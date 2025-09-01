@@ -66,6 +66,54 @@ class RoseEditProcessor:
             sam2_masks.append(sam_mask)
         return sam2_masks
 
+    def get_overlayed_sam2_masks(self, video_id):
+        frame_ids = self.video_id_frame_id_list[video_id]
+        frame_id_list = sorted(list(np.unique(frame_ids)))
+
+        sam_video_mask_dir = os.path.join(self.sam2_directory, video_id, "mask")
+        sam_video_frame_dir = os.path.join(self.data_directory, "frames", video_id)
+        frame_files = sorted([f for f in os.listdir(sam_video_mask_dir) if f.endswith('.png')])
+        frame_ids = [os.path.splitext(f)[0] for f in frame_files]
+
+        sam_masks_dict = {}
+        for frame_file, frame_id in zip(frame_files, frame_ids):
+            mask_path = os.path.join(sam_video_mask_dir, frame_file)
+            mask_image = Image.open(mask_path).convert("RGB")
+            mask_image_tensor = torch.from_numpy(np.array(mask_image)).float() / 255.0
+            # Change it into binary mask if any pixel value is greater than 0, set it to 1.0 else 0.0
+            mask_image_tensor = (mask_image_tensor > 0).float()
+            sam_masks_dict[int(frame_id)] = mask_image_tensor
+
+        sam_mask_keys = list(sam_masks_dict.keys())
+        sam_mask_keys.sort()
+        print(f"[{video_id}] Loaded {len(sam_mask_keys)} SAM2 masks: {sam_mask_keys[:5]} ... {sam_mask_keys[-5:]}")
+
+        overlayed_sam2_masks = []
+        for frame_id in frame_id_list:
+            sam_mask = sam_masks_dict[frame_id]
+
+            # Load the original frame
+            original_frame_path = os.path.join(sam_video_frame_dir, f"{frame_id:06d}.png")
+            original_frame = Image.open(original_frame_path).convert("RGB")
+            original_frame_tensor = torch.from_numpy(np.array(original_frame)).float() / 255.0
+
+            # Ensure the mask is binary
+            binary_mask = (sam_mask > 0.5).float()
+
+            # Create the masked image by setting the masked region to white (1.0)
+            masked_frame_tensor = original_frame_tensor * (1 - binary_mask) + binary_mask * 1.0
+            masked_frame = Image.fromarray((masked_frame_tensor.numpy() * 255).astype(np.uint8))
+            overlayed_sam2_masks.append(masked_frame)
+        return overlayed_sam2_masks
+
+    def store_overlayed_sam2_masks(self, video_id, overlayed_sam2_masks):
+        overlayed_mask_dir = os.path.join(self.data_directory, "overlayed_sam2_masks", video_id)
+        os.makedirs(overlayed_mask_dir, exist_ok=True)
+        for idx, overlayed_mask in enumerate(overlayed_sam2_masks):
+            overlayed_mask_path = os.path.join(overlayed_mask_dir, f"{idx:06d}.png")
+            overlayed_mask.save(overlayed_mask_path)
+        print(f"[{video_id}] Saved {len(overlayed_sam2_masks)} overlayed SAM2 masks to {overlayed_mask_dir}")
+
     def store_masked_frames(self, video_id, mask_frames):
         masked_frame_dir = os.path.join(self.data_directory, "masked_frames", video_id)
         os.makedirs(masked_frame_dir, exist_ok=True)
@@ -129,23 +177,27 @@ class RoseEditProcessor:
         print(f"Processing video_id: {video_id}")
 
         # Get SAM2 masks
-        sam2_mask_frames = self.get_sam2_masks(video_id)
+        # sam2_mask_frames = self.get_sam2_masks(video_id)
+
+        # Get overlayed SAM2 masks
+        overlayed_sam2_masks = self.get_overlayed_sam2_masks(video_id)
+        self.store_overlayed_sam2_masks(video_id, overlayed_sam2_masks)
 
         # Resize SAM2 masks to 480x720
         # resized_sam2_mask_frames = self.resize_frames(sam2_mask_frames, target_size=(480, 720))
         # sam2_mask_frames = resized_sam2_mask_frames
 
-        self.store_masked_frames(video_id, sam2_mask_frames)
+        # self.store_masked_frames(video_id, sam2_mask_frames)
         # self.store_mask_videos(video_id, sam2_mask_frames)
 
         # Get sampled original frames
-        sampled_frames = self.get_sampled_frames(video_id)
+        # sampled_frames = self.get_sampled_frames(video_id)
 
         # Resize sampled frames to 480x720
         # resized_sampled_frames = self.resize_frames(sampled_frames, target_size=(480, 720))
         # sampled_frames = resized_sampled_frames
 
-        self.store_sampled_frames(video_id, sampled_frames)
+        # self.store_sampled_frames(video_id, sampled_frames)
         # self.store_sampled_videos(video_id, sampled_frames)
 
 
