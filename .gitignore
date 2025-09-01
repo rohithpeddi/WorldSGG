@@ -1,6 +1,4 @@
-datasets/preprocess/inpainting/VideoPainter/ckpt/*
-
-
+dataloader/*.pkl
 .DS_Store
 .idea/*
 
@@ -17,7 +15,7 @@ build/
 develop-eggs/
 dist/
 eggs/
-lib/
+lib_b/
 lib64/
 parts/
 sdist/

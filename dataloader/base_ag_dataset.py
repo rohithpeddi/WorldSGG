@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import Dataset
 
 from constants import Constants as const
-from utils import prep_im_for_blob, im_list_to_blob
+from fasterRCNN.lib.model.utils.blob import prep_im_for_blob, im_list_to_blob
 
 
 class BaseAG(Dataset):
@@ -91,7 +91,7 @@ class BaseAG(Dataset):
             with open(os.path.join(annotations_path, const.PERSON_BOUNDING_BOX_PKL), 'rb') as f:
                 person_bbox = pickle.load(f)
             f.close()
-            with open(os.path.join(annotations_path, const.OBJECT_BOUNDING_BOX_RELATIONSHIP_PKL), 'rb') as f:
+            with open('dataloader/object_bbox_and_relationship_filtersmall.pkl', 'rb') as f:
                 object_bbox = pickle.load(f)
         else:
             with open(os.path.join(annotations_path, const.PERSON_BOUNDING_BOX_PKL), 'rb') as f:

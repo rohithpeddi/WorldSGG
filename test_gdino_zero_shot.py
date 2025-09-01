@@ -1,14 +1,11 @@
-import os
-import pickle
-import json
 import argparse
-from typing import Dict, List, Any
-from collections import defaultdict
+import json
+import os
+from typing import Dict, List
 
-import torch
 import numpy as np
+import torch
 from tqdm import tqdm
-from torch.utils.data import DataLoader
 
 # COCO evaluation imports
 try:
@@ -21,22 +18,15 @@ except ImportError:
     COCOeval = None
 
 from dataloader.base_ag_dataset import BaseAG
-from datasets.preprocess.detection.ag_gdino import AgGDino
 from constants import Constants as const
 
 
 class ActionGenomeEvaluationDataset(BaseAG):
-    """
-    Dataset class for Action Genome evaluation with GroundingDINO
-    """
     def __init__(self, phase="test", mode="sgdet", datasize="full", data_path=None, 
                  filter_nonperson_box_frame=True, filter_small_box=False):
         super().__init__(phase, mode, datasize, data_path, filter_nonperson_box_frame, filter_small_box)
         
     def __getitem__(self, index):
-        """
-        Returns frame information and ground truth annotations for evaluation
-        """
         frame_names = self._video_list[index]
         gt_annotations = self._gt_annotations[index]
         video_size = self._video_size[index]
@@ -50,9 +40,6 @@ class ActionGenomeEvaluationDataset(BaseAG):
 
 
 class GDinoZeroShotEvaluator:
-    """
-    Evaluator for GroundingDINO zero-shot object detection on Action Genome dataset
-    """
     
     def __init__(self, ag_root_directory: str, gdino_predictions_path: str = None):
         self.ag_root_directory = ag_root_directory
@@ -78,9 +65,6 @@ class GDinoZeroShotEvaluator:
         self.ground_truths = []
         
     def _create_class_mapping(self) -> Dict[str, str]:
-        """
-        Create mapping between Action Genome object classes and GroundingDINO object labels
-        """
         # GroundingDINO object labels from ag_gdino.py
         gdino_labels = [
             "person", "bag", "blanket", "book", "box", "broom", "chair", "clothes", "cup", "dish", 
@@ -109,7 +93,7 @@ class GDinoZeroShotEvaluator:
             elif ag_class == "sofa/couch":
                 mapping[ag_class] = "chair"  # Approximate mapping
             else:
-                # Try to find closest match
+                # Try to find the closest match
                 ag_lower = ag_class.lower()
                 for gdino_label in gdino_labels:
                     if gdino_label in ag_lower or ag_lower in gdino_label:
@@ -122,9 +106,6 @@ class GDinoZeroShotEvaluator:
         return mapping
     
     def load_gdino_predictions(self, video_id: str) -> Dict[int, Dict]:
-        """
-        Load GroundingDINO predictions for a specific video
-        """
         prediction_file = os.path.join(self.gdino_predictions_path, f"{video_id[:-4]}.pkl")
         
         if not os.path.exists(prediction_file):
@@ -137,9 +118,6 @@ class GDinoZeroShotEvaluator:
         return predictions
     
     def convert_to_coco_format(self) -> tuple:
-        """
-        Convert Action Genome annotations and GroundingDINO predictions to COCO format
-        """
         coco_gt = {
             "images": [],
             "annotations": [],
@@ -236,12 +214,6 @@ class GDinoZeroShotEvaluator:
         return coco_gt, coco_predictions
     
     def evaluate_map(self, iou_thresholds: List[float] = None) -> Dict[str, float]:
-        """
-        Evaluate mAP using COCO evaluation metrics
-        """
-        if COCO is None or COCOeval is None:
-            raise ImportError("pycocotools is required for mAP evaluation. Install with: pip install pycocotools")
-        
         print("Converting data to COCO format...")
         coco_gt_data, coco_predictions = self.convert_to_coco_format()
         
@@ -333,12 +305,6 @@ def main():
     )
     
     args = parser.parse_args()
-    
-    # Check if pycocotools is available
-    if COCO is None:
-        print("Error: pycocotools is required but not installed.")
-        print("Please install with: pip install pycocotools")
-        return
     
     # Initialize evaluator
     print("Initializing GroundingDINO zero-shot evaluator...")

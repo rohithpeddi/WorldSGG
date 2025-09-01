@@ -15,3 +15,4 @@ onnxruntime-gpu; platform_system != 'Darwin'
 onnxruntime; platform_system == 'Darwin'
 opencv-python
 shapely
+pycocotools
