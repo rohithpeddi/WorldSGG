@@ -2,6 +2,9 @@ dataloader/*.pkl
 .DS_Store
 .idea/*
 
+datasets/preprocess/inpainting/RoseEdit/weights/transformer/*
+datasets/preprocess/inpainting/RoseEdit/models/*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -13,7 +16,6 @@ __pycache__/
 bin/
 build/
 develop-eggs/
-dist/
 eggs/
 lib_b/
 lib64/
@@ -55,5 +57,6 @@ docs/_build/
 
 # Ignore data and ckpts
 *.pth
-data
 src/checkpoints
+/datasets/preprocess/inpainting/RoseEdit/weights/transformer/
+/datasets/preprocess/inpainting/RoseEdit/models/
