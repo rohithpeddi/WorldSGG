@@ -1,175 +1,365 @@
-import argparse
-import gc
-import logging
-import math
 import os
-import pickle
-import random
-import shutil
 import sys
-import copy
+import math
+import glob
 import warnings
+from dataclasses import dataclass
+from typing import List, Tuple
 
 warnings.filterwarnings("ignore")
 
-import accelerate
-import diffusers
-import numpy as np
 import torch
+import cv2
 import torch.nn.functional as F
-import torch.utils.checkpoint
 import torchvision.transforms.functional as TF
-from torchvision.utils import save_image
-import transformers
-from accelerate import Accelerator, FullyShardedDataParallelPlugin
-from accelerate.logging import get_logger
-from accelerate.state import AcceleratorState
-from accelerate.utils import ProjectConfiguration, set_seed
-from diffusers import DDIMScheduler, FlowMatchEulerDiscreteScheduler
-from diffusers.optimization import get_scheduler
-from diffusers.training_utils import (EMAModel,
-                                      compute_density_for_timestep_sampling,
-                                      compute_loss_weighting_for_sd3)
-from diffusers.utils import check_min_version, deprecate, is_wandb_available
-from diffusers.utils.torch_utils import is_compiled_module
 from einops import rearrange
 from omegaconf import OmegaConf
-from packaging import version
-from PIL import Image
-from torch.utils.data import RandomSampler
-from torch.utils.tensorboard import SummaryWriter
-from torchvision import transforms
-from tqdm.auto import tqdm
-from omegaconf import OmegaConf
 from transformers import AutoTokenizer
-from transformers.utils import ContextManagers
 
+# Insert project roots so rose.* imports resolve just like your original script
 current_file_path = os.path.abspath(__file__)
-project_roots = [os.path.dirname(current_file_path), os.path.dirname(os.path.dirname(current_file_path)),
+project_roots = [os.path.dirname(current_file_path),
+                 os.path.dirname(os.path.dirname(current_file_path)),
                  os.path.dirname(os.path.dirname(os.path.dirname(current_file_path)))]
 for project_root in project_roots:
-    sys.path.insert(0, project_root) if project_root not in sys.path else None
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
 
-from rose.data.bucket_sampler import (ASPECT_RATIO_512,
-                                      ASPECT_RATIO_RANDOM_CROP_512,
-                                      ASPECT_RATIO_RANDOM_CROP_PROB,
-                                      AspectRatioBatchImageVideoSampler,
-                                      RandomSampler, get_closest_ratio)
-from rose.data.dataset_image_video import (ImageVideoControlDataset,
-                                           ImageVideoSampler,
-                                           get_random_mask)
-from rose.models import (AutoencoderKLWan, CLIPModel, WanT5EncoderModel,
-                         WanTransformer3DModel)
+# rose imports (same as your script)
+from rose.utils.utils import get_video_and_mask, save_videos_grid
 from rose.pipeline import WanFunInpaintPipeline
-from rose.utils.discrete_sampler import DiscreteSampling
-from rose.utils.utils import (get_video_to_video_latent,
-                              get_video_and_mask,
-                              save_videos_grid)
+from rose.models import (AutoencoderKLWan, CLIPModel, WanT5EncoderModel, WanTransformer3DModel)
+from diffusers import FlowMatchEulerDiscreteScheduler
 
 
-def filter_kwargs(cls, kwargs):
-    import inspect
-    sig = inspect.signature(cls.__init__)
-    valid_params = set(sig.parameters.keys()) - {'self', 'cls'}
-    filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
-    return filtered_kwargs
+@dataclass
+class ExtractorConfig:
+    data_dir: str = "/data/rohith/ag"
+    videos_dir: str = "/data/rohith/ag/videos"
+    sampled_dir: str = "/data/rohith/ag/sampled_videos"
+    masked_dir: str = "/data/rohith/ag/masked_videos"
+    static_dir: str = "/data/rohith/ag/static_videos"
+
+    # Model/config paths (same as your original script)
+    pretrained_model_name_or_path: str = "models/Wan2.1-Fun-1.3B-InP"
+    pretrained_transformer_path: str = "weights/transformer"
+    config_path: str = "configs/wan2.1/wan_civitai.yaml"
+
+    # Inference
+    work_size_hw: Tuple[int, int] = (480, 720)  # (H, W) for working resolution
+    max_chunk_len: int = 129  # ≤ 128 per your requirement
+    num_inference_steps: int = 50
+    device: str = "cuda"
+    dtype = torch.float16
+
+    # I/O behavior
+    save_resized_work_clips: bool = True  # also save the (480,720) sampled & masked intermediates
+    overwrite_outputs: bool = True  # overwrite existing outputs
+
+    # If your transformer needs 16n+1, set this True
+    ENFORCE_16N_PLUS_1: bool = True
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Run video inpainting pipeline")
+class StaticAgSceneExtractor:
 
-    parser.add_argument("--validation_videos", type=str, nargs='+', default=['/data/rohith/ag/sampled_videos/00T1E.mp4'],
-                        help="Path(s) to validation videos.")
-    parser.add_argument("--validation_masks", type=str, nargs='+', default=['/data/rohith/ag/mask_videos/00T1E.mp4'],
-                        help="Path(s) to validation masks.")
-    parser.add_argument("--validation_prompts", type=str, nargs='+', default=[""],
-                        help="Validation prompts.")
-    parser.add_argument("--output_dir", type=str, default="results/",
-                        help="Output directory.")
-    parser.add_argument("--video_length", type=int, default=81,
-                        help="Number of frames in video.")  # The length of videos needs to be 16n+1.
-    parser.add_argument("--sample_size", type=int, nargs=2, default=[480, 720],
-                        help="Video frame size: height width.")
+    def __init__(self, cfg: ExtractorConfig = ExtractorConfig()):
+        self.cfg = cfg
+        os.makedirs(self.cfg.sampled_dir, exist_ok=True)
+        os.makedirs(self.cfg.masked_dir, exist_ok=True)
+        os.makedirs(self.cfg.static_dir, exist_ok=True)
+        self._init_models()
 
-    return parser.parse_args()
+    # --------------------------
+    # Model / pipeline init
+    # --------------------------
+    def _init_models(self):
+        cfg = self.cfg
+        config = OmegaConf.load(cfg.config_path)
+        self.config = config
+
+        # Tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(
+            os.path.join(cfg.pretrained_model_name_or_path,
+                         config['text_encoder_kwargs'].get('tokenizer_subpath', 'tokenizer')),
+        )
+
+        # Text encoder
+        text_encoder = WanT5EncoderModel.from_pretrained(
+            os.path.join(cfg.pretrained_model_name_or_path,
+                         config['text_encoder_kwargs'].get('text_encoder_subpath', 'text_encoder')),
+            additional_kwargs=OmegaConf.to_container(config['text_encoder_kwargs']),
+            low_cpu_mem_usage=True,
+        )
+
+        # CLIP image encoder
+        clip_image_encoder = CLIPModel.from_pretrained(
+            os.path.join(cfg.pretrained_model_name_or_path,
+                         config['image_encoder_kwargs'].get('image_encoder_subpath', 'image_encoder')),
+        )
+
+        # Scheduler
+        def filter_kwargs(cls, kwargs):
+            import inspect
+            sig = inspect.signature(cls.__init__)
+            valid_params = set(sig.parameters.keys()) - {'self', 'cls'}
+            return {k: v for k, v in kwargs.items() if k in valid_params}
+
+        noise_scheduler = FlowMatchEulerDiscreteScheduler(
+            **filter_kwargs(FlowMatchEulerDiscreteScheduler, OmegaConf.to_container(config['scheduler_kwargs']))
+        )
+
+        # VAE
+        vae = AutoencoderKLWan.from_pretrained(
+            os.path.join(cfg.pretrained_model_name_or_path, config['vae_kwargs'].get('vae_subpath', 'vae')),
+            additional_kwargs=OmegaConf.to_container(config['vae_kwargs']),
+        )
+
+        # 3D transformer
+        transformer3d = WanTransformer3DModel.from_pretrained(
+            os.path.join(cfg.pretrained_transformer_path,
+                         config['transformer_additional_kwargs'].get('transformer_subpath', 'transformer')),
+            transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
+        )
+
+        # Pipeline
+        pipe = WanFunInpaintPipeline(
+            vae=vae,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            transformer=transformer3d,
+            scheduler=noise_scheduler,
+            clip_image_encoder=clip_image_encoder
+        ).to(self.cfg.device, self.cfg.dtype)
+
+        self.tokenizer = tokenizer
+        self.text_encoder = text_encoder
+        self.clip_image_encoder = clip_image_encoder
+        self.noise_scheduler = noise_scheduler
+        self.vae = vae
+        self.transformer3d = transformer3d
+        self.pipeline = pipe
+
+    # --------------------------
+    # Utilities
+    # --------------------------
+    @staticmethod
+    def _stem(path: str) -> str:
+        return os.path.splitext(os.path.basename(path))[0]
+
+    @staticmethod
+    def _get_video_hw(path: str) -> Tuple[int, int]:
+        """Return (H, W) from the source video using OpenCV without loading full frames."""
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video: {path}")
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        return h, w
+
+    def _compute_chunks(self, total_frames: int) -> List[Tuple[int, int]]:
+        """
+        Partition [0, total_frames) into chunks where:
+          - Each chunk length is one of {17, 33, 49, 65, 81, 97, 113, 129}.
+          - No chunk > 129.
+          - If the final leftover < 17, merge it into the previous chunk
+            by expanding the last chunk's end to cover the total_frames.
+        """
+        if total_frames <= 0:
+            return []
+
+        allowed = [129, 113, 97, 81, 65, 49, 33, 17]
+        chunks: List[Tuple[int, int]] = []
+        start = 0
+        remaining = total_frames
+
+        while remaining >= 17:
+            # pick the largest allowed size that fits
+            for size in allowed:
+                if size <= remaining:
+                    chunks.append((start, start + size))
+                    start += size
+                    remaining -= size
+                    break
+
+        if remaining > 0 and chunks:
+            # leftover < 17 → merge into the last chunk
+            last_start, last_end = chunks[-1]
+            chunks[-1] = (last_start, total_frames)
+        elif remaining > 0 and not chunks:
+            # edge case: total_frames < 17, just one chunk [0, total_frames)
+            raise ValueError("Total frames less than 17; cannot form a valid chunk.")
+
+        return chunks
+
+    @staticmethod
+    def _resize_video_tensor(video: torch.Tensor, out_hw: Tuple[int, int]) -> torch.Tensor:
+        """
+        Resize a video tensor to (H_out, W_out).
+        Accepts shapes [B, C, F, H, W] or [B, F, C, H, W].
+        Returns same order as input.
+        """
+        if video.ndim != 5:
+            raise ValueError(f"Expected 5D video tensor, got {video.shape}")
+
+        if video.shape[2] in (3, 1):  # [B, C, F, H, W]
+            order = "BCFHW"
+            B, C, F_, H, W = video.shape
+            vid = rearrange(video, "b c f h w -> (b f) c h w")
+            vid = F.interpolate(vid, size=out_hw, mode="bilinear", align_corners=False)
+            vid = rearrange(vid, "(b f) c h w -> b c f h w", b=B, f=F_)
+            return vid
+        else:  # assume [B, F, C, H, W]
+            order = "BFCHW"
+            B, F_, C, H, W = video.shape
+            vid = rearrange(video, "b f c h w -> (b f) c h w")
+            vid = F.interpolate(vid, size=out_hw, mode="bilinear", align_corners=False)
+            vid = rearrange(vid, "(b f) c h w -> b f c h w", b=B, f=F_)
+            return vid
+
+    @staticmethod
+    def _ensure_dir(path: str):
+        os.makedirs(path, exist_ok=True)
+
+    # --------------------------
+    # Core processing
+    # --------------------------
+    def _load_inputs_for_chunk(
+            self,
+            video_path: str,
+            mask_path: str,
+            work_frames: int,
+            work_hw: Tuple[int, int],
+            start_idx: int,
+            end_idx: int,
+    ):
+        """
+        Use rose.utils.utils.get_video_and_mask to fetch a window [start_idx, end_idx)
+        resized to work_hw and clamped to work_frames.
+        """
+        # The rose helper loads a continuous clip; we pass the requested length explicitly.
+        # It returns: input_video, input_mask, ref_image, clip_image
+        # NOTE: If ENFORCE_16N_PLUS_1 is True and window length doesn't match that,
+        # you may need to pad/trim externally. For now we rely on window selection.
+        window_len = end_idx - start_idx
+        num_frames = min(work_frames, window_len)
+
+        input_video, input_mask, ref_image, clip_image = get_video_and_mask(
+            input_video_path=video_path,
+            video_length=num_frames,
+            sample_size=list(work_hw),  # expects [H, W]
+            input_mask_path=mask_path,
+            start_idx=start_idx,
+        )
+        return input_video, input_mask, num_frames
+
+    def _save_video(self, video_tensor: torch.Tensor, out_path: str):
+        """
+        Save a single video batch (B=1) using save_videos_grid.
+        The expected layout for save_videos_grid in your project is [B, C, F, H, W].
+        Convert to that if needed.
+        """
+        self._ensure_dir(os.path.dirname(out_path))
+
+        vid = video_tensor
+        if vid.ndim != 5:
+            raise ValueError(f"Expected 5D, got {vid.shape}")
+
+        # Ensure [B, C, F, H, W]
+        if vid.shape[2] not in (3, 1):  # [B, F, C, H, W] -> [B, C, F, H, W]
+            vid = rearrange(vid, "b f c h w -> b c f h w")
+
+        save_videos_grid(vid, out_path)
+
+    def process_single_video(self, video_path: str, prompt: str = ""):
+        """
+        - Finds the matching mask video in masked_videos/ (same stem).
+        - Resizes sampled/mask to (480,720) for working inference, split into chunks of ≤ 128 frames.
+        - Runs the ROSE inpaint pipeline.
+        - Restores chunk outputs back to original HxW, stitches per-chunk outputs to files.
+        - Writes outputs into static_videos/.
+        """
+        stem = self._stem(video_path)
+        mask_path = os.path.join(self.cfg.masked_dir, f"{stem}.mp4")
+
+        if not os.path.exists(mask_path):
+            raise FileNotFoundError(f"Mask video missing for {stem}: {mask_path}")
+
+        # Determine original resolution
+        orig_h, orig_w = self._get_video_hw(video_path)
+
+        # To compute chunk windows, we need total frames. Use OpenCV for a quick count.
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video: {video_path}")
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+
+        # Chunk windows
+        chunks = self._compute_chunks(total_frames)
+
+        # Process each chunk
+        for ci, (s, e) in enumerate(chunks):
+            window_len = e - s
+            if window_len <= 0:
+                continue
+
+            # Load working-resolution tensors
+            input_video, input_mask, num_frames = self._load_inputs_for_chunk(
+                video_path=video_path,
+                mask_path=mask_path,
+                work_frames=min(self.cfg.max_chunk_len, window_len),
+                work_hw=self.cfg.work_size_hw,
+                start_idx=s,
+                end_idx=e,
+            )
+
+            # --------------------------
+            # Run the edit pipeline
+            # --------------------------
+            with torch.no_grad():
+                result = self.pipeline(
+                    prompt=prompt,
+                    video=input_video,
+                    mask_video=input_mask,
+                    num_frames=num_frames,
+                    num_inference_steps=self.cfg.num_inference_steps
+                ).videos  # expected [B, C, F, H, W] or [B, F, C, H, W]
+
+            # ----------------------------------
+            # Restore to original resolution
+            # ----------------------------------
+            restored = self._resize_video_tensor(result, (orig_h, orig_w))
+
+            # ----------------------------------
+            # Save the static output chunk
+            # ----------------------------------
+            out_path = os.path.join(self.cfg.static_dir, f"{stem}_static_chunk{ci:03d}.mp4")
+            if (not os.path.exists(out_path)) or self.cfg.overwrite_outputs:
+                self._save_video(restored, out_path)
+
+    def process_all(self, prompt: str = ""):
+        """
+        Process every video in /data/rohith/ag/videos/.
+        Expects a matching mask video with the same stem in /data/rohith/ag/masked_videos/.
+        """
+        video_paths = sorted(glob.glob(os.path.join(self.cfg.videos_dir, "*.mp4")))
+        if not video_paths:
+            raise FileNotFoundError(f"No videos found in {self.cfg.videos_dir}")
+
+        for vp in video_paths:
+            print(f"[StaticAgSceneExtractor] Processing: {vp}")
+            self.process_single_video(vp, prompt=prompt)
+        print("[StaticAgSceneExtractor] Done.")
 
 
 def main():
-    args = parse_args()
-    pretrained_model_name_or_path = "models/Wan2.1-Fun-1.3B-InP"
-    pretrained_transformer_path = "weights/transformer"
-    config_path = "configs/wan2.1/wan_civitai.yaml"
-    config = OmegaConf.load(config_path)
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        os.path.join(pretrained_model_name_or_path,
-                     config['text_encoder_kwargs'].get('tokenizer_subpath', 'tokenizer')),
-    )
-
-    text_encoder = WanT5EncoderModel.from_pretrained(
-        os.path.join(pretrained_model_name_or_path,
-                     config['text_encoder_kwargs'].get('text_encoder_subpath', 'text_encoder')),
-        additional_kwargs=OmegaConf.to_container(config['text_encoder_kwargs']),
-        low_cpu_mem_usage=True,
-    )
-
-    clip_image_encoder = CLIPModel.from_pretrained(
-        os.path.join(pretrained_model_name_or_path,
-                     config['image_encoder_kwargs'].get('image_encoder_subpath', 'image_encoder')),
-    )
-
-    noise_scheduler = FlowMatchEulerDiscreteScheduler(
-        **filter_kwargs(FlowMatchEulerDiscreteScheduler, OmegaConf.to_container(config['scheduler_kwargs']))
-    )
-
-    vae = AutoencoderKLWan.from_pretrained(
-        os.path.join(pretrained_model_name_or_path, config['vae_kwargs'].get('vae_subpath', 'vae')),
-        additional_kwargs=OmegaConf.to_container(config['vae_kwargs']),
-    )
-
-    transformer3d = WanTransformer3DModel.from_pretrained(
-        os.path.join(pretrained_transformer_path,
-                     config['transformer_additional_kwargs'].get('transformer_subpath', 'transformer')),
-        transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
-    )
-
-    pipeline = WanFunInpaintPipeline(
-        vae=vae,
-        text_encoder=text_encoder,
-        tokenizer=tokenizer,
-        transformer=transformer3d,
-        scheduler=noise_scheduler,
-        clip_image_encoder=clip_image_encoder
-    ).to("cuda", torch.float16)
-
-    with torch.no_grad():
-        for i, (validation_prompt, validation_video, validation_mask) in enumerate(
-                zip(args.validation_prompts, args.validation_videos, args.validation_masks), start=1):
-            input_video, input_mask, ref_image, clip_image = get_video_and_mask(
-                input_video_path=validation_video,
-                video_length=args.video_length,
-                sample_size=args.sample_size,
-                input_mask_path=validation_mask
-            )
-
-            result = pipeline(
-                prompt=validation_prompt,
-                video=input_video,
-                mask_video=input_mask,
-                num_frames=args.video_length,
-                num_inference_steps=50
-            ).videos
-
-            os.makedirs(args.output_dir, exist_ok=True)
-            out_path = os.path.join(args.output_dir, f"example-{i}.mp4")
-            save_videos_grid(result, out_path)
+    extractor = StaticAgSceneExtractor()
+    extractor.process_all(prompt="")
 
 
+# --------------------------
+# CLI entry
+# --------------------------
 if __name__ == "__main__":
     main()
-
-
-
-
-
-

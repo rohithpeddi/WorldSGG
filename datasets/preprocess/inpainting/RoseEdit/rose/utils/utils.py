@@ -235,14 +235,22 @@ def get_video_to_video_latent(input_video_path, video_length, sample_size, fps=N
     return input_video, input_video_mask, ref_image, clip_image
 
 
-def get_video_and_mask(input_video_path, video_length, sample_size, fps=None, input_mask_path=None, ref_image=None):
+def get_video_and_mask(
+    input_video_path,
+    video_length,
+    sample_size,
+    fps=None,
+    input_mask_path=None,
+    ref_image=None,
+    start_idx: int = 0,   # <-- NEW argument
+):
     if input_video_path is not None:
         if isinstance(input_video_path, str):
             cap = cv2.VideoCapture(input_video_path)
             input_video = []
 
             original_fps = cap.get(cv2.CAP_PROP_FPS)
-            frame_skip = 1 if fps is None else int(original_fps // fps)
+            frame_skip = 1 if fps is None else max(1, int(original_fps // fps))
 
             frame_count = 0
 
@@ -251,9 +259,14 @@ def get_video_and_mask(input_video_path, video_length, sample_size, fps=None, in
                 if not ret:
                     break
 
-                if frame_count % frame_skip == 0:
-                    frame = cv2.resize(frame, (sample_size[1], sample_size[0]))
-                    input_video.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                if frame_count >= start_idx:  # <-- skip until start_idx
+                    if (frame_count - start_idx) % frame_skip == 0:
+                        frame = cv2.resize(frame, (sample_size[1], sample_size[0]))
+                        input_video.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+                # stop if collected enough frames
+                if len(input_video) >= video_length:
+                    break
 
                 frame_count += 1
 
@@ -263,7 +276,6 @@ def get_video_and_mask(input_video_path, video_length, sample_size, fps=None, in
 
         input_video = torch.from_numpy(np.array(input_video))[:video_length]
         input_video = input_video.permute([3, 0, 1, 2]).unsqueeze(0) / 255.0
-
     else:
         input_video = None
 
@@ -271,30 +283,36 @@ def get_video_and_mask(input_video_path, video_length, sample_size, fps=None, in
         if isinstance(input_mask_path, str):
             cap = cv2.VideoCapture(input_mask_path)
             mask_frames = []
-            original_fps = cap.get(cv2.CAP_PROP_FPS)
-            frame_skip = 1 if fps is None else int(original_fps // fps)
-            frame_count = 0
 
+            original_fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_skip = 1 if fps is None else max(1, int(original_fps // fps))
+
+            frame_count = 0
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
-                if frame_count % frame_skip == 0:
-                    frame = cv2.resize(frame, (sample_size[1], sample_size[0]))
-                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    mask_frames.append(gray)
+
+                if frame_count >= start_idx:  # <-- skip until start_idx
+                    if (frame_count - start_idx) % frame_skip == 0:
+                        frame = cv2.resize(frame, (sample_size[1], sample_size[0]))
+                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        mask_frames.append(gray)
+
+                if len(mask_frames) >= video_length:
+                    break
+
                 frame_count += 1
+
             cap.release()
         else:
             mask_frames = input_mask_path
 
         mask_np = np.array(mask_frames)[:video_length]   # (F, H, W), uint8
-        mask_bin = np.where(mask_np < 240, 0, 1).astype(np.uint8)  # (F,H,W)
-        mask_tensor = torch.from_numpy(mask_bin)        
-        mask_tensor = mask_tensor.unsqueeze(1)          
-        mask_tensor = mask_tensor.unsqueeze(0)          
-        input_mask = mask_tensor.permute(0,2,1,3,4)      
-        input_mask = input_mask.float()          
+        mask_bin = np.where(mask_np < 240, 0, 1).astype(np.uint8)
+        mask_tensor = torch.from_numpy(mask_bin)
+        mask_tensor = mask_tensor.unsqueeze(1).unsqueeze(0)  # [1, F, 1, H, W]
+        input_mask = mask_tensor.permute(0, 2, 1, 3, 4).float()  # [1,1,F,H,W]
     else:
         input_mask = None
 
@@ -315,4 +333,5 @@ def get_video_and_mask(input_video_path, video_length, sample_size, fps=None, in
         else:
             ref_image = torch.from_numpy(np.array(ref_image))
             ref_image = ref_image.unsqueeze(0).permute([3, 0, 1, 2]).unsqueeze(0) / 255
+
     return input_video, input_mask, ref_image, clip_image
