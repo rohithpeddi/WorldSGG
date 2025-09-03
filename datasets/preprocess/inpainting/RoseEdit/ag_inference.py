@@ -252,22 +252,6 @@ class StaticAgSceneExtractor:
         )
         return input_video, input_mask, num_frames
 
-    def _save_video(self, video_tensor: torch.Tensor, out_path: str):
-        """
-        Save a single video batch (B=1) using save_videos_grid.
-        The expected layout for save_videos_grid in your project is [B, C, F, H, W].
-        Convert to that if needed.
-        """
-        self._ensure_dir(os.path.dirname(out_path))
-        vid = video_tensor.clone()
-        if vid.ndim != 5:
-            raise ValueError(f"Expected 5D, got {vid.shape}")
-        # Ensure [B, C, F, H, W]
-        # [B, F, C, H, W] -> [B, C, F, H, W]
-        vid = rearrange(vid, "b f c h w -> b c f h w")
-
-        save_videos_grid(vid, out_path)
-
     def process_single_video(self, video_path: str, prompt: str = ""):
         """
         - Finds the matching mask video in masked_videos/ (same stem).
@@ -326,47 +310,44 @@ class StaticAgSceneExtractor:
                     mask_video=input_mask,
                     num_frames=num_frames,
                     num_inference_steps=self.cfg.num_inference_steps
-                ).videos  # [B,C,F,H,W] or [B,F,C,H,W]
+                ).videos  # [B, C, F, H, W]
 
-            out_result_path = os.path.join(self.cfg.static_dir, f"{stem}_result.mp4")
-            save_videos_grid(result, out_result_path)
-
-            # Ensure [B, C, F, H, W]
-            # Resize to the original resolution
+            # out_result_path = os.path.join(self.cfg.static_dir, f"{stem}_result.mp4")
+            # save_videos_grid(result, out_result_path)
+            #
+            # # Ensure [B, C, F, H, W]
+            # # Resize to the original resolution
             restored = self._resize_video_tensor(result, (orig_h, orig_w))  # [B,C,F,H,W]
-            out_restored_path = os.path.join(self.cfg.static_dir, f"{stem}_restored.mp4")
-            save_videos_grid(restored, out_restored_path)
+            # out_restored_path = os.path.join(self.cfg.static_dir, f"{stem}_restored.mp4")
+            # save_videos_grid(restored, out_restored_path)
 
-        #     # Convert to numpy frames [F,H,W,C] uint8 for placement
-        #     restored_np = (
-        #         (restored[0].clamp(0, 1) * 255.0)
-        #         .round()
-        #         .to(torch.uint8)
-        #         .permute(1, 2, 3, 0)  # [C,F,H,W] -> [F,H,W,C]
-        #         .cpu()
-        #         .numpy()
-        #     )
-        #
-        #     # Place frames into the global buffer
-        #     # Use min in case num_frames < (e - s) for any reason (e.g., short read)
-        #     place_count = min(restored_np.shape[0], e - s)
-        #     for k in range(place_count):
-        #         frame_buffer[s + k] = restored_np[k]
-        #
-        # # Drop any None (e.g., if the last chunk was short); keep order
-        # final_frames = [f for f in frame_buffer if f is not None]
-        # if not final_frames:
-        #     raise RuntimeError(f"No frames produced for {video_path}")
-        #
-        # # Stack to [F, H, W,C] → torch [1,C, F, H,W]
-        # final_np = np.stack(final_frames, axis=0)  # [F,H,W,C]
-        # final_tensor = torch.from_numpy(final_np).to(torch.uint8)  # [F,H,W,C]
-        # final_tensor = final_tensor.permute(3, 0, 1, 2).unsqueeze(0)  # [1,C,F,H,W], uint8
-        #
-        # # Save once
-        # out_path = os.path.join(self.cfg.static_dir, f"{stem}.mp4")
-        # if (not os.path.exists(out_path)) or self.cfg.overwrite_outputs:
-        #     self._save_video(final_tensor, out_path)
+            # Convert to numpy frames [F,H,W,C] uint8 for placement
+            restored_np = (
+                restored[0]
+                .permute(1, 2, 3, 0)  # [C,F,H,W] -> [F,H,W,C]
+                .cpu()
+                .numpy()
+            )
+
+            # Place frames into the global buffer
+            # Use min in case num_frames < (e - s) for any reason (e.g., short read)
+            place_count = min(restored_np.shape[0], e - s)
+            for k in range(place_count):
+                frame_buffer[s + k] = restored_np[k]
+
+        # Drop any None (e.g., if the last chunk was short); keep order
+        final_frames = [f for f in frame_buffer if f is not None]
+        if not final_frames:
+            raise RuntimeError(f"No frames produced for {video_path}")
+
+        # Stack to [F, H, W, C] → torch [1, C, F, H, W]
+        final_np = np.stack(final_frames, axis=0)  # [F,H,W,C]
+        final_tensor = torch.from_numpy(final_np) # [F,H,W,C]
+        final_tensor = final_tensor.permute(3, 0, 1, 2).unsqueeze(0)  # [1,C,F,H,W], uint8
+
+        # Save once
+        out_path = os.path.join(self.cfg.static_dir, f"{stem}.mp4")
+        save_videos_grid(final_tensor, out_path)
 
     def process_all(self, prompt: str = ""):
         # video_paths = sorted(glob.glob(os.path.join(self.cfg.videos_dir, "*.mp4")))
