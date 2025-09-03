@@ -204,7 +204,7 @@ class StaticAgSceneExtractor:
         """
         Resize a video tensor to (H_out, W_out).
         Accepts shapes [B, C, F, H, W] or [B, F, C, H, W].
-        Returns same order as input.
+        Returns the same order as input.
         """
         if video.ndim != 5:
             raise ValueError(f"Expected 5D video tensor, got {video.shape}")

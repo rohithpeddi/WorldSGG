@@ -60,7 +60,7 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=6, f
     videos = rearrange(videos, "b c t h w -> t b c h w")
     outputs = []
     for x in videos:
-        x = torchvision.utils.make_grid(x, nrow=n_rows)
+        x = torchvision.utils.make_grid(x, nrow=n_rows, padding=0)
         x = x.transpose(0, 1).transpose(1, 2).squeeze(-1)
         if rescale:
             x = (x + 1.0) / 2.0  # -1,1 -> 0,1
@@ -74,7 +74,9 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=6, f
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if imageio_backend:
         if path.endswith("mp4"):
-            imageio.mimsave(path, outputs, fps=fps)
+            with imageio.get_writer(path, fps=fps, codec='libx264', macro_block_size=None) as writer:
+                for img in outputs:
+                    writer.append_data(np.array(img))
         else:
             imageio.mimsave(path, outputs, duration=(1000 * 1 / fps))
     else:
