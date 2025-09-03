@@ -23,10 +23,14 @@ class RoseEditProcessor:
         self.monst3r_directory = monst3r_directory
         self.mask_video_directory = os.path.join(self.data_directory, "mask_videos")
         self.sampled_video_directory = os.path.join(self.data_directory, "sampled_videos")
+        self.static_video_directory = os.path.join(self.data_directory, "static_videos")
+        self.static_frames_directory = os.path.join(self.data_directory, "static_frames")
         self.mask_prefix = mask_prefix
 
         os.makedirs(self.mask_video_directory, exist_ok=True)
         os.makedirs(self.sampled_video_directory, exist_ok=True)
+        os.makedirs(self.static_video_directory, exist_ok=True)
+        os.makedirs(self.static_frames_directory, exist_ok=True)
 
         self.debug = False
 
@@ -200,6 +204,30 @@ class RoseEditProcessor:
         # self.store_sampled_frames(video_id, sampled_frames)
         # self.store_sampled_videos(video_id, sampled_frames)
 
+    def static_video_to_frames(self, video_id):
+        static_video_path = os.path.join(self.static_video_directory, video_id)
+        if not os.path.exists(static_video_path):
+            print(f"[{video_id}] Static video not found at {static_video_path}")
+            return
+
+        cap = cv2.VideoCapture(static_video_path)
+        frame_idx = 0
+        static_frame_dir = os.path.join(self.static_frames_directory, video_id)
+        os.makedirs(static_frame_dir, exist_ok=True)
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_pil = Image.fromarray(frame_rgb)
+            frame_path = os.path.join(static_frame_dir, f"{frame_idx:06d}.png")
+            frame_pil.save(frame_path)
+            frame_idx += 1
+
+        cap.release()
+        print(f"[{video_id}] Extracted {frame_idx} frames to {static_frame_dir}")
+
 
 def main():
     sam2_directory = "/data/rohith/ag/ag4D/uni4D/sam2"
@@ -220,5 +248,20 @@ def main():
         processor.process(video_id)
 
 
+def main_static_video_to_frames():
+    data_directory = "/data/rohith/ag/"
+    processor = RoseEditProcessor(
+        data_directory=data_directory,
+        sam2_directory="",
+        monst3r_directory="",
+        mask_prefix=""
+    )
+
+    video_id_list = ["00T1E.mp4"]
+
+    for video_id in video_id_list:
+        processor.static_video_to_frames(video_id)
+
+
 if __name__ == "__main__":
-    main()
+    main_static_video_to_frames()
