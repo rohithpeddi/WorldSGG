@@ -6,6 +6,8 @@ import warnings
 from dataclasses import dataclass
 from typing import List, Tuple
 
+import numpy as np
+
 warnings.filterwarnings("ignore")
 
 import torch
@@ -37,7 +39,7 @@ class ExtractorConfig:
     data_dir: str = "/data/rohith/ag"
     videos_dir: str = "/data/rohith/ag/videos"
     sampled_dir: str = "/data/rohith/ag/sampled_videos"
-    masked_dir: str = "/data/rohith/ag/masked_videos"
+    masked_dir: str = "/data/rohith/ag/mask_videos"
     static_dir: str = "/data/rohith/ag/static_videos"
 
     # Model/config paths (same as your original script)
@@ -78,12 +80,14 @@ class StaticAgSceneExtractor:
         self.config = config
 
         # Tokenizer
+        print("[StaticAgSceneExtractor] Loading tokenizer ....")
         tokenizer = AutoTokenizer.from_pretrained(
             os.path.join(cfg.pretrained_model_name_or_path,
                          config['text_encoder_kwargs'].get('tokenizer_subpath', 'tokenizer')),
         )
 
         # Text encoder
+        print("[StaticAgSceneExtractor] Loading text_encoder ....")
         text_encoder = WanT5EncoderModel.from_pretrained(
             os.path.join(cfg.pretrained_model_name_or_path,
                          config['text_encoder_kwargs'].get('text_encoder_subpath', 'text_encoder')),
@@ -92,6 +96,7 @@ class StaticAgSceneExtractor:
         )
 
         # CLIP image encoder
+        print("[StaticAgSceneExtractor] Loading clip_image_encoder ....")
         clip_image_encoder = CLIPModel.from_pretrained(
             os.path.join(cfg.pretrained_model_name_or_path,
                          config['image_encoder_kwargs'].get('image_encoder_subpath', 'image_encoder')),
@@ -109,12 +114,14 @@ class StaticAgSceneExtractor:
         )
 
         # VAE
+        print("[StaticAgSceneExtractor] Loading vae ....")
         vae = AutoencoderKLWan.from_pretrained(
             os.path.join(cfg.pretrained_model_name_or_path, config['vae_kwargs'].get('vae_subpath', 'vae')),
             additional_kwargs=OmegaConf.to_container(config['vae_kwargs']),
         )
 
         # 3D transformer
+        print("[StaticAgSceneExtractor] Loading transformer3d ....")
         transformer3d = WanTransformer3DModel.from_pretrained(
             os.path.join(cfg.pretrained_transformer_path,
                          config['transformer_additional_kwargs'].get('transformer_subpath', 'transformer')),
@@ -202,20 +209,12 @@ class StaticAgSceneExtractor:
         if video.ndim != 5:
             raise ValueError(f"Expected 5D video tensor, got {video.shape}")
 
-        if video.shape[2] in (3, 1):  # [B, C, F, H, W]
-            order = "BCFHW"
-            B, C, F_, H, W = video.shape
-            vid = rearrange(video, "b c f h w -> (b f) c h w")
-            vid = F.interpolate(vid, size=out_hw, mode="bilinear", align_corners=False)
-            vid = rearrange(vid, "(b f) c h w -> b c f h w", b=B, f=F_)
-            return vid
-        else:  # assume [B, F, C, H, W]
-            order = "BFCHW"
-            B, F_, C, H, W = video.shape
-            vid = rearrange(video, "b f c h w -> (b f) c h w")
-            vid = F.interpolate(vid, size=out_hw, mode="bilinear", align_corners=False)
-            vid = rearrange(vid, "(b f) c h w -> b f c h w", b=B, f=F_)
-            return vid
+        order = "BFCHW"
+        B, F_, C, H, W = video.shape
+        vid = rearrange(video, "b f c h w -> (b f) c h w")
+        vid = F.interpolate(vid, size=out_hw, mode="bilinear", align_corners=False)
+        vid = rearrange(vid, "(b f) c h w -> b f c h w", b=B, f=F_)
+        return vid
 
     @staticmethod
     def _ensure_dir(path: str):
@@ -260,43 +259,48 @@ class StaticAgSceneExtractor:
         Convert to that if needed.
         """
         self._ensure_dir(os.path.dirname(out_path))
-
-        vid = video_tensor
+        vid = video_tensor.clone()
         if vid.ndim != 5:
             raise ValueError(f"Expected 5D, got {vid.shape}")
-
         # Ensure [B, C, F, H, W]
-        if vid.shape[2] not in (3, 1):  # [B, F, C, H, W] -> [B, C, F, H, W]
-            vid = rearrange(vid, "b f c h w -> b c f h w")
+        # [B, F, C, H, W] -> [B, C, F, H, W]
+        vid = rearrange(vid, "b f c h w -> b c f h w")
 
         save_videos_grid(vid, out_path)
 
     def process_single_video(self, video_path: str, prompt: str = ""):
         """
         - Finds the matching mask video in masked_videos/ (same stem).
-        - Resizes sampled/mask to (480,720) for working inference, split into chunks of ≤ 128 frames.
-        - Runs the ROSE inpaint pipeline.
-        - Restores chunk outputs back to original HxW, stitches per-chunk outputs to files.
-        - Writes outputs into static_videos/.
+        - Splits into chunks per _compute_chunks().
+        - Runs the ROSE inpaint pipeline per chunk at (480,720),
+          restores each chunk to original HxW, and assembles frames
+          by global frame index.
+        - Writes a single stitched output video to static_videos/.
         """
         stem = self._stem(video_path)
-        mask_path = os.path.join(self.cfg.masked_dir, f"{stem}.mp4")
+        mask_video_path = os.path.join(self.cfg.masked_dir, f"{stem}.mp4")
+        sample_video_path = os.path.join(self.cfg.sampled_dir, f"{stem}.mp4")
 
-        if not os.path.exists(mask_path):
-            raise FileNotFoundError(f"Mask video missing for {stem}: {mask_path}")
+        if not os.path.exists(mask_video_path):
+            raise FileNotFoundError(f"Mask video missing for {stem}: {mask_video_path}")
 
-        # Determine original resolution
+        # Original resolution (H, W)
         orig_h, orig_w = self._get_video_hw(video_path)
 
-        # To compute chunk windows, we need total frames. Use OpenCV for a quick count.
-        cap = cv2.VideoCapture(video_path)
+        # Get total frame count from the MASK video (assumed aligned with source video)
+        import cv2
+        cap = cv2.VideoCapture(mask_video_path)
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {video_path}")
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
 
-        # Chunk windows
+        # Compute chunk windows [(start, end)], end exclusive
         chunks = self._compute_chunks(total_frames)
+
+        # Buffer to hold restored frames at global positions
+        # Each entry will be a numpy array [H, W, C] (uint8, RGB)
+        frame_buffer = [None] * total_frames
 
         # Process each chunk
         for ci, (s, e) in enumerate(chunks):
@@ -304,19 +308,17 @@ class StaticAgSceneExtractor:
             if window_len <= 0:
                 continue
 
-            # Load working-resolution tensors
+            # Load working-resolution tensors (expects start_idx support)
             input_video, input_mask, num_frames = self._load_inputs_for_chunk(
-                video_path=video_path,
-                mask_path=mask_path,
+                video_path=sample_video_path,
+                mask_path=mask_video_path,
                 work_frames=min(self.cfg.max_chunk_len, window_len),
                 work_hw=self.cfg.work_size_hw,
                 start_idx=s,
                 end_idx=e,
             )
 
-            # --------------------------
             # Run the edit pipeline
-            # --------------------------
             with torch.no_grad():
                 result = self.pipeline(
                     prompt=prompt,
@@ -324,28 +326,54 @@ class StaticAgSceneExtractor:
                     mask_video=input_mask,
                     num_frames=num_frames,
                     num_inference_steps=self.cfg.num_inference_steps
-                ).videos  # expected [B, C, F, H, W] or [B, F, C, H, W]
+                ).videos  # [B,C,F,H,W] or [B,F,C,H,W]
 
-            # ----------------------------------
-            # Restore to original resolution
-            # ----------------------------------
-            restored = self._resize_video_tensor(result, (orig_h, orig_w))
+            out_result_path = os.path.join(self.cfg.static_dir, f"{stem}_result.mp4")
+            save_videos_grid(result, out_result_path)
 
-            # ----------------------------------
-            # Save the static output chunk
-            # ----------------------------------
-            out_path = os.path.join(self.cfg.static_dir, f"{stem}_static_chunk{ci:03d}.mp4")
-            if (not os.path.exists(out_path)) or self.cfg.overwrite_outputs:
-                self._save_video(restored, out_path)
+            # Ensure [B, C, F, H, W]
+            # Resize to the original resolution
+            restored = self._resize_video_tensor(result, (orig_h, orig_w))  # [B,C,F,H,W]
+            out_restored_path = os.path.join(self.cfg.static_dir, f"{stem}_restored.mp4")
+            save_videos_grid(restored, out_restored_path)
+
+        #     # Convert to numpy frames [F,H,W,C] uint8 for placement
+        #     restored_np = (
+        #         (restored[0].clamp(0, 1) * 255.0)
+        #         .round()
+        #         .to(torch.uint8)
+        #         .permute(1, 2, 3, 0)  # [C,F,H,W] -> [F,H,W,C]
+        #         .cpu()
+        #         .numpy()
+        #     )
+        #
+        #     # Place frames into the global buffer
+        #     # Use min in case num_frames < (e - s) for any reason (e.g., short read)
+        #     place_count = min(restored_np.shape[0], e - s)
+        #     for k in range(place_count):
+        #         frame_buffer[s + k] = restored_np[k]
+        #
+        # # Drop any None (e.g., if the last chunk was short); keep order
+        # final_frames = [f for f in frame_buffer if f is not None]
+        # if not final_frames:
+        #     raise RuntimeError(f"No frames produced for {video_path}")
+        #
+        # # Stack to [F, H, W,C] → torch [1,C, F, H,W]
+        # final_np = np.stack(final_frames, axis=0)  # [F,H,W,C]
+        # final_tensor = torch.from_numpy(final_np).to(torch.uint8)  # [F,H,W,C]
+        # final_tensor = final_tensor.permute(3, 0, 1, 2).unsqueeze(0)  # [1,C,F,H,W], uint8
+        #
+        # # Save once
+        # out_path = os.path.join(self.cfg.static_dir, f"{stem}.mp4")
+        # if (not os.path.exists(out_path)) or self.cfg.overwrite_outputs:
+        #     self._save_video(final_tensor, out_path)
 
     def process_all(self, prompt: str = ""):
-        """
-        Process every video in /data/rohith/ag/videos/.
-        Expects a matching mask video with the same stem in /data/rohith/ag/masked_videos/.
-        """
-        video_paths = sorted(glob.glob(os.path.join(self.cfg.videos_dir, "*.mp4")))
-        if not video_paths:
-            raise FileNotFoundError(f"No videos found in {self.cfg.videos_dir}")
+        # video_paths = sorted(glob.glob(os.path.join(self.cfg.videos_dir, "*.mp4")))
+        # if not video_paths:
+        #     raise FileNotFoundError(f"No videos found in {self.cfg.videos_dir}")
+
+        video_paths = ["/data/rohith/ag/videos/00T1E.mp4"]
 
         for vp in video_paths:
             print(f"[StaticAgSceneExtractor] Processing: {vp}")
