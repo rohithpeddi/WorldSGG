@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional, Union
 
 import cv2
+import argparse
 import numpy as np
 from shapely.geometry import Polygon
 from tqdm import tqdm
@@ -264,12 +265,25 @@ class FeatureDescriptorSampler:
         return kept_frame_indices
 
 
-def main():
-    data_dir = Path("/data/rohith/ag")
-    feat_desc_sampler = FeatureDescriptorSampler(data_dir)
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Sample frames from videos based on homography-overlap filtering."
+    )
+    parser.add_argument(
+        "--data_dir", type=str, default="/data/rohith/ag",
+        help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
+    )
+    return parser.parse_args()
 
-    video_id_list = os.listdir(data_dir / "videos")
-    # video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
+
+def main():
+    args = parse_args()
+    data_dir = Path(args.data_dir)
+
+    feat_desc_sampler = FeatureDescriptorSampler(data_dir)  # uses internal default max_samples=150
+
+    # video_id_list = os.listdir(data_dir / "videos")
+    video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
     output_dir = data_dir / "sampled_frames_idx"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -278,19 +292,56 @@ def main():
 
     # Save the sampled frame indices npy file for each video_id
     video_id_frame_idx_dict = {}
-    for video_id in tqdm(video_id_list):
-        sub_sampled_idx = feat_desc_sampler.init_video_sampler(video_id)
 
-        # 1. Store the result in the dictionary and also save as a npy file
-        np.save(output_dir / f"{video_id[:-4]}.npy", np.array(sub_sampled_idx))
-        video_id_frame_idx_dict[video_id] = sub_sampled_idx
+    for video_id in tqdm(video_id_list):
+        video_stem = video_id[:-4] if video_id.lower().endswith(".mp4") else Path(video_id).stem
+        npy_path = output_dir / f"{video_stem}.npy"
+        legacy_marker_dir = output_dir / video_id  # optional: legacy directory-as-marker
+
+        already_processed = npy_path.exists() or legacy_marker_dir.is_dir()
+
+        if already_processed:
+            try:
+                if npy_path.exists():
+                    sub_sampled_idx = np.load(npy_path).astype(int).tolist()
+                    print(f"[{video_id}] Found existing indices at {npy_path}; loading.")
+                else:
+                    # Legacy marker present but no npy: attempt to reconstruct from sampled_frames
+                    sampled_frames_dir = data_dir / "sampled_frames" / video_id
+                    if sampled_frames_dir.exists():
+                        sub_sampled_idx = sorted(
+                            [int(p.stem) for p in sampled_frames_dir.glob("*.png") if p.stem.isdigit()]
+                        )
+                        print(
+                            f"[{video_id}] Found legacy processed marker dir and derived indices from {sampled_frames_dir}.")
+                        np.save(npy_path, np.array(sub_sampled_idx, dtype=np.int32))
+                    else:
+                        print(
+                            f"[{video_id}] Processed marker exists but no indices found; recomputing once to materialize .npy.")
+                        sub_sampled_idx = feat_desc_sampler.init_video_sampler(video_id)
+                        np.save(npy_path, np.array(sub_sampled_idx, dtype=np.int32))
+
+                video_id_frame_idx_dict[video_id] = sub_sampled_idx
+                # Skip copying frames and video writing if already processed
+                continue
+            except Exception as e:
+                print(f"[{video_id}] Failed to load existing indices due to: {e}. Recomputing.")
+                sub_sampled_idx = feat_desc_sampler.init_video_sampler(video_id)
+                np.save(npy_path, np.array(sub_sampled_idx, dtype=np.int32))
+                video_id_frame_idx_dict[video_id] = sub_sampled_idx
+                # Fall through to copy/video below
+
+        # Not processed yet: run the pipeline and save artifacts
+        if not already_processed:
+            sub_sampled_idx = feat_desc_sampler.init_video_sampler(video_id)
+            np.save(npy_path, np.array(sub_sampled_idx, dtype=np.int32))
+            video_id_frame_idx_dict[video_id] = sub_sampled_idx
 
         # 2. Store the sampled frames into a separate directory
         sampled_frames_dir = data_dir / "sampled_frames" / video_id
         sampled_frames_dir.mkdir(parents=True, exist_ok=True)
 
         for idx in sub_sampled_idx:
-            # Make the idx zero-padded to 6 digits
             src_path = data_dir / "frames" / video_id / f"{idx:06d}.png"
             dst_path = sampled_frames_dir / f"{idx:06d}.png"
             if src_path.exists():
