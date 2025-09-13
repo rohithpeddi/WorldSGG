@@ -9,7 +9,7 @@ tqdm
 open3d
 trimesh
 pyglet==1.5.31
-transformers>=4.46.2
+transformers>=4.56.1
 Pillow
 datasets
 huggingface_hub

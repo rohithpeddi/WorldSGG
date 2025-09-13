@@ -13,7 +13,7 @@ from transformers import (
     AutoProcessor,
     AutoModelForZeroShotObjectDetection,
     Sam2Processor,
-    Sam2ForImageSegmentation,
+    Sam2Model,
 )
 import cv2
 import matplotlib.pyplot as plt
@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 
 # --- Visualization Helper ---
 def get_color_map(num_colors):
+    if num_colors <= 0: return []
     """Generates a list of distinct colors for visualization."""
     colors = plt.cm.get_cmap('hsv', num_colors)
     return [(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255)) for c in colors(range(num_colors))]
@@ -69,6 +70,7 @@ def draw_and_save_masks(
 
 # --- Bounding Box Estimator (with Visualization) ---
 class BoundingBoxEstimator:
+
     def __init__(self, ag_root_directory: str):
         # ... (initialization code is the same)
         self.ag_root_directory = ag_root_directory
@@ -76,27 +78,30 @@ class BoundingBoxEstimator:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.processor = AutoProcessor.from_pretrained(self.model_id)
         self.gdino_model = AutoModelForZeroShotObjectDetection.from_pretrained(self.model_id).to(self.device)
-        self.object_labels = ["person", "bag", "blanket", "book", "box", "broom", "chair", "clothes", "cup", "dish",
-                              "food", "laptop", "paper", "phone", "picture", "pillow", "sandwich", "shoe", "towel",
-                              "vacuum", "glass", "bottle", "notebook", "camera"]
+        self.object_labels = ["a person", "a bag", "a blanket", "a book", "a box", "a broom", "a chair", "a clothes",
+                              "a cup", "a dish", "a food", "a laptop", "a paper", "a phone", "a picture", "a pillow",
+                              "a sandwich", "a shoe", "a towel", "a vacuum", "a glass", "a bottle", "a notebook", "a camera"]
+
         self.gdino_output_path = os.path.join(self.ag_root_directory, "detection", "gdino_bboxes")
         self.vis_output_path = os.path.join(self.ag_root_directory, "detection", "gdino_bboxes_vis")  # Vis path
         os.makedirs(self.gdino_output_path, exist_ok=True)
-        self.video_id_frames_dict = self._load_video_frame_dict()
 
-    def _load_video_frame_dict(self) -> Dict[str, Any]:
-        # ... (same as before)
-        json_file_path = Path("./4d_video_frame_id_list.json")
-        if not json_file_path.exists(): raise FileNotFoundError("Could not find '4d_video_frame_id_list.json'.")
-        with open(json_file_path, 'r') as file: return json.load(file)
-
-    def draw_and_save_bboxes(self, image_path: str, boxes: torch.Tensor, labels: List[str], output_dir: str,
-                             frame_number: int):
+    def draw_and_save_bboxes(
+            self,
+            image_path: str,
+            boxes: torch.Tensor,
+            labels: List[str],
+            output_dir: str,
+            frame_name: str
+    ):
         if not os.path.exists(image_path): return
         image = Image.open(image_path).convert("RGB")
         draw = ImageDraw.Draw(image)
 
         unique_labels = sorted(list(set(labels)))
+
+        if len(unique_labels) == 0: return
+
         color_map = get_color_map(len(unique_labels))
         label_to_color = {label: tuple(c) for label, c in zip(unique_labels, color_map)}
 
@@ -106,66 +111,77 @@ class BoundingBoxEstimator:
             draw.text((box[0], box[1] - 10), label, fill=color)
 
         os.makedirs(output_dir, exist_ok=True)
-        image.save(os.path.join(output_dir, f"{frame_number:06d}.png"))
+        image.save(os.path.join(output_dir, frame_name))
 
     def process_video_bboxes(self, video_id: str, visualize: bool = False):
-        # ... (processing logic is the same, with added visualize call)
-        video_frames_path = os.path.join(self.ag_root_directory, "frames", video_id)
+        video_frames_dir_path = os.path.join(self.ag_root_directory, "sampled_frames", video_id)
         video_output_file_path = os.path.join(self.gdino_output_path, f"{video_id}.pkl")
 
         if os.path.exists(video_output_file_path):
             print(f"Bounding boxes for video {video_id} already exist. Skipping detection...")
-            if visualize:  # Still run visualization if requested
-                with open(video_output_file_path, 'rb') as f:
-                    video_predictions = pickle.load(f)
-                vis_dir = os.path.join(self.vis_output_path, video_id)
-                for frame_number, preds in tqdm(video_predictions.items(), desc=f"Visualizing BBoxes for {video_id}"):
-                    frame_path = os.path.join(video_frames_path, f"{frame_number:06d}.png")
-                    self.draw_and_save_bboxes(frame_path, preds['boxes'], preds['labels'], vis_dir, frame_number)
             return
 
-        if video_id not in self.video_id_frames_dict: return
-        video_frame_numbers = self.video_id_frames_dict[video_id]
         video_predictions = {}
-
-        for frame_number in tqdm(video_frame_numbers, desc=f"Detecting objects in {video_id}"):
-            frame_path = os.path.join(video_frames_path, f"{frame_number:06d}.png")
+        video_frames = sorted([f for f in os.listdir(video_frames_dir_path) if f.endswith('.png')])
+        for video_frame_name in tqdm(video_frames, desc=f"Detecting objects in {video_id}"):
+            frame_path = os.path.join(video_frames_dir_path, video_frame_name)
             if not os.path.exists(frame_path): continue
             image = Image.open(frame_path).convert("RGB")
-            inputs = self.processor(images=image, text=". ".join(self.object_labels), return_tensors="pt").to(
-                self.device)
+            inputs = self.processor(
+                images=image,
+                text=". ".join(self.object_labels),
+                return_tensors="pt").to(self.device)
+
             with torch.no_grad():
                 outputs = self.gdino_model(**inputs)
-            results = \
-            self.processor.post_process_grounded_object_detection(outputs, inputs.input_ids, box_threshold=0.4,
-                                                                  text_threshold=0.3, target_sizes=[image.size[::-1]])[
-                0]
-            video_predictions[frame_number] = {'boxes': results['boxes'], 'scores': results['scores'],
-                                               'labels': results['labels']}
+
+            results = self.processor.post_process_grounded_object_detection(
+                outputs,
+                inputs.input_ids,
+                threshold=0.4,
+                text_threshold=0.3,
+                target_sizes=[image.size[::-1]])[0]
+
+            video_predictions[video_frame_name] = {
+                'boxes': results['boxes'],
+                'scores': results['scores'],
+                'labels': results['labels']
+            }
 
             if visualize:
                 vis_dir = os.path.join(self.vis_output_path, video_id)
-                self.draw_and_save_bboxes(frame_path, results['boxes'], results['labels'], vis_dir, frame_number)
+                self.draw_and_save_bboxes(frame_path, results['boxes'], results['labels'], vis_dir, video_frame_name)
 
         with open(video_output_file_path, 'wb') as file:
             pickle.dump(video_predictions, file)
 
     def process_all_videos(self, visualize: bool = False):
-        video_ids = sorted([d for d in os.listdir(os.path.join(self.ag_root_directory, "frames")) if
-                            os.path.isdir(os.path.join(self.ag_root_directory, "frames", d))])
+        video_ids = sorted([d for d in os.listdir(os.path.join(self.ag_root_directory, "sampled_frames")) if
+                            os.path.isdir(os.path.join(self.ag_root_directory, "sampled_frames", d))])
         for video_id in video_ids:
             self.process_video_bboxes(video_id, visualize)
 
 
 # --- Segmentation Generator (with Visualization) ---
 class SegmentationGenerator:
+
     def __init__(self, ag_root_directory: str):
-        # ... (initialization code is the same, adding vis paths)
         self.ag_root_directory = ag_root_directory
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"SegmentationGenerator is using device: {self.device}")
+
+        # --- MODIFIED LINES START ---
+        # 1. Using the SAM-2 model ID
         self.sam_model_id = "facebook/sam2-hiera-base-400m"
-        self.sam_model = Sam2ForImageSegmentation.from_pretrained(self.sam_model_id).to(self.device)
+
+        # 2. Changed class to the base Sam2Model
+        self.sam_model = Sam2Model.from_pretrained(self.sam_model_id).to(self.device)
+
+        # 3. The Sam2Processor remains the same
         self.sam_processor = Sam2Processor.from_pretrained(self.sam_model_id)
+        # --- MODIFIED LINES END ---
+
+        # Configure I/O paths (this part is unchanged)
         self.bbox_input_path = os.path.join(ag_root_directory, "detection", "gdino_bboxes")
         self.image_seg_output_path = os.path.join(ag_root_directory, "detection", "image_sam_segmentations")
         self.video_seg_output_path = os.path.join(ag_root_directory, "detection", "video_sam_segmentations")
@@ -173,16 +189,22 @@ class SegmentationGenerator:
         self.video_vis_path = os.path.join(ag_root_directory, "detection", "video_sam_masks_vis")
         os.makedirs(self.image_seg_output_path, exist_ok=True);
         os.makedirs(self.video_seg_output_path, exist_ok=True)
-        self.video_id_frames_dict = self._load_video_frame_dict()
+
+        json_file_path = Path("./4d_video_frame_id_list.json")
+        if json_file_path.exists():
+            with open(json_file_path, 'r') as file:
+                self.video_id_frames_dict = json.load(file)
+        else:
+            raise FileNotFoundError("Could not find '4d_video_frame_id_list.json'. Please ensure it exists.")
+
+    # No changes are needed in the methods below, as the processor handles the output.
 
     def _load_video_frame_dict(self) -> Dict[str, Any]:
-        # ... (same as before)
         json_file_path = Path("./4d_video_frame_id_list.json")
         if not json_file_path.exists(): raise FileNotFoundError("Could not find '4d_video_frame_id_list.json'.")
         with open(json_file_path, 'r') as file: return json.load(file)
 
     def run_image_based_segmentation(self, video_id: str, visualize: bool = False):
-        # ... (processing logic is the same, with added visualize call)
         bbox_file_path = os.path.join(self.bbox_input_path, f"{video_id}.pkl")
         output_file_path = os.path.join(self.image_seg_output_path, f"{video_id}.pkl")
         video_frames_path = os.path.join(self.ag_root_directory, "frames", video_id)
@@ -211,9 +233,16 @@ class SegmentationGenerator:
             inputs = self.sam_processor(image, input_boxes=[[detections['boxes'].tolist()]], return_tensors="pt").to(
                 self.device)
             with torch.no_grad():
+                # The output object from the base model also contains `pred_masks`
                 outputs = self.sam_model(**inputs)
-            masks = self.sam_processor.post_process_masks(outputs.pred_masks, inputs["original_sizes"],
-                                                          inputs["reshaped_input_sizes"])[0].cpu().numpy()
+
+            # The processor's post-processing function works directly with the base model's output
+            masks = self.sam_processor.post_process_masks(
+                outputs.pred_masks,
+                inputs["original_sizes"],
+                inputs["reshaped_input_sizes"]
+            )[0].cpu().numpy()
+
             video_segmentations[frame_number] = {'masks': masks, 'labels': detections['labels'],
                                                  'scores': detections['scores'].cpu().numpy()}
 
@@ -225,7 +254,6 @@ class SegmentationGenerator:
             pickle.dump(video_segmentations, file)
 
     def run_video_based_segmentation(self, video_id: str, visualize: bool = False):
-        # ... (processing logic is the same, with added visualize call)
         bbox_file_path = os.path.join(self.bbox_input_path, f"{video_id}.pkl")
         output_file_path = os.path.join(self.video_seg_output_path, f"{video_id}.pkl")
 
@@ -248,7 +276,6 @@ class SegmentationGenerator:
                         draw_and_save_masks(frame_path, masks_in_frame, labels_in_frame, vis_dir, frame_num)
             return
 
-        # ... (The rest of the video segmentation logic remains the same)
         if not os.path.exists(bbox_file_path): return
         with open(bbox_file_path, 'rb') as file:
             bbox_data = pickle.load(file)
@@ -269,8 +296,12 @@ class SegmentationGenerator:
                 self.device)
             with torch.no_grad():
                 outputs = self.sam_model(**inputs)
-            ref_mask = self.sam_processor.post_process_masks(outputs.pred_masks, inputs["original_sizes"],
-                                                             inputs["reshaped_input_sizes"])[0]
+
+            ref_mask = self.sam_processor.post_process_masks(
+                outputs.pred_masks,
+                inputs["original_sizes"],
+                inputs["reshaped_input_sizes"]
+            )[0]
 
             propagated_masks = {}
             frame_list = self.video_id_frames_dict.get(video_id, [])
@@ -282,8 +313,13 @@ class SegmentationGenerator:
                                             return_tensors="pt").to(self.device)
                 with torch.no_grad():
                     outputs = self.sam_model(**inputs)
-                p_mask = self.sam_processor.post_process_masks(outputs.pred_masks, inputs["original_sizes"],
-                                                               inputs["reshaped_input_sizes"])[0].cpu().numpy()
+
+                p_mask = self.sam_processor.post_process_masks(
+                    outputs.pred_masks,
+                    inputs["original_sizes"],
+                    inputs["reshaped_input_sizes"]
+                )[0].cpu().numpy()
+
                 propagated_masks[frame_number] = p_mask
             video_tracked_segmentations[label] = propagated_masks
 
