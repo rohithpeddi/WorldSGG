@@ -81,7 +81,7 @@ class MovingObjectIdentifier:
                 output = self.model.generate(**inputs, max_new_tokens=100)
 
             response_text = self.processor.decode(output[0], skip_special_tokens=True)
-            # Extract the part of the response after "ASSISTANT:"
+            # Extract the part of the response after "ASSISTANT":
             assistant_response = response_text.split("ASSISTANT:")[-1].strip().lower()
 
             # Filter the candidate list based on the VLM's response
@@ -118,13 +118,9 @@ def main():
     # Create the output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
 
-    # --- IMPORTANT ---
-    # This list of candidate labels should be loaded or defined based on your dataset's specific needs.
-    # This is a placeholder example.
-    candidate_labels = [
-        "person", "hand", "cup", "bottle", "bowl", "fork", "knife", "spoon",
-        "plate", "table", "chair", "laptop", "phone", "book", "pen"
-    ]
+    candidate_labels = ["a person", "a bag", "a blanket", "a book", "a box", "a broom", "a chair", "a clothes",
+                        "a cup", "a dish", "a food", "a laptop", "a paper", "a phone", "a picture", "a pillow",
+                        "a sandwich", "a shoe", "a towel", "a vacuum", "a glass", "a bottle", "a notebook", "a camera"]
 
     # Initialize the model
     identifier = MovingObjectIdentifier()
