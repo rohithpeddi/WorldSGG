@@ -1,31 +1,28 @@
-import torch
-import os
-from PIL import Image
-from typing import List
-from transformers import AutoProcessor, LlavaNextForConditionalGeneration
-import numpy as np
 import argparse
+import os
 from pathlib import Path
+from typing import List
+
+import numpy as np
+import torch
+from PIL import Image
+from transformers import VideoLlavaForConditionalGeneration, VideoLlavaProcessor
 
 
 class MovingObjectIdentifier:
-    """
-    Uses a Vision Language Model to identify moving objects in a video.
-    """
 
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         # Load a powerful video-VLM and its processor
-        self.model_id = "microsoft/Video-LLaVA-NeXT-Llama-3-8B-4-frames"
+        self.model_id = "LanguageBind/Video-LLaVA-7B-hf"
 
         # Load in 4-bit for efficiency
-        self.model = LlavaNextForConditionalGeneration.from_pretrained(
+        self.model = VideoLlavaForConditionalGeneration.from_pretrained(
             self.model_id,
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=True,
-            load_in_4bit=True
-        )
-        self.processor = AutoProcessor.from_pretrained(self.model_id)
+            dtype=torch.float16,
+            device_map="auto")
+
+        self.processor = VideoLlavaProcessor.from_pretrained(self.model_id)
         print("MovingObjectIdentifier initialized on device:", self.device)
 
     def identify_moving_objects(
@@ -34,38 +31,23 @@ class MovingObjectIdentifier:
             candidate_labels: List[str]
     ) -> List[str]:
         """
-        Analyzes video frames and returns a list of moving objects from the candidate list.
-
-        Args:
-            video_frames_dir_path: Path to the directory of sampled video frames.
-            candidate_labels: The full list of potential object labels.
-
-        Returns:
-            A filtered list of labels that the VLM identified as moving.
+        Analyzes video frames in chunks of up to 50 and returns a list of moving objects.
+        For each chunk, it samples 4 representative frames to pass to the model.
         """
         if not os.path.exists(video_frames_dir_path):
             print(f"Error: Frame directory not found at {video_frames_dir_path}")
             return []
 
         frame_files = sorted([f for f in os.listdir(video_frames_dir_path) if f.endswith('.png')])
-        if len(frame_files) < 4:
-            print(
-                f"Warning: Not enough frames in {video_frames_dir_path} for full analysis. Using all {len(frame_files)} available frames.")
-            if not frame_files:
-                print("Error: No frames found.")
-                return []
-            selected_frames = frame_files
-        else:
-            # Sample 4 frames evenly from the video
-            indices = np.linspace(0, len(frame_files) - 1, 4, dtype=int)
-            selected_frames = [frame_files[i] for i in indices]
+        if not frame_files:
+            print("Error: No frames found.")
+            return []
 
-        video_frames = [Image.open(os.path.join(video_frames_dir_path, f)).convert("RGB") for f in selected_frames]
-
-        # Construct a detailed prompt for the VLM
+        all_moving_objects = []
         candidate_list_str = ", ".join(candidate_labels)
+        # The prompt is slightly adjusted to reflect that the frames are sampled from a wider segment.
         prompt = (
-            "USER: <video>\nHere are four frames from a video. Your task is to identify all objects that are moving. "
+            "USER: <video>\nHere are four frames sampled from a video segment. Your task is to identify all objects that are moving. "
             "The movement could be natural (like a person walking) or caused by an actor (like a person picking up a cup). "
             f"From the following list, please identify ONLY the objects that are in motion in the video.\n"
             f"List of candidate objects: [{candidate_list_str}]\n\n"
@@ -73,27 +55,53 @@ class MovingObjectIdentifier:
             "ASSISTANT:"
         )
 
-        try:
-            inputs = self.processor(text=prompt, images=video_frames, return_tensors="pt").to(self.device)
+        # Process the video in large chunks
+        chunk_size = 8
+        frame_chunks_to_process = []
+        for i in range(0, len(frame_files), chunk_size):
+            frame_chunks_to_process.append(frame_files[i:i + chunk_size])
 
-            # Generate the response
-            with torch.no_grad():
-                output = self.model.generate(**inputs, max_new_tokens=100)
+        print(f"Total frames: {len(frame_files)}. "
+              f"Processing in {len(frame_chunks_to_process)} chunks of up to {chunk_size} frames each.")
 
-            response_text = self.processor.decode(output[0], skip_special_tokens=True)
-            # Extract the part of the response after "ASSISTANT":
-            assistant_response = response_text.split("ASSISTANT:")[-1].strip().lower()
+        for i, frame_chunk in enumerate(frame_chunks_to_process):
+            print(f"  - Processing chunk {i + 1}/{len(frame_chunks_to_process)} ({len(frame_chunk)} frames)...")
 
-            # Filter the candidate list based on the VLM's response
-            moving_objects = [
-                label for label in candidate_labels if label.lower() in assistant_response
-            ]
+            selected_frames_files = []
+            # The model requires exactly 4 frames.
+            if len(frame_chunk) < 8:
+                # If a chunk has fewer than 4 frames (e.g., at the end of a video), pad it.
+                if not frame_chunk: continue
+                selected_frames_files = frame_chunk + [frame_chunk[-1]] * (8 - len(frame_chunk))
+            else:
+                # For chunks with 4 or more frames, sample 4 frames evenly.
+                indices = np.linspace(0, len(frame_chunk) - 1, 8, dtype=int)
+                selected_frames_files = [frame_chunk[idx] for idx in indices]
 
-            return list(set(moving_objects))  # Return unique objects
+            video_frames = [Image.open(os.path.join(video_frames_dir_path, f)).convert("RGB") for f in
+                            selected_frames_files]
 
-        except Exception as e:
-            print(f"An error occurred during VLM processing: {e}")
-            return []
+            try:
+                inputs = self.processor(text=prompt, images=video_frames, return_tensors="pt").to(self.device)
+
+                with torch.no_grad():
+                    output = self.model.generate(**inputs, max_new_tokens=100)
+
+                response_text = self.processor.decode(output[0], skip_special_tokens=True)
+                assistant_response = response_text.split("ASSISTANT:")[-1].strip().lower()
+
+                batch_moving_objects = [
+                    label for label in candidate_labels if label.lower() in assistant_response
+                ]
+                if batch_moving_objects:
+                    all_moving_objects.extend(batch_moving_objects)
+
+            except Exception as e:
+                print(f"An error occurred during VLM processing for chunk {i + 1}: {e}")
+                continue
+
+        # Return a unique, compiled list of all identified objects
+        return list(set(all_moving_objects))
 
 
 def parse_args():
@@ -113,6 +121,7 @@ def main():
 
     # List of video files to process
     video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
+    # video_id_list = [v for v in os.listdir(data_dir / "videos") if v.endswith('.mp4')]
     output_dir = data_dir / "moving_objects"
 
     # Create the output directory if it doesn't exist
@@ -128,8 +137,14 @@ def main():
     # Process each video
     for video_id in video_id_list:
         video_name = Path(video_id).stem
-        frames_dir = data_dir / "frames" / video_name
+        output_file_path = output_dir / f"{video_name}.txt"
 
+        # If the output file already exists, skip processing this video
+        if output_file_path.exists():
+            print(f"Output for {video_name} already exists. Skipping.")
+            continue
+
+        frames_dir = data_dir / "sampled_frames" / video_name
         print(f"\nProcessing video: {video_name}")
 
         moving_objects = identifier.identify_moving_objects(str(frames_dir), candidate_labels)
@@ -137,7 +152,6 @@ def main():
         print(f"Identified moving objects: {moving_objects}")
 
         # Save the results to a text file
-        output_file_path = output_dir / f"{video_name}.txt"
         with open(output_file_path, 'w') as f:
             if moving_objects:
                 f.write("\n".join(moving_objects))
