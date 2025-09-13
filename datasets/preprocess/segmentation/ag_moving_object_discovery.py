@@ -152,9 +152,11 @@ def main():
         data_dir / "captions" / "chatuniv.json",
     ]
     candidate_labels = [
-        "a person", "a bag", "a blanket", "a book", "a box", "a broom", "a chair", "a clothes",
-        "a cup", "a dish", "a food", "a laptop", "a paper", "a phone", "a picture", "a pillow",
-        "a sandwich", "a shoe", "a towel", "a vacuum", "a glass", "a bottle", "a notebook", "a camera"
+        "person", "bag", "blanket", "book", "box", "broom", "chair", "clothes",
+        "cup", "dish", "food", "laptop", "paper", "phone", "picture", "pillow",
+        "sandwich", "shoe", "towel", "vacuum", "glass", "bottle", "notebook", "camera",
+        "bed", "closet", "cabinet", "door", "doorknob", "groceries", "mirror", "refrigerator",
+        "sofa", "couch", "table", "television", "window"
     ]
 
     # Preload all caption data into memory at once
@@ -163,18 +165,15 @@ def main():
     for video_id in video_id_list:
         video_name = Path(video_id).stem
         output_file_path = output_dir / f"{video_name}.txt"
-
         if output_file_path.exists():
             print(f"Output for {video_name} already exists. Skipping.")
             continue
-
         print(f"\nProcessing video: {video_name}")
 
         # Get combined caption from preloaded data in memory
-        combined_caption = get_combined_caption_from_memory(video_id, all_captions_data)
-
+        combined_caption = get_combined_caption_from_memory(video_name, all_captions_data)
         if not combined_caption:
-            print(f"No captions found for {video_id}. Saving empty file.")
+            print(f"No captions found for {video_name}. Saving empty file.")
             with open(output_file_path, "w") as f:
                 f.write("")
             continue
