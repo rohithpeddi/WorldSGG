@@ -342,7 +342,7 @@ class StaticAgSceneExtractor:
 
         # Stack to [F, H, W, C] → torch [1, C, F, H, W]
         final_np = np.stack(final_frames, axis=0)  # [F,H,W,C]
-        final_tensor = torch.from_numpy(final_np) # [F,H,W,C]
+        final_tensor = torch.from_numpy(final_np)  # [F,H,W,C]
         final_tensor = final_tensor.permute(3, 0, 1, 2).unsqueeze(0)  # [1,C,F,H,W], uint8
 
         # Save once
@@ -354,7 +354,8 @@ class StaticAgSceneExtractor:
         # if not video_paths:
         #     raise FileNotFoundError(f"No videos found in {self.cfg.videos_dir}")
 
-        video_paths = ["/data/rohith/ag/videos/00T1E.mp4"]
+        video_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
+        video_paths = [os.path.join("/data/rohith/ag/videos", v) for v in video_list]
 
         for vp in video_paths:
             print(f"[StaticAgSceneExtractor] Processing: {vp}")

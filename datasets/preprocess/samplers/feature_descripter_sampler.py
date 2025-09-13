@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import pickle
 import re
+import shutil
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional, Union
 
@@ -230,15 +231,15 @@ class FeatureDescriptorSampler:
                 break
             threshold -= 0.02
 
-        # If we still exceed max_samples even at threshold 0.0, take uniform sampling
+        # If still too many, use uniform sampling
         if len(kept_frame_indices) > self.max_samples:
             print(f"[{video_id}] Still exceeds max_samples ({self.max_samples}), using uniform sampling")
             step = len(kept_frame_indices) // self.max_samples
             kept_frame_indices = kept_frame_indices[::step][:self.max_samples]
 
-        print(f"[{video_id}] Final selection: {len(kept_frame_indices)} frames with threshold {threshold:.2f}")
+        print(f"[{video_id}] Preliminary selection: {len(kept_frame_indices)} frames with threshold {threshold:.2f}")
 
-        # Add all annotated frames to the kept list
+        # --- Add annotated frames before enforcing minimum ---
         annotated_frames_dir = self.data_dir / "frames_annotated" / video_id
         annotated_frame_files = sorted(annotated_frames_dir.glob("*.png"))
         annotated_frame_indices = {int(f.stem) for f in annotated_frame_files if f.stem.isdigit()}
@@ -246,7 +247,18 @@ class FeatureDescriptorSampler:
         kept_frame_indices_set.update(annotated_frame_indices)
         kept_frame_indices = sorted(kept_frame_indices_set)
 
-        print(f"[{video_id}] After adding annotated frames: {len(kept_frame_indices)} total frames")
+        # 🔹 Ensure at least 17 frames (AFTER adding annotations)
+        if len(kept_frame_indices) < 17:
+            print(f"[{video_id}] Too few frames ({len(kept_frame_indices)}), enforcing minimum of 17")
+            total_frames = len(frame_files)
+            step = max(1, total_frames // 17)
+            kept_frame_indices = [int(Path(frame_files[i]).stem) for i in range(0, total_frames, step)][:17]
+            # Ensure annotated frames are still included
+            kept_frame_indices_set = set(kept_frame_indices)
+            kept_frame_indices_set.update(annotated_frame_indices)
+            kept_frame_indices = sorted(kept_frame_indices_set)
+
+        print(f"[{video_id}] Final selection: {len(kept_frame_indices)} total frames")
         print(kept_frame_indices)
 
         return kept_frame_indices
@@ -254,23 +266,59 @@ class FeatureDescriptorSampler:
 
 def main():
     data_dir = Path("/data/rohith/ag")
-    raft_of = FeatureDescriptorSampler(data_dir)
+    feat_desc_sampler = FeatureDescriptorSampler(data_dir)
 
-    # video_id_list = os.listdir(data_dir / "videos")
-    video_id_list = ["00T1E.mp4"]
-    output_dir = data_dir / "frames_sampled"
+    video_id_list = os.listdir(data_dir / "videos")
+    # video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
+    output_dir = data_dir / "sampled_frames_idx"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    sampled_video_dir = data_dir / "sampled_videos"
+    sampled_video_dir.mkdir(parents=True, exist_ok=True)
 
     # Save the sampled frame indices npy file for each video_id
     video_id_frame_idx_dict = {}
     for video_id in tqdm(video_id_list):
-        sub_sampled_idx = raft_of.init_video_sampler(video_id)
-        # Store the result in the dictionary and also save as a npy file
+        sub_sampled_idx = feat_desc_sampler.init_video_sampler(video_id)
+
+        # 1. Store the result in the dictionary and also save as a npy file
         np.save(output_dir / f"{video_id[:-4]}.npy", np.array(sub_sampled_idx))
         video_id_frame_idx_dict[video_id] = sub_sampled_idx
 
-    # Save the video_id_frame_idx_dict as a pkl file
-    with open(data_dir / "video_id_frame_idx_dict_raft.pkl", "wb") as f:
+        # 2. Store the sampled frames into a separate directory
+        sampled_frames_dir = data_dir / "sampled_frames" / video_id
+        sampled_frames_dir.mkdir(parents=True, exist_ok=True)
+
+        for idx in sub_sampled_idx:
+            # Make the idx zero-padded to 6 digits
+            src_path = data_dir / "frames" / video_id / f"{idx:06d}.png"
+            dst_path = sampled_frames_dir / f"{idx:06d}.png"
+            if src_path.exists():
+                if not dst_path.exists():
+                    shutil.copy(src_path, dst_path)
+            else:
+                print(f"Warning: Source frame {src_path} does not exist.")
+
+        # 3. Make a video for the sampled frames and place it in sampled_videos
+        video_writer = None
+        for idx in sub_sampled_idx:
+            frame_path = data_dir / "frames" / video_id / f"{idx:06d}.png"
+            if frame_path.exists():
+                frame = cv2.imread(str(frame_path))
+                if video_writer is None:
+                    height, width, _ = frame.shape
+                    video_writer = cv2.VideoWriter(
+                        str(sampled_video_dir / video_id),
+                        cv2.VideoWriter_fourcc(*'mp4v'),
+                        10,  # fps
+                        (width, height)
+                    )
+                video_writer.write(frame)
+        if video_writer is not None:
+            video_writer.release()
+
+    # 4. Finally, save the dictionary as a pkl file
+    with open(data_dir / "video_id_frame_idx_dict.pkl", "wb") as f:
         pickle.dump(video_id_frame_idx_dict, f)
 
 
