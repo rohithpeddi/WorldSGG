@@ -144,7 +144,7 @@ class MovingObjectLLMIdentifier:
                 f"--- CONTEXT ---\n{context}\n--- END CONTEXT ---"
             )
         }
-        raw = self._generate([sys, user], max_new_tokens=1000)
+        raw = self._generate([sys, user], max_new_tokens=512)
         return self._safe_json_loads(raw)
 
     def _stage2_map_to_labels(self, interacted: List[str], candidate_labels: List[str]) -> Dict[str, Any]:
@@ -171,7 +171,7 @@ class MovingObjectLLMIdentifier:
                 f"allowed_labels = {json.dumps(candidate_labels, ensure_ascii=False)}\n"
             )
         }
-        raw = self._generate([sys, user], max_new_tokens=1000)
+        raw = self._generate([sys, user], max_new_tokens=512)
         return self._safe_json_loads(raw)
 
     # ---------------------------
@@ -288,7 +288,10 @@ def main():
 
         # Multi-stage deliberate reasoning (intermediate JSON kept internal)
         moving_objects = identifier.identify_moving_objects_from_captions(combined_caption, candidate_labels)
-        print(f"  - Identified moving objects: {moving_objects}")
+        # print(f"  - Identified moving objects: {moving_objects}")
+
+        if len(moving_objects) == 0:
+            print(f"  - Warning: No moving objects identified for {video_name}.")
 
         with open(output_file_path, "w") as f:
             if moving_objects:

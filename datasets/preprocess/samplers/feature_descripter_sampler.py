@@ -282,8 +282,8 @@ def main():
 
     feat_desc_sampler = FeatureDescriptorSampler(data_dir)  # uses internal default max_samples=150
 
-    # video_id_list = os.listdir(data_dir / "videos")
-    video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
+    video_id_list = os.listdir(data_dir / "videos")
+    # video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
     output_dir = data_dir / "sampled_frames_idx"
     output_dir.mkdir(parents=True, exist_ok=True)
 
