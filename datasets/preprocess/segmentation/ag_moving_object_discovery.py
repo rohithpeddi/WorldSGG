@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 import torch
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
@@ -247,8 +248,8 @@ def main():
     args = parse_args()
     data_dir = Path(args.data_dir)
 
-    video_id_list = essential_video_ids
-    # video_id_list = os.listdir(data_dir / "videos")
+    # video_id_list = essential_video_ids
+    video_id_list = os.listdir(data_dir / "videos")
     output_dir = data_dir / "moving_objects" / "llama3.1"
     os.makedirs(output_dir, exist_ok=True)
 
@@ -269,7 +270,7 @@ def main():
     all_captions_data = load_all_captions(caption_files)
     identifier = MovingObjectLLMIdentifier()
 
-    for video_id in video_id_list:
+    for video_id in tqdm(video_id_list):
         video_name = Path(video_id).stem
         output_file_path = output_dir / f"{video_name}.txt"
         if output_file_path.exists():
