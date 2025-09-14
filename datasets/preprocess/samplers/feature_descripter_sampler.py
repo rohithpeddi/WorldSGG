@@ -90,7 +90,6 @@ class FeatureDescriptorSampler:
     def __init__(self, data_dir: Union[str, Path]):
         self.data_dir = Path(data_dir)
         self.frames_dir = self.data_dir / "frames"
-        self.max_samples = 150  # hard cap on number of frames to keep
 
     # ---------------------------
     # Core geometry / matching
@@ -254,24 +253,8 @@ class FeatureDescriptorSampler:
 
         # Adaptive threshold sampling
         threshold = 0.95
-        kept_frame_indices: List[int] = []
-
-        while threshold > 0.0:
-            kept_frame_paths = self.filter_frames_by_overlap(video_id, str(video_frames_dir), overlap_thresh=threshold)
-            kept_frame_indices = [int(Path(p).stem) for p in kept_frame_paths if Path(p).stem.isdigit()]
-
-            print(f"[{video_id}] Threshold {threshold:.2f}: {len(kept_frame_indices)} frames")
-            if len(kept_frame_indices) <= self.max_samples:
-                break
-            threshold -= 0.02
-
-        # If still too many, use uniform sampling
-        if len(kept_frame_indices) > self.max_samples:
-            print(f"[{video_id}] Still exceeds max_samples ({self.max_samples}), using uniform sampling")
-            step = max(1, len(kept_frame_indices) // self.max_samples)
-            kept_frame_indices = kept_frame_indices[::step][:self.max_samples]
-
-        print(f"[{video_id}] Preliminary selection: {len(kept_frame_indices)} frames with threshold {threshold:.2f}")
+        kept_frame_paths = self.filter_frames_by_overlap(video_id, str(video_frames_dir), overlap_thresh=threshold)
+        kept_frame_indices = [int(Path(p).stem) for p in kept_frame_paths if Path(p).stem.isdigit()]
 
         # --- Add annotated frames before enforcing minimum ---
         annotated_frames_dir = self.data_dir / "frames_annotated" / video_id
