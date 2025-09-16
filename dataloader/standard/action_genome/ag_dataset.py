@@ -33,13 +33,8 @@ class StandardAG(BaseAG):
 
         gt_boxes = torch.zeros([img_tensor.shape[0], 1, 5])
         num_boxes = torch.zeros([img_tensor.shape[0]], dtype=torch.int64)
-
         return img_tensor, im_info, gt_boxes, num_boxes, index
 
 
 def cuda_collate_fn(batch):
-    """
-    don't need to zip the tensor
-
-    """
     return batch[0]

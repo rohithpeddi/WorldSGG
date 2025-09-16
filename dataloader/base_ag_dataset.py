@@ -5,9 +5,10 @@ import cv2
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from typing import Dict, List, Any, Tuple
 
 from constants import Constants as const
-from fasterRCNN.lib.model.utils.blob import prep_im_for_blob, im_list_to_blob
+from utils import prep_im_for_blob, im_list_to_blob
 
 
 class BaseAG(Dataset):
@@ -44,6 +45,122 @@ class BaseAG(Dataset):
 
         # Build dataset
         self._build_dataset(video_dict, person_bbox, object_bbox, all_video_names, filter_nonperson_box_frame)
+
+        self.gt_coco_dict = None
+        self.dataset_classnames = [
+            '__background__', 'person', 'bag', 'bed', 'blanket', 'book', 'box', 'broom', 'chair',
+            'closet/cabinet', 'clothes', 'cup/glass/bottle', 'dish', 'door', 'doorknob', 'doorway',
+            'floor', 'food', 'groceries', 'laptop', 'light', 'medicine', 'mirror', 'paper/notebook',
+            'phone/camera', 'picture', 'pillow', 'refrigerator', 'sandwich', 'shelf', 'shoe',
+            'sofa/couch', 'table', 'television', 'towel', 'vacuum', 'window'
+        ]
+        self.name_to_catid = {name: idx for idx, name in enumerate(self.dataset_classnames) if idx > 0}
+
+        self.categories_json: List[Dict[str, Any]] = [
+            {"id": cid, "name": name} for name, cid in self.name_to_catid.items()
+        ]
+
+        self._ann_id_counter = 1
+        self._min_box_area = 0.25 if filter_small_box else 0.0
+        self._image_id_lookup: Dict[str, int] = {}
+
+        self._images_json: List[Dict[str, Any]] = []
+        self._gt_coco_annotations_json: List[Dict[str, Any]] = []
+
+        self._build_gt_coco_annotations()
+
+    def _parse_gt_for_frame(
+            self,
+            gt_video_annotations: List[List[Dict[str, Any]]],
+            frame_relpath: str
+    ) -> Tuple[List[List[float]], List[int]]:
+        boxes_xyxy: List[List[float]] = []
+        cat_ids: List[int] = []
+        gt_frame_items = None
+        for frame_items in gt_video_annotations:
+            item = frame_items[0]
+            if 'frame' in item and item['frame'] == frame_relpath:
+                gt_frame_items = frame_items
+                break
+        if gt_frame_items is None:
+            raise ValueError(f"No GT items found for frame {frame_relpath}")
+        for item in gt_frame_items:
+            if 'person_bbox' in item and item['person_bbox'] is not None:
+                pb = item['person_bbox']
+                if isinstance(pb, np.ndarray):
+                    pb = pb.tolist()
+                if isinstance(pb, list) and len(pb) > 0:
+                    for b in pb:
+                        b_list = b if isinstance(b, list) else list(b)
+                        boxes_xyxy.append([float(b_list[0]), float(b_list[1]), float(b_list[2]), float(b_list[3])])
+                        cat_ids.append(self.name_to_catid['person'])
+            else:
+                has_bbox = ('bbox' in item) and (item['bbox'] is not None)
+                has_cls = ('class' in item) and (item['class'] is not None)
+                matches_frame = ('frame' in item and item['frame'] == frame_relpath)
+                if has_bbox and has_cls and (matches_frame or ('frame' not in item)):
+                    b = item['bbox']
+                    if isinstance(b, np.ndarray):
+                        b = b.tolist()
+                    b = [float(b[0]), float(b[1]), float(b[2]), float(b[3])]
+                    cls_idx = int(item['class'])
+                    if cls_idx <= 0:
+                        continue
+                    class_name = self.dataset_classnames[cls_idx]
+                    if class_name not in self.name_to_catid:
+                        continue
+                    boxes_xyxy.append(b)
+                    cat_ids.append(self.name_to_catid[class_name])
+        return boxes_xyxy, cat_ids
+
+    def _build_coco_gt_for_video(
+            self,
+            gt_video_annotations: List[List[Dict[str, Any]]],
+            frame_names: List[str],
+            video_id: str
+    ):
+        for frame_rel in frame_names:
+            video_id2, frame_file = frame_rel.split('/')
+            assert video_id2 == video_id
+            frame_abs = os.path.join(self._data_path, "frames_annotated", video_id, frame_file)
+            if not os.path.exists(frame_abs):
+                continue
+
+            if frame_rel not in self._image_id_lookup:
+                self._image_id_lookup[frame_rel] = len(self._image_id_lookup) + 1
+                self._images_json.append({"id": self._image_id_lookup[frame_rel], "file_name": frame_rel})
+            image_id = self._image_id_lookup[frame_rel]
+
+            gt_boxes_xyxy, gt_cat_ids = self._parse_gt_for_frame(gt_video_annotations, frame_rel)
+            for b, cid in zip(gt_boxes_xyxy, gt_cat_ids):
+                area = float(max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1]))
+                if area < self._min_box_area:
+                    continue
+                self._gt_coco_annotations_json.append({
+                    "id": self._ann_id_counter,
+                    "image_id": image_id,
+                    "category_id": cid,
+                    "bbox": [float(b[0]), float(b[1]), float(b[2] - b[0]), float(b[3] - b[1])],
+                    "area": area,
+                    "iscrowd": 0,
+                })
+                self._ann_id_counter += 1
+
+    def _build_gt_coco_annotations(self):
+        for idx in range(len(self._video_list)):
+            frame_names = self._video_list[idx]
+            gt_video_annotations = self._gt_annotations[idx]
+            video_id = frame_names[0].split('/')[0]
+            self._build_coco_gt_for_video(gt_video_annotations, frame_names, video_id)
+
+        self.gt_coco_dict = {
+            "images": self._images_json,
+            "annotations": self._gt_coco_annotations_json,
+            "categories": self.categories_json,
+            "info": {"description": "Action Genome detection eval", "version": "1.0"},
+            "licenses": []
+        }
+
 
     def _fetch_object_classes(self):
         self.object_classes = [const.BACKGROUND]
@@ -91,7 +208,7 @@ class BaseAG(Dataset):
             with open(os.path.join(annotations_path, const.PERSON_BOUNDING_BOX_PKL), 'rb') as f:
                 person_bbox = pickle.load(f)
             f.close()
-            with open('dataloader/object_bbox_and_relationship_filtersmall.pkl', 'rb') as f:
+            with open(os.path.join(annotations_path, const.OBJECT_BOUNDING_BOX_RELATIONSHIP_PKL), 'rb') as f:
                 object_bbox = pickle.load(f)
         else:
             with open(os.path.join(annotations_path, const.PERSON_BOUNDING_BOX_PKL), 'rb') as f:

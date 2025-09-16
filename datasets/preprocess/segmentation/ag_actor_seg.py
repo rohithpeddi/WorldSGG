@@ -7,10 +7,9 @@ import torch
 from PIL import Image, ImageDraw
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-
-from dataloader.standard.action_genome.ag_dataset import StandardAG, cuda_collate_fn
 from utils import get_color_map
+from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+from dataloader.coco.action_genome.ag_dataset import StandardAGCoCoDataset
 
 
 # 1. Load the dataset, get the objects present in the dataset annotations.
@@ -53,12 +52,13 @@ class AgActorSegmentation:
         self.load_gdino_model()
         self.load_sam2_model()
 
-        self.video_id_active_objects_map = self.process_video_id_active_objects_map()
+        self.video_id_active_objects_map = {}
+        self.process_video_id_active_objects_map()
 
     # -------------------------------------- LOADING INFORMATION -------------------------------------- #
 
     def load_dataset(self):
-        self._train_dataset = StandardAG(
+        self._train_dataset = StandardAGCoCoDataset(
             phase="train",
             mode="sgdet",
             datasize="large",
@@ -67,7 +67,7 @@ class AgActorSegmentation:
             filter_small_box=True
         )
 
-        self._test_dataset = StandardAG(
+        self._test_dataset = StandardAGCoCoDataset(
             phase="test",
             mode="sgdet",
             datasize="large",
@@ -79,15 +79,15 @@ class AgActorSegmentation:
         self._dataloader_train = DataLoader(
             self._train_dataset,
             shuffle=True,
-            collate_fn=cuda_collate_fn,
-            pin_memory=True,
+            collate_fn=lambda b: b[0],  # you use batch_size=1; just pass the item through,
+            pin_memory=False,
             num_workers=0
         )
 
         self._dataloader_test = DataLoader(
             self._test_dataset,
             shuffle=False,
-            collate_fn=cuda_collate_fn,
+            collate_fn=lambda b: b[0],  # you use batch_size=1; just pass the item through,
             pin_memory=False
         )
 
@@ -110,8 +110,19 @@ class AgActorSegmentation:
         pass
 
     def process_video_id_active_objects_map(self):
-        # Process the video to get the list of active objects present in the video
-        pass
+        for data in self._dataloader_train:
+            video_id = data['video_id']
+            gt_annotations = data['gt_annotations']
+            active_objects = set()
+            for frame_items in gt_annotations:
+                for item in frame_items:
+                    category_id = item['class']
+                    category_name = self._train_dataset.catid_to_name_map[category_id]
+                    if category_name:
+                        active_objects.add(category_name)
+
+            active_objects.add("person")  # Ensure 'person' is always included
+            self.video_id_active_objects_map[video_id] = sorted(list(active_objects))
 
     # -------------------------------------- DETECTION MODULES -------------------------------------- #
 
@@ -222,7 +233,7 @@ class AgActorSegmentation:
 def main():
     data_dir_path = "/data/rohith/ag/"
     ag_actor_segmentation = AgActorSegmentation(data_dir_path)
-    ag_actor_segmentation.process()
+    # ag_actor_segmentation.process()
 
 
 if __name__ == "__main__":
