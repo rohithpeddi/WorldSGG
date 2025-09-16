@@ -212,6 +212,83 @@ class AgActorSegmentation:
         image.save(os.path.join(output_dir, frame_name))
 
     def extract_bounding_boxes(self, video_id, visualize=True):
+        """
+        Run Grounding DINO on sampled frames, apply class-wise NMS, and (optionally) save visualizations.
+        Saves a pickle with per-frame {boxes, scores, labels} to self.bbox_dir_path.
+        """
+
+        # ---------- helpers (self-contained) ----------
+        def _box_iou_single_vs_many(box_i: torch.Tensor, boxes: torch.Tensor) -> torch.Tensor:
+            # boxes are xyxy; box_i is shape (4,), boxes is (N,4)
+            tl = torch.maximum(box_i[:2], boxes[:, :2])  # (N,2)
+            br = torch.minimum(box_i[2:], boxes[:, 2:])  # (N,2)
+            wh = (br - tl).clamp(min=0)  # (N,2)
+            inter = wh[:, 0] * wh[:, 1]  # (N,)
+
+            area_i = (box_i[2] - box_i[0]).clamp(min=0) * (box_i[3] - box_i[1]).clamp(min=0)
+            area_n = (boxes[:, 2] - boxes[:, 0]).clamp(min=0) * (boxes[:, 3] - boxes[:, 1]).clamp(min=0)
+            union = area_i + area_n - inter
+            return inter / union.clamp(min=1e-9)
+
+        def _nms_single_class(boxes: torch.Tensor, scores: torch.Tensor, iou_thr: float = 0.5) -> torch.Tensor:
+            # Returns indices (w.r.t. input tensors) to keep
+            if boxes.numel() == 0:
+                return torch.empty(0, dtype=torch.long)
+            order = scores.argsort(descending=True)
+            keep = []
+            while order.numel() > 0:
+                i = order[0].item()
+                keep.append(i)
+                if order.numel() == 1:
+                    break
+                rest = order[1:]
+                ious = _box_iou_single_vs_many(boxes[i], boxes[rest])
+                order = rest[ious <= iou_thr]
+            return torch.tensor(keep, dtype=torch.long)
+
+        def _nms_classwise(boxes: torch.Tensor, scores: torch.Tensor, labels: list,
+                           iou_thr: float = 0.5, min_score: float = 0.0):
+            # Run NMS per label string; return filtered (boxes, scores, labels)
+            if boxes.numel() == 0:
+                return boxes, scores, labels
+
+            boxes = boxes.detach().cpu().float()
+            scores = scores.detach().cpu().float()
+            labels = list(labels)
+
+            # pre-filter on score if requested
+            if min_score > 0:
+                keep0 = torch.nonzero(scores >= min_score, as_tuple=False).squeeze(1)
+                boxes, scores = boxes[keep0], scores[keep0]
+                labels = [labels[i] for i in keep0.tolist()]
+                if boxes.numel() == 0:
+                    return boxes, scores, labels
+
+            kept_boxes, kept_scores, kept_labels = [], [], []
+            for lbl in sorted(set(labels)):
+                idx = [i for i, l in enumerate(labels) if l == lbl]
+                if not idx:
+                    continue
+                b = boxes[idx]
+                s = scores[idx]
+                keep_idx_local = _nms_single_class(b, s, iou_thr=iou_thr).tolist()
+                for k in keep_idx_local:
+                    kept_boxes.append(b[k].unsqueeze(0))
+                    kept_scores.append(s[k].unsqueeze(0))
+                    kept_labels.append(lbl)
+
+            if kept_boxes:
+                boxes_out = torch.cat(kept_boxes, dim=0)
+                scores_out = torch.cat(kept_scores, dim=0)
+                labels_out = kept_labels
+            else:
+                boxes_out = torch.empty((0, 4), dtype=torch.float32)
+                scores_out = torch.empty((0,), dtype=torch.float32)
+                labels_out = []
+            return boxes_out, scores_out, labels_out
+
+        # ---------------------------------------------
+
         # Use GDINO to extract bounding boxes for objects in frames
         video_frames_dir_path = os.path.join(self.ag_root_directory, "sampled_frames", video_id)
         video_output_file_path = os.path.join(self.bbox_dir_path, f"{video_id}.pkl")
@@ -227,15 +304,20 @@ class AgActorSegmentation:
         self._ensure_dir(Path(self.bbox_dir_path))
 
         video_predictions = {}
-        video_frames = sorted([f for f in os.listdir(video_frames_dir_path) if f.endswith('.png') or f.endswith('.jpg')])
+        video_frames = sorted([f for f in os.listdir(video_frames_dir_path)
+                               if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+
         for video_frame_name in tqdm(video_frames, desc=f"Detecting objects in {video_id}"):
             frame_path = os.path.join(video_frames_dir_path, video_frame_name)
-            if not os.path.exists(frame_path): continue
+            if not os.path.exists(frame_path):
+                continue
+
             image = Image.open(frame_path).convert("RGB")
             inputs = self.gdino_processor(
                 images=image,
                 text=". ".join(video_object_labels),
-                return_tensors="pt").to(self.device)
+                return_tensors="pt"
+            ).to(self.device)
 
             with torch.no_grad():
                 outputs = self.gdino_model(**inputs)
@@ -243,22 +325,30 @@ class AgActorSegmentation:
             results = self.gdino_processor.post_process_grounded_object_detection(
                 outputs,
                 inputs.input_ids,
-                threshold=0.4,
+                threshold=0.10,
                 text_threshold=0.3,
-                target_sizes=[image.size[::-1]])[0]
+                target_sizes=[image.size[::-1]]
+            )[0]
 
             # normalize labels (strip 'a/the')
             labels = [self._normalize_label(l) for l in results['labels']]
 
+            # ---- class-wise NMS (tune thresholds as needed) ----
+            boxes_nms, scores_nms, labels_nms = _nms_classwise(
+                results['boxes'], results['scores'], labels,
+                iou_thr=0.5,  # IoU threshold for suppression
+                min_score=0.0  # optional pre-filter; set >0 to drop low scores
+            )
+
             video_predictions[video_frame_name] = {
-                'boxes': results['boxes'],
-                'scores': results['scores'],
-                'labels': labels
+                'boxes': boxes_nms,
+                'scores': scores_nms,
+                'labels': labels_nms
             }
 
-            if visualize:
+            if visualize and boxes_nms.numel() > 0 and len(labels_nms) > 0:
                 vis_dir = os.path.join(self.gdino_vis_path, video_id)
-                self.draw_and_save_bboxes(frame_path, results['boxes'], labels, vis_dir, video_frame_name)
+                self.draw_and_save_bboxes(frame_path, boxes_nms, labels_nms, vis_dir, video_frame_name)
 
         with open(video_output_file_path, 'wb') as file:
             pickle.dump(video_predictions, file)
