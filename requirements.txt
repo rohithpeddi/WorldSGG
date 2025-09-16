@@ -39,3 +39,4 @@ flash_attn
 numpy
 Pillow
 Requests
+sam2

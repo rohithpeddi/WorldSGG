@@ -8,9 +8,7 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image, ImageDraw
-# Image predictor (promptable with boxes/points)
 from sam2.sam2_image_predictor import SAM2ImagePredictor
-# Video predictor (stateful propagation across frames)
 from sam2.sam2_video_predictor import SAM2VideoPredictor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -60,7 +58,7 @@ class AgActorSegmentation:
         self.masks_combined_dir_path = self.ag_root_directory / "segmentation" / "masks" / "combined"
 
         # temp JPG mirror for SAM2 video predictor (expects JPEG frames)
-        self.sam2_jpg_tmp = self.ag_root_directory / "segmentation" / "tmp_jpg"
+        self.sampled_frames_jpg = self.ag_root_directory / "sampled_frames_jpg"
 
         for p in [
             self.masked_frames_im_dir_path,
@@ -70,7 +68,7 @@ class AgActorSegmentation:
             self.masks_im_dir_path,
             self.masks_vid_dir_path,
             self.masks_combined_dir_path,
-            self.sam2_jpg_tmp,
+            self.sampled_frames_jpg,
         ]:
             p.mkdir(parents=True, exist_ok=True)
 
@@ -78,7 +76,7 @@ class AgActorSegmentation:
 
         self.load_dataset()
         self.load_gdino_model()
-        self.load_sam2_model()  # >>> filled
+        self.load_sam2_model()
 
         self.video_id_active_objects_map = {}
         self.process_video_id_active_objects_map()
@@ -92,7 +90,7 @@ class AgActorSegmentation:
             datasize="large",
             data_path=self.ag_root_directory,
             filter_nonperson_box_frame=True,
-            filter_small_box=True
+            filter_small_box=False
         )
 
         self._test_dataset = StandardAGCoCoDataset(
@@ -101,7 +99,7 @@ class AgActorSegmentation:
             datasize="large",
             data_path=self.ag_root_directory,
             filter_nonperson_box_frame=True,
-            filter_small_box=True
+            filter_small_box=False
         )
 
         self._dataloader_train = DataLoader(
@@ -126,6 +124,8 @@ class AgActorSegmentation:
             active_objects = set()
             for frame_items in gt_annotations:
                 for item in frame_items:
+                    if 'person_bbox' in item:
+                        continue
                     category_id = item['class']
                     category_name = self._train_dataset.catid_to_name_map[category_id]
                     if category_name:
@@ -172,12 +172,8 @@ class AgActorSegmentation:
         p.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
-    def _img_to_np(img: Image.Image) -> np.ndarray:
-        return np.array(img)
-
-    @staticmethod
     def _binary_to_png(mask_bool: np.ndarray) -> np.ndarray:
-        return (mask_bool.astype(np.uint8) * 255)
+        return mask_bool.astype(np.uint8) * 255
 
     @staticmethod
     def _apply_mask(img_np: np.ndarray, mask_bool: np.ndarray) -> np.ndarray:
@@ -215,7 +211,7 @@ class AgActorSegmentation:
         os.makedirs(output_dir, exist_ok=True)
         image.save(os.path.join(output_dir, frame_name))
 
-    def extract_bounding_boxes(self, video_id, visualize=False):
+    def extract_bounding_boxes(self, video_id, visualize=True):
         # Use GDINO to extract bounding boxes for objects in frames
         video_frames_dir_path = os.path.join(self.ag_root_directory, "sampled_frames", video_id)
         video_output_file_path = os.path.join(self.bbox_dir_path, f"{video_id}.pkl")
@@ -270,9 +266,6 @@ class AgActorSegmentation:
     # -------------------------------------- SEGMENTATION (SAM2) -------------------------------------- #
 
     def segment_with_sam2(self, video_id):
-        """Image-mode SAM2: per-frame segmentation with box prompts from GDINO.  # >>> filled
-        Saves per-object binary masks and union-masked frames.
-        """
         frames_dir = Path(self.ag_root_directory) / "sampled_frames" / video_id
         pkl_path = Path(self.bbox_dir_path) / f"{video_id}.pkl"
         if not pkl_path.exists():
@@ -288,23 +281,21 @@ class AgActorSegmentation:
         self._ensure_dir(out_frames_dir)
 
         frame_names = sorted([fn for fn in dets.keys() if (frames_dir / fn).exists()])
-
         for fn in tqdm(frame_names, desc=f"SAM2 (image) {video_id}"):
             img_p = frames_dir / fn
             img = Image.open(img_p).convert("RGB")
-            img_np = self._img_to_np(img)
+            img_np = np.array(img)
 
             boxes: torch.Tensor = dets[fn]["boxes"]
             labels: List[str] = dets[fn]["labels"]
             scores: torch.Tensor = dets[fn]["scores"]
 
-            # group detections by label
+            # Group detections by label
             by_label: DefaultDict[str, List[Tuple[np.ndarray, float]]] = defaultdict(list)
             for b, l, s in zip(boxes.cpu().numpy(), labels, scores.cpu().numpy()):
                 by_label[l].append((b.astype(np.float32), float(s)))
 
-            # run predictor per frame
-            # cast in AMP on CUDA (bf16), else normal mode
+            # Run predictor per frame cast in AMP on CUDA (bf16), else normal mode
             if self._use_amp:
                 amp_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
             else:
@@ -314,10 +305,8 @@ class AgActorSegmentation:
                 amp_ctx = _Noop()
 
             union_mask = np.zeros(img_np.shape[:2], dtype=bool)
-
             with torch.inference_mode(), amp_ctx:
                 self.sam2_image_predictor.set_image(img_np)
-
                 for lbl, items in by_label.items():
                     lbl_mask = np.zeros(img_np.shape[:2], dtype=bool)
                     for box_px, _ in items:
@@ -337,9 +326,7 @@ class AgActorSegmentation:
             cv2.imwrite(str(out_frames_dir / fn), cv2.cvtColor(masked_np, cv2.COLOR_RGB2BGR))
 
     def _mirror_pngs_to_jpg(self, frames_dir: Path, video_id: str) -> Tuple[Path, List[str]]:
-        """Ensure a JPG folder exists with same ordering as sampled_frames.  # >>> helper
-        Returns (jpg_dir, ordered_jpg_filenames)."""
-        jpg_dir = self.sam2_jpg_tmp / video_id
+        jpg_dir = self.sampled_frames_jpg / video_id
         self._ensure_dir(jpg_dir)
 
         fn_png = sorted([f for f in os.listdir(frames_dir) if f.lower().endswith((".png", ".jpg", ".jpeg"))])
@@ -356,9 +343,6 @@ class AgActorSegmentation:
         return jpg_dir, sorted(jpg_names)
 
     def segment_with_sam2_video_mode(self, video_id):
-        """Video-mode SAM2: add a single box prompt on the first observed frame per object,
-        then propagate throughout the video to get per-frame masks.  # >>> filled
-        """
         frames_dir = Path(self.ag_root_directory) / "sampled_frames" / video_id
         pkl_path = Path(self.bbox_dir_path) / f"{video_id}.pkl"
         if not pkl_path.exists():
@@ -420,7 +404,9 @@ class AgActorSegmentation:
 
         with torch.inference_mode(), amp_ctx:
             # The official API uses init_state(video_path=...)
-            state = self.sam2_video_predictor.init_state(video_path=str(jpg_dir))
+            # state = self.sam2_video_predictor.init_state(video_path=str(jpg_dir))
+            video_path = str(self.ag_root_directory / "sampled_videos" / video_id)
+            state = self.sam2_video_predictor.init_state(video_path=video_path)
 
             # Add one box per object at its first occurrence frame
             for lbl, (first_fn, box_px) in first_occurrence.items():
@@ -453,9 +439,11 @@ class AgActorSegmentation:
                 img_np = np.array(img)
                 union_mask = np.zeros(img_np.shape[:2], dtype=bool)
 
+                masks_copy = masks.clone().cpu().numpy()
                 for k, obj_id in enumerate(object_ids):
                     lbl = objid_to_lbl[int(obj_id)]
-                    m = np.array(masks[k]).astype(bool)
+                    m = np.array(masks_copy[k]).astype(bool)
+                    m = m.squeeze()
                     union_mask |= m
                     # save per-object binary mask
                     save_p = out_mask_dir / f"{stem}__{lbl}.png"
@@ -466,8 +454,6 @@ class AgActorSegmentation:
                 cv2.imwrite(str(out_frames_dir / f"{stem}.png"), cv2.cvtColor(masked_np, cv2.COLOR_RGB2BGR))
 
     def combine_masks(self, video_id):
-        """Union per-object masks from image route and video route, write combined masks and frames.  # >>> filled
-        """
         frames_dir = Path(self.ag_root_directory) / "sampled_frames" / video_id
         out_mask_dir = self.masks_combined_dir_path / video_id
         out_frames_dir = self.masked_frames_combined_dir_path / video_id
@@ -579,7 +565,7 @@ class AgActorSegmentation:
 def main():
     data_dir_path = "/data/rohith/ag/"
     ag_actor_segmentation = AgActorSegmentation(data_dir_path)
-    # ag_actor_segmentation.process()
+    ag_actor_segmentation.process()
 
 
 if __name__ == "__main__":
