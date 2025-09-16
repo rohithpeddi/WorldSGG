@@ -91,6 +91,21 @@ class AgActorSegmentation:
             pin_memory=False
         )
 
+    def process_video_id_active_objects_map(self):
+        for data in self._dataloader_train:
+            video_id = data['video_id']
+            gt_annotations = data['gt_annotations']
+            active_objects = set()
+            for frame_items in gt_annotations:
+                for item in frame_items:
+                    category_id = item['class']
+                    category_name = self._train_dataset.catid_to_name_map[category_id]
+                    if category_name:
+                        active_objects.add(category_name)
+
+            active_objects.add("person")  # Ensure 'person' is always included
+            self.video_id_active_objects_map[video_id] = sorted(list(active_objects))
+
     def load_gdino_model(self):
         # Load GDINO model for bounding box extraction
         self.gdino_model_id = "IDEA-Research/grounding-dino-base"
@@ -108,21 +123,6 @@ class AgActorSegmentation:
     def load_sam2_model(self):
         # Load SAM2 model for segmentation
         pass
-
-    def process_video_id_active_objects_map(self):
-        for data in self._dataloader_train:
-            video_id = data['video_id']
-            gt_annotations = data['gt_annotations']
-            active_objects = set()
-            for frame_items in gt_annotations:
-                for item in frame_items:
-                    category_id = item['class']
-                    category_name = self._train_dataset.catid_to_name_map[category_id]
-                    if category_name:
-                        active_objects.add(category_name)
-
-            active_objects.add("person")  # Ensure 'person' is always included
-            self.video_id_active_objects_map[video_id] = sorted(list(active_objects))
 
     # -------------------------------------- DETECTION MODULES -------------------------------------- #
 
