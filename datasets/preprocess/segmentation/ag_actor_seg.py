@@ -1,5 +1,7 @@
+import json
 import os
 import pickle
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import List, Dict, Tuple, Any, DefaultDict
@@ -12,7 +14,7 @@ from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.sam2_video_predictor import SAM2VideoPredictor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection, AutoModelForCausalLM, AutoTokenizer
 
 from dataloader.coco.action_genome.ag_dataset import StandardAGCoCoDataset
 from utils import get_color_map
@@ -175,11 +177,14 @@ class AgActorDetection(BaseAgActor):
 
     def __init__(self, ag_root_directory):
         super().__init__(ag_root_directory)
+        self.caption_data = None
         self.bbox_dir_path = self.ag_root_directory / "detection" / 'gdino_bboxes'
         self.gdino_vis_path = self.ag_root_directory / "detection" / 'gdino_vis'
-        self.active_objects_path = self.ag_root_directory / 'active_objects'
+        self.active_objects_b_annotations_path = self.ag_root_directory / 'active_objects' / 'annotations'
+        self.active_objects_b_reasoned_path = self.ag_root_directory / 'active_objects' / 'sampled_videos'
 
-        for p in [self.bbox_dir_path, self.gdino_vis_path, self.active_objects_path]:
+        for p in [self.bbox_dir_path, self.gdino_vis_path, self.active_objects_b_reasoned_path,
+                  self.active_objects_b_annotations_path]:
             p.mkdir(parents=True, exist_ok=True)
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -188,6 +193,9 @@ class AgActorDetection(BaseAgActor):
         self._dataloader_test = None
         self._test_dataset = None
         self._train_dataset = None
+        self.tokenizer = None
+        self.llama_model = None
+        self.model_id = None
 
         self.gdino_object_labels = None
         self.gdino_model = None
@@ -196,9 +204,81 @@ class AgActorDetection(BaseAgActor):
         self.gdino_model_id = None
 
         self.load_gdino_model()
+        self.load_llama_model()
+        self.load_caption_data()
 
         self.video_id_active_objects_map = {}
         self.process_video_id_active_objects_map()
+
+    def load_caption_data(self):
+        caption_json = self.ag_root_directory / "captions" / "charades.json"
+        if not caption_json.exists():
+            print(f"Warning: Caption file not found: {caption_json}")
+            return
+
+        with open(caption_json, 'r') as f:
+            self.caption_data = json.load(f)
+
+    def load_llama_model(self):
+        self.model_id = "meta-llama/Llama-3.1-8B-Instruct"
+
+        self.llama_model = AutoModelForCausalLM.from_pretrained(
+            self.model_id,
+            device_map="auto",
+            trust_remote_code=True,
+            torch_dtype="auto",
+            _attn_implementation="sdpa",
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
+        # Ensure we have a pad token to avoid warnings during generation
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+    # ---------------------------
+    # Low-level generation helpers
+    # ---------------------------
+    def _generate(self, messages: List[Dict[str, str]], max_new_tokens: int = 256) -> str:
+        inputs = self.tokenizer.apply_chat_template(
+            messages,
+            return_tensors="pt",
+            add_generation_prompt=True,
+        )
+        # Keep tensors on CPU and let accelerate handle device placement for sharded models
+        terminators = [
+            self.tokenizer.eos_token_id,
+            self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+        ]
+        gen_kwargs = dict(
+            max_new_tokens=max_new_tokens,
+            temperature=0.0,
+            do_sample=False,
+            eos_token_id=terminators,
+        )
+        inputs = inputs.to(self.device)
+        with torch.no_grad():
+            out_ids = self.llama_model.generate(inputs, **gen_kwargs)
+        gen_only = out_ids[:, inputs.shape[1]:]
+        text = self.tokenizer.batch_decode(
+            gen_only,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False
+        )[0]
+        return text.strip()
+
+    @staticmethod
+    def _safe_json_loads(s: str) -> Dict[str, Any]:
+        """Try to parse JSON; if there is extra text, extract the first JSON object candidate."""
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            # Attempt to extract the first {...} block
+            m = re.search(r"\{[\s\S]*\}", s)
+            if m:
+                try:
+                    return json.loads(m.group(0))
+                except json.JSONDecodeError:
+                    pass
+        return {}
 
     def process_video_id_active_objects_map(self):
 
@@ -223,8 +303,27 @@ class AgActorDetection(BaseAgActor):
 
         # list of objects corresponding to each video id in a text file
         for video_id, objects in self.video_id_active_objects_map.items():
-            with open(self.active_objects_path / f"{video_id}.txt", "w") as f:
+            with open(self.active_objects_b_annotations_path / f"{video_id[:-4]}.txt", "w") as f:
                 for obj in objects:
+                    f.write(f"{obj}\n")
+
+            reasoned_objects = []
+            video_caption = self.caption_data[video_id]
+
+            # Given active objects and video caption, use LLaMA to reason about objects that result in
+            # movement due to the interaction from the active objects
+            prompt = (
+                f"Given the video caption: '{video_caption}', and the list of objects present in the video: "
+                f"'{', '.join(objects)}', identify the objects that are likely to be involved in movements or actions. "
+                f"List only the objects that are likely to be involved in movements or actions, and exclude static objects. "
+                f"Provide the answer in JSON format as {{'reasoned_objects': [list of objects]}}."
+            )
+
+            # TODO: Prepare messages for querying the model and store the output responses in the reasoned_objects list
+
+            with open(self.active_objects_b_reasoned_path / f"{video_id[:-4]}.txt", "w") as f:
+                for obj in reasoned_objects:
+                    assert obj in objects  # sanity check, reasoned objects should be a subset of active objects
                     f.write(f"{obj}\n")
 
     def load_gdino_model(self):
@@ -706,6 +805,10 @@ class AgActorSegmentation(BaseAgActor):
 
 def main():
     data_dir_path = "/data/rohith/ag/"
+
+    ag_actor_detection = AgActorDetection(data_dir_path)
+    ag_actor_detection.process()
+
     ag_actor_segmentation = AgActorSegmentation(data_dir_path)
     ag_actor_segmentation.process()
 
