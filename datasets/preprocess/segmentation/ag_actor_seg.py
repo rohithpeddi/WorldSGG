@@ -385,7 +385,7 @@ class AgActorDetection(BaseAgActor):
             if video_id_object_annotations_path.exists():
                 with open(video_id_object_annotations_path, "r") as f:
                     annotated_objects = [line.strip() for line in f if line.strip()]
-
+                self.video_id_active_objects_annotations_map[video_id] = sorted(annotated_objects)
                 if video_id_object_reasoning_path.exists():
                     with open(video_id_object_reasoning_path, "r") as f:
                         video_reasoned_objects = [line.strip() for line in f if line.strip()]
@@ -402,7 +402,8 @@ class AgActorDetection(BaseAgActor):
                         video_reasoned_objects.add("mirror")
                     self.video_id_active_objects_b_reasoned_map[video_id] = sorted(list(video_reasoned_objects))
                 else:
-                    self.video_id_active_objects_annotations_map[video_id] = sorted(annotated_objects)
+                    print(f"Video {video_id} has no reasoned objects. Loading annotated objects instead.")
+                    self.video_id_active_objects_b_reasoned_map[video_id] = sorted(annotated_objects)
             else:
                 print("Warning: Missing annotation file for video:", video_id)
 
