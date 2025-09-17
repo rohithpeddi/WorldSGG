@@ -202,7 +202,8 @@ class AgActorDetection(BaseAgActor):
         self.load_llama_model()
         self.load_caption_data()
 
-        self.video_id_active_objects_map = {}
+        self.video_id_active_objects_annotations_map = {}
+        self.video_id_active_objects_b_reasoned_map = {}
         self.process_video_id_active_objects_map()
 
     def load_caption_data(self):
@@ -309,13 +310,16 @@ class AgActorDetection(BaseAgActor):
                                 active_objects.add(category_name)
 
                 active_objects.add("person")
-                self.video_id_active_objects_map[video_id] = sorted(list(active_objects))
+                self.video_id_active_objects_annotations_map[video_id] = sorted(list(active_objects))
 
         fetch_active_videos(self._dataloader_train)
         fetch_active_videos(self._dataloader_test)
 
+        new_objects_list = []
+        error_videos_list = []
+
         # list of objects corresponding to each video id in a text file
-        for video_id, objects in tqdm(self.video_id_active_objects_map.items()):
+        for video_id, objects in tqdm(self.video_id_active_objects_annotations_map.items()):
             with open(self.active_objects_b_annotations_path / f"{video_id[:-4]}.txt", "w") as f:
                 for obj in objects:
                     f.write(f"{obj}\n")
@@ -346,15 +350,33 @@ class AgActorDetection(BaseAgActor):
                 {"role": "user", "content": prompt},
             ]
 
-            raw = self._generate(messages, max_new_tokens=128)
-            parsed = self._safe_json_loads(raw)
-            reasoned_objects = set(parsed["reasoned_objects"])
-            reasoned_objects.add("person")
+            try:
+                raw = self._generate(messages, max_new_tokens=128)
+                parsed = self._safe_json_loads(raw)
+                reasoned_objects = set(parsed["reasoned_objects"])
+                reasoned_objects.add("person")
 
-            with open(self.active_objects_b_reasoned_path / f"{video_id[:-4]}.txt", "w") as f:
-                for obj in reasoned_objects:
-                    assert obj in objects
-                    f.write(f"{obj}\n")
+                with open(self.active_objects_b_reasoned_path / f"{video_id[:-4]}.txt", "w") as f:
+                    for obj in reasoned_objects:
+                        if obj in objects:
+                            f.write(f"{obj}\n")
+                        else:
+                            new_objects_list.append((video_id, obj))
+                self.video_id_active_objects_b_reasoned_map[video_id] = sorted(list(reasoned_objects))
+            except Exception as e:
+                print(f"Error processing video {video_id}: {e}")
+                error_videos_list.append(video_id)
+                continue
+
+        if new_objects_list:
+            with open(self.ag_root_directory / "new_objects_b_reasoned.txt", "w") as f:
+                for video_id, obj in new_objects_list:
+                    f.write(f"{video_id}: {obj}\n")
+
+        if error_videos_list:
+            with open(self.ag_root_directory / "error_videos_b_reasoned.txt", "w") as f:
+                for video_id in error_videos_list:
+                    f.write(f"{video_id}\n")
 
     def load_gdino_model(self):
         # Load GDINO model for bounding box extraction
@@ -454,7 +476,7 @@ class AgActorDetection(BaseAgActor):
         video_output_file_path = os.path.join(self.bbox_dir_path, f"{video_id}.pkl")
 
         # Loads object labels corresponding to active objects in the dataset
-        video_object_labels = self.video_id_active_objects_map[video_id]
+        video_object_labels = self.video_id_active_objects_b_reasoned_map[video_id]
 
         if os.path.exists(video_output_file_path):
             print(f"Bounding boxes for video {video_id} already exist. Skipping detection...")
