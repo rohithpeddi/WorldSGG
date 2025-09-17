@@ -536,8 +536,6 @@ class AgActorDetection(BaseAgActor):
             pickle.dump(video_predictions, file)
 
     def process(self):
-        self.load_dataset()
-
         # video_id_list = os.listdir(self.data_dir_path / "videos")
         video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
 
@@ -651,7 +649,76 @@ class AgActorSegmentation(BaseAgActor):
             masked_np = self._apply_mask(img_np, union_mask)
             cv2.imwrite(str(out_frames_dir / fn), cv2.cvtColor(masked_np, cv2.COLOR_RGB2BGR))
 
-    def segment_with_sam2_video_mode(self, video_id):
+    def segment_with_sam2_video_mode(self, video_id: str, mask_threshold: float = 0.5, min_area: int = 0) -> None:
+        """
+        Runs SAM2 in video mode and writes per-object binary masks + union-masked frames.
+        Args:
+            video_id: ID/name of the video (directory under sampled_frames)
+            mask_threshold: probability/logit threshold used to binarize masks
+            min_area: remove connected components smaller than this (in pixels); 0 disables
+        """
+
+        import pickle
+        from typing import Dict, Tuple, Any
+        from pathlib import Path
+
+        import cv2
+        import numpy as np
+        import torch
+        from PIL import Image
+
+        def _as_bool_mask(x, thr: float = mask_threshold) -> np.ndarray:
+            """
+            Convert torch/numpy mask (logits or probabilities; shapes [H,W], [1,H,W], [H,W,1], [N,H,W], etc.)
+            into a 2D boolean mask with robust handling.
+            """
+            # to numpy float32 on CPU
+            if isinstance(x, torch.Tensor):
+                x = x.detach().to(dtype=torch.float32, device="cpu").numpy()
+            x = np.asarray(x)
+
+            # squeeze singleton dimensions
+            x = np.squeeze(x)
+
+            # if still 3D (e.g., [C,H,W] or [H,W,C]), reduce to single channel
+            if x.ndim == 3:
+                # prefer channel-first common case [C,H,W]
+                if x.shape[0] in (1, 3):
+                    x = x[0] if x.shape[0] == 1 else x.mean(axis=0)
+                # else handle channel-last [H,W,C]
+                elif x.shape[-1] in (1, 3):
+                    x = x[..., 0] if x.shape[-1] == 1 else x.mean(axis=-1)
+                else:
+                    # fallback: average all channels
+                    x = x.mean(axis=0)
+
+            # sanitize NaNs/Inf
+            x = np.nan_to_num(x, copy=False)
+
+            # if outside [0,1], treat as logits (apply sigmoid) or rescale if narrow range
+            x_min, x_max = float(x.min()), float(x.max())
+            if not (0.0 <= x_min and x_max <= 1.0):
+                # large dynamic range -> likely logits
+                if (x_max - x_min) > 6.0 or x_max > 2.0 or x_min < -2.0:
+                    x = 1.0 / (1.0 + np.exp(-x))
+                else:
+                    denom = (x_max - x_min) if x_max != x_min else 1.0
+                    x = (x - x_min) / denom
+
+            mask = (x >= thr)
+
+            # optional: remove tiny components
+            if min_area > 0:
+                m8 = mask.astype(np.uint8)
+                num, labels, stats, _ = cv2.connectedComponentsWithStats(m8, connectivity=8)
+                keep = np.zeros_like(mask, dtype=bool)
+                for lab in range(1, num):
+                    if stats[lab, cv2.CC_STAT_AREA] >= min_area:
+                        keep |= (labels == lab)
+                mask = keep
+
+            return mask
+
         frames_dir = Path(self.ag_root_directory) / "sampled_frames" / video_id
         pkl_path = Path(self.bbox_dir_path) / f"{video_id}.pkl"
         if not pkl_path.exists():
@@ -686,7 +753,7 @@ class AgActorSegmentation(BaseAgActor):
             print(f"[segment_with_sam2_video_mode][{video_id}] No objects found in detections.")
             return
 
-        # SAM2 video predictor expects a directory of JPEG frames
+        # If your predictor truly needs JPEGs on disk, mirror PNG->JPG. Otherwise you can pass a video file.
         jpg_dir, jpg_order = self._mirror_pngs_to_jpg(frames_dir, video_id)
 
         # Map frame name -> index in jpg_order (strip extension)
@@ -702,8 +769,8 @@ class AgActorSegmentation(BaseAgActor):
         lbl_to_objid = {lbl: i for i, lbl in enumerate(labels_sorted)}
         objid_to_lbl = {i: lbl for lbl, i in lbl_to_objid.items()}
 
-        # init state and add prompts
-        if self._use_amp:
+        # AMP guard
+        if getattr(self, "_use_amp", False):
             amp_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         else:
             class _Noop:
@@ -714,16 +781,15 @@ class AgActorSegmentation(BaseAgActor):
             amp_ctx = _Noop()
 
         with torch.inference_mode(), amp_ctx:
-            # The official API uses init_state(video_path=...)
+            # Either pass a directory of JPG frames or a video file; choose what your predictor expects.
             # state = self.sam2_video_predictor.init_state(video_path=str(jpg_dir))
             video_path = str(self.ag_root_directory / "sampled_videos" / video_id)
             state = self.sam2_video_predictor.init_state(video_path=video_path)
 
-            # Add one box per object at its first occurrence frame
+            # Seed with one box per object at its first occurrence frame
             for lbl, (first_fn, box_px) in first_occurrence.items():
                 obj_id = lbl_to_objid[lbl]
                 ann_frame_idx = stem_to_idx[Path(first_fn).stem]
-                # API: add_new_points_or_box(inference_state=..., frame_idx=..., obj_id=..., box=...)
                 self.sam2_video_predictor.add_new_points_or_box(
                     inference_state=state,
                     frame_idx=ann_frame_idx,
@@ -731,37 +797,47 @@ class AgActorSegmentation(BaseAgActor):
                     box=box_px.astype(np.float32),
                 )
 
-            # Now propagate across the video, saving per-frame masks
-            # We'll also build per-frame union masks to export masked frames.
+            # Propagate through video
             for frame_idx, object_ids, masks in self.sam2_video_predictor.propagate_in_video(state):
-                # masks: (num_objects_on_frame, H, W) — map each obj_id to its mask
-                # Resolve original frame name (PNG path)
+                # Resolve original frame name
                 jpg_name = jpg_order[frame_idx]
                 stem = Path(jpg_name).stem
-                # locate original PNG/JPG frame from sampled_frames
                 candidate_png = frames_dir / f"{stem}.png"
                 candidate_jpg = frames_dir / f"{stem}.jpg"
                 src_img_path = candidate_png if candidate_png.exists() else candidate_jpg
                 if not src_img_path.exists():
-                    # fallback to temp jpg
-                    src_img_path = jpg_dir / jpg_name
+                    src_img_path = Path(jpg_dir) / jpg_name  # fallback
 
                 img = Image.open(src_img_path).convert("RGB")
-                img_np = np.array(img)
-                union_mask = np.zeros(img_np.shape[:2], dtype=bool)
+                img_np = np.array(img)  # HxWx3 (RGB)
+                H, W = img_np.shape[:2]
+                union_mask = np.zeros((H, W), dtype=bool)
 
-                masks_copy = masks.clone().cpu().numpy()
-                for k, obj_id in enumerate(object_ids):
-                    lbl = objid_to_lbl[int(obj_id)]
-                    m = np.array(masks_copy[k]).astype(bool)
-                    m = m.squeeze()
-                    union_mask |= m
-                    # save per-object binary mask
+                # Iterate over masks aligned with object_ids
+                # masks is typically a torch.Tensor with shape [K, H, W] or [K, 1, H, W]
+                K = len(object_ids)
+                for k in range(K):
+                    # object id -> label
+                    oid = object_ids[k]
+                    oid_i = int(oid.item() if hasattr(oid, "item") else oid)
+                    lbl = objid_to_lbl.get(oid_i, f"obj{oid_i}")
+
+                    # Convert the k-th mask to boolean with robust binarization
+                    m_bool = _as_bool_mask(masks[k])
+
+                    # Ensure mask matches frame size
+                    if m_bool.shape != (H, W):
+                        m_bool = cv2.resize(m_bool.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(
+                            bool)
+
+                    union_mask |= m_bool
+
+                    # Save per-object binary mask as 0/255 PNG
                     save_p = out_mask_dir / f"{stem}__{lbl}.png"
-                    cv2.imwrite(str(save_p), self._binary_to_png(m))
+                    cv2.imwrite(str(save_p), (m_bool.astype(np.uint8) * 255))
 
-                # save union-masked frame
-                masked_np = self._apply_mask(img_np, union_mask)
+                # Save union-masked frame
+                masked_np = self._apply_mask(img_np, union_mask)  # expects a boolean mask
                 cv2.imwrite(str(out_frames_dir / f"{stem}.png"), cv2.cvtColor(masked_np, cv2.COLOR_RGB2BGR))
 
     def combine_masks(self, video_id):
@@ -843,26 +919,24 @@ class AgActorSegmentation(BaseAgActor):
             self._write_video_from_frames(frames_dir, out_mp4, fps=15)
 
     def process(self):
-        self.load_dataset()
-
         # video_id_list = os.listdir(self.data_dir_path / "videos")
         video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
 
         for video_id in tqdm(video_id_list):
-            self.segment_with_sam2(video_id)
+            # self.segment_with_sam2(video_id)
             self.segment_with_sam2_video_mode(video_id)
-            self.combine_masks(video_id)
-            self.save_masked_frames_and_videos(video_id)
+            # self.combine_masks(video_id)
+            # self.save_masked_frames_and_videos(video_id)
 
 
 def main():
     data_dir_path = "/data/rohith/ag/"
 
-    ag_actor_detection = AgActorDetection(data_dir_path)
-    ag_actor_detection.process()
+    # ag_actor_detection = AgActorDetection(data_dir_path)
+    # ag_actor_detection.process()
 
-    # ag_actor_segmentation = AgActorSegmentation(data_dir_path)
-    # ag_actor_segmentation.process()
+    ag_actor_segmentation = AgActorSegmentation(data_dir_path)
+    ag_actor_segmentation.process()
 
 
 if __name__ == "__main__":
