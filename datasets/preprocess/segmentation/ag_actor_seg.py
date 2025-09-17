@@ -573,10 +573,15 @@ class AgActorDetection(BaseAgActor):
             pickle.dump(video_predictions, file)
 
     def process(self):
-        video_id_list = os.listdir(self.ag_root_directory / "videos")
         # video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
+        # for video_id in tqdm(video_id_list):
+        #     self.extract_bounding_boxes(video_id, visualize=True)
 
-        for video_id in tqdm(video_id_list):
+        for data in self._dataloader_train:
+            video_id = data['video_id']
+            self.extract_bounding_boxes(video_id, visualize=True)
+        for data in self._dataloader_test:
+            video_id = data['video_id']
             self.extract_bounding_boxes(video_id, visualize=True)
 
 
