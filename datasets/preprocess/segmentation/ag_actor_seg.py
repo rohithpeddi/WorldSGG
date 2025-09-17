@@ -27,67 +27,27 @@ from utils import get_color_map
 # 5. Take union of masks from both routes to get the final masks for each object in each frame.
 # 6. Save masked frames and masked videos.
 
-
-class AgActorSegmentation:
+class BaseAgActor:
 
     def __init__(self, ag_root_directory):
-        self._use_amp = None
-        self.sam2_video_predictor = None
-        self.sam2_image_predictor = None
-        self.gdino_object_labels = None
-        self.gdino_model = None
-        self.gdino_processor = None
-        self.gdino_device = None
-        self.gdino_model_id = None
+        self.ag_root_directory = Path(ag_root_directory)
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # temp JPG mirror for SAM2 video predictor (expects JPEG frames)
+        self.sampled_frames_jpg = self.ag_root_directory / "sampled_frames_jpg"
+        self.bbox_dir_path = self.ag_root_directory / "detection" / 'gdino_bboxes'
+
+        self._ensure_dir(self.bbox_dir_path)
+        self._ensure_dir(self.sampled_frames_jpg)
+
         self._dataloader_train = None
         self._dataloader_test = None
         self._test_dataset = None
         self._train_dataset = None
 
-        self.ag_root_directory = Path(ag_root_directory)
-        self.bbox_dir_path = self.ag_root_directory / "detection" / 'gdino_bboxes'
-        self.gdino_vis_path = self.ag_root_directory / "detection" / 'gdino_vis'
-        self.active_objects_path = self.ag_root_directory / 'active_objects'
-
-        self.masked_frames_im_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'image_based'
-        self.masked_frames_vid_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'video_based'
-        self.masked_frames_combined_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'combined'
-        self.masked_videos_dir_path = self.ag_root_directory / "segmentation" / "masked_videos"
-
-        # Internal (per-object) mask stores
-        self.masks_im_dir_path = self.ag_root_directory / "segmentation" / "masks" / "image_based"
-        self.masks_vid_dir_path = self.ag_root_directory / "segmentation" / "masks" / "video_based"
-        self.masks_combined_dir_path = self.ag_root_directory / "segmentation" / "masks" / "combined"
-
-        # temp JPG mirror for SAM2 video predictor (expects JPEG frames)
-        self.sampled_frames_jpg = self.ag_root_directory / "sampled_frames_jpg"
-
-        for p in [
-            self.masked_frames_im_dir_path,
-            self.masked_frames_vid_dir_path,
-            self.masked_frames_combined_dir_path,
-            self.masked_videos_dir_path,
-            self.masks_im_dir_path,
-            self.masks_vid_dir_path,
-            self.masks_combined_dir_path,
-            self.sampled_frames_jpg,
-            self.bbox_dir_path,
-            self.gdino_vis_path,
-            self.active_objects_path
-        ]:
-            p.mkdir(parents=True, exist_ok=True)
-
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
         self.load_dataset()
-        self.load_gdino_model()
-        self.load_sam2_model()
-
-        self.video_id_active_objects_map = {}
-        self.process_video_id_active_objects_map()
 
     # -------------------------------------- LOADING INFORMATION -------------------------------------- #
-
     def load_dataset(self):
         self._train_dataset = StandardAGCoCoDataset(
             phase="train",
@@ -121,56 +81,6 @@ class AgActorSegmentation:
             collate_fn=lambda b: b[0],  # you use batch_size=1; just pass the item through,
             pin_memory=False
         )
-
-    def process_video_id_active_objects_map(self):
-        def fetch_active_videos(dataloader):
-            for data in dataloader:
-                video_id = data['video_id']
-                gt_annotations = data['gt_annotations']
-                active_objects = set()
-                for frame_items in gt_annotations:
-                    for item in frame_items:
-                        if 'person_bbox' in item:
-                            continue
-                        category_id = item['class']
-                        category_name = self._train_dataset.catid_to_name_map[category_id]
-                        if category_name:
-                            active_objects.add(category_name)
-                active_objects.add("person")  # Ensure 'person' is always included
-                self.video_id_active_objects_map[video_id] = sorted(list(active_objects))
-
-        fetch_active_videos(self._dataloader_train)
-        fetch_active_videos(self._dataloader_test)
-
-        # list of objects corresponding to each video id in a text file
-        for video_id, objects in self.video_id_active_objects_map.items():
-            with open(self.active_objects_path / f"{video_id}.txt", "w") as f:
-                for obj in objects:
-                    f.write(f"{obj}\n")
-
-    def load_gdino_model(self):
-        # Load GDINO model for bounding box extraction
-        self.gdino_model_id = "IDEA-Research/grounding-dino-base"
-        self.gdino_device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.gdino_processor = AutoProcessor.from_pretrained(self.gdino_model_id)
-        self.gdino_model = AutoModelForZeroShotObjectDetection.from_pretrained(self.gdino_model_id).to(self.device)
-        self.gdino_object_labels = [
-            "a person", "a bag", "a blanket", "a book", "a box", "a broom", "a chair", "a clothes",
-            "a cup", "a dish", "a food", "a laptop", "a paper", "a phone", "a picture", "a pillow",
-            "a sandwich", "a shoe", "a towel", "a vacuum", "a glass", "a bottle", "a notebook", "a camera",
-            "a bed", "a closet", "a cabinet", "a door", "a doorknob", "a groceries", "a mirror", "a refrigerator",
-            "a sofa", "a couch", "a table", "a television", "a window"
-        ]
-
-    def load_sam2_model(self):
-        # Use a balanced checkpoint (you can switch to 'facebook/sam2-hiera-large' if you have headroom)
-        self.sam2_image_predictor = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-base-plus")
-        self.sam2_video_predictor = SAM2VideoPredictor.from_pretrained("facebook/sam2-hiera-base-plus")
-
-        # Prefer bfloat16 autocast on CUDA; fall back to regular inference on CPU.
-        self._use_amp = (self.device.type == "cuda")
-
-    # -------------------------------------- DETECTION MODULES -------------------------------------- #
 
     @staticmethod
     def _normalize_label(s: str) -> str:
@@ -225,6 +135,113 @@ class AgActorSegmentation:
         os.makedirs(output_dir, exist_ok=True)
         image.save(os.path.join(output_dir, frame_name))
 
+    def _mirror_pngs_to_jpg(self, frames_dir: Path, video_id: str) -> Tuple[Path, List[str]]:
+        jpg_dir = self.sampled_frames_jpg / video_id
+        self._ensure_dir(jpg_dir)
+
+        fn_png = sorted([f for f in os.listdir(frames_dir) if f.lower().endswith((".png", ".jpg", ".jpeg"))])
+        jpg_names = []
+        for fn in fn_png:
+            src = frames_dir / fn
+            stem = Path(fn).stem
+            dst = jpg_dir / f"{stem}.jpg"
+            if not dst.exists():
+                # convert (and also unify color)
+                img = Image.open(src).convert("RGB")
+                img.save(dst, format="JPEG", quality=95)
+            jpg_names.append(dst.name)
+        return jpg_dir, sorted(jpg_names)
+
+    def _write_video_from_frames(self, frames_dir: Path, out_path: Path, fps: int = 15):
+        img_files = sorted([f for f in os.listdir(frames_dir) if f.lower().endswith((".png", ".jpg", ".jpeg"))])
+        if not img_files:
+            return
+        first = cv2.imread(str(frames_dir / img_files[0]), cv2.IMREAD_COLOR)
+        h, w = first.shape[:2]
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
+        for fn in img_files:
+            frame = cv2.imread(str(frames_dir / fn), cv2.IMREAD_COLOR)
+            if frame is None:
+                continue
+            if frame.shape[0] != h or frame.shape[1] != w:
+                frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_LINEAR)
+            writer.write(frame)
+        writer.release()
+
+
+class AgActorDetection(BaseAgActor):
+
+    def __init__(self, ag_root_directory):
+        super().__init__(ag_root_directory)
+        self.bbox_dir_path = self.ag_root_directory / "detection" / 'gdino_bboxes'
+        self.gdino_vis_path = self.ag_root_directory / "detection" / 'gdino_vis'
+        self.active_objects_path = self.ag_root_directory / 'active_objects'
+
+        for p in [self.bbox_dir_path, self.gdino_vis_path, self.active_objects_path]:
+            p.mkdir(parents=True, exist_ok=True)
+
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        self._dataloader_train = None
+        self._dataloader_test = None
+        self._test_dataset = None
+        self._train_dataset = None
+
+        self.gdino_object_labels = None
+        self.gdino_model = None
+        self.gdino_processor = None
+        self.gdino_device = None
+        self.gdino_model_id = None
+
+        self.load_gdino_model()
+
+        self.video_id_active_objects_map = {}
+        self.process_video_id_active_objects_map()
+
+    def process_video_id_active_objects_map(self):
+
+        def fetch_active_videos(dataloader):
+            for data in dataloader:
+                video_id = data['video_id']
+                gt_annotations = data['gt_annotations']
+                active_objects = set()
+                for frame_items in gt_annotations:
+                    for item in frame_items:
+                        if 'person_bbox' in item:
+                            continue
+                        category_id = item['class']
+                        category_name = self._train_dataset.catid_to_name_map[category_id]
+                        if category_name:
+                            active_objects.add(category_name)
+                active_objects.add("person")
+                self.video_id_active_objects_map[video_id] = sorted(list(active_objects))
+
+        fetch_active_videos(self._dataloader_train)
+        fetch_active_videos(self._dataloader_test)
+
+        # list of objects corresponding to each video id in a text file
+        for video_id, objects in self.video_id_active_objects_map.items():
+            with open(self.active_objects_path / f"{video_id}.txt", "w") as f:
+                for obj in objects:
+                    f.write(f"{obj}\n")
+
+    def load_gdino_model(self):
+        # Load GDINO model for bounding box extraction
+        self.gdino_model_id = "IDEA-Research/grounding-dino-base"
+        self.gdino_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.gdino_processor = AutoProcessor.from_pretrained(self.gdino_model_id)
+        self.gdino_model = AutoModelForZeroShotObjectDetection.from_pretrained(self.gdino_model_id).to(self.device)
+        self.gdino_object_labels = [
+            "a person", "a bag", "a blanket", "a book", "a box", "a broom", "a chair", "a clothes",
+            "a cup", "a dish", "a food", "a laptop", "a paper", "a phone", "a picture", "a pillow",
+            "a sandwich", "a shoe", "a towel", "a vacuum", "a glass", "a bottle", "a notebook", "a camera",
+            "a bed", "a closet", "a cabinet", "a door", "a doorknob", "a groceries", "a mirror", "a refrigerator",
+            "a sofa", "a couch", "a table", "a television", "a window"
+        ]
+
+    # -------------------------------------- DETECTION MODULES -------------------------------------- #
     def extract_bounding_boxes(self, video_id, visualize=True):
         """
         Run Grounding DINO on sampled frames, apply class-wise NMS, and (optionally) save visualizations.
@@ -367,6 +384,58 @@ class AgActorSegmentation:
         with open(video_output_file_path, 'wb') as file:
             pickle.dump(video_predictions, file)
 
+    def process(self):
+        self.load_dataset()
+
+        # video_id_list = os.listdir(self.data_dir_path / "videos")
+        video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
+
+        for video_id in tqdm(video_id_list):
+            self.extract_bounding_boxes(video_id, visualize=True)
+
+
+class AgActorSegmentation(BaseAgActor):
+
+    def __init__(self, ag_root_directory):
+        super().__init__(ag_root_directory)
+
+        self._use_amp = None
+        self.sam2_video_predictor = None
+        self.sam2_image_predictor = None
+
+        self.masked_frames_im_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'image_based'
+        self.masked_frames_vid_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'video_based'
+        self.masked_frames_combined_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'combined'
+        self.masked_videos_dir_path = self.ag_root_directory / "segmentation" / "masked_videos"
+
+        # Internal (per-object) mask stores
+        self.masks_im_dir_path = self.ag_root_directory / "segmentation" / "masks" / "image_based"
+        self.masks_vid_dir_path = self.ag_root_directory / "segmentation" / "masks" / "video_based"
+        self.masks_combined_dir_path = self.ag_root_directory / "segmentation" / "masks" / "combined"
+
+        for p in [
+            self.masked_frames_im_dir_path,
+            self.masked_frames_vid_dir_path,
+            self.masked_frames_combined_dir_path,
+            self.masked_videos_dir_path,
+            self.masks_im_dir_path,
+            self.masks_vid_dir_path,
+            self.masks_combined_dir_path,
+            self.sampled_frames_jpg,
+        ]:
+            p.mkdir(parents=True, exist_ok=True)
+
+        self.load_sam2_model()
+
+    # -------------------------------------- LOADING INFORMATION -------------------------------------- #
+    def load_sam2_model(self):
+        # Use a balanced checkpoint (you can switch to 'facebook/sam2-hiera-large' if you have headroom)
+        self.sam2_image_predictor = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-base-plus")
+        self.sam2_video_predictor = SAM2VideoPredictor.from_pretrained("facebook/sam2-hiera-base-plus")
+
+        # Prefer bfloat16 autocast on CUDA; fall back to regular inference on CPU.
+        self._use_amp = (self.device.type == "cuda")
+
     # -------------------------------------- SEGMENTATION (SAM2) -------------------------------------- #
 
     def segment_with_sam2(self, video_id):
@@ -405,7 +474,9 @@ class AgActorSegmentation:
             else:
                 class _Noop:
                     def __enter__(self): return None
+
                     def __exit__(self, *args): return False
+
                 amp_ctx = _Noop()
 
             union_mask = np.zeros(img_np.shape[:2], dtype=bool)
@@ -428,23 +499,6 @@ class AgActorSegmentation:
             # save union-masked frame (all objects together)
             masked_np = self._apply_mask(img_np, union_mask)
             cv2.imwrite(str(out_frames_dir / fn), cv2.cvtColor(masked_np, cv2.COLOR_RGB2BGR))
-
-    def _mirror_pngs_to_jpg(self, frames_dir: Path, video_id: str) -> Tuple[Path, List[str]]:
-        jpg_dir = self.sampled_frames_jpg / video_id
-        self._ensure_dir(jpg_dir)
-
-        fn_png = sorted([f for f in os.listdir(frames_dir) if f.lower().endswith((".png", ".jpg", ".jpeg"))])
-        jpg_names = []
-        for fn in fn_png:
-            src = frames_dir / fn
-            stem = Path(fn).stem
-            dst = jpg_dir / f"{stem}.jpg"
-            if not dst.exists():
-                # convert (and also unify color)
-                img = Image.open(src).convert("RGB")
-                img.save(dst, format="JPEG", quality=95)
-            jpg_names.append(dst.name)
-        return jpg_dir, sorted(jpg_names)
 
     def segment_with_sam2_video_mode(self, video_id):
         frames_dir = Path(self.ag_root_directory) / "sampled_frames" / video_id
@@ -503,7 +557,9 @@ class AgActorSegmentation:
         else:
             class _Noop:
                 def __enter__(self): return None
+
                 def __exit__(self, *args): return False
+
             amp_ctx = _Noop()
 
         with torch.inference_mode(), amp_ctx:
@@ -565,7 +621,8 @@ class AgActorSegmentation:
         self._ensure_dir(out_frames_dir)
 
         # collect all frame stems present
-        stems = sorted({Path(fn).stem for fn in os.listdir(frames_dir) if fn.lower().endswith((".png", ".jpg", ".jpeg"))})
+        stems = sorted(
+            {Path(fn).stem for fn in os.listdir(frames_dir) if fn.lower().endswith((".png", ".jpg", ".jpeg"))})
 
         # collect all label names that appear in either route for this video
         def _labels_in(mask_dir: Path) -> set:
@@ -622,24 +679,6 @@ class AgActorSegmentation:
                 masked_np = self._apply_mask(img_np, union_frame.astype(bool))
                 cv2.imwrite(str(out_frames_dir / f"{stem}.png"), cv2.cvtColor(masked_np, cv2.COLOR_RGB2BGR))
 
-    def _write_video_from_frames(self, frames_dir: Path, out_path: Path, fps: int = 15):
-        img_files = sorted([f for f in os.listdir(frames_dir) if f.lower().endswith((".png", ".jpg", ".jpeg"))])
-        if not img_files:
-            return
-        first = cv2.imread(str(frames_dir / img_files[0]), cv2.IMREAD_COLOR)
-        h, w = first.shape[:2]
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
-        for fn in img_files:
-            frame = cv2.imread(str(frames_dir / fn), cv2.IMREAD_COLOR)
-            if frame is None:
-                continue
-            if frame.shape[0] != h or frame.shape[1] != w:
-                frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_LINEAR)
-            writer.write(frame)
-        writer.release()
-
     def save_masked_frames_and_videos(self, video_id):
         routes = [
             ("image_based", self.masked_frames_im_dir_path / video_id),
@@ -659,7 +698,6 @@ class AgActorSegmentation:
         video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
 
         for video_id in tqdm(video_id_list):
-            self.extract_bounding_boxes(video_id)
             self.segment_with_sam2(video_id)
             self.segment_with_sam2_video_mode(video_id)
             self.combine_masks(video_id)
