@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image, ImageDraw
+from fontTools.ttx import process
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.sam2_video_predictor import SAM2VideoPredictor
 from torch.utils.data import DataLoader
@@ -276,107 +277,132 @@ class AgActorDetection(BaseAgActor):
                     pass
         return {}
 
-    def process_video_id_active_objects_map(self):
+    def process_video_id_active_objects_map(self, process_raw=False):
 
-        def fetch_active_videos(dataloader):
+        def fetch_active_objects_in_videos(dataloader, process_raw=False):
             for data in dataloader:
                 video_id = data['video_id']
                 gt_annotations = data['gt_annotations']
-                active_objects = set()
-                for frame_items in gt_annotations:
-                    for item in frame_items:
-                        if 'person_bbox' in item:
-                            continue
-                        category_id = item['class']
-                        category_name = self._train_dataset.catid_to_name_map[category_id]
-                        if category_name:
-                            if category_name == "closet/cabinet":
-                                active_objects.add("closet")
-                                active_objects.add("cabinet")
-                            elif category_name == "cup/glass/bottle":
-                                active_objects.add("cup")
-                                active_objects.add("glass")
-                                active_objects.add("bottle")
-                            elif category_name == "paper/notebook":
-                                active_objects.add("paper")
-                                active_objects.add("notebook")
-                            elif category_name == "sofa/couch":
-                                active_objects.add("sofa")
-                                active_objects.add("couch")
-                            elif category_name == "phone/camera":
-                                active_objects.add("phone")
-                                active_objects.add("camera")
-                            else:
-                                active_objects.add(category_name)
+                video_id_object_reasoning_path = self.active_objects_b_reasoned_path / f"{video_id[:-4]}.txt"
+                video_id_object_annotations_path = self.active_objects_b_annotations_path / f"{video_id[:-4]}.txt"
+                if not process_raw:
+                    if video_id_object_annotations_path.exists():
+                        with open(video_id_object_annotations_path, "r") as f:
+                            annotated_objects = [line.strip() for line in f if line.strip()]
 
-                active_objects.add("person")
-                self.video_id_active_objects_annotations_map[video_id] = sorted(list(active_objects))
+                        if video_id_object_reasoning_path.exists():
+                            with open(video_id_object_reasoning_path, "r") as f:
+                                video_reasoned_objects = [line.strip() for line in f if line.strip()]
 
-        fetch_active_videos(self._dataloader_train)
-        fetch_active_videos(self._dataloader_test)
+                            # Ensure presence of "person", as it's always active
+                            # If there is a television in annotated objects, add it to reasoned objects
+                            # If there is a mirror in annotated objects, add it to reasoned objects
+                            video_reasoned_objects = set(video_reasoned_objects)
+                            video_reasoned_objects.add("person")
 
-        new_objects_list = []
-        error_videos_list = []
-
-        # list of objects corresponding to each video id in a text file
-        for video_id, objects in tqdm(self.video_id_active_objects_annotations_map.items()):
-            with open(self.active_objects_b_annotations_path / f"{video_id[:-4]}.txt", "w") as f:
-                for obj in objects:
-                    f.write(f"{obj}\n")
-
-            video_caption = self.caption_data[video_id[:-4]]
-
-            # Given active objects and video caption, use LLaMA to reason about objects that result in
-            # movement due to the interaction from the active objects
-            prompt = (
-                f"Given the video caption: \"{video_caption}\", and the list of objects present in the video: "
-                f"\"{', '.join(objects)}\", identify ONLY the objects that are likely to be involved in "
-                f"movements or actions. Exclude static/background items. "
-                f"Return STRICT JSON with DOUBLE QUOTES only, exactly in the form:\n"
-                f"{{\"reasoned_objects\": [\"obj1\", \"obj2\", ...]}}\n"
-                f"Use ONLY names from the provided list; do not invent new ones. No extra text."
-            )
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an expert video-understanding assistant. "
-                        "Output must be a SINGLE JSON object with key \"reasoned_objects\" "
-                        "whose value is a list of object names from the provided candidates. "
-                        "Use ONLY double quotes and ONLY provided object names. No prose."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ]
-
-            try:
-                raw = self._generate(messages, max_new_tokens=128)
-                parsed = self._safe_json_loads(raw)
-                reasoned_objects = set(parsed["reasoned_objects"])
-                reasoned_objects.add("person")
-
-                with open(self.active_objects_b_reasoned_path / f"{video_id[:-4]}.txt", "w") as f:
-                    for obj in reasoned_objects:
-                        if obj in objects:
-                            f.write(f"{obj}\n")
+                            if "television" in annotated_objects:
+                                video_reasoned_objects.add("television")
+                            if "mirror" in annotated_objects:
+                                video_reasoned_objects.add("mirror")
+                            self.video_id_active_objects_b_reasoned_map[video_id] = sorted(list(video_reasoned_objects))
                         else:
-                            new_objects_list.append((video_id, obj))
-                self.video_id_active_objects_b_reasoned_map[video_id] = sorted(list(reasoned_objects))
-            except Exception as e:
-                print(f"Error processing video {video_id}: {e}")
-                error_videos_list.append(video_id)
-                continue
+                            self.video_id_active_objects_annotations_map[video_id] = sorted(annotated_objects)
+                    else:
+                        print("Warning: Missing annotation file for video:", video_id)
+                else:
+                    active_objects = set()
+                    for frame_items in gt_annotations:
+                        for item in frame_items:
+                            if 'person_bbox' in item:
+                                continue
+                            category_id = item['class']
+                            category_name = self._train_dataset.catid_to_name_map[category_id]
+                            if category_name:
+                                if category_name == "closet/cabinet":
+                                    active_objects.add("closet")
+                                    active_objects.add("cabinet")
+                                elif category_name == "cup/glass/bottle":
+                                    active_objects.add("cup")
+                                    active_objects.add("glass")
+                                    active_objects.add("bottle")
+                                elif category_name == "paper/notebook":
+                                    active_objects.add("paper")
+                                    active_objects.add("notebook")
+                                elif category_name == "sofa/couch":
+                                    active_objects.add("sofa")
+                                    active_objects.add("couch")
+                                elif category_name == "phone/camera":
+                                    active_objects.add("phone")
+                                    active_objects.add("camera")
+                                else:
+                                    active_objects.add(category_name)
 
-        if new_objects_list:
-            with open(self.ag_root_directory / "new_objects_b_reasoned.txt", "w") as f:
-                for video_id, obj in new_objects_list:
-                    f.write(f"{video_id}: {obj}\n")
+                    active_objects.add("person")
+                    self.video_id_active_objects_annotations_map[video_id] = sorted(list(active_objects))
 
-        if error_videos_list:
-            with open(self.ag_root_directory / "error_videos_b_reasoned.txt", "w") as f:
-                for video_id in error_videos_list:
-                    f.write(f"{video_id}\n")
+        fetch_active_objects_in_videos(self._dataloader_train, process_raw=process_raw)
+        fetch_active_objects_in_videos(self._dataloader_test, process_raw=process_raw)
+
+        if process_raw:
+            new_objects_list = []
+            error_videos_list = []
+
+            # list of objects corresponding to each video id in a text file
+            for video_id, objects in tqdm(self.video_id_active_objects_annotations_map.items()):
+                with open(self.active_objects_b_annotations_path / f"{video_id[:-4]}.txt", "w") as f:
+                    for obj in objects:
+                        f.write(f"{obj}\n")
+
+                video_caption = self.caption_data[video_id[:-4]]
+
+                # Given active objects and video caption, use LLaMA to reason about objects that result in
+                # movement due to the interaction from the active objects
+                prompt = (
+                    f"Given the video caption: \"{video_caption}\", and the list of objects present in the video: "
+                    f"\"{', '.join(objects)}\", identify ONLY the objects that are likely to be involved in "
+                    f"movements or actions. Exclude static/background items. "
+                    f"Return STRICT JSON with DOUBLE QUOTES only, exactly in the form:\n"
+                    f"{{\"reasoned_objects\": [\"obj1\", \"obj2\", ...]}}\n"
+                    f"Use ONLY names from the provided list; do not invent new ones. No extra text."
+                )
+
+                messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an expert video-understanding assistant. "
+                            "Output must be a SINGLE JSON object with key \"reasoned_objects\" "
+                            "whose value is a list of object names from the provided candidates. "
+                            "Use ONLY double quotes and ONLY provided object names. No prose."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ]
+
+                try:
+                    raw = self._generate(messages, max_new_tokens=128)
+                    parsed = self._safe_json_loads(raw)
+                    reasoned_objects = set(parsed["reasoned_objects"])
+                    reasoned_objects.add("person")
+                    with open(self.active_objects_b_reasoned_path / f"{video_id[:-4]}.txt", "w") as f:
+                        for obj in reasoned_objects:
+                            if obj in objects:
+                                f.write(f"{obj}\n")
+                            else:
+                                new_objects_list.append((video_id, obj))
+                    self.video_id_active_objects_b_reasoned_map[video_id] = sorted(list(reasoned_objects))
+                except Exception as e:
+                    print(f"Error processing video {video_id}: {e}")
+                    error_videos_list.append(video_id)
+                    continue
+            if new_objects_list:
+                with open(self.ag_root_directory / "new_objects_b_reasoned.txt", "w") as f:
+                    for video_id, obj in new_objects_list:
+                        f.write(f"{video_id}: {obj}\n")
+            if error_videos_list:
+                with open(self.ag_root_directory / "error_videos_b_reasoned.txt", "w") as f:
+                    for video_id in error_videos_list:
+                        f.write(f"{video_id}\n")
 
     def load_gdino_model(self):
         # Load GDINO model for bounding box extraction
