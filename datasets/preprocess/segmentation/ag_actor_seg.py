@@ -10,7 +10,6 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image, ImageDraw
-from fontTools.ttx import process
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.sam2_video_predictor import SAM2VideoPredictor
 from torch.utils.data import DataLoader
@@ -205,7 +204,7 @@ class AgActorDetection(BaseAgActor):
 
         self.video_id_active_objects_annotations_map = {}
         self.video_id_active_objects_b_reasoned_map = {}
-        self.process_video_id_active_objects_map()
+        self.process_video_id_active_objects_map(process_raw=True)
 
     def load_caption_data(self):
         caption_json = self.ag_root_directory / "captions" / "charades.json"
