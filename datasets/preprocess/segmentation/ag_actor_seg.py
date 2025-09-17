@@ -189,14 +189,9 @@ class AgActorDetection(BaseAgActor):
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        self._dataloader_train = None
-        self._dataloader_test = None
-        self._test_dataset = None
-        self._train_dataset = None
         self.tokenizer = None
         self.llama_model = None
         self.model_id = None
-
         self.gdino_object_labels = None
         self.gdino_model = None
         self.gdino_processor = None
@@ -294,7 +289,25 @@ class AgActorDetection(BaseAgActor):
                         category_id = item['class']
                         category_name = self._train_dataset.catid_to_name_map[category_id]
                         if category_name:
-                            active_objects.add(category_name)
+                            if category_name == "closet/cabinet":
+                                active_objects.add("closet")
+                                active_objects.add("cabinet")
+                            elif category_name == "cup/glass/bottle":
+                                active_objects.add("cup")
+                                active_objects.add("glass")
+                                active_objects.add("bottle")
+                            elif category_name == "paper/notebook":
+                                active_objects.add("paper")
+                                active_objects.add("notebook")
+                            elif category_name == "sofa/couch":
+                                active_objects.add("sofa")
+                                active_objects.add("couch")
+                            elif category_name == "phone/camera":
+                                active_objects.add("phone")
+                                active_objects.add("camera")
+                            else:
+                                active_objects.add(category_name)
+
                 active_objects.add("person")
                 self.video_id_active_objects_map[video_id] = sorted(list(active_objects))
 
@@ -302,12 +315,12 @@ class AgActorDetection(BaseAgActor):
         fetch_active_videos(self._dataloader_test)
 
         # list of objects corresponding to each video id in a text file
-        for video_id, objects in self.video_id_active_objects_map.items():
+        for video_id, objects in tqdm(self.video_id_active_objects_map.items()):
             with open(self.active_objects_b_annotations_path / f"{video_id[:-4]}.txt", "w") as f:
                 for obj in objects:
                     f.write(f"{obj}\n")
 
-            video_caption = self.caption_data.get(video_id, "")
+            video_caption = self.caption_data[video_id[:-4]]
 
             # Given active objects and video caption, use LLaMA to reason about objects that result in
             # movement due to the interaction from the active objects
@@ -335,10 +348,12 @@ class AgActorDetection(BaseAgActor):
 
             raw = self._generate(messages, max_new_tokens=128)
             parsed = self._safe_json_loads(raw)
-            reasoned_objects = parsed["reasoned_objects"]
+            reasoned_objects = set(parsed["reasoned_objects"])
+            reasoned_objects.add("person")
+
             with open(self.active_objects_b_reasoned_path / f"{video_id[:-4]}.txt", "w") as f:
                 for obj in reasoned_objects:
-                    assert obj in objects  # sanity check, reasoned objects should be a subset of active objects
+                    assert obj in objects
                     f.write(f"{obj}\n")
 
     def load_gdino_model(self):
@@ -824,8 +839,8 @@ def main():
     ag_actor_detection = AgActorDetection(data_dir_path)
     ag_actor_detection.process()
 
-    ag_actor_segmentation = AgActorSegmentation(data_dir_path)
-    ag_actor_segmentation.process()
+    # ag_actor_segmentation = AgActorSegmentation(data_dir_path)
+    # ag_actor_segmentation.process()
 
 
 if __name__ == "__main__":
