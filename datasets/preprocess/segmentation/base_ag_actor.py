@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import cv2
 import numpy as np
@@ -20,6 +20,37 @@ from utils import get_color_map
 #       (b) Use SAM2 video mode to propagate and get the masks for each frame.
 # 5. Take union of masks from both routes to get the final masks for each object in each frame.
 # 6. Save masked frames and masked videos.
+
+# ---------------------------
+# Split logic (yours)
+# ---------------------------
+
+def get_video_belongs_to_split(video_id: str) -> Optional[str]:
+    """
+    Get the split that the video belongs to based on its ID.
+    Accepts either a bare ID (e.g., '0DJ6R') or a filename (e.g., '0DJ6R.mp4').
+    """
+    stem = Path(video_id).stem
+    if not stem:
+        return None
+    first_letter = stem[0]
+    if first_letter.isdigit() and int(first_letter) < 5:
+        return "04"
+    elif first_letter.isdigit() and int(first_letter) >= 5:
+        return "59"
+    elif first_letter in "ABCD":
+        return "AD"
+    elif first_letter in "EFGH":
+        return "EH"
+    elif first_letter in "IJKL":
+        return "IL"
+    elif first_letter in "MNOP":
+        return "MP"
+    elif first_letter in "QRST":
+        return "QT"
+    elif first_letter in "UVWXYZ":
+        return "UZ"
+    return None
 
 
 class BaseAgActor:

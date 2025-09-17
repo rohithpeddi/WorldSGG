@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import pickle
@@ -10,7 +11,7 @@ from PIL import Image
 from tqdm import tqdm
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection, AutoModelForCausalLM, AutoTokenizer
 
-from datasets.preprocess.segmentation.base_ag_actor import BaseAgActor
+from datasets.preprocess.segmentation.base_ag_actor import BaseAgActor, get_video_belongs_to_split
 
 
 class AgDetection(BaseAgActor):
@@ -412,24 +413,54 @@ class AgDetection(BaseAgActor):
         with open(video_output_file_path, 'wb') as file:
             pickle.dump(video_predictions, file)
 
-    def process(self):
+    def process(self, split):
         # video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
         # for video_id in tqdm(video_id_list):
         #     self.extract_bounding_boxes(video_id, visualize=True)
 
         for data in tqdm(self._dataloader_train):
             video_id = data['video_id']
-            self.extract_bounding_boxes(video_id, visualize=True)
+            if get_video_belongs_to_split(video_id) == split:
+                self.extract_bounding_boxes(video_id, visualize=True)
         for data in tqdm(self._dataloader_test):
             video_id = data['video_id']
-            self.extract_bounding_boxes(video_id, visualize=True)
+            if get_video_belongs_to_split(video_id) == split:
+                self.extract_bounding_boxes(video_id, visualize=True)
+
+
+def _parse_split(s: str) -> str:
+    valid = {"04", "59", "AD", "EH", "IL", "MP", "QT", "UZ"}
+    val = s.strip().upper()
+    if val not in valid:
+        raise argparse.ArgumentTypeError(
+            f"Invalid split '{s}'. Choose one of: {sorted(valid)}"
+        )
+    return val
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Sample frames from videos based on homography-overlap filtering."
+    )
+    parser.add_argument(
+        "--data_dir", type=str, default="/data/rohith/ag",
+        help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
+    )
+    parser.add_argument(
+        "--split", type=_parse_split, default=None,
+        help="Optional shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}. "
+             "If omitted, processes all videos."
+    )
+    return parser.parse_args()
 
 
 def main():
-    data_dir_path = "/data/rohith/ag/"
+    args = parse_args()
+    data_dir = Path(args.data_dir)
+    split = args.split
 
-    ag_actor_detection = AgDetection(data_dir_path, process_raw=False)
-    ag_actor_detection.process()
+    ag_actor_detection = AgDetection(data_dir, process_raw=False)
+    ag_actor_detection.process(split)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from datasets.preprocess.segmentation.ag_detection import BaseAgActor
 
+# TODO: Apply dilation to expand masks slightly to cover object boundaries better?
 
 class AgSegmentation(BaseAgActor):
 
