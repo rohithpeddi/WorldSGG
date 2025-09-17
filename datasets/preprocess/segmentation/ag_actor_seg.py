@@ -47,6 +47,8 @@ class AgActorSegmentation:
         self.ag_root_directory = Path(ag_root_directory)
         self.bbox_dir_path = self.ag_root_directory / "detection" / 'gdino_bboxes'
         self.gdino_vis_path = self.ag_root_directory / "detection" / 'gdino_vis'
+        self.active_objects_path = self.ag_root_directory / 'active_objects'
+
         self.masked_frames_im_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'image_based'
         self.masked_frames_vid_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'video_based'
         self.masked_frames_combined_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'combined'
@@ -69,6 +71,9 @@ class AgActorSegmentation:
             self.masks_vid_dir_path,
             self.masks_combined_dir_path,
             self.sampled_frames_jpg,
+            self.bbox_dir_path,
+            self.gdino_vis_path,
+            self.active_objects_path
         ]:
             p.mkdir(parents=True, exist_ok=True)
 
@@ -118,21 +123,30 @@ class AgActorSegmentation:
         )
 
     def process_video_id_active_objects_map(self):
-        for data in self._dataloader_train:
-            video_id = data['video_id']
-            gt_annotations = data['gt_annotations']
-            active_objects = set()
-            for frame_items in gt_annotations:
-                for item in frame_items:
-                    if 'person_bbox' in item:
-                        continue
-                    category_id = item['class']
-                    category_name = self._train_dataset.catid_to_name_map[category_id]
-                    if category_name:
-                        active_objects.add(category_name)
+        def fetch_active_videos(dataloader):
+            for data in dataloader:
+                video_id = data['video_id']
+                gt_annotations = data['gt_annotations']
+                active_objects = set()
+                for frame_items in gt_annotations:
+                    for item in frame_items:
+                        if 'person_bbox' in item:
+                            continue
+                        category_id = item['class']
+                        category_name = self._train_dataset.catid_to_name_map[category_id]
+                        if category_name:
+                            active_objects.add(category_name)
+                active_objects.add("person")  # Ensure 'person' is always included
+                self.video_id_active_objects_map[video_id] = sorted(list(active_objects))
 
-            active_objects.add("person")  # Ensure 'person' is always included
-            self.video_id_active_objects_map[video_id] = sorted(list(active_objects))
+        fetch_active_videos(self._dataloader_train)
+        fetch_active_videos(self._dataloader_test)
+
+        # list of objects corresponding to each video id in a text file
+        for video_id, objects in self.video_id_active_objects_map.items():
+            with open(self.active_objects_path / f"{video_id}.txt", "w") as f:
+                for obj in objects:
+                    f.write(f"{obj}\n")
 
     def load_gdino_model(self):
         # Load GDINO model for bounding box extraction
@@ -325,7 +339,7 @@ class AgActorSegmentation:
             results = self.gdino_processor.post_process_grounded_object_detection(
                 outputs,
                 inputs.input_ids,
-                threshold=0.10,
+                threshold=0.4,
                 text_threshold=0.3,
                 target_sizes=[image.size[::-1]]
             )[0]
