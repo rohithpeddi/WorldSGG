@@ -307,20 +307,35 @@ class AgActorDetection(BaseAgActor):
                 for obj in objects:
                     f.write(f"{obj}\n")
 
-            reasoned_objects = []
-            video_caption = self.caption_data[video_id]
+            video_caption = self.caption_data.get(video_id, "")
 
             # Given active objects and video caption, use LLaMA to reason about objects that result in
             # movement due to the interaction from the active objects
             prompt = (
-                f"Given the video caption: '{video_caption}', and the list of objects present in the video: "
-                f"'{', '.join(objects)}', identify the objects that are likely to be involved in movements or actions. "
-                f"List only the objects that are likely to be involved in movements or actions, and exclude static objects. "
-                f"Provide the answer in JSON format as {{'reasoned_objects': [list of objects]}}."
+                f"Given the video caption: \"{video_caption}\", and the list of objects present in the video: "
+                f"\"{', '.join(objects)}\", identify ONLY the objects that are likely to be involved in "
+                f"movements or actions. Exclude static/background items. "
+                f"Return STRICT JSON with DOUBLE QUOTES only, exactly in the form:\n"
+                f"{{\"reasoned_objects\": [\"obj1\", \"obj2\", ...]}}\n"
+                f"Use ONLY names from the provided list; do not invent new ones. No extra text."
             )
 
-            # TODO: Prepare messages for querying the model and store the output responses in the reasoned_objects list
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert video-understanding assistant. "
+                        "Output must be a SINGLE JSON object with key \"reasoned_objects\" "
+                        "whose value is a list of object names from the provided candidates. "
+                        "Use ONLY double quotes and ONLY provided object names. No prose."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ]
 
+            raw = self._generate(messages, max_new_tokens=128)
+            parsed = self._safe_json_loads(raw)
+            reasoned_objects = parsed["reasoned_objects"]
             with open(self.active_objects_b_reasoned_path / f"{video_id[:-4]}.txt", "w") as f:
                 for obj in reasoned_objects:
                     assert obj in objects  # sanity check, reasoned objects should be a subset of active objects
