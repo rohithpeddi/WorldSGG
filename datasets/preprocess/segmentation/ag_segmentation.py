@@ -1,3 +1,4 @@
+import argparse
 import os
 import pickle
 from collections import defaultdict
@@ -12,6 +13,7 @@ from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.sam2_video_predictor import SAM2VideoPredictor
 from tqdm import tqdm
 
+from datasets.preprocess.samplers.feature_descripter_sampler import get_video_belongs_to_split
 from datasets.preprocess.segmentation.ag_detection import BaseAgActor
 
 # TODO: Apply dilation to expand masks slightly to cover object boundaries better?
@@ -391,13 +393,64 @@ class AgSegmentation(BaseAgActor):
             out_mp4 = self.masked_videos_dir_path / f"{Path(video_id).stem}__{route_name}.mp4"
             self._write_video_from_frames(frames_dir, out_mp4, fps=15)
 
-    def process(self):
+    def process(self, split):
         # video_id_list = os.listdir(self.data_dir_path / "videos")
-        video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
+        # video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
+        # for video_id in tqdm(video_id_list):
+        #     self.segment_with_sam2(video_id)
+        #     self.segment_with_sam2_video_mode(video_id)
+        #     # self.combine_masks(video_id)
+        #     # self.save_masked_frames_and_videos(video_id)
 
-        for video_id in tqdm(video_id_list):
-            # self.segment_with_sam2(video_id)
-            self.segment_with_sam2_video_mode(video_id)
-            # self.combine_masks(video_id)
-            # self.save_masked_frames_and_videos(video_id)
+        for data in tqdm(self._dataloader_train):
+            video_id = data['video_id']
+            if get_video_belongs_to_split(video_id) == split:
+                self.segment_with_sam2_video_mode(video_id)
+                self.segment_with_sam2(video_id)
+                # self.combine_masks(video_id)
+                # self.save_masked_frames_and_videos(video_id)
+        for data in tqdm(self._dataloader_test):
+            video_id = data['video_id']
+            if get_video_belongs_to_split(video_id) == split:
+                self.segment_with_sam2_video_mode(video_id)
+                self.segment_with_sam2(video_id)
+                # self.combine_masks(video_id)
+                # self.save_masked_frames_and_videos(video_id)
 
+
+def _parse_split(s: str) -> str:
+    valid = {"04", "59", "AD", "EH", "IL", "MP", "QT", "UZ"}
+    val = s.strip().upper()
+    if val not in valid:
+        raise argparse.ArgumentTypeError(
+            f"Invalid split '{s}'. Choose one of: {sorted(valid)}"
+        )
+    return val
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Sample frames from videos based on homography-overlap filtering."
+    )
+    parser.add_argument(
+        "--data_dir", type=str, default="/data/rohith/ag",
+        help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
+    )
+    parser.add_argument(
+        "--split", type=_parse_split, default=None,
+        help="Optional shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}. "
+             "If omitted, processes all videos."
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    data_dir = Path(args.data_dir)
+    split = args.split
+    ag_actor_segmentation = AgSegmentation(data_dir)
+    ag_actor_segmentation.process(split)
+
+
+if __name__ == "__main__":
+    main()
