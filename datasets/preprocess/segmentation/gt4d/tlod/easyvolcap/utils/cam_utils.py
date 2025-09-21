@@ -13,9 +13,9 @@ import torch
 from scipy import interpolate
 from scipy.spatial.transform import Rotation
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.chunk_utils import multi_gather
+from .chunk_utils import multi_gather
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.data_utils import as_numpy_func
+from .data_utils import as_numpy_func
 
 
 def compute_camera_similarity(tar_c2ws: torch.Tensor, src_c2ws: torch.Tensor):
@@ -477,7 +477,7 @@ def gen_cubic_spline_interp_func(
 def slerp(
     q0: torch.Tensor, q1: torch.Tensor, qs: torch.Tensor, shortest_arc: bool = True
 ):
-    from easyvolcap.utils.math_utils import normalize
+    from .math_utils import normalize
 
     cos_omega = (q0 * q1).sum(dim=-1)
 

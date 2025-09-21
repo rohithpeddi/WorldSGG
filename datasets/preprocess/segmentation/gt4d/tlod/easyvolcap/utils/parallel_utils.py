@@ -4,7 +4,7 @@
 from multiprocessing.pool import Pool, ThreadPool
 from typing import Callable, Dict, List
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import dotdict, tqdm, tqdm_rich
+from .console_utils import dotdict, tqdm, tqdm_rich
 
 
 def parallel_execution(  # noqa: C901

@@ -15,34 +15,34 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from transformers import PretrainedConfig
 
-from datasets.preprocess.segmentation.gt4d.tlod.acceleration.checkpoint import auto_grad_checkpoint
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.chunk_utils import multi_gather
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import (
+from ...acceleration.checkpoint import auto_grad_checkpoint
+from ...easyvolcap.utils.chunk_utils import multi_gather
+from ...easyvolcap.utils.console_utils import (
     dotdict,
     logger,
     tqdm
 )
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.math_utils import normalize
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.net_utils import (
+from ...easyvolcap.utils.math_utils import normalize
+from ...easyvolcap.utils.net_utils import (
     freeze_module,
     make_buffer,
 )
-from datasets.preprocess.segmentation.gt4d.tlod.models.geometry import (
+from ...models.geometry import (
     dt_to_cov_t,
     radius_to_sigma,
     sigma_to_radius,
 )
 
-from datasets.preprocess.segmentation.gt4d.tlod.models.encoders.image_encoder_4DG import ImageEncoder4DG
-from datasets.preprocess.segmentation.gt4d.tlod.models.encoders.image_encoder import BaseImageEncoder
-from datasets.preprocess.segmentation.gt4d.tlod.models.blocks import (
+from ...models.encoders.image_encoder_4DG import ImageEncoder4DG
+from ...models.encoders.image_encoder import BaseImageEncoder
+from ...models.blocks import (
     build_pytorch_mlp,
     get_layernorm,
     RotaryPositionEmbedding,
     RotaryPositionEmbedding3D,
     SelfAttentionBlock,
 )
-from datasets.preprocess.segmentation.gt4d.tlod.registry import MODELS
+from ...registry import MODELS
 
 
 class TLoDConfig(PretrainedConfig):  # Temporal Level of Detail Config

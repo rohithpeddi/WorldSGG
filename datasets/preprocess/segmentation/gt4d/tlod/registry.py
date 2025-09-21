@@ -5,7 +5,7 @@ from copy import deepcopy
 
 import torch.nn as nn
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.engine.registry import Registry
+from ..tlod.easyvolcap.engine.registry import Registry
 
 
 def build_module(module, builder, **kwargs):

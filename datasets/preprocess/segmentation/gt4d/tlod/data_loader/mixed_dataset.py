@@ -4,7 +4,7 @@
 import numpy as np
 from torch.utils.data import Dataset
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import logger  # noqa: F401
+from ..easyvolcap.utils.console_utils import logger  # noqa: F401
 
 
 class MixedDataset(Dataset):

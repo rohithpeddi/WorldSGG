@@ -8,9 +8,9 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig, PreTrainedModel
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.math_utils import normalize
-from datasets.preprocess.segmentation.gt4d.tlod.models.blocks import get_layernorm, SelfAttentionBlock
-from datasets.preprocess.segmentation.gt4d.tlod.registry import MODELS
+from ...easyvolcap.utils.math_utils import normalize
+from ..blocks import get_layernorm, SelfAttentionBlock
+from ...registry import MODELS
 
 
 class BaseImageEncoderConfig(PretrainedConfig):

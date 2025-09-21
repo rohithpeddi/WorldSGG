@@ -12,11 +12,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from datasets.preprocess.segmentation.gt4d.tlod.acceleration.checkpoint import auto_grad_checkpoint
-from datasets.preprocess.segmentation.gt4d.tlod.models.geometry import dt_to_cov_t, radius_to_sigma
-from datasets.preprocess.segmentation.gt4d.tlod.models.encoders.image_encoder import BaseImageEncoder
-from datasets.preprocess.segmentation.gt4d.tlod.models.blocks import get_layernorm, SelfAttentionBlock, build_pytorch_mlp
-from datasets.preprocess.segmentation.gt4d.tlod.registry import MODELS
+from ...acceleration.checkpoint import auto_grad_checkpoint
+from ...models.geometry import dt_to_cov_t, radius_to_sigma
+from ...models.encoders.image_encoder import BaseImageEncoder
+from ...models.blocks import get_layernorm, SelfAttentionBlock, build_pytorch_mlp
+from ...registry import MODELS
 
 
 class ImageEncoder4DGConfig(PretrainedConfig):

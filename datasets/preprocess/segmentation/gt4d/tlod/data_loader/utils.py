@@ -12,14 +12,14 @@ import numpy as np
 import torch
 
 from os.path import isfile, splitext
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import dirname, join, red, run
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.data_utils import (  # noqa: F401
+from ..easyvolcap.utils.console_utils import dirname, join, red, run
+from ..easyvolcap.utils.data_utils import (  # noqa: F401
     as_numpy_func
 )
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.math_utils import affine_inverse, affine_padding
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.parallel_utils import parallel_execution
+from ..easyvolcap.utils.math_utils import affine_inverse, affine_padding
+from ..easyvolcap.utils.parallel_utils import parallel_execution
 
-from datasets.preprocess.segmentation.gt4d.tlod.misc.io_helper import pathmgr
+from ..misc.io_helper import pathmgr
 
 
 def prepare_images(

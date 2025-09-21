@@ -4,8 +4,8 @@
 import numpy as np
 import torch
 
-from datasets.preprocess.segmentation.gt4d.tlod.acceleration.checkpoint import auto_grad_checkpoint
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import logger
+from ..acceleration.checkpoint import auto_grad_checkpoint
+from ..easyvolcap.utils.console_utils import logger
 
 
 log10 = np.log(10)

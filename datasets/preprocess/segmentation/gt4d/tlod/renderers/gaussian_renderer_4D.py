@@ -8,11 +8,11 @@ import torch
 from gsplat.rendering import rasterization
 from torch import nn
 
-from datasets.preprocess.segmentation.gt4d.tlod.acceleration.checkpoint import auto_grad_checkpoint
+from ..acceleration.checkpoint import auto_grad_checkpoint
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.math_utils import affine_inverse
-from datasets.preprocess.segmentation.gt4d.tlod.registry import RENDERER
-from datasets.preprocess.segmentation.gt4d.tlod.renderers.gaussian_renderer import GaussianRenderer
+from ..easyvolcap.utils.math_utils import affine_inverse
+from ..registry import RENDERER
+from ..renderers.gaussian_renderer import GaussianRenderer
 
 
 @torch.jit.script

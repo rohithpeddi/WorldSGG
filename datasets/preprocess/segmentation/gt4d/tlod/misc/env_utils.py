@@ -11,8 +11,8 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import log
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.net_utils import setup_deterministic
+from ..easyvolcap.utils.console_utils import log
+from ..easyvolcap.utils.net_utils import setup_deterministic
 
 from .dist_helper import get_rank, get_world_size, init_process_group
 

@@ -7,9 +7,9 @@ import torch
 
 from gsplat.rendering import rasterization
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.math_utils import affine_inverse
+from ..easyvolcap.utils.math_utils import affine_inverse
 
-from datasets.preprocess.segmentation.gt4d.tlod.registry import RENDERER
+from ...tlod.registry import RENDERER
 
 
 @RENDERER.register_module()

@@ -6,14 +6,14 @@ from typing import Mapping
 import torch
 from gsplat.rendering import rasterization, rasterization_2dgs
 
-from datasets.preprocess.segmentation.gt4d.tlod.acceleration.checkpoint import auto_grad_checkpoint, dummy_function
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.chunk_utils import multi_gather, multi_scatter
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import dotdict
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.flow_utils import flow_to_color  # noqa: F401
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.math_utils import affine_inverse
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.quat_utils import angle_axis_to_quaternion, qmul
-from datasets.preprocess.segmentation.gt4d.tlod.registry import RENDERER
-from datasets.preprocess.segmentation.gt4d.tlod.renderers.gaussian_renderer import GaussianRenderer
+from ..acceleration.checkpoint import auto_grad_checkpoint, dummy_function
+from ..easyvolcap.utils.chunk_utils import multi_gather, multi_scatter
+from ..easyvolcap.utils.console_utils import dotdict
+from ..easyvolcap.utils.flow_utils import flow_to_color  # noqa: F401
+from ..easyvolcap.utils.math_utils import affine_inverse
+from ..easyvolcap.utils.quat_utils import angle_axis_to_quaternion, qmul
+from ..registry import RENDERER
+from ..renderers.gaussian_renderer import GaussianRenderer
 
 
 @torch.jit.script

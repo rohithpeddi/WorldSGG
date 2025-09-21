@@ -22,7 +22,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 # from typing import TYPE_CHECKING
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import (
+from .console_utils import (
     blue,
     dirname,
     dotdict,
@@ -99,7 +99,7 @@ def reduce_record_stats(record_stats: dotdict):
 
 
 def typed(input_to: torch.dtype = torch.float, output_to: torch.dtype = torch.float):
-    from easyvolcap.utils.data_utils import to_x
+    from .data_utils import to_x
 
     def wrapper(func: Callable):
         def inner(*args, **kwargs):
@@ -513,7 +513,7 @@ def load_pretrained(  # noqa: C901
     else:
         # For .npz files, we load data in a similar chunked manner
         # This allows us to show progress and handle potentially large files
-        from easyvolcap.utils.data_utils import to_tensor
+        from .data_utils import to_tensor
 
         file_size = getsize(model_path)
         with open(model_path, "rb") as f:
@@ -713,7 +713,7 @@ def save_npz(
     latest: int = True,
     path: str = None,
 ):
-    from easyvolcap.utils.data_utils import to_numpy
+    from .data_utils import to_numpy
 
     model_path = (
         path if path else join(model_dir, "latest.npz" if latest else f"{epoch}.npz")

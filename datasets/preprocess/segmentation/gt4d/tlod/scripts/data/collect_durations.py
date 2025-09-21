@@ -7,7 +7,7 @@ Collect the duration information for all the datasets present in the folder
 
 import os
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import (
+from ...easyvolcap.utils.console_utils import (
     build_parser,
     catch_throw,
     dirname,
@@ -20,7 +20,7 @@ from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils i
     tqdm,
     yellow,
 )
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.data_utils import get_video_length
+from ...easyvolcap.utils.data_utils import get_video_length
 
 
 @catch_throw

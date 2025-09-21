@@ -12,8 +12,8 @@ import viser
 import viser.transforms as vt
 from jaxtyping import Float32
 
-from datasets.preprocess.segmentation.gt4d.tlod.splatsviewer._renderer import Renderer, RenderTask
-from datasets.preprocess.segmentation.gt4d.tlod.splatsviewer.render_panel import RenderTabState, populate_general_render_tab
+from ._renderer import Renderer, RenderTask
+from .render_panel import RenderTabState, populate_general_render_tab
 
 
 @dataclasses.dataclass

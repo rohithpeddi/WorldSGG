@@ -20,14 +20,14 @@ from typing import Dict, Optional, Any, List, Tuple
 import torch
 from mmengine import Config as MMConfig
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import logger, blue, tqdm
-from datasets.preprocess.segmentation.gt4d.tlod.misc import utils
+from ..tlod.easyvolcap.utils.console_utils import logger, blue, tqdm
+from ..tlod.misc import utils
 # Import model and renderers to register them
-from datasets.preprocess.segmentation.gt4d.tlod.models.gaussian_model import GaussianModel  # noqa: F401
-from datasets.preprocess.segmentation.gt4d.tlod.renderers.gaussian_renderer import GaussianRenderer  # noqa: F401
-from datasets.preprocess.segmentation.gt4d.tlod.renderers.tlod_renderer import TLODRenderer  # noqa: F401
+from ..tlod.models.gaussian_model import GaussianModel  # noqa: F401
+from ..tlod.renderers.gaussian_renderer import GaussianRenderer  # noqa: F401
+from ..tlod.renderers.tlod_renderer import TLODRenderer  # noqa: F401
 # Import VideoSystem for file handling
-from datasets.preprocess.segmentation.gt4d.tlod.video_system import VideoSystem, SaveConfig
+from ..tlod.video_system import VideoSystem, SaveConfig
 
 
 class FourDGTDemo:
@@ -96,7 +96,7 @@ class FourDGTDemo:
 
     def _load_model(self) -> None:
         """Initialize model and load checkpoint."""
-        from datasets.preprocess.segmentation.gt4d.tlod.registry import build_module, MODELS
+        from ..tlod.registry import build_module, MODELS
 
         # Load configuration
         self.model_cfg = self._load_model_config()

@@ -5,7 +5,7 @@ import warnings
 from functools import partial
 from typing import Any, Callable, Dict, Optional
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import (
+from ..utils.console_utils import (
     dotdict,
     line,
     log,
@@ -13,9 +13,9 @@ from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils i
     yellow,
 )
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.engine.config import APPEND_KEY, BASE_KEY, Config, DELETE_KEY, DEPRECATION_KEY
+from ..engine.config import APPEND_KEY, BASE_KEY, Config, DELETE_KEY, DEPRECATION_KEY
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.engine.misc import deprecated_api_warning, is_seq_of
+from ..engine.misc import deprecated_api_warning, is_seq_of
 
 
 def get_func_args(func: Callable):

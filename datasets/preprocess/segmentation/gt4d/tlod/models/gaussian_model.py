@@ -4,10 +4,10 @@
 import torch
 from transformers import PretrainedConfig, PreTrainedModel
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.data_utils import to_cpu
+from ...tlod.easyvolcap.utils.data_utils import to_cpu
 
-from datasets.preprocess.segmentation.gt4d.tlod.registry import build_module, MODELS, RENDERER
-from datasets.preprocess.segmentation.gt4d.tlod.models.encoders.image_encoder_TLoD import ImageEncoderTLoD
+from ...tlod.registry import build_module, MODELS, RENDERER
+from .encoders.image_encoder_TLoD import ImageEncoderTLoD
 
 
 class GaussianModelConfig(PretrainedConfig):

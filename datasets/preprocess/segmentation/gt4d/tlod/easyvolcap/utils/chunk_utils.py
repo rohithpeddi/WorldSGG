@@ -6,7 +6,7 @@ from typing import Callable, Tuple
 
 import torch
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import log, tqdm
+from .console_utils import log, tqdm
 
 
 def chunkify(  # noqa: C901

@@ -30,8 +30,8 @@ from torch.utils.data._utils.collate import (  # noqa: F401
     default_convert,
 )
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import dirname, dotdict, json, log, read, run, tqdm
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.parallel_utils import parallel_execution
+from .console_utils import dirname, dotdict, json, log, read, run, tqdm
+from .parallel_utils import parallel_execution
 
 
 IS_MAST_ENV = False
@@ -892,7 +892,7 @@ def get_mesh(
     normals: torch.Tensor = None,
     filename: str = "default.ply",
 ):
-    from easyvolcap.utils.mesh_utils import face_normals
+    from .mesh_utils import face_normals
     from trimesh import Trimesh
     from trimesh.visual import TextureVisuals
     from trimesh.visual.material import SimpleMaterial
@@ -2179,14 +2179,14 @@ def full_sample_ray(img, msk, K, R, T, bounds, split="train", subpixel=False):
 
 def affine_inverse(m: np.ndarray):
     import torch
-    from easyvolcap.utils.math_utils import affine_inverse
+    from .math_utils import affine_inverse
 
     return affine_inverse(torch.as_tensor(m)).numpy()
 
 
 def affine_padding(m: np.ndarray):
     import torch
-    from easyvolcap.utils.math_utils import affine_padding
+    from .math_utils import affine_padding
 
     return affine_padding(torch.as_tensor(m)).numpy()
 
@@ -2379,7 +2379,7 @@ def load_resize_undist_im_bytes(  # noqa: C901
     oH, oW = img.shape[:2]
 
     if dist_backend == "colmap" and sys.platform != "win32":
-        from easyvolcap.utils.undist_utils import colmap_undistort_numpy
+        from .undist_utils import colmap_undistort_numpy
 
         if dist_opt_K and np.sum(np.abs(D)) != 0.0:
             img, K = colmap_undistort_numpy(img, K, D, blank_pixels=False)

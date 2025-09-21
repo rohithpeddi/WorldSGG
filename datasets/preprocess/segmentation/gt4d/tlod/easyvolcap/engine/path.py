@@ -4,7 +4,7 @@ import os
 import os.path as osp
 from pathlib import Path
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.engine.misc import is_str
+from .misc import is_str
 
 
 def is_filepath(x):

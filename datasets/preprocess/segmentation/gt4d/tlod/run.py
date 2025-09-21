@@ -9,16 +9,16 @@ from omegaconf import DictConfig, OmegaConf
 
 from torch.utils.data.dataloader import default_collate
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import logger, blue, green
-from datasets.preprocess.segmentation.gt4d.tlod.misc import utils
-from datasets.preprocess.segmentation.gt4d.tlod.misc.io_helper import mkdirs
-from datasets.preprocess.segmentation.gt4d.tlod.data_loader.mvaria_dataset import AriaDataset
+from ..tlod.easyvolcap.utils.console_utils import logger, blue, green
+from ..tlod.misc import utils
+from ..tlod.misc.io_helper import mkdirs
+from ..tlod.data_loader.mvaria_dataset import AriaDataset
 from torch.utils.data import DataLoader
 from os.path import join, dirname
 
 # Import the new demo class
-from datasets.preprocess.segmentation.gt4d.tlod.demo import FourDGTDemo
-from datasets.preprocess.segmentation.gt4d.tlod.download_model import download_4dgt_model
+from ..tlod.demo import FourDGTDemo
+from ..tlod.download_model import download_4dgt_model
 
 
 def create_dataset(cfg: DictConfig) -> AriaDataset:
@@ -178,7 +178,7 @@ def run_inference(demo: FourDGTDemo,
 
         # Create save configuration based on user settings
         if should_save:
-            from datasets.preprocess.segmentation.gt4d.tlod.demo import SaveConfig
+            from ..tlod.demo import SaveConfig
 
             # Create save config based on what the user wants
             save_config = SaveConfig(
@@ -271,7 +271,7 @@ def main(cfg: DictConfig) -> None:
     # Optional GPU monitoring
     gpu_monitor = None
     if cfg.get('enable_gpu_monitoring', False):
-        from datasets.preprocess.segmentation.gt4d.tlod.gpu_monitor import GPUMonitor
+        from ..tlod.gpu_monitor import GPUMonitor
         gpu_monitor = GPUMonitor(interval=0.5)
         gpu_monitor.start()
 

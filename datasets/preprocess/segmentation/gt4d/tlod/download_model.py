@@ -4,7 +4,7 @@
 import argparse
 from pathlib import Path
 from huggingface_hub import hf_hub_download
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import logger
+from .easyvolcap.utils.console_utils import logger
 
 
 def download_4dgt_model(

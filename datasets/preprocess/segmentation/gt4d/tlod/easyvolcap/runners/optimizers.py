@@ -7,9 +7,9 @@ from torch import nn
 from typing import Iterator, Tuple, Mapping, Dict
 
 from torch.optim import Adam, AdamW, SGD, LBFGS, Optimizer
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.engine import OPTIMIZERS
+from ..engine import OPTIMIZERS
 from ..utils.base_utils import dotdict
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import *
+from ..utils.console_utils import *
 
 OPTIMIZERS.register_module()(Adam)
 OPTIMIZERS.register_module()(AdamW)
@@ -62,7 +62,7 @@ class MyFusedAdam(Adam):
                 max_exp_avg_sqs,
                 state_steps)
 
-            from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.adam_utils import _single_tensor_adam
+            from ..utils.adam_utils import _single_tensor_adam
             _single_tensor_adam(
                 params_with_grad,
                 grads,

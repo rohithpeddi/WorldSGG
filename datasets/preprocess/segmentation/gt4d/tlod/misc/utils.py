@@ -51,14 +51,14 @@ from plyfile import PlyData, PlyElement
 from skimage import measure
 from torch.utils.data import DataLoader
 
-from datasets.preprocess.segmentation.gt4d.tlod.data_loader.utils import compute_rays
+from ..data_loader.utils import compute_rays
 
 # from ..easyvolcap.utils.console_utils import *
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import blue, dirname, logger, yellow
+from ..easyvolcap.utils.console_utils import blue, dirname, logger, yellow
 
-from datasets.preprocess.segmentation.gt4d.tlod.misc.dist_helper import get_rank, get_world_size, is_dist_avail_and_initialized
+from ..misc.dist_helper import get_rank, get_world_size, is_dist_avail_and_initialized
 
-from datasets.preprocess.segmentation.gt4d.tlod.misc.io_helper import pathmgr
+from ..misc.io_helper import pathmgr
 
 print_debug_info = False
 # fmt: on
