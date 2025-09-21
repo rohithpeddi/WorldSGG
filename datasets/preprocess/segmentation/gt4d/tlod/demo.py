@@ -20,14 +20,14 @@ from typing import Dict, Optional, Any, List, Tuple
 import torch
 from mmengine import Config as MMConfig
 
-from ..tlod.easyvolcap.utils.console_utils import logger, blue, tqdm
-from ..tlod.misc import utils
+from .easyvolcap.utils.console_utils import logger, blue, tqdm
+from .misc import utils
 # Import model and renderers to register them
-from ..tlod.models.gaussian_model import GaussianModel  # noqa: F401
-from ..tlod.renderers.gaussian_renderer import GaussianRenderer  # noqa: F401
-from ..tlod.renderers.tlod_renderer import TLODRenderer  # noqa: F401
+from .models.gaussian_model import GaussianModel  # noqa: F401
+from .renderers.gaussian_renderer import GaussianRenderer  # noqa: F401
+from .renderers.tlod_renderer import TLODRenderer  # noqa: F401
 # Import VideoSystem for file handling
-from ..tlod.video_system import VideoSystem, SaveConfig
+from .video_system import VideoSystem, SaveConfig
 
 
 class FourDGTDemo:
@@ -96,7 +96,7 @@ class FourDGTDemo:
 
     def _load_model(self) -> None:
         """Initialize model and load checkpoint."""
-        from ..tlod.registry import build_module, MODELS
+        from .registry import build_module, MODELS
 
         # Load configuration
         self.model_cfg = self._load_model_config()

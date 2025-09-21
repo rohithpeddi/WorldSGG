@@ -4,9 +4,9 @@
 import torch
 from transformers import PretrainedConfig, PreTrainedModel
 
-from ...tlod.easyvolcap.utils.data_utils import to_cpu
+from ..easyvolcap.utils.data_utils import to_cpu
 
-from ...tlod.registry import build_module, MODELS, RENDERER
+from ..registry import build_module, MODELS, RENDERER
 from .encoders.image_encoder_TLoD import ImageEncoderTLoD
 
 

@@ -10,7 +10,7 @@ import torch
 import time
 import threading
 from typing import List, Tuple
-from ..tlod.easyvolcap.utils.console_utils import logger
+from .easyvolcap.utils.console_utils import logger
 
 
 class GPUMonitor:

@@ -22,8 +22,8 @@ from typing import List, Union
 from addict import Dict
 from yapf.yapflib.yapf_api import FormatCode
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.engine.misc import import_modules_from_strings
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.engine.path import check_file_exist
+from .misc import import_modules_from_strings
+from .path import check_file_exist
 
 try:
     import memory_tempfile

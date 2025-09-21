@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np  # noqa: F401
 
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import (
+from ...easyvolcap.utils.console_utils import (
     blue,
     build_parser,
     catch_throw,
@@ -23,9 +23,9 @@ from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils i
     tqdm,
     yellow,
 )
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.data_utils import generate_video
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.parallel_utils import parallel_execution
-from datasets.preprocess.segmentation.gt4d.tlod.misc.io_helper import pathmgr
+from ...easyvolcap.utils.data_utils import generate_video
+from ...easyvolcap.utils.parallel_utils import parallel_execution
+from ...misc.io_helper import pathmgr
 
 
 ffmpeg_bin = "ffmpeg"

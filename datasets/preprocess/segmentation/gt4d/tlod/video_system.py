@@ -24,10 +24,10 @@ from tqdm import tqdm
 from queue import Queue
 import threading
 
-from datasets.preprocess.segmentation.gt4d.tlod.misc import utils
-from datasets.preprocess.segmentation.gt4d.tlod.misc.io_helper import mkdirs
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import logger, blue, green
-from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.data_utils import dotdict
+from .misc import utils
+from .misc.io_helper import mkdirs
+from .easyvolcap.utils.console_utils import logger, blue, green
+from .easyvolcap.utils.data_utils import dotdict
 # fmt: on
 
 

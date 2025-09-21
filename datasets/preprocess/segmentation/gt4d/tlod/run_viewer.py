@@ -15,17 +15,17 @@ from os.path import join
 from einops import rearrange
 import matplotlib.pyplot as plt
 
-from ..tlod import splatsviewer
-from ..tlod.demo import FourDGTDemo
+import splatsviewer
+from .demo import FourDGTDemo
 from .video_system import SaveConfig
-from ..tlod.easyvolcap.utils.console_utils import logger
-from ..tlod.download_model import download_4dgt_model
+from .easyvolcap.utils.console_utils import logger
+from .download_model import download_4dgt_model
 from pathlib import Path
 
 
 def create_dataloader(cfg: DictConfig) -> DataLoader:
     """Create dataloader based on configuration - matches run.py."""
-    from ..tlod.data_loader.mvaria_dataset import AriaDataset
+    from .data_loader.mvaria_dataset import AriaDataset
     from torch.utils.data.dataloader import default_collate
 
     logger.info("Creating dataset for viewer...")
@@ -101,7 +101,7 @@ def create_dataloader(cfg: DictConfig) -> DataLoader:
 def setup_output_dirs(cfg: DictConfig) -> DictConfig:
     """Set up output directories based on configuration."""
     from omegaconf import OmegaConf
-    from ..tlod.misc.io_helper import mkdirs
+    from .misc.io_helper import mkdirs
 
     # Temporarily disable struct mode to add new keys
     OmegaConf.set_struct(cfg, False)
@@ -847,7 +847,7 @@ class FourDGTViewer:
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     """Main entry point for the 4DGT viewer."""
-    from ..tlod.misc import utils
+    from .misc import utils
     
     # Set random seed
     utils.fix_random_seeds(cfg.seed)

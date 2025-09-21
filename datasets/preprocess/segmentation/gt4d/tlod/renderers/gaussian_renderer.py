@@ -9,7 +9,7 @@ from gsplat.rendering import rasterization
 
 from ..easyvolcap.utils.math_utils import affine_inverse
 
-from ...tlod.registry import RENDERER
+from ..registry import RENDERER
 
 
 @RENDERER.register_module()
