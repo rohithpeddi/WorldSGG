@@ -30,8 +30,8 @@ from torch.utils.data._utils.collate import (  # noqa: F401
     default_convert,
 )
 
-from .console_utils import dirname, dotdict, json, log, read, run, tqdm
-from .parallel_utils import parallel_execution
+from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import dirname, dotdict, json, log, read, run, tqdm
+from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.parallel_utils import parallel_execution
 
 
 IS_MAST_ENV = False

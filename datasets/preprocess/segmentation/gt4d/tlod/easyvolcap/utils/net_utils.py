@@ -22,7 +22,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 # from typing import TYPE_CHECKING
 
-from .console_utils import (
+from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import (
     blue,
     dirname,
     dotdict,

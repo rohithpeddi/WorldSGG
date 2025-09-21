@@ -13,9 +13,9 @@ import torch
 from scipy import interpolate
 from scipy.spatial.transform import Rotation
 
-from .chunk_utils import multi_gather
+from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.chunk_utils import multi_gather
 
-from .data_utils import as_numpy_func
+from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.data_utils import as_numpy_func
 
 
 def compute_camera_similarity(tar_c2ws: torch.Tensor, src_c2ws: torch.Tensor):

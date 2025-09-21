@@ -6,7 +6,7 @@ from typing import Callable, Tuple
 
 import torch
 
-from .console_utils import log, tqdm
+from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import log, tqdm
 
 
 def chunkify(  # noqa: C901
@@ -21,7 +21,7 @@ def chunkify(  # noqa: C901
     batch_key: str = "batch",
     inds_key: str = "chunkify_sample",
 ):
-    from easyvolcap.utils.data_utils import to_cpu  # keep global imports clean
+    from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.data_utils import to_cpu  # keep global imports clean
     # will fail if dim == -1, currently only tested on dim == -2 or dim == 1
     # will select a key element from the argments: either by keyword `key` or position `pos`
     # then, depending on whether user wants to merge other dimensions, will select the dim to chunkify according to `dim`

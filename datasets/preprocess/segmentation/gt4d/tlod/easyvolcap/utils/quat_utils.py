@@ -10,8 +10,8 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
-from .console_utils import warn_once
-from .math_utils import normalize
+from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import warn_once
+from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.math_utils import normalize
 
 
 def unitquat_to_rotmat(quat):

@@ -18,25 +18,25 @@ import torch
 from torch.nn import functional as F
 from torch.utils.data import Dataset
 
-from ..easyvolcap.utils.cam_utils import (
+from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.cam_utils import (
     align_c2ws,
     average_c2ws,
     generate_spiral_path,
     interpolate_camera_lins,
     interpolate_camera_path,
 )
-from ..easyvolcap.utils.console_utils import (
+from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.console_utils import (
     dotdict,
     join,
     logger,
     magenta,
 )
-from ..easyvolcap.utils.data_utils import as_numpy_func
-from ..easyvolcap.utils.math_utils import affine_inverse, affine_padding
-from ..easyvolcap.utils.parallel_utils import parallel_execution
+from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.data_utils import as_numpy_func
+from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.math_utils import affine_inverse, affine_padding
+from datasets.preprocess.segmentation.gt4d.tlod.easyvolcap.utils.parallel_utils import parallel_execution
 
-from ..misc.io_helper import pathmgr
-from .utils import (  # noqa: F401
+from datasets.preprocess.segmentation.gt4d.tlod.misc.io_helper import pathmgr
+from datasets.preprocess.segmentation.gt4d.tlod.data_loader.utils import (  # noqa: F401
     load_aria_images,
     load_camera_poses,
     load_image,
