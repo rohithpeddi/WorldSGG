@@ -15,7 +15,7 @@ from os.path import join
 from einops import rearrange
 import matplotlib.pyplot as plt
 
-import splatsviewer
+from . import splatsviewer
 from .demo import FourDGTDemo
 from .video_system import SaveConfig
 from .easyvolcap.utils.console_utils import logger
