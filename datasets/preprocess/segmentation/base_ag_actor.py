@@ -175,7 +175,12 @@ class BaseAgActor:
         image.save(os.path.join(output_dir, frame_name))
 
     def _mirror_pngs_to_jpg(self, frames_dir: Path, video_id: str) -> Tuple[Path, List[str]]:
-        jpg_dir = self.sampled_frames_jpg / video_id
+        jpg_dir = Path(self.sampled_frames_jpg / video_id)
+
+        if jpg_dir.exists() and len(os.listdir(jpg_dir)) > 0:
+            jpg_names = sorted([f for f in os.listdir(jpg_dir) if f.lower().endswith((".jpg", ".jpeg"))])
+            return jpg_dir, jpg_names
+
         self._ensure_dir(jpg_dir)
 
         fn_png = sorted([f for f in os.listdir(frames_dir) if f.lower().endswith((".png", ".jpg", ".jpeg"))])

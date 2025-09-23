@@ -1,9 +1,10 @@
 import argparse
+import json
 import os
 import pickle
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Dict, Tuple, Any, DefaultDict
+from typing import Dict, Tuple, Any, List, DefaultDict
 
 import cv2
 import numpy as np
@@ -13,7 +14,6 @@ from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.sam2_video_predictor import SAM2VideoPredictor
 from tqdm import tqdm
 
-from datasets.preprocess.samplers.feature_descripter_sampler import get_video_belongs_to_split
 from datasets.preprocess.segmentation.ag_detection import BaseAgActor
 
 
@@ -128,21 +128,18 @@ class AgSegmentation(BaseAgActor):
     def segment_with_sam2_video_mode(self, video_id: str, mask_threshold: float = 0.5, min_area: int = 0) -> None:
         """
         Runs SAM2 in video mode and writes per-object binary masks + union-masked frames.
+        Seeds from multiple ground-truth (anchor) frames if available, otherwise falls back
+        to first-occurrence seeding.
+
         Args:
             video_id: ID/name of the video (directory under sampled_frames)
             mask_threshold: probability/logit threshold used to binarize masks
             min_area: remove connected components smaller than this (in pixels); 0 disables
         """
 
-        import pickle
-        from typing import Dict, Tuple, Any
-        from pathlib import Path
-
-        import cv2
-        import numpy as np
-        import torch
-        from PIL import Image
-
+        # -------------------------------
+        # Robust binarization helper
+        # -------------------------------
         def _as_bool_mask(x, thr: float = mask_threshold) -> np.ndarray:
             """
             Convert torch/numpy mask (logits or probabilities; shapes [H,W], [1,H,W], [H,W,1], [N,H,W], etc.)
@@ -195,7 +192,12 @@ class AgSegmentation(BaseAgActor):
 
             return mask
 
+        # -------------------------------
+        # Paths & detections
+        # -------------------------------
         frames_dir = Path(self.ag_root_directory) / "sampled_frames" / video_id
+        video_annotated_frames_dir = Path(self.ag_root_directory) / "frames_annotated" / video_id
+
         pkl_path = Path(self.bbox_dir_path) / f"{video_id}.pkl"
         if not pkl_path.exists():
             print(f"[segment_with_sam2_video_mode][{video_id}] Missing detections ({pkl_path}). Skipping.")
@@ -204,76 +206,231 @@ class AgSegmentation(BaseAgActor):
         with open(pkl_path, "rb") as f:
             dets: Dict[str, Dict[str, Any]] = pickle.load(f)
 
-        # Build a map: label -> (first_frame_name, best_box_on_that_frame)
+        # -------------------------------
+        # First-occurrence fallback map
+        # -------------------------------
         first_occurrence: Dict[str, Tuple[str, np.ndarray]] = {}
         frame_names_sorted = sorted([fn for fn in dets.keys() if (frames_dir / fn).exists()])
 
         seen_labels = set()
         for fn in frame_names_sorted:
-            labels = dets[fn]["labels"]
-            boxes = dets[fn]["boxes"].cpu().numpy().astype(np.float32)
-            scores = dets[fn]["scores"].cpu().numpy().astype(np.float32)
+            rec = dets[fn]
+            labels_raw = rec["labels"]
+            # Normalize labels to Python list[str]
+            if isinstance(labels_raw, torch.Tensor):
+                labels_list = labels_raw.cpu().tolist()
+            elif isinstance(labels_raw, (list, tuple, np.ndarray)):
+                labels_list = list(labels_raw)
+            else:
+                labels_list = [labels_raw]
+            labels = [str(l) for l in labels_list]
 
-            # for each label on this frame, if unseen, record the highest-score box
+            boxes = rec["boxes"]
+            if isinstance(boxes, torch.Tensor):
+                boxes = boxes.cpu().numpy()
+            boxes = np.asarray(boxes, dtype=np.float32)
+
+            scores = rec["scores"]
+            if isinstance(scores, torch.Tensor):
+                scores = scores.cpu().numpy()
+            scores = np.asarray(scores, dtype=np.float32)
+
+            # best per label on this frame
             per_label_best: Dict[str, Tuple[np.ndarray, float]] = {}
             for b, l, s in zip(boxes, labels, scores):
                 if l not in per_label_best or s > per_label_best[l][1]:
-                    per_label_best[l] = (b, s)
+                    per_label_best[l] = (b, float(s))
 
             for l, (b, s) in per_label_best.items():
                 if l not in seen_labels:
-                    first_occurrence[l] = (fn, b)
+                    first_occurrence[l] = (fn, b.astype(np.float32))
                     seen_labels.add(l)
 
         if not first_occurrence:
             print(f"[segment_with_sam2_video_mode][{video_id}] No objects found in detections.")
             return
 
-        # If your predictor truly needs JPEGs on disk, mirror PNG->JPG. Otherwise you can pass a video file.
+        # Mirror PNG->JPG for stable indexing (jpg_order drives frame_idx)
         jpg_dir, jpg_order = self._mirror_pngs_to_jpg(frames_dir, video_id)
-
-        # Map frame name -> index in jpg_order (strip extension)
         stem_to_idx = {Path(n).stem: idx for idx, n in enumerate(jpg_order)}
 
+        # -------------------------------
+        # Output dirs
+        # -------------------------------
         out_mask_dir = self.masks_vid_dir_path / video_id
         out_frames_dir = self.masked_frames_vid_dir_path / video_id
         self._ensure_dir(out_mask_dir)
         self._ensure_dir(out_frames_dir)
 
-        # Prepare object id mapping (stable small ints)
-        labels_sorted = sorted(first_occurrence.keys())
-        lbl_to_objid = {lbl: i for i, lbl in enumerate(labels_sorted)}
+        # -------------------------------
+        # Collect anchor frames (if any)
+        # -------------------------------
+        annotated_stems: set = set()
+        if video_annotated_frames_dir.exists():
+            for fn in os.listdir(video_annotated_frames_dir):
+                p = Path(fn)
+                if p.suffix.lower() in (".png", ".jpg", ".jpeg"):
+                    annotated_stems.add(p.stem)
+
+        # Load GT annotations if present
+        gt_path_json = self.active_objects_b_annotations_path / f"{video_id}.json"
+        gt_path_pkl = self.active_objects_b_annotations_path / f"{video_id}.pkl"
+        gt = None
+        if gt_path_json.exists():
+            try:
+                with open(gt_path_json, "r") as f:
+                    gt = json.load(f)
+            except Exception:
+                gt = None
+        if gt is None and gt_path_pkl.exists():
+            try:
+                with open(gt_path_pkl, "rb") as f:
+                    gt = pickle.load(f)
+            except Exception:
+                gt = None
+
+        # seeds_by_frame: stem -> [(label, box[x1,y1,x2,y2], score)]
+        from collections import defaultdict
+        seeds_by_frame: Dict[str, List[Tuple[str, np.ndarray, float]]] = defaultdict(list)
+
+        if gt is not None:
+            # Expect: dict[frame_name_or_stem] -> list of {label/category/id, bbox/box: [x1,y1,x2,y2], score?}
+            for k, items in gt.items():
+                stem = Path(k).stem
+                if annotated_stems and stem not in annotated_stems:
+                    continue
+                if not isinstance(items, (list, tuple)):
+                    continue
+                for it in items:
+                    lbl = it.get("label") or it.get("category") or str(it.get("id", "obj"))
+                    b = np.asarray(it.get("bbox") or it.get("box"), dtype=np.float32)
+                    if b.shape != (4,):
+                        continue
+                    s = float(it.get("score", 1.0))
+                    seeds_by_frame[stem].append((str(lbl), b, s))
+        else:
+            # Fallback: use detections on annotated frames
+            if annotated_stems:
+                for fn, rec in dets.items():
+                    stem = Path(fn).stem
+                    if stem not in annotated_stems:
+                        continue
+
+                    labels_raw = rec["labels"]
+                    if isinstance(labels_raw, torch.Tensor):
+                        labels_list = labels_raw.cpu().tolist()
+                    elif isinstance(labels_raw, (list, tuple, np.ndarray)):
+                        labels_list = list(labels_raw)
+                    else:
+                        labels_list = [labels_raw]
+                    labels = [str(l) for l in labels_list]
+
+                    boxes = rec["boxes"]
+                    if isinstance(boxes, torch.Tensor):
+                        boxes = boxes.cpu().numpy()
+                    boxes = np.asarray(boxes, dtype=np.float32)
+
+                    scores = rec["scores"]
+                    if isinstance(scores, torch.Tensor):
+                        scores = scores.cpu().numpy()
+                    scores = np.asarray(scores, dtype=np.float32)
+
+                    best = {}
+                    for b, l, s in zip(boxes, labels, scores):
+                        if (l not in best) or s > best[l][1]:
+                            best[l] = (b, float(s))
+                    for l, (b, s) in best.items():
+                        seeds_by_frame[stem].append((l, b.astype(np.float32), s))
+
+        use_anchor_seeds = len(seeds_by_frame) > 0
+
+        # Label universe & obj-id mapping
+        if use_anchor_seeds:
+            all_labels = sorted({l for items in seeds_by_frame.values() for (l, _, __) in items})
+        else:
+            all_labels = sorted(first_occurrence.keys())
+
+        if not all_labels:
+            print(f"[segment_with_sam2_video_mode][{video_id}] No objects to seed.")
+            return
+
+        lbl_to_objid = {lbl: i for i, lbl in enumerate(all_labels)}
         objid_to_lbl = {i: lbl for lbl, i in lbl_to_objid.items()}
 
-        # AMP guard
-        if getattr(self, "_use_amp", False):
-            amp_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-        else:
-            class _Noop:
-                def __enter__(self): return None
+        # -------------------------------
+        # Select spaced/high-quality seeds
+        # -------------------------------
+        max_seeds_per_label = getattr(self, "max_seeds_per_label", 5)  # tune as needed
+        anchor_min_gap = getattr(self, "anchor_min_gap", 10)  # frames between seeds per label
 
-                def __exit__(self, *args): return False
+        # Candidates as (label, frame_idx, box, score)
+        candidates: List[Tuple[str, int, np.ndarray, float]] = []
+        if use_anchor_seeds:
+            for stem, items in seeds_by_frame.items():
+                if stem not in stem_to_idx:
+                    continue
+                idx = stem_to_idx[stem]
+                for (l, b, s) in items:
+                    if l in lbl_to_objid:
+                        candidates.append((l, idx, b, float(s)))
 
-            amp_ctx = _Noop()
-
-        with torch.inference_mode(), amp_ctx:
-            # Either pass a directory of JPG frames or a video file; choose what your predictor expects.
-            # state = self.sam2_video_predictor.init_state(video_path=str(jpg_dir))
-            video_path = str(self.ag_root_directory / "sampled_videos" / video_id)
-            state = self.sam2_video_predictor.init_state(video_path=video_path)
-
-            # Seed with one box per object at its first occurrence frame
+        # If no anchor candidates, synthesize from first_occurrence (one per label)
+        if not candidates and not use_anchor_seeds:
             for lbl, (first_fn, box_px) in first_occurrence.items():
-                obj_id = lbl_to_objid[lbl]
-                ann_frame_idx = stem_to_idx[Path(first_fn).stem]
+                stem = Path(first_fn).stem
+                if stem in stem_to_idx:
+                    idx = stem_to_idx[stem]
+                    candidates.append((lbl, idx, box_px.astype(np.float32), 1.0))
+
+        # Per-label selection: highest score, spaced by >= anchor_min_gap
+        from collections import defaultdict as dd
+        selected_by_frame: Dict[int, List[Tuple[str, np.ndarray]]] = dd(list)
+        if candidates:
+            by_label: Dict[str, List[Tuple[int, np.ndarray, float]]] = dd(list)
+            for l, idx, b, s in candidates:
+                by_label[l].append((idx, b, s))
+            for l, lst in by_label.items():
+                lst.sort(key=lambda x: (-x[2], x[0]))  # score desc, frame idx asc
+                chosen: List[Tuple[int, np.ndarray]] = []
+                used: List[int] = []
+                for idx, b, _s in lst:
+                    if all(abs(idx - u) >= anchor_min_gap for u in used):
+                        chosen.append((idx, b))
+                        used.append(idx)
+                    if len(chosen) >= max_seeds_per_label:
+                        break
+                if not chosen and lst:
+                    chosen.append((lst[0][0], lst[0][1]))
+                for idx, b in chosen:
+                    selected_by_frame[idx].append((l, b.astype(np.float32)))
+        else:
+            # Edge case: nothing selected -> first occurrence fallback
+            for lbl, (first_fn, box_px) in first_occurrence.items():
+                stem = Path(first_fn).stem
+                if stem in stem_to_idx:
+                    idx = stem_to_idx[stem]
+                    selected_by_frame[idx].append((lbl, box_px.astype(np.float32)))
+
+        # -------------------------------
+        # Init predictor & add ALL seeds
+        # -------------------------------
+        # Use JPG directory so frame_idx aligns with jpg_order/stem_to_idx
+        state = self.sam2_video_predictor.init_state(video_path=str(jpg_dir))
+
+        # Add seeds for multiple frames/labels up-front; one object_id per label
+        for frame_idx in sorted(selected_by_frame.keys()):
+            for (lbl, box_px) in selected_by_frame[frame_idx]:
                 self.sam2_video_predictor.add_new_points_or_box(
                     inference_state=state,
-                    frame_idx=ann_frame_idx,
-                    obj_id=obj_id,
+                    frame_idx=int(frame_idx),
+                    obj_id=int(lbl_to_objid[lbl]),
                     box=box_px.astype(np.float32),
                 )
 
-            # Propagate through video
+        # -------------------------------
+        # Single pass propagation & saving
+        # -------------------------------
+        with torch.inference_mode():
             for frame_idx, object_ids, masks in self.sam2_video_predictor.propagate_in_video(state):
                 # Resolve original frame name
                 jpg_name = jpg_order[frame_idx]
@@ -290,7 +447,6 @@ class AgSegmentation(BaseAgActor):
                 union_mask = np.zeros((H, W), dtype=bool)
 
                 # Iterate over masks aligned with object_ids
-                # masks is typically a torch.Tensor with shape [K, H, W] or [K, 1, H, W]
                 K = len(object_ids)
                 for k in range(K):
                     # object id -> label
@@ -455,7 +611,7 @@ def parse_args():
         help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
     )
     parser.add_argument(
-        "--split", type=_parse_split, default=None,
+        "--split", type=_parse_split, default="04",
         help="Optional shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}. "
              "If omitted, processes all videos."
     )
