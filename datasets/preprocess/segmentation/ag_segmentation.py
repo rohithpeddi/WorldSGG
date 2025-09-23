@@ -546,8 +546,14 @@ class AgSegmentation(BaseAgActor):
             self._write_video_from_frames(frames_dir, out_mp4, fps=10)
 
     def process(self, split):
-        video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
+        video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4", "0A8CF.mp4"]
         for video_id in tqdm(video_id_list):
+            # Skip if already done
+            out_mp4 = self.masked_videos_dir_path / "combined_frames" / f"{video_id[:-4]}.mp4"
+            if out_mp4.exists() and out_mp4.stat().st_size > 0:
+                print(f"[process][{video_id}] Skipping (already done: {out_mp4})")
+                continue
+
             self.segment_with_sam2(video_id)
             self.segment_with_sam2_video_mode(video_id)
             self.combine_masks(video_id)
