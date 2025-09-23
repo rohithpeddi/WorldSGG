@@ -507,7 +507,7 @@ class AgDetection(BaseAgActor):
             if visualize and boxes_nms.numel() > 0 and len(labels_nms) > 0:
                 vis_dir = Path(self.gdino_vis_path) / video_id
                 self._ensure_dir(vis_dir)
-                self.draw_and_save_bboxes(frame_path, boxes_nms, labels_nms, vis_dir, video_frame_name)
+                self.draw_and_save_bboxes(frame_path, final_boxes, final_labels, vis_dir, video_frame_name)
 
         with open(video_output_file_path, 'wb') as file:
             pickle.dump(video_predictions, file)
