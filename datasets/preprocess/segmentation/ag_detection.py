@@ -414,18 +414,18 @@ class AgDetection(BaseAgActor):
             pickle.dump(video_predictions, file)
 
     def process(self, split):
-        # video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
-        # for video_id in tqdm(video_id_list):
-        #     self.extract_bounding_boxes(video_id, visualize=True)
+        video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
+        for video_id in tqdm(video_id_list):
+            self.extract_bounding_boxes(video_id, visualize=True)
 
-        for data in tqdm(self._dataloader_train):
-            video_id = data['video_id']
-            if get_video_belongs_to_split(video_id) == split:
-                self.extract_bounding_boxes(video_id, visualize=True)
-        for data in tqdm(self._dataloader_test):
-            video_id = data['video_id']
-            if get_video_belongs_to_split(video_id) == split:
-                self.extract_bounding_boxes(video_id, visualize=True)
+        # for data in tqdm(self._dataloader_train):
+        #     video_id = data['video_id']
+        #     if get_video_belongs_to_split(video_id) == split:
+        #         self.extract_bounding_boxes(video_id, visualize=True)
+        # for data in tqdm(self._dataloader_test):
+        #     video_id = data['video_id']
+        #     if get_video_belongs_to_split(video_id) == split:
+        #         self.extract_bounding_boxes(video_id, visualize=True)
 
 
 def _parse_split(s: str) -> str:

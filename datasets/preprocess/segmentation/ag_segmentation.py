@@ -16,6 +16,7 @@ from tqdm import tqdm
 from datasets.preprocess.samplers.feature_descripter_sampler import get_video_belongs_to_split
 from datasets.preprocess.segmentation.ag_detection import BaseAgActor
 
+
 # TODO: Apply dilation to expand masks slightly to cover object boundaries better?
 
 class AgSegmentation(BaseAgActor):
@@ -316,15 +317,21 @@ class AgSegmentation(BaseAgActor):
                 cv2.imwrite(str(out_frames_dir / f"{stem}.png"), cv2.cvtColor(masked_np, cv2.COLOR_RGB2BGR))
 
     def combine_masks(self, video_id):
+        """
+        For each frame, read per-label masks from both sources (image- and video-mode),
+        threshold to boolean, take their union, and WRITE A BINARY MASK (0/255) so all
+        foreground pixels are white (255). Also export the union-masked RGB frame.
+        """
         frames_dir = Path(self.ag_root_directory) / "sampled_frames" / video_id
-        out_mask_dir = self.masks_combined_dir_path / video_id
-        out_frames_dir = self.masked_frames_combined_dir_path / video_id
-        self._ensure_dir(out_mask_dir)
-        self._ensure_dir(out_frames_dir)
+        out_masks_combined_dir = self.masks_combined_dir_path / video_id
+        out_frames_combined_dir = self.masked_frames_combined_dir_path / video_id
+        self._ensure_dir(out_masks_combined_dir)
+        self._ensure_dir(out_frames_combined_dir)
 
         # collect all frame stems present
         stems = sorted(
-            {Path(fn).stem for fn in os.listdir(frames_dir) if fn.lower().endswith((".png", ".jpg", ".jpeg"))})
+            {Path(fn).stem for fn in os.listdir(frames_dir) if fn.lower().endswith((".png", ".jpg", ".jpeg"))}
+        )
 
         # collect all label names that appear in either route for this video
         def _labels_in(mask_dir: Path) -> set:
@@ -341,7 +348,7 @@ class AgSegmentation(BaseAgActor):
 
         for stem in tqdm(stems, desc=f"Combine masks {video_id}"):
             # build union across labels for frame image export
-            union_frame = None
+            union_frame = None  # keep as boolean
 
             for lbl in labels_all:
                 im_mask_p = self.masks_im_dir_path / video_id / f"{stem}__{lbl}.png"
@@ -353,6 +360,7 @@ class AgSegmentation(BaseAgActor):
                 if m_im is None and m_vd is None:
                     continue
 
+                # --- threshold to boolean ---
                 if m_im is None:
                     m_union = (m_vd > 127)
                 elif m_vd is None:
@@ -360,11 +368,12 @@ class AgSegmentation(BaseAgActor):
                 else:
                     m_union = (m_im > 127) | (m_vd > 127)
 
-                # save combined per-object mask
-                save_p = out_mask_dir / f"{stem}__{lbl}.png"
-                cv2.imwrite(str(save_p), self._binary_to_png(m_union))
+                # --- save combined per-object mask as STRICT BINARY (0 or 255) ---
+                # m_union_u8 = (m_union.astype(np.uint8) * 255)  # foreground=255 (white), background=0 (black)
+                # save_p = out_masks_combined_dir / f"{stem}__{lbl}.png"
+                # cv2.imwrite(str(save_p), m_union_u8)
 
-                # accumulate into per-frame union
+                # accumulate into per-frame union (boolean)
                 if union_frame is None:
                     union_frame = m_union.copy()
                 else:
@@ -379,43 +388,52 @@ class AgSegmentation(BaseAgActor):
                 img = Image.open(src).convert("RGB")
                 img_np = np.array(img)
                 masked_np = self._apply_mask(img_np, union_frame.astype(bool))
-                cv2.imwrite(str(out_frames_dir / f"{stem}.png"), cv2.cvtColor(masked_np, cv2.COLOR_RGB2BGR))
+                cv2.imwrite(str(out_frames_combined_dir / f"{stem}.png"), cv2.cvtColor(masked_np, cv2.COLOR_RGB2BGR))
+
+                # (optional) also save the per-frame union mask itself as binary:
+                union_mask_path = out_masks_combined_dir / f"{stem}.png"
+                cv2.imwrite(str(union_mask_path), (union_frame.astype(np.uint8) * 255))
 
     def save_masked_frames_and_videos(self, video_id):
         routes = [
             ("image_based", self.masked_frames_im_dir_path / video_id),
             ("video_based", self.masked_frames_vid_dir_path / video_id),
-            ("combined", self.masked_frames_combined_dir_path / video_id),
+            ("combined_masks", self.masks_combined_dir_path / video_id),
+            ("combined_frames", self.masked_frames_combined_dir_path / video_id),
         ]
         for route_name, frames_dir in routes:
             if not frames_dir.exists():
                 continue
-            out_mp4 = self.masked_videos_dir_path / f"{Path(video_id).stem}__{route_name}.mp4"
-            self._write_video_from_frames(frames_dir, out_mp4, fps=15)
+
+            mp4_video_directory = self.masked_videos_dir_path / f"{route_name}"
+            mp4_video_directory.mkdir(parents=True, exist_ok=True)
+
+            # write video from frames
+            out_mp4 = mp4_video_directory / f"{Path(video_id).stem}.mp4"
+            self._write_video_from_frames(frames_dir, out_mp4, fps=10)
 
     def process(self, split):
-        # video_id_list = os.listdir(self.data_dir_path / "videos")
-        # video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
-        # for video_id in tqdm(video_id_list):
-        #     self.segment_with_sam2(video_id)
-        #     self.segment_with_sam2_video_mode(video_id)
-        #     # self.combine_masks(video_id)
-        #     # self.save_masked_frames_and_videos(video_id)
+        video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
+        for video_id in tqdm(video_id_list):
+            self.segment_with_sam2(video_id)
+            self.segment_with_sam2_video_mode(video_id)
+            self.combine_masks(video_id)
+            self.save_masked_frames_and_videos(video_id)
 
-        for data in tqdm(self._dataloader_train):
-            video_id = data['video_id']
-            if get_video_belongs_to_split(video_id) == split:
-                self.segment_with_sam2(video_id)
-                self.segment_with_sam2_video_mode(video_id)
-                # self.combine_masks(video_id)
-                # self.save_masked_frames_and_videos(video_id)
-        for data in tqdm(self._dataloader_test):
-            video_id = data['video_id']
-            if get_video_belongs_to_split(video_id) == split:
-                self.segment_with_sam2(video_id)
-                self.segment_with_sam2_video_mode(video_id)
-                # self.combine_masks(video_id)
-                # self.save_masked_frames_and_videos(video_id)
+        # for data in tqdm(self._dataloader_train):
+        #     video_id = data['video_id']
+        #     if get_video_belongs_to_split(video_id) == split:
+        #         self.segment_with_sam2(video_id)
+        #         self.segment_with_sam2_video_mode(video_id)
+        #         self.combine_masks(video_id)
+        #         self.save_masked_frames_and_videos(video_id)
+        # for data in tqdm(self._dataloader_test):
+        #     video_id = data['video_id']
+        #     if get_video_belongs_to_split(video_id) == split:
+        #         self.segment_with_sam2(video_id)
+        #         self.segment_with_sam2_video_mode(video_id)
+        #         self.combine_masks(video_id)
+        #         self.save_masked_frames_and_videos(video_id)
 
 
 def _parse_split(s: str) -> str:
