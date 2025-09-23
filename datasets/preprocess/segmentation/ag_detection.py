@@ -21,10 +21,11 @@ class AgDetection(BaseAgActor):
         self.caption_data = None
         self.bbox_dir_path = self.ag_root_directory / "detection" / 'gdino_bboxes'
         self.gdino_vis_path = self.ag_root_directory / "detection" / 'gdino_vis'
+        self.gt_vis_path = self.ag_root_directory / "detection" / 'gt_vis'
         self.active_objects_b_annotations_path = self.ag_root_directory / 'active_objects' / 'annotations'
         self.active_objects_b_reasoned_path = self.ag_root_directory / 'active_objects' / 'sampled_videos'
 
-        for p in [self.bbox_dir_path, self.gdino_vis_path, self.active_objects_b_reasoned_path,
+        for p in [self.bbox_dir_path, self.gdino_vis_path, self.gt_vis_path, self.active_objects_b_reasoned_path,
                   self.active_objects_b_annotations_path]:
             p.mkdir(parents=True, exist_ok=True)
 
@@ -67,12 +68,12 @@ class AgDetection(BaseAgActor):
         for video_id, gt_annotations in self.video_id_gt_annotations_map.items():
             video_gt_bboxes = {}
             for frame_idx, frame_items in enumerate(gt_annotations):
-                frame_name = f"frame{frame_idx:05d}.jpg"
+                frame_name = frame_items[0]["frame"].split("/")[-1]
                 boxes = []
                 labels = []
                 for item in frame_items:
                     if 'person_bbox' in item:
-                        boxes.append(item['person_bbox'])
+                        boxes.append(item['person_bbox'][0])
                         labels.append('person')
                         continue
                     category_id = item['class']
@@ -92,7 +93,7 @@ class AgDetection(BaseAgActor):
                         labels.append(category_name)
                 if boxes:
                     video_gt_bboxes[frame_name] = {
-                        'boxes': torch.tensor(boxes, dtype=torch.float32),
+                        'boxes': boxes,
                         'labels': labels
                     }
             self.video_id_gt_bboxes_map[video_id] = video_gt_bboxes
@@ -322,7 +323,12 @@ class AgDetection(BaseAgActor):
 
     # -------------------------------------- DETECTION MODULES -------------------------------------- #
 
-    def _prepare_gt_for_frame(self, video_id: str, frame_name: str) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
+    def _prepare_gt_for_frame(
+            self,
+            video_id: str,
+            frame_name: str,
+            video_object_labels: List[str]
+    ) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
         """
         Returns (gt_boxes_xyxy, gt_scores, gt_labels_norm) for this frame.
         If no GT for the frame, returns empty tensors/lists.
@@ -333,13 +339,28 @@ class AgDetection(BaseAgActor):
             return (torch.empty((0, 4), dtype=torch.float32),
                     torch.empty((0,), dtype=torch.float32), [])
 
-        gt_boxes = rec["boxes"].float()
+        gt_boxes = [torch.tensor(b, dtype=torch.float32) for b in rec["boxes"]]
         if self.gt_bbox_format == "xywh":
             gt_boxes = self._xywh_to_xyxy(gt_boxes)
 
         gt_labels = [self._normalize_label(l) for l in rec["labels"]]
-        gt_scores = torch.full((gt_boxes.shape[0],), 1.001, dtype=torch.float32)
-        return gt_boxes, gt_scores, gt_labels
+        gt_scores = [torch.tensor(1.001, dtype=torch.float32) for _ in gt_labels]  # slightly >1 to ensure GT is always kept in NMS
+
+        # Filter GT to only include objects in video_object_labels
+        filtered_boxes, filtered_scores, filtered_labels = [], [], []
+        for box, score, label in zip(gt_boxes, gt_scores, gt_labels):
+            if label in video_object_labels:
+                filtered_boxes.append(box.unsqueeze(0))
+                filtered_scores.append(score.unsqueeze(0))
+                filtered_labels.append(label)
+
+        if filtered_boxes:
+            return (torch.cat(filtered_boxes, dim=0),
+                    torch.cat(filtered_scores, dim=0),
+                    filtered_labels)
+        else:
+            return (torch.empty((0, 4), dtype=torch.float32),
+                    torch.empty((0,), dtype=torch.float32), [])
 
     def extract_bounding_boxes(self, video_id, visualize=True):
         """
@@ -396,6 +417,7 @@ class AgDetection(BaseAgActor):
             if kept_boxes:
                 return torch.cat(kept_boxes, dim=0), torch.cat(kept_scores, dim=0), kept_labels
             return torch.empty((0, 4), dtype=torch.float32), torch.empty((0,), dtype=torch.float32), []
+
         # ---------------------------------------------
 
         # Use GDINO to extract bounding boxes for objects in frames
@@ -404,6 +426,10 @@ class AgDetection(BaseAgActor):
 
         # Loads object labels corresponding to active objects in the dataset
         video_object_labels = self.video_id_active_objects_b_reasoned_map[video_id]
+
+        # Remove active objects which do not move
+        non_moving_objects = ["floor", "sofa", "couch", "bed", "doorway", "table", "chair"]
+        video_object_labels = [obj for obj in video_object_labels if obj not in non_moving_objects]
 
         if os.path.exists(video_output_file_path):
             print(f"Bounding boxes for video {video_id} already exist. Skipping detection...")
@@ -434,7 +460,7 @@ class AgDetection(BaseAgActor):
             results = self.gdino_processor.post_process_grounded_object_detection(
                 outputs,
                 inputs.input_ids,
-                threshold=0.4,
+                threshold=0.3,
                 text_threshold=0.3,
                 target_sizes=[image.size[::-1]]
             )[0]
@@ -450,7 +476,13 @@ class AgDetection(BaseAgActor):
             )
 
             # 2) Pull GT for this frame
-            gt_boxes, gt_scores, gt_labels = self._prepare_gt_for_frame(video_id, video_frame_name)
+            gt_boxes, gt_scores, gt_labels = self._prepare_gt_for_frame(video_id, video_frame_name, video_object_labels)
+
+            # If the gt_boxes is not empty, store the frame in gt_vis directory for visualization
+            if visualize and gt_boxes.numel() > 0 and len(gt_labels) > 0:
+                vid_gt_vis_dir = Path(self.gt_vis_path) / video_id
+                self._ensure_dir(vid_gt_vis_dir)
+                self.draw_and_save_bboxes(frame_path, gt_boxes, gt_labels, vid_gt_vis_dir, video_frame_name)
 
             # 3) Concatenate predicted+GT and run final per-class NMS
             if gt_boxes.numel() > 0:
@@ -473,14 +505,16 @@ class AgDetection(BaseAgActor):
             }
 
             if visualize and boxes_nms.numel() > 0 and len(labels_nms) > 0:
-                vis_dir = os.path.join(self.gdino_vis_path, video_id)
+                vis_dir = Path(self.gdino_vis_path) / video_id
+                self._ensure_dir(vis_dir)
                 self.draw_and_save_bboxes(frame_path, boxes_nms, labels_nms, vis_dir, video_frame_name)
 
         with open(video_output_file_path, 'wb') as file:
             pickle.dump(video_predictions, file)
 
     def process(self, split):
-        video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
+        video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4",
+                         "0A8CF.mp4"]
         for video_id in tqdm(video_id_list):
             self.extract_bounding_boxes(video_id, visualize=True)
 
@@ -513,7 +547,7 @@ def parse_args():
         help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
     )
     parser.add_argument(
-        "--split", type=_parse_split, default=None,
+        "--split", type=_parse_split, default="04",
         help="Optional shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}. "
              "If omitted, processes all videos."
     )
