@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 from typing import List, Tuple, Optional
 
@@ -108,14 +109,26 @@ class BaseAgActor:
             pin_memory=False
         )
 
-    @staticmethod
-    def _normalize_label(s: str) -> str:
+    def _normalize_label(self, s: str) -> str:
+        # keep your existing behavior if already defined elsewhere
         s = s.lower().strip()
-        for art in ("a ", "an ", "the "):
-            if s.startswith(art):
-                s = s[len(art):]
-                break
-        return s
+        s = re.sub(r"^(a|an|the)\s+", "", s)
+        alias = {
+            "closet/cabinet": "closet",
+            "cup/glass/bottle": "cup",
+            "paper/notebook": "paper",
+            "sofa/couch": "sofa",
+            "phone/camera": "phone",
+        }
+        return alias.get(s, s)
+
+    @staticmethod
+    def _xywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
+        # boxes: (..., 4) as [x, y, w, h] -> [x1, y1, x2, y2]
+        out = boxes.clone()
+        out[..., 2] = boxes[..., 0] + boxes[..., 2]
+        out[..., 3] = boxes[..., 1] + boxes[..., 3]
+        return out
 
     @staticmethod
     def _ensure_dir(p: Path):

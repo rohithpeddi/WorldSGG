@@ -45,7 +45,57 @@ class AgDetection(BaseAgActor):
 
         self.video_id_active_objects_annotations_map = {}
         self.video_id_active_objects_b_reasoned_map = {}
+        self.video_id_gt_annotations_map = {}
+        self.video_id_gt_bboxes_map = {}
         self.process_video_id_active_objects_map(process_raw=process_raw)
+
+        self.create_gt_annotations_map()
+        self.gt_bbox_format = "xyxy"  # set to "xywh" if your GT is COCO-style
+
+    def create_gt_annotations_map(self):
+        # Create a mapping from video_id to its ground truth annotations
+        for data in self._dataloader_train:
+            video_id = data['video_id']
+            gt_annotations = data['gt_annotations']
+            self.video_id_gt_annotations_map[video_id] = gt_annotations
+        for data in self._dataloader_test:
+            video_id = data['video_id']
+            gt_annotations = data['gt_annotations']
+            self.video_id_gt_annotations_map[video_id] = gt_annotations
+
+        # video_id, gt_bboxes for the gt detections
+        for video_id, gt_annotations in self.video_id_gt_annotations_map.items():
+            video_gt_bboxes = {}
+            for frame_idx, frame_items in enumerate(gt_annotations):
+                frame_name = f"frame{frame_idx:05d}.jpg"
+                boxes = []
+                labels = []
+                for item in frame_items:
+                    if 'person_bbox' in item:
+                        boxes.append(item['person_bbox'])
+                        labels.append('person')
+                        continue
+                    category_id = item['class']
+                    category_name = self._train_dataset.catid_to_name_map[category_id]
+                    if category_name:
+                        if category_name == "closet/cabinet":
+                            category_name = "closet"
+                        elif category_name == "cup/glass/bottle":
+                            category_name = "cup"
+                        elif category_name == "paper/notebook":
+                            category_name = "paper"
+                        elif category_name == "sofa/couch":
+                            category_name = "sofa"
+                        elif category_name == "phone/camera":
+                            category_name = "phone"
+                        boxes.append(item['bbox'])
+                        labels.append(category_name)
+                if boxes:
+                    video_gt_bboxes[frame_name] = {
+                        'boxes': torch.tensor(boxes, dtype=torch.float32),
+                        'labels': labels
+                    }
+            self.video_id_gt_bboxes_map[video_id] = video_gt_bboxes
 
     def load_caption_data(self):
         caption_json = self.ag_root_directory / "captions" / "charades.json"
@@ -271,6 +321,26 @@ class AgDetection(BaseAgActor):
         ]
 
     # -------------------------------------- DETECTION MODULES -------------------------------------- #
+
+    def _prepare_gt_for_frame(self, video_id: str, frame_name: str) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
+        """
+        Returns (gt_boxes_xyxy, gt_scores, gt_labels_norm) for this frame.
+        If no GT for the frame, returns empty tensors/lists.
+        """
+        frame_map = self.video_id_gt_bboxes_map.get(video_id, {})
+        rec = frame_map.get(frame_name)
+        if rec is None or len(rec.get("boxes", [])) == 0:
+            return (torch.empty((0, 4), dtype=torch.float32),
+                    torch.empty((0,), dtype=torch.float32), [])
+
+        gt_boxes = rec["boxes"].float()
+        if self.gt_bbox_format == "xywh":
+            gt_boxes = self._xywh_to_xyxy(gt_boxes)
+
+        gt_labels = [self._normalize_label(l) for l in rec["labels"]]
+        gt_scores = torch.full((gt_boxes.shape[0],), 1.001, dtype=torch.float32)
+        return gt_boxes, gt_scores, gt_labels
+
     def extract_bounding_boxes(self, video_id, visualize=True):
         """
         Run Grounding DINO on sampled frames, apply class-wise NMS, and (optionally) save visualizations.
@@ -278,37 +348,8 @@ class AgDetection(BaseAgActor):
         """
 
         # ---------- helpers (self-contained) ----------
-        def _box_iou_single_vs_many(box_i: torch.Tensor, boxes: torch.Tensor) -> torch.Tensor:
-            # boxes are xyxy; box_i is shape (4,), boxes is (N,4)
-            tl = torch.maximum(box_i[:2], boxes[:, :2])  # (N,2)
-            br = torch.minimum(box_i[2:], boxes[:, 2:])  # (N,2)
-            wh = (br - tl).clamp(min=0)  # (N,2)
-            inter = wh[:, 0] * wh[:, 1]  # (N,)
-
-            area_i = (box_i[2] - box_i[0]).clamp(min=0) * (box_i[3] - box_i[1]).clamp(min=0)
-            area_n = (boxes[:, 2] - boxes[:, 0]).clamp(min=0) * (boxes[:, 3] - boxes[:, 1]).clamp(min=0)
-            union = area_i + area_n - inter
-            return inter / union.clamp(min=1e-9)
-
-        def _nms_single_class(boxes: torch.Tensor, scores: torch.Tensor, iou_thr: float = 0.5) -> torch.Tensor:
-            # Returns indices (w.r.t. input tensors) to keep
-            if boxes.numel() == 0:
-                return torch.empty(0, dtype=torch.long)
-            order = scores.argsort(descending=True)
-            keep = []
-            while order.numel() > 0:
-                i = order[0].item()
-                keep.append(i)
-                if order.numel() == 1:
-                    break
-                rest = order[1:]
-                ious = _box_iou_single_vs_many(boxes[i], boxes[rest])
-                order = rest[ious <= iou_thr]
-            return torch.tensor(keep, dtype=torch.long)
-
-        def _nms_classwise(boxes: torch.Tensor, scores: torch.Tensor, labels: list,
+        def _classwise_nms(boxes: torch.Tensor, scores: torch.Tensor, labels: list[str],
                            iou_thr: float = 0.5, min_score: float = 0.0):
-            # Run NMS per label string; return filtered (boxes, scores, labels)
             if boxes.numel() == 0:
                 return boxes, scores, labels
 
@@ -316,7 +357,6 @@ class AgDetection(BaseAgActor):
             scores = scores.detach().cpu().float()
             labels = list(labels)
 
-            # pre-filter on score if requested
             if min_score > 0:
                 keep0 = torch.nonzero(scores >= min_score, as_tuple=False).squeeze(1)
                 boxes, scores = boxes[keep0], scores[keep0]
@@ -331,22 +371,31 @@ class AgDetection(BaseAgActor):
                     continue
                 b = boxes[idx]
                 s = scores[idx]
-                keep_idx_local = _nms_single_class(b, s, iou_thr=iou_thr).tolist()
-                for k in keep_idx_local:
+                # per-class greedy NMS
+                order = s.argsort(descending=True)
+                keep = []
+                while order.numel() > 0:
+                    i = order[0].item()
+                    keep.append(i)
+                    if order.numel() == 1:
+                        break
+                    rest = order[1:]
+                    tl = torch.maximum(b[i, :2], b[rest, :2])
+                    br = torch.minimum(b[i, 2:], b[rest, 2:])
+                    inter = (br - tl).clamp(min=0)
+                    inter = inter[:, 0] * inter[:, 1]
+                    area_i = (b[i, 2] - b[i, 0]).clamp(min=0) * (b[i, 3] - b[i, 1]).clamp(min=0)
+                    area_r = (b[rest, 2] - b[rest, 0]).clamp(min=0) * (b[rest, 3] - b[rest, 1]).clamp(min=0)
+                    iou = inter / (area_i + area_r - inter).clamp(min=1e-9)
+                    order = rest[iou <= iou_thr]
+                for k in keep:
                     kept_boxes.append(b[k].unsqueeze(0))
                     kept_scores.append(s[k].unsqueeze(0))
                     kept_labels.append(lbl)
 
             if kept_boxes:
-                boxes_out = torch.cat(kept_boxes, dim=0)
-                scores_out = torch.cat(kept_scores, dim=0)
-                labels_out = kept_labels
-            else:
-                boxes_out = torch.empty((0, 4), dtype=torch.float32)
-                scores_out = torch.empty((0,), dtype=torch.float32)
-                labels_out = []
-            return boxes_out, scores_out, labels_out
-
+                return torch.cat(kept_boxes, dim=0), torch.cat(kept_scores, dim=0), kept_labels
+            return torch.empty((0, 4), dtype=torch.float32), torch.empty((0,), dtype=torch.float32), []
         # ---------------------------------------------
 
         # Use GDINO to extract bounding boxes for objects in frames
@@ -390,20 +439,37 @@ class AgDetection(BaseAgActor):
                 target_sizes=[image.size[::-1]]
             )[0]
 
-            # normalize labels (strip 'a/the')
+            # Normalize labels (strip 'a/the')
             labels = [self._normalize_label(l) for l in results['labels']]
 
-            # ---- class-wise NMS (tune thresholds as needed) ----
-            boxes_nms, scores_nms, labels_nms = _nms_classwise(
+            # 1) First-stage NMS on GDINO outputs (you already have this)
+            boxes_nms, scores_nms, labels_nms = _classwise_nms(
                 results['boxes'], results['scores'], labels,
-                iou_thr=0.5,  # IoU threshold for suppression
-                min_score=0.0  # optional pre-filter; set >0 to drop low scores
+                iou_thr=0.5,
+                min_score=0.0
+            )
+
+            # 2) Pull GT for this frame
+            gt_boxes, gt_scores, gt_labels = self._prepare_gt_for_frame(video_id, video_frame_name)
+
+            # 3) Concatenate predicted+GT and run final per-class NMS
+            if gt_boxes.numel() > 0:
+                all_boxes = torch.cat([boxes_nms, gt_boxes], dim=0) if boxes_nms.numel() else gt_boxes
+                all_scores = torch.cat([scores_nms, gt_scores], dim=0) if scores_nms.numel() else gt_scores
+                all_labels = list(labels_nms) + gt_labels
+            else:
+                all_boxes, all_scores, all_labels = boxes_nms, scores_nms, labels_nms
+
+            final_boxes, final_scores, final_labels = _classwise_nms(
+                all_boxes, all_scores, all_labels,
+                iou_thr=0.5,  # you can use a slightly higher IoU here if you want fewer near-duplicates
+                min_score=0.0
             )
 
             video_predictions[video_frame_name] = {
-                'boxes': boxes_nms,
-                'scores': scores_nms,
-                'labels': labels_nms
+                'boxes': final_boxes,
+                'scores': final_scores,
+                'labels': final_labels
             }
 
             if visualize and boxes_nms.numel() > 0 and len(labels_nms) > 0:
