@@ -14,6 +14,7 @@ from sam2.sam2_video_predictor import SAM2VideoPredictor
 from tqdm import tqdm
 
 from datasets.preprocess.segmentation.ag_detection import BaseAgActor
+from datasets.preprocess.segmentation.base_ag_actor import get_video_belongs_to_split
 
 
 # TODO: Apply dilation to expand masks slightly to cover object boundaries better?
@@ -545,33 +546,41 @@ class AgSegmentation(BaseAgActor):
             self._write_video_from_frames(frames_dir, out_mp4, fps=10)
 
     def process(self, split):
-        video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4", "0A8CF.mp4"]
-        for video_id in tqdm(video_id_list):
-            # Skip if already done
+        # video_id_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4", "0A8CF.mp4"]
+        # for video_id in tqdm(video_id_list):
+        #     # Skip if already done
+        #     out_mp4 = self.masked_videos_dir_path / "combined_frames" / f"{video_id[:-4]}.mp4"
+        #     if out_mp4.exists() and out_mp4.stat().st_size > 0:
+        #         print(f"[process][{video_id}] Skipping (already done: {out_mp4})")
+        #         continue
+        #
+        #     self.segment_with_sam2(video_id)
+        #     self.segment_with_sam2_video_mode(video_id)
+        #     self.combine_masks(video_id)
+        #     self.save_masked_frames_and_videos(video_id)
+
+        for data in tqdm(self._dataloader_train):
+            video_id = data['video_id']
             out_mp4 = self.masked_videos_dir_path / "combined_frames" / f"{video_id[:-4]}.mp4"
             if out_mp4.exists() and out_mp4.stat().st_size > 0:
                 print(f"[process][{video_id}] Skipping (already done: {out_mp4})")
                 continue
-
-            self.segment_with_sam2(video_id)
-            self.segment_with_sam2_video_mode(video_id)
-            self.combine_masks(video_id)
-            self.save_masked_frames_and_videos(video_id)
-
-        # for data in tqdm(self._dataloader_train):
-        #     video_id = data['video_id']
-        #     if get_video_belongs_to_split(video_id) == split:
-        #         self.segment_with_sam2(video_id)
-        #         self.segment_with_sam2_video_mode(video_id)
-        #         self.combine_masks(video_id)
-        #         self.save_masked_frames_and_videos(video_id)
-        # for data in tqdm(self._dataloader_test):
-        #     video_id = data['video_id']
-        #     if get_video_belongs_to_split(video_id) == split:
-        #         self.segment_with_sam2(video_id)
-        #         self.segment_with_sam2_video_mode(video_id)
-        #         self.combine_masks(video_id)
-        #         self.save_masked_frames_and_videos(video_id)
+            if get_video_belongs_to_split(video_id) == split:
+                self.segment_with_sam2(video_id)
+                self.segment_with_sam2_video_mode(video_id)
+                self.combine_masks(video_id)
+                self.save_masked_frames_and_videos(video_id)
+        for data in tqdm(self._dataloader_test):
+            video_id = data['video_id']
+            out_mp4 = self.masked_videos_dir_path / "combined_frames" / f"{video_id[:-4]}.mp4"
+            if out_mp4.exists() and out_mp4.stat().st_size > 0:
+                print(f"[process][{video_id}] Skipping (already done: {out_mp4})")
+                continue
+            if get_video_belongs_to_split(video_id) == split:
+                self.segment_with_sam2(video_id)
+                self.segment_with_sam2_video_mode(video_id)
+                self.combine_masks(video_id)
+                self.save_masked_frames_and_videos(video_id)
 
 
 def _parse_split(s: str) -> str:
