@@ -496,16 +496,6 @@ class WanFunInpaintPipeline(DiffusionPipeline):
         max_sequence_length: int = 512,
         comfyui_progressbar: bool = False,
     ) -> Union[WanPipelineOutput, Tuple]:
-        """
-        Function invoked when calling the pipeline for generation.
-        Args:
-
-        Examples:
-
-        Returns:
-
-        """
-
         if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
         num_videos_per_prompt = 1

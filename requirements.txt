@@ -1,5 +1,7 @@
 --extra-index-url https://download.pytorch.org/whl/cu124
-
+torch==2.4.0
+torchvision==0.19.0
+torchaudio==2.4.0
 accelerate>=0.25.0
 albumentations
 beautifulsoup4
@@ -49,15 +51,13 @@ splines
 tensorboard
 timm
 tomesd
-torch>=2.1.2
-torchaudio
 torchdiffeq
 torchsde
 torchmetrics
-torchvision
 transformers>=4.56.1
 trimesh
 tqdm
 ujson
 viser
 xformers
+sam2==0.4.1

@@ -39,7 +39,7 @@ class ExtractorConfig:
     data_dir: str = "/data/rohith/ag"
     videos_dir: str = "/data/rohith/ag/videos"
     sampled_dir: str = "/data/rohith/ag/sampled_videos"
-    masked_dir: str = "/data/rohith/ag/mask_videos"
+    masked_dir: str = "/data/rohith/ag/segmentation/masked_videos/combined_masks"
     static_dir: str = "/data/rohith/ag/static_videos"
 
     # Model/config paths (same as your original script)
@@ -191,8 +191,11 @@ class StaticAgSceneExtractor:
 
         if remaining > 0 and chunks:
             # leftover < 17 → merge into the last chunk
+            # TODO: Create another copy and maintain the padding
             last_start, last_end = chunks[-1]
-            chunks[-1] = (last_start, total_frames)
+            last_start = last_start - (17 - remaining)  # expand start backwards
+            last_end = last_end + remaining  # expand end forwards
+            chunks.append((last_start, last_end))
         elif remaining > 0 and not chunks:
             # edge case: total_frames < 17, just one chunk [0, total_frames)
             raise ValueError("Total frames less than 17; cannot form a valid chunk.")
@@ -354,7 +357,7 @@ class StaticAgSceneExtractor:
         # if not video_paths:
         #     raise FileNotFoundError(f"No videos found in {self.cfg.videos_dir}")
 
-        video_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4"]
+        video_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4", "0A8CF.mp4"]
         video_paths = [os.path.join("/data/rohith/ag/videos", v) for v in video_list]
 
         for vp in video_paths:
