@@ -191,11 +191,7 @@ class StaticAgSceneExtractor:
 
         if remaining > 0 and chunks:
             # leftover < 17 → merge into the last chunk
-            # TODO: Create another copy and maintain the padding
-            last_start, last_end = chunks[-1]
-            last_start = last_start - (17 - remaining)  # expand start backwards
-            last_end = last_end + remaining  # expand end forwards
-            chunks.append((last_start, last_end))
+            chunks.append((total_frames-17, total_frames))
         elif remaining > 0 and not chunks:
             # edge case: total_frames < 17, just one chunk [0, total_frames)
             raise ValueError("Total frames less than 17; cannot form a valid chunk.")
