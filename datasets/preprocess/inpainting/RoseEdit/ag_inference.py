@@ -1,10 +1,10 @@
+import argparse
 import os
 import sys
-import math
-import glob
 import warnings
 from dataclasses import dataclass
-from typing import List, Tuple
+from pathlib import Path
+from typing import List, Tuple, Optional
 
 import numpy as np
 
@@ -13,7 +13,6 @@ warnings.filterwarnings("ignore")
 import torch
 import cv2
 import torch.nn.functional as F
-import torchvision.transforms.functional as TF
 from einops import rearrange
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
@@ -36,36 +35,39 @@ from diffusers import FlowMatchEulerDiscreteScheduler
 
 @dataclass
 class ExtractorConfig:
-    data_dir: str = "/data/rohith/ag"
-    videos_dir: str = "/data/rohith/ag/videos"
-    sampled_dir: str = "/data/rohith/ag/sampled_videos"
-    masked_dir: str = "/data/rohith/ag/segmentation/masked_videos/combined_masks"
-    static_dir: str = "/data/rohith/ag/static_videos"
 
-    # Model/config paths (same as your original script)
-    pretrained_model_name_or_path: str = "models/Wan2.1-Fun-1.3B-InP"
-    pretrained_transformer_path: str = "weights/transformer"
-    config_path: str = "configs/wan2.1/wan_civitai.yaml"
+    def __init__(self, data_dir):
+        self.data_dir = data_dir
+        self.videos_dir = os.path.join(data_dir, "videos")
+        self.sampled_dir = os.path.join(data_dir, "sampled_videos")
+        self.masked_dir = os.path.join(data_dir, "segmentation", "masked_videos", "combined_masks")
+        self.static_dir = os.path.join(data_dir, "static_videos")
 
-    # Inference
-    work_size_hw: Tuple[int, int] = (480, 720)  # (H, W) for working resolution
-    max_chunk_len: int = 129  # ≤ 128 per your requirement
-    num_inference_steps: int = 50
-    device: str = "cuda"
-    dtype = torch.float16
+        # Model/config paths (same as your original script)
+        self.pretrained_model_name_or_path: str = "models/Wan2.1-Fun-1.3B-InP"
+        self.pretrained_transformer_path: str = "weights/transformer"
+        self.config_path: str = "configs/wan2.1/wan_civitai.yaml"
 
-    # I/O behavior
-    save_resized_work_clips: bool = True  # also save the (480,720) sampled & masked intermediates
-    overwrite_outputs: bool = True  # overwrite existing outputs
+        # Inference
+        self.work_size_hw: Tuple[int, int] = (480, 720)  # (H, W) for working resolution
+        self.max_chunk_len: int = 129  # ≤ 128 per your requirement
+        self.num_inference_steps: int = 50
+        self.device: str = "cuda"
+        self.dtype = torch.float16
 
-    # If your transformer needs 16n+1, set this True
-    ENFORCE_16N_PLUS_1: bool = True
+        # I/O behavior
+        self.save_resized_work_clips: bool = True  # also save the (480,720) sampled & masked intermediates
+        self.overwrite_outputs: bool = True  # overwrite existing outputs
+
+        # If your transformer needs 16n+1, set this True
+        self.ENFORCE_16N_PLUS_1: bool = True
 
 
 class StaticAgSceneExtractor:
 
-    def __init__(self, cfg: ExtractorConfig = ExtractorConfig()):
+    def __init__(self, cfg, split):
         self.cfg = cfg
+        self.split = split
         os.makedirs(self.cfg.sampled_dir, exist_ok=True)
         os.makedirs(self.cfg.masked_dir, exist_ok=True)
         os.makedirs(self.cfg.static_dir, exist_ok=True)
@@ -191,7 +193,7 @@ class StaticAgSceneExtractor:
 
         if remaining > 0 and chunks:
             # leftover < 17 → merge into the last chunk
-            chunks.append((total_frames-17, total_frames))
+            chunks.append((total_frames - 17, total_frames))
         elif remaining > 0 and not chunks:
             # edge case: total_frames < 17, just one chunk [0, total_frames)
             raise ValueError("Total frames less than 17; cannot form a valid chunk.")
@@ -349,21 +351,90 @@ class StaticAgSceneExtractor:
         save_videos_grid(final_tensor, out_path)
 
     def process_all(self, prompt: str = ""):
-        # video_paths = sorted(glob.glob(os.path.join(self.cfg.videos_dir, "*.mp4")))
-        # if not video_paths:
-        #     raise FileNotFoundError(f"No videos found in {self.cfg.videos_dir}")
+        # video_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4",
+        #               "0A8CF.mp4"]
+        # video_paths = [os.path.join("/data/rohith/ag/videos", v) for v in video_list]
+        #
+        # for vp in video_paths:
+        #     print(f"[StaticAgSceneExtractor] Processing: {vp}")
+        #     self.process_single_video(vp, prompt=prompt)
+        # print("[StaticAgSceneExtractor] Done.")
 
-        video_list = ["0DJ6R.mp4", "00HFP.mp4", "00NN7.mp4", "00T1E.mp4", "00X3U.mp4", "00ZCA.mp4", "0ACZ8.mp4", "0A8CF.mp4"]
-        video_paths = [os.path.join("/data/rohith/ag/videos", v) for v in video_list]
+        def get_video_belongs_to_split(video_id: str) -> Optional[str]:
+            """
+            Get the split that the video belongs to based on its ID.
+            Accepts either a bare ID (e.g., '0DJ6R') or a filename (e.g., '0DJ6R.mp4').
+            """
+            stem = Path(video_id).stem
+            if not stem:
+                return None
+            first_letter = stem[0]
+            if first_letter.isdigit() and int(first_letter) < 5:
+                return "04"
+            elif first_letter.isdigit() and int(first_letter) >= 5:
+                return "59"
+            elif first_letter in "ABCD":
+                return "AD"
+            elif first_letter in "EFGH":
+                return "EH"
+            elif first_letter in "IJKL":
+                return "IL"
+            elif first_letter in "MNOP":
+                return "MP"
+            elif first_letter in "QRST":
+                return "QT"
+            elif first_letter in "UVWXYZ":
+                return "UZ"
+            return None
 
-        for vp in video_paths:
-            print(f"[StaticAgSceneExtractor] Processing: {vp}")
-            self.process_single_video(vp, prompt=prompt)
-        print("[StaticAgSceneExtractor] Done.")
+        video_id_list = os.listdir(self.cfg.masked_dir)
+        split_video_id_list = [video_id for video_id in video_id_list if
+                               get_video_belongs_to_split(video_id) == self.split]
+        import random
+        random.shuffle(split_video_id_list)
+
+        print(f"[StaticAgSceneExtractor] Found {len(split_video_id_list)} videos in split '{self.split}'.")
+
+        for idx, video_id in enumerate(split_video_id_list):
+            print(f"[StaticAgSceneExtractor] Processing {idx + 1}/{len(split_video_id_list)}: {video_id}")
+            video_path = os.path.join(self.cfg.videos_dir, video_id)
+            self.process_single_video(video_path, prompt=prompt)
+            print("-----------------------------------------------------------------------------------")
+
+
+def _parse_split(s: str) -> str:
+    valid = {"04", "59", "AD", "EH", "IL", "MP", "QT", "UZ"}
+    val = s.strip().upper()
+    if val not in valid:
+        raise argparse.ArgumentTypeError(
+            f"Invalid split '{s}'. Choose one of: {sorted(valid)}"
+        )
+    return val
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Sample frames from videos based on homography-overlap filtering."
+    )
+    parser.add_argument(
+        "--data_dir", type=str, default="/data/rohith/ag",
+        help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
+    )
+    parser.add_argument(
+        "--split", type=_parse_split, default="04",
+        help="Optional shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}. "
+             "If omitted, processes all videos."
+    )
+    return parser.parse_args()
 
 
 def main():
-    extractor = StaticAgSceneExtractor()
+    args = parse_args()
+    data_dir = Path(args.data_dir)
+    split = args.split
+
+    extractor_config = ExtractorConfig(data_dir)
+    extractor = StaticAgSceneExtractor(extractor_config, split)
     extractor.process_all(prompt="")
 
 
