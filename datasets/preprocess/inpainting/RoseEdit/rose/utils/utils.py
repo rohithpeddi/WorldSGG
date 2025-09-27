@@ -55,7 +55,7 @@ def color_transfer(sc, dc):
     return dst
 
 
-def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=6, fps=12, imageio_backend=True,
+def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=6, fps=10, imageio_backend=True,
                      color_transfer_post_process=False):
     videos = rearrange(videos, "b c t h w -> t b c h w")
     outputs = []
