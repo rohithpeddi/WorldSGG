@@ -265,6 +265,12 @@ class StaticAgSceneExtractor:
         stem = self._stem(video_path)
         mask_video_path = os.path.join(self.cfg.masked_dir, f"{stem}.mp4")
         sample_video_path = os.path.join(self.cfg.sampled_dir, f"{stem}.mp4")
+        out_path = os.path.join(self.cfg.static_dir, f"{stem}.mp4")
+
+        # Check if the path exists and the size of the file is greater than 0
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            print(f"[StaticAgSceneExtractor] Output exists, skipping: {out_path}")
+            return
 
         if not os.path.exists(mask_video_path):
             raise FileNotFoundError(f"Mask video missing for {stem}: {mask_video_path}")
@@ -347,7 +353,7 @@ class StaticAgSceneExtractor:
         final_tensor = final_tensor.permute(3, 0, 1, 2).unsqueeze(0)  # [1,C,F,H,W], uint8
 
         # Save once
-        out_path = os.path.join(self.cfg.static_dir, f"{stem}.mp4")
+
         save_videos_grid(final_tensor, out_path)
 
     def process_all(self, prompt: str = ""):
