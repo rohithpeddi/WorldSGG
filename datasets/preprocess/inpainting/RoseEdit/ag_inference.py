@@ -177,7 +177,7 @@ class StaticAgSceneExtractor:
         if total_frames <= 0:
             return []
 
-        allowed = [129, 113, 97, 81, 65, 49, 33, 17]
+        allowed = [81, 65, 49, 33, 17]
         chunks: List[Tuple[int, int]] = []
         start = 0
         remaining = total_frames
@@ -280,11 +280,11 @@ class StaticAgSceneExtractor:
 
         # Get total frame count from the MASK video (assumed aligned with source video)
         import cv2
-        cap = cv2.VideoCapture(mask_video_path)
-        if not cap.isOpened():
+        mask_cap = cv2.VideoCapture(mask_video_path)
+        if not mask_cap.isOpened():
             raise RuntimeError(f"Cannot open video: {video_path}")
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
+        total_frames = int(mask_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        mask_cap.release()
 
         # Compute chunk windows [(start, end)], end exclusive
         chunks = self._compute_chunks(total_frames)
@@ -292,6 +292,16 @@ class StaticAgSceneExtractor:
         # Buffer to hold restored frames at global positions
         # Each entry will be a numpy array [H, W, C] (uint8, RGB)
         frame_buffer = [None] * total_frames
+
+        # Check if masked and sampled videos match their number of frames match
+        sampled_cap = cv2.VideoCapture(sample_video_path)
+        if not sampled_cap.isOpened():
+            raise RuntimeError(f"Cannot open video: {sample_video_path}")
+        sampled_total_frames = int(sampled_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        sampled_cap.release()
+
+        if sampled_total_frames != total_frames:
+            raise ValueError(f"Frame count mismatch between sampled ({sampled_total_frames}) and mask ({total_frames}) videos for {stem}")
 
         # Process each chunk
         for ci, (s, e) in enumerate(chunks):
@@ -353,7 +363,6 @@ class StaticAgSceneExtractor:
         final_tensor = final_tensor.permute(3, 0, 1, 2).unsqueeze(0)  # [1,C,F,H,W], uint8
 
         # Save once
-
         save_videos_grid(final_tensor, out_path)
 
     def process_all(self, prompt: str = ""):
@@ -400,6 +409,8 @@ class StaticAgSceneExtractor:
         random.shuffle(split_video_id_list)
 
         print(f"[StaticAgSceneExtractor] Found {len(split_video_id_list)} videos in split '{self.split}'.")
+
+        split_video_id_list = ["9GUX4.mp4"]
 
         for idx, video_id in enumerate(split_video_id_list):
             print(f"[StaticAgSceneExtractor] Processing {idx + 1}/{len(split_video_id_list)}: {video_id}")
