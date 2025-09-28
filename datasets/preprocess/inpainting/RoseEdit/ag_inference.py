@@ -410,7 +410,7 @@ class StaticAgSceneExtractor:
 
         print(f"[StaticAgSceneExtractor] Found {len(split_video_id_list)} videos in split '{self.split}'.")
 
-        split_video_id_list = ["9GUX4.mp4"]
+        # split_video_id_list = ["9GUX4.mp4"]
 
         for idx, video_id in enumerate(split_video_id_list):
             print(f"[StaticAgSceneExtractor] Processing {idx + 1}/{len(split_video_id_list)}: {video_id}")
