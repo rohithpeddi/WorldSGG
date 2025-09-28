@@ -293,15 +293,19 @@ class StaticAgSceneExtractor:
         # Each entry will be a numpy array [H, W, C] (uint8, RGB)
         frame_buffer = [None] * total_frames
 
-        # Check if masked and sampled videos match their number of frames match
+        #Check if masked and sampled videos match their number of frames match
         sampled_cap = cv2.VideoCapture(sample_video_path)
         if not sampled_cap.isOpened():
             raise RuntimeError(f"Cannot open video: {sample_video_path}")
         sampled_total_frames = int(sampled_cap.get(cv2.CAP_PROP_FRAME_COUNT))
         sampled_cap.release()
 
+        # Raise an exception if the frame counts do not match and skip processing
         if sampled_total_frames != total_frames:
-            raise ValueError(f"Frame count mismatch between sampled ({sampled_total_frames}) and mask ({total_frames}) videos for {stem}")
+            raise ValueError(f"Frame count mismatch for {stem}: sampled video has {sampled_total_frames} frames, "
+                             f"mask video has {total_frames} frames.")
+
+        print(f"[StaticAgSceneExtractor] Processing {stem}: {total_frames} frames in {len(chunks)} chunks.")
 
         # Process each chunk
         for ci, (s, e) in enumerate(chunks):
@@ -410,12 +414,16 @@ class StaticAgSceneExtractor:
 
         print(f"[StaticAgSceneExtractor] Found {len(split_video_id_list)} videos in split '{self.split}'.")
 
-        # split_video_id_list = ["9GUX4.mp4"]
+        # split_video_id_list = ["7WIKW.mp4"]
 
         for idx, video_id in enumerate(split_video_id_list):
             print(f"[StaticAgSceneExtractor] Processing {idx + 1}/{len(split_video_id_list)}: {video_id}")
-            video_path = os.path.join(self.cfg.videos_dir, video_id)
-            self.process_single_video(video_path, prompt=prompt)
+            try:
+                video_path = os.path.join(self.cfg.videos_dir, video_id)
+                self.process_single_video(video_path, prompt=prompt)
+            except Exception as e:
+                print(f"Error constructing path for {video_id}: {e}")
+                continue
             print("-----------------------------------------------------------------------------------")
 
 
