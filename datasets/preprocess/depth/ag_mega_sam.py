@@ -120,10 +120,7 @@ class AgMegaSam:
     def __init__(self, datapath):
         self.datapath = datapath
         self.frames_path = os.path.join(self.datapath, "frames")
-        self.annotations_path = os.path.join(self.datapath, "annotations")
         self.video_list = sorted(os.listdir(self.frames_path))
-        self.gt_annotations = sorted(os.listdir(self.annotations_path))
-        print("Total number of ground truth annotations: ", len(self.gt_annotations))
 
         video_id_frame_id_list_pkl_file_path = os.path.join(self.datapath, "4d_video_frame_id_list.pkl")
         if os.path.exists(video_id_frame_id_list_pkl_file_path):
