@@ -1,5 +1,7 @@
 import argparse
+import glob
 import os
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -14,14 +16,16 @@ class AgUniDepth:
 
     def __init__(self, datapath):
         self.datapath = datapath
+        self.frames_path = os.path.join(self.datapath, "sampled_frames")
+        self.video_list = sorted(os.listdir(self.frames_path))
 
-        # ------- UniDepth parameters -------
-        self._unidepth_root = os.path.join(self.datapath, 'ag4D', "mega_sam", "unidepth")
+        self._unidepth_root = os.path.join(self.datapath, 'ag4D', "unidepth")
+        os.makedirs(self._unidepth_root, exist_ok=True)
         self.LONG_DIM = 640
 
         # -------------------------- UNIDEPTH --------------------------
 
-    def _load_unidepth_model(self, args):
+    def load_unidepth_model(self, args):
         self._unidepth_model = UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vitl14",
                                                           revision="1d0d3c52f60b5164629d279bb9a7546458e6dcc4")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -81,7 +85,8 @@ class AgUniDepth:
         for video_id in tqdm(self.video_list):
             video_frames_path = os.path.join(self.frames_path, video_id)
             img_paths = []
-            frame_id_list = self.video_id_frame_id_list[video_id]
+            frame_id_list = sorted([int(Path(p).stem) for p in
+                                    glob.glob(os.path.join(video_frames_path, "*.png"))])
             for frame_id in frame_id_list:
                 img_path = os.path.join(video_frames_path, f"{frame_id:06d}.png")
                 if os.path.exists(img_path):
@@ -106,7 +111,7 @@ def main():
 
     args = parser.parse_args()
     ag_unidepth = AgUniDepth(datapath=args.datapath)
-    ag_unidepth._load_unidepth_model(args)
+    ag_unidepth.load_unidepth_model(args)
     ag_unidepth.run_ag_unidepth_estimation()
 
 

@@ -21,7 +21,6 @@ class AgDepthAnything:
         self.frames_path = os.path.join(self.datapath, "sampled_frames")
         self.video_list = sorted(os.listdir(self.frames_path))
 
-        # ------ Depth Anything parameters ------
         self.margin_width = 50
         self.caption_height = 60
 
