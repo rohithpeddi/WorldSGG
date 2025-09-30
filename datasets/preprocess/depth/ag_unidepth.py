@@ -10,6 +10,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from UniDepth.unidepth.models import UniDepthV2
+from utils import get_video_belongs_to_split
 
 
 class AgUniDepth:
@@ -81,7 +82,7 @@ class AgUniDepth:
                 fov=fov_,
             )
 
-    def run_ag_unidepth_estimation(self):
+    def run_ag_unidepth_estimation(self, split):
         for video_id in tqdm(self.video_list):
             video_frames_path = os.path.join(self.frames_path, video_id)
             img_paths = []
@@ -94,25 +95,35 @@ class AgUniDepth:
                 else:
                     assert False, f"Image {img_path} does not exist."
 
-            self.video_unidepth_estimation(video_id, img_paths)
-
+            if get_video_belongs_to_split(video_id) == split:
+                self.video_unidepth_estimation(video_id, img_paths)
         print("Depth estimation completed for all videos.")
+
+
+def _parse_split(s: str) -> str:
+    valid = {"04", "59", "AD", "EH", "IL", "MP", "QT", "UZ"}
+    val = s.strip().upper()
+    if val not in valid:
+        raise argparse.ArgumentTypeError(
+            f"Invalid split '{s}'. Choose one of: {sorted(valid)}"
+        )
+    return val
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--datapath', type=str, default="/data/rohith/ag/")
 
-    # # ------------------------------ DEPTH ANYTHING ----------------------------
-    parser.add_argument('--encoder', type=str, default='vitl')
-    parser.add_argument('--load_from', type=str,
-                        default='/home/rxp190007/CODE/mega-sam/Depth_Anything/checkpoints/depth_anything_vitl14.pth')
-    parser.add_argument('--localhub', dest='localhub', action='store_true', default=False)
+    parser.add_argument(
+        "--split", type=_parse_split, default="04",
+        help="Optional shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}. "
+             "If omitted, processes all videos."
+    )
 
     args = parser.parse_args()
     ag_unidepth = AgUniDepth(datapath=args.datapath)
     ag_unidepth.load_unidepth_model(args)
-    ag_unidepth.run_ag_unidepth_estimation()
+    ag_unidepth.run_ag_unidepth_estimation(args.split)
 
 
 if __name__ == "__main__":

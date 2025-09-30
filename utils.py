@@ -1,4 +1,7 @@
 import json
+from pathlib import Path
+from typing import Optional
+
 import numpy as np
 import torch
 from matplotlib import pyplot as plt
@@ -8,6 +11,40 @@ import json
 import cv2
 import numpy as np
 import torch
+
+
+# ---------------------------
+# Split logic (yours)
+# ---------------------------
+
+def get_video_belongs_to_split(video_id: str) -> Optional[str]:
+    """
+    Get the split that the video belongs to based on its ID.
+    Accepts either a bare ID (e.g., '0DJ6R') or a filename (e.g., '0DJ6R.mp4').
+    """
+    stem = Path(video_id).stem
+    if not stem:
+        return None
+    first_letter = stem[0]
+    if first_letter.isdigit() and int(first_letter) < 5:
+        return "04"
+    elif first_letter.isdigit() and int(first_letter) >= 5:
+        return "59"
+    elif first_letter in "ABCD":
+        return "AD"
+    elif first_letter in "EFGH":
+        return "EH"
+    elif first_letter in "IJKL":
+        return "IL"
+    elif first_letter in "MNOP":
+        return "MP"
+    elif first_letter in "QRST":
+        return "QT"
+    elif first_letter in "UVWXYZ":
+        return "UZ"
+    return None
+
+# ------------------------------ Utilities (OLD) ------------------------------
 
 
 class NumpyEncoder(json.JSONEncoder):
