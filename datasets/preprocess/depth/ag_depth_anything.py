@@ -32,7 +32,7 @@ class AgDepthAnything:
         self._depth_anything_root = os.path.join(self.datapath, 'ag4D', "depth_anything")
         os.makedirs(self._depth_anything_root, exist_ok=True)
 
-    def _load_depth_anything_model(self, args):
+    def load_depth_anything_model(self, args):
         if args.encoder == 'vits':
             self.depth_anything = DPT_DINOv2(
                 encoder='vits',
@@ -137,16 +137,14 @@ class AgDepthAnything:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--datapath', type=str, default="/data/rohith/ag/")
-
-    # # ------------------------------ DEPTH ANYTHING ----------------------------
     parser.add_argument('--encoder', type=str, default='vitl')
     parser.add_argument('--load_from', type=str,
-                        default='/home/rxp190007/CODE/mega-sam/Depth_Anything/checkpoints/depth_anything_vitl14.pth')
+                        default='/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/depth/Depth_Anything/checkpoints/depth_anything_vitl14.pth')
     parser.add_argument('--localhub', dest='localhub', action='store_true', default=False)
 
     args = parser.parse_args()
     ag_depth_anything = AgDepthAnything(datapath=args.datapath)
-    ag_depth_anything._load_depth_anything_model(args)
+    ag_depth_anything.load_depth_anything_model(args)
     ag_depth_anything.run_ag_depth_anything_estimation()
 
 
