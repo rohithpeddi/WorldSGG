@@ -1,4 +1,5 @@
 import argparse
+import glob
 import os
 from pathlib import Path
 from typing import Optional
@@ -81,7 +82,7 @@ class AgFlow:
         self._flow_model.cuda()
         self._flow_model.eval()
 
-    def video_preprocess_flow(self, video_id, image_list, args):
+    def video_preprocess_flow(self, video_id, image_list):
         img_data = []
         for t, (image_file) in tqdm(enumerate(image_list)):
             image = cv2.imread(image_file)[..., ::-1]  # rgb
@@ -190,15 +191,16 @@ class AgFlow:
         for video_id in tqdm(self.video_list):
             video_frames_path = os.path.join(self.frames_path, video_id)
             img_paths = []
-            frame_id_list = self.video_id_frame_id_list[video_id]
-            frame_id_list = sorted(np.unique(frame_id_list))
+            frame_id_list = sorted([int(Path(p).stem) for p in glob.glob(os.path.join(video_frames_path, "*.png"))])
             for frame_id in frame_id_list:
                 img_path = os.path.join(video_frames_path, f"{frame_id:06d}.png")
                 if os.path.exists(img_path):
                     img_paths.append(img_path)
                 else:
                     assert False, f"Image {img_path} does not exist."
-            self.video_preprocess_flow(video_id, img_paths, args)
+
+            if get_video_belongs_to_split(video_id) == args.split:
+                self.video_preprocess_flow(video_id, img_paths)
         print("Flow estimation completed for all videos.")
 
 
@@ -222,11 +224,39 @@ def main():
              "If omitted, processes all videos."
     )
 
+    parser.add_argument(
+        '--model', default='/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/cvd_opt/raft-things.pth', help='restore checkpoint'
+    )
+    parser.add_argument('--small', action='store_true', help='use small model')
+
+    parser.add_argument('--path', help='dataset for evaluation')
+    parser.add_argument(
+        '--num_heads',
+        default=1,
+        type=int,
+        help='number of heads in attention and aggregation',
+    )
+    parser.add_argument(
+        '--position_only',
+        default=False,
+        action='store_true',
+        help='only use position-wise attention',
+    )
+    parser.add_argument(
+        '--position_and_content',
+        default=False,
+        action='store_true',
+        help='use position and content-wise attention',
+    )
+    parser.add_argument(
+        '--mixed_precision', action='store_true', help='use mixed precision'
+    )
+
     args = parser.parse_args()
 
     ag_flow = AgFlow(datapath=args.datapath)
     ag_flow.load_flow_estimation_model(args)
-    ag_flow.run_flow_estimation(args.split)
+    ag_flow.run_flow_estimation(args)
 
 
 if __name__ == "__main__":
