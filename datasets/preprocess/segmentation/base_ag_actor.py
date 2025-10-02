@@ -182,4 +182,3 @@ class BaseAgActor:
                 frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_LINEAR)
             writer.write(frame)
         writer.release()
-
