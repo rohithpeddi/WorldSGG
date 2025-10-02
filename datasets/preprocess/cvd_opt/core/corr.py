@@ -17,7 +17,7 @@
 
 import torch
 import torch.nn.functional as F
-from datasets.preprocess.cvd_opt.core.utils.utils import bilinear_sampler
+from .utils.utils import bilinear_sampler
 
 # pylint: disable=g-import-not-at-top
 try:

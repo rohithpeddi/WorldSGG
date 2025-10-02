@@ -23,9 +23,9 @@ import random
 import numpy as np
 import torch
 from torch.utils import data
-from datasets.preprocess.cvd_opt.core.utils import frame_utils
-from datasets.preprocess.cvd_opt.core.utils.augmentor import FlowAugmentor
-from datasets.preprocess.cvd_opt.core.utils.augmentor import SparseFlowAugmentor
+from .utils import frame_utils
+from .utils.augmentor import FlowAugmentor
+from .utils.augmentor import SparseFlowAugmentor
 
 
 class FlowDataset(data.Dataset):

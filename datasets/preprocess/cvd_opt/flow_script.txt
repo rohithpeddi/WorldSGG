@@ -1,8 +1,8 @@
-python ag_flow.py --split 04 --mixed_precision
-python ag_flow.py --split 59 --mixed_precision
-python ag_flow.py --split AD --mixed_precision
-python ag_flow.py --split EH --mixed_precision
-python ag_flow.py --split IL --mixed_precision
-python ag_flow.py --split MP --mixed_precision
-python ag_flow.py --split QT --mixed_precision
-python ag_flow.py --split UZ --mixed_precision
+CUDA_VISIBLE_DEVICES=0 python ag_flow.py --split 04 --mixed_precision
+CUDA_VISIBLE_DEVICES=0 python ag_flow.py --split 59 --mixed_precision
+CUDA_VISIBLE_DEVICES=0 python ag_flow.py --split AD --mixed_precision
+CUDA_VISIBLE_DEVICES=0 python ag_flow.py --split EH --mixed_precision
+CUDA_VISIBLE_DEVICES=0 python ag_flow.py --split IL --mixed_precision
+CUDA_VISIBLE_DEVICES=0 python ag_flow.py --split MP --mixed_precision
+CUDA_VISIBLE_DEVICES=0 python ag_flow.py --split QT --mixed_precision
+CUDA_VISIBLE_DEVICES=0 python ag_flow.py --split UZ --mixed_precision

@@ -9,8 +9,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from datasets.preprocess.cvd_opt.core.raft import RAFT
-from datasets.preprocess.cvd_opt.core.utils.utils import InputPadder
+from core.raft import RAFT
+from core.utils.utils import InputPadder
 
 
 # ---------------------------
