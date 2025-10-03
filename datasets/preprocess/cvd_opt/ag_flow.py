@@ -83,22 +83,30 @@ class AgFlow:
         self._flow_model.eval()
 
     def video_preprocess_flow(self, video_id, image_list):
+        # 1) Load & normalize frames (C,H,W) with consistent H,W
         img_data = []
-        for t, (image_file) in tqdm(enumerate(image_list)):
-            image = cv2.imread(image_file)[..., ::-1]  # rgb
+        for t, image_file in tqdm(enumerate(image_list), total=len(image_list)):
+            image = cv2.imread(image_file)[..., ::-1]  # BGR->RGB
             h0, w0, _ = image.shape
-            h1 = int(h0 * np.sqrt((384 * 512) / (h0 * w0)))
-            w1 = int(w0 * np.sqrt((384 * 512) / (h0 * w0)))
-            image = cv2.resize(image, (w1, h1))
-            image = image[: h1 - h1 % 8, : w1 - w1 % 8].transpose(2, 0, 1)
+            # keep ~constant area ~ (384*512)
+            scale = np.sqrt((384 * 512) / float(h0 * w0))
+            h1 = int(h0 * scale)
+            w1 = int(w0 * scale)
+            image = cv2.resize(image, (w1, h1), interpolation=cv2.INTER_LINEAR)
+            # make divisible by 8
+            h1 = h1 - (h1 % 8)
+            w1 = w1 - (w1 % 8)
+            image = image[:h1, :w1].transpose(2, 0, 1)  # (C,H,W)
             img_data.append(image)
 
-        img_data = np.array(img_data)
+        img_data = np.array(img_data)  # (T, 3, H_ref, W_ref) if consistent
+        if img_data.ndim != 4:
+            raise RuntimeError(
+                f"Inconsistent frame sizes; got array with ndim={img_data.ndim}. "
+                f"Ensure all frames resize to a single (H,W)."
+            )
+        T, C, H_ref, W_ref = img_data.shape
 
-        flows_low = []
-        flows_high = []
-        flow_masks_high = []
-        flow_init = None
         flows_arr_low_bwd = {}
         flows_arr_low_fwd = {}
 
@@ -108,77 +116,79 @@ class AgFlow:
         masks_arr_up = []
 
         for step in [1, 2, 4, 8, 15]:
-            flows_arr_low = []
-            for i in tqdm(range(max(0, -step), img_data.shape[0] - max(0, step))):
-                image1 = (
-                    torch.as_tensor(np.ascontiguousarray(img_data[i: i + 1]))
-                    .float()
-                    .cuda()
-                )
-                image2 = (
-                    torch.as_tensor(
-                        np.ascontiguousarray(img_data[i + step: i + step + 1])
-                    )
-                    .float()
-                    .cuda()
-                )
+            # skip steps longer than available frames
+            if T - step <= 0:
+                continue
+
+            for i in tqdm(range(0, T - step), leave=False):
+                image1 = torch.as_tensor(np.ascontiguousarray(img_data[i:i + 1])).float().cuda()
+                image2 = torch.as_tensor(np.ascontiguousarray(img_data[i + step:i + step + 1])).float().cuda()
 
                 ii.append(i)
                 jj.append(i + step)
 
                 with torch.no_grad():
-                    padder = InputPadder(image1.shape)
-                    image1, image2 = padder.pad(image1, image2)
-                    if np.abs(step) > 1:
-                        flow_init = np.stack(
-                            [flows_arr_low_fwd[i], flows_arr_low_bwd[i + step]], axis=0
-                        )
+                    padder = InputPadder(image1.shape)  # pads to multiples of 8
+                    image1p, image2p = padder.pad(image1, image2)
+
+                    # Optional RAFT warm-start
+                    if step > 1 and (i in flows_arr_low_fwd) and ((i + step) in flows_arr_low_bwd):
+                        flow_init = np.stack([flows_arr_low_fwd[i], flows_arr_low_bwd[i + step]],
+                                             axis=0)  # (2, H, W, 2)
                         flow_init = (
                             torch.as_tensor(np.ascontiguousarray(flow_init))
-                            .float()
-                            .cuda()
-                            .permute(0, 3, 1, 2)
+                            .float().cuda().permute(0, 3, 1, 2)  # (2, 2, H, W)
                         )
                     else:
                         flow_init = None
 
                     flow_low, flow_up, _ = self._flow_model(
-                        torch.cat([image1, image2], dim=0),
-                        torch.cat([image2, image1], dim=0),
+                        torch.cat([image1p, image2p], dim=0),
+                        torch.cat([image2p, image1p], dim=0),
                         iters=22,
                         test_mode=True,
                         flow_init=flow_init,
                     )
+                    # flow_*: (2, 2, Hp, Wp) where dim0 is fwd/bwd, dim1 is xy
 
-                    flow_low_fwd = flow_low[0].cpu().numpy().transpose(1, 2, 0)
-                    flow_low_bwd = flow_low[1].cpu().numpy().transpose(1, 2, 0)
+                    # Convert to (H,W,2)
+                    flow_low_fwd = flow_low[0].detach().cpu().numpy().transpose(1, 2, 0)
+                    flow_low_bwd = flow_low[1].detach().cpu().numpy().transpose(1, 2, 0)
 
-                    flow_up_fwd = resize_flow(
-                        flow_up[0].cpu().numpy().transpose(1, 2, 0),
-                        flow_up.shape[-2] // 2,
-                        flow_up.shape[-1] // 2,
-                    )
-                    flow_up_bwd = resize_flow(
-                        flow_up[1].cpu().numpy().transpose(1, 2, 0),
-                        flow_up.shape[-2] // 2,
-                        flow_up.shape[-1] // 2,
-                    )
+                    flow_up_fwd = flow_up[0].detach().cpu().numpy().transpose(1, 2, 0)
+                    flow_up_bwd = flow_up[1].detach().cpu().numpy().transpose(1, 2, 0)
 
-                    bwd2fwd_flow = warp_flow(flow_up_bwd, flow_up_fwd)
-                    fwd_lr_error = np.linalg.norm(flow_up_fwd + bwd2fwd_flow, axis=-1)
-                    fwd_mask_up = fwd_lr_error < 1.0
+                    # --- Normalize all flows to a single reference size (H_ref, W_ref)
+                    if (flow_up_fwd.shape[0] != H_ref) or (flow_up_fwd.shape[1] != W_ref):
+                        flow_up_fwd = resize_flow(flow_up_fwd, H_ref, W_ref)
+                    if (flow_up_bwd.shape[0] != H_ref) or (flow_up_bwd.shape[1] != W_ref):
+                        flow_up_bwd = resize_flow(flow_up_bwd, H_ref, W_ref)
 
-                    # flows_arr_low.append(flow_low_fwd)
-                    flows_arr_low_bwd[i + step] = flow_low_bwd
+                    # Consistent low-resolution cache for warm-starting RAFT across steps
                     flows_arr_low_fwd[i] = flow_low_fwd
+                    flows_arr_low_bwd[i + step] = flow_low_bwd
 
-                    # masks_arr_low.append(fwd_mask_low)
-                    flows_arr_up.append(flow_up_fwd)
-                    masks_arr_up.append(fwd_mask_up)
+                    # --- Mask from forward-backward consistency at reference size
+                    bwd2fwd_flow = warp_flow(flow_up_bwd.astype(np.float32), flow_up_fwd.astype(np.float32))
+                    fwd_lr_error = np.linalg.norm(flow_up_fwd + bwd2fwd_flow, axis=-1)
+                    fwd_mask_up = (fwd_lr_error < 1.0)  # (H_ref, W_ref), bool
 
-        iijj = np.stack((ii, jj), axis=0)
-        flows_high = np.array(flows_arr_up).transpose(0, 3, 1, 2)
-        flow_masks_high = np.array(masks_arr_up)[:, None, ...]
+                    flows_arr_up.append(flow_up_fwd.astype(np.float32))  # (H_ref, W_ref, 2)
+                    masks_arr_up.append(fwd_mask_up.astype(np.bool_))  # (H_ref, W_ref)
+
+        # Stack safely
+        if len(flows_arr_up) == 0:
+            raise RuntimeError("No flows were computed (check number of frames vs steps).")
+
+        try:
+            flows_high = np.stack(flows_arr_up, axis=0).transpose(0, 3, 1, 2)  # (N, 2, H, W)
+        except Exception as e:
+            # Helpful debug if something ever goes ragged again
+            shapes = [a.shape for a in flows_arr_up]
+            raise RuntimeError(f"Ragged flow list; shapes seen: {shapes}") from e
+
+        flow_masks_high = np.stack(masks_arr_up, axis=0)[:, None, ...]  # (N, 1, H, W)
+        iijj = np.stack((np.array(ii, dtype=np.int32), np.array(jj, dtype=np.int32)), axis=0)
 
         video_flow_dir = os.path.join(self._flow_root, video_id)
         os.makedirs(video_flow_dir, exist_ok=True)
