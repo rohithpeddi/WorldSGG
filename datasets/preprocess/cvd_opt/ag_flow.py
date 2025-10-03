@@ -311,6 +311,11 @@ class AgFlow:
                     assert False, f"Image {img_path} does not exist."
 
             if get_video_belongs_to_split(video_id) == args.split:
+                # Check the flow output already exists
+                flow_output_path = os.path.join(self._flow_root, video_id, "flows.npy")
+                if os.path.exists(flow_output_path):
+                    print(f"[skip] Flow already exists for video {video_id}, skipping.")
+                    continue
                 self.video_preprocess_flow(video_id, img_paths)
         print("Flow estimation completed for all videos.")
 
