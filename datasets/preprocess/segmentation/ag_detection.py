@@ -4,14 +4,46 @@ import os
 import pickle
 import re
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import torch
 from PIL import Image
 from tqdm import tqdm
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection, AutoModelForCausalLM, AutoTokenizer
 
-from datasets.preprocess.segmentation.base_ag_actor import BaseAgActor, get_video_belongs_to_split
+from datasets.preprocess.segmentation.base_ag_actor import BaseAgActor
+
+
+# ---------------------------
+# Split logic (yours)
+# ---------------------------
+
+def get_video_belongs_to_split(video_id: str) -> Optional[str]:
+    """
+    Get the split that the video belongs to based on its ID.
+    Accepts either a bare ID (e.g., '0DJ6R') or a filename (e.g., '0DJ6R.mp4').
+    """
+    stem = Path(video_id).stem
+    if not stem:
+        return None
+    first_letter = stem[0]
+    if first_letter.isdigit() and int(first_letter) < 5:
+        return "04"
+    elif first_letter.isdigit() and int(first_letter) >= 5:
+        return "59"
+    elif first_letter in "ABCD":
+        return "AD"
+    elif first_letter in "EFGH":
+        return "EH"
+    elif first_letter in "IJKL":
+        return "IL"
+    elif first_letter in "MNOP":
+        return "MP"
+    elif first_letter in "QRST":
+        return "QT"
+    elif first_letter in "UVWXYZ":
+        return "UZ"
+    return None
 
 
 class AgDetection(BaseAgActor):

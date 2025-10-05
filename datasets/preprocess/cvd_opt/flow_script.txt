@@ -4,5 +4,5 @@ CUDA_VISIBLE_DEVICES=0 python ag_flow.py --split AD --mixed_precision
 CUDA_VISIBLE_DEVICES=0 python ag_flow.py --split EH --mixed_precision
 CUDA_VISIBLE_DEVICES=0 python ag_flow.py --split IL --mixed_precision
 CUDA_VISIBLE_DEVICES=0 python ag_flow.py --split MP --mixed_precision
-CUDA_VISIBLE_DEVICES=0 python ag_flow.py --split QT --mixed_precision
-CUDA_VISIBLE_DEVICES=0 python ag_flow.py --split UZ --mixed_precision
+CUDA_VISIBLE_DEVICES=1 python ag_flow.py --split QT --mixed_precision
+CUDA_VISIBLE_DEVICES=1 python ag_flow.py --split UZ --mixed_precision

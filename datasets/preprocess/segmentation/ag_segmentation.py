@@ -3,7 +3,7 @@ import os
 import pickle
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Tuple, Any, List, DefaultDict
+from typing import Dict, Tuple, Any, List, DefaultDict, Optional
 
 import cv2
 import numpy as np
@@ -14,10 +14,39 @@ from sam2.sam2_video_predictor import SAM2VideoPredictor
 from tqdm import tqdm
 
 from datasets.preprocess.segmentation.ag_detection import BaseAgActor
-from datasets.preprocess.segmentation.base_ag_actor import get_video_belongs_to_split
 
 
-# TODO: Apply dilation to expand masks slightly to cover object boundaries better?
+# ---------------------------
+# Split logic (yours)
+# ---------------------------
+
+def get_video_belongs_to_split(video_id: str) -> Optional[str]:
+    """
+    Get the split that the video belongs to based on its ID.
+    Accepts either a bare ID (e.g., '0DJ6R') or a filename (e.g., '0DJ6R.mp4').
+    """
+    stem = Path(video_id).stem
+    if not stem:
+        return None
+    first_letter = stem[0]
+    if first_letter.isdigit() and int(first_letter) < 5:
+        return "04"
+    elif first_letter.isdigit() and int(first_letter) >= 5:
+        return "59"
+    elif first_letter in "ABCD":
+        return "AD"
+    elif first_letter in "EFGH":
+        return "EH"
+    elif first_letter in "IJKL":
+        return "IL"
+    elif first_letter in "MNOP":
+        return "MP"
+    elif first_letter in "QRST":
+        return "QT"
+    elif first_letter in "UVWXYZ":
+        return "UZ"
+    return None
+
 
 class AgSegmentation(BaseAgActor):
 
@@ -401,7 +430,9 @@ class AgSegmentation(BaseAgActor):
         else:
             class _Noop:
                 def __enter__(self): return None
+
                 def __exit__(self, *args): return False
+
             amp_ctx = _Noop()
 
         # -------------------------------
@@ -526,6 +557,37 @@ class AgSegmentation(BaseAgActor):
                 # (optional) also save the per-frame union mask itself as binary:
                 union_mask_path = out_masks_combined_dir / f"{stem}.png"
                 cv2.imwrite(str(union_mask_path), (union_frame.astype(np.uint8) * 255))
+            else:
+                print(f"[combine_masks][{video_id}][{stem}] No masks found in either route. Writing placeholders.")
+                # Edge case: no masks from either route for this frame -> write empty mask + blacked frame
+                # Steps:
+                # No masks from either route for this frame: write placeholders
+                # 1) Find the original frame (try .png, .jpg, .jpeg)
+                src = None
+                for ext in (".png", ".jpg", ".jpeg"):
+                    cand = frames_dir / f"{stem}{ext}"
+                    if cand.exists():
+                        src = cand
+                        break
+                if src is None:
+                    print(f"[combine_masks][{video_id}][{stem}] Frame not found (no .png/.jpg/.jpeg). Skipping.")
+                    continue
+
+                # 2) Load image to get H, W and keep RGB for consistency
+                img = Image.open(src).convert("RGB")
+                h, w = img.height, img.width
+
+                # 3) Save an EMPTY (all-zero) union mask in the combined masks dir
+                empty_mask_u8 = np.zeros((h, w), dtype=np.uint8)  # 0 = background (black)
+                cv2.imwrite(str(out_masks_combined_dir / f"{stem}.png"), empty_mask_u8)
+
+                # 4) Save a union-masked RGB frame placeholder
+                #    (semantics match the masked frame logic: applying an empty mask -> all black)
+                masked_np = self._apply_mask(np.array(img), empty_mask_u8.astype(bool))
+                cv2.imwrite(
+                    str(out_frames_combined_dir / f"{stem}.png"),
+                    cv2.cvtColor(masked_np, cv2.COLOR_RGB2BGR),
+                )
 
     def save_masked_frames_and_videos(self, video_id):
         routes = [
@@ -543,6 +605,10 @@ class AgSegmentation(BaseAgActor):
 
             # write video from frames
             out_mp4 = mp4_video_directory / f"{Path(video_id).stem}.mp4"
+            if out_mp4.exists() and out_mp4.stat().st_size > 0:
+                print(f"[save_masked_frames_and_videos][{video_id}][{route_name}] Skipping (already done: {out_mp4})")
+                continue
+
             self._write_video_from_frames(frames_dir, out_mp4, fps=10)
 
     def process(self, split):
@@ -617,5 +683,99 @@ def main():
     ag_actor_segmentation.process(split)
 
 
+# -------------------------------------- VIDEO FRAME COUNT MISMATCH CHECK AND CORRECTION -------------------------------------- #
+
+def fetch_mismatch_video_stats():
+    sampled_videos_dir_path = Path("/data/rohith/ag/sampled_videos")
+    masked_videos_dir_path = Path("/data/rohith/ag/segmentation/masked_videos/combined_masks_1")
+
+    mismatch_video_count = 0
+    masked_video_not_found = 0
+    frame_mismatch_video_list = []
+    for video_id in tqdm(os.listdir(sampled_videos_dir_path)):
+        sampled_video_path = sampled_videos_dir_path / video_id
+        if not sampled_video_path.is_file() or not video_id.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
+            continue
+
+        masked_video_path = masked_videos_dir_path / video_id
+        if not masked_video_path.exists():
+            print(f"[fetch_mismatch_video_count][{video_id}] Masked video not found at {masked_video_path}. Skipping.")
+            masked_video_not_found += 1
+            continue
+
+        # Function to get frame count using OpenCV
+        def get_frame_count(video_path: Path) -> int:
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                print(f"[get_frame_count] Failed to open video: {video_path}")
+                return -1
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            return frame_count
+
+        sampled_frame_count = get_frame_count(sampled_video_path)
+        masked_frame_count = get_frame_count(masked_video_path)
+
+        if sampled_frame_count == -1 or masked_frame_count == -1:
+            continue
+
+        if sampled_frame_count != masked_frame_count:
+            print(
+                f"[fetch_mismatch_video_count][{video_id}] Frame count mismatch: sampled={sampled_frame_count}, masked={masked_frame_count}")
+            mismatch_video_count += 1
+            frame_mismatch_video_list.append(video_id)
+
+    print(
+        f"Total videos with frame count mismatch: {mismatch_video_count}, Masked videos not found: {masked_video_not_found}")
+
+    return frame_mismatch_video_list, mismatch_video_count, masked_video_not_found
+
+
+def check_mismatch_video_count(sampled_video_path: Path, masked_video_path: Path) -> bool:
+    """
+    Check if the number of frames in the sampled video matches the number of frames in the masked video.
+    Returns True if there is a mismatch, False otherwise.
+    """
+
+    def get_frame_count(video_path: Path) -> int:
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            print(f"[get_frame_count] Failed to open video: {video_path}")
+            return -1
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        return frame_count
+
+    sampled_frame_count = get_frame_count(sampled_video_path)
+    masked_frame_count = get_frame_count(masked_video_path)
+
+    if sampled_frame_count == -1 or masked_frame_count == -1:
+        return False  # Unable to determine frame count; treat as no mismatch
+
+    return sampled_frame_count != masked_frame_count
+
+
+def correct_masked_videos():
+    data_dir = Path("/data/rohith/ag")
+    ag_actor_segmentation = AgSegmentation(data_dir)
+    sampled_videos_dir_path = Path("/data/rohith/ag/sampled_videos")
+    masked_videos_dir_path = Path("/data/rohith/ag/segmentation/masked_videos/combined_masks_1")
+
+    for video_id in tqdm(os.listdir(sampled_videos_dir_path)):
+        sampled_video_path = sampled_videos_dir_path / video_id
+        masked_video_path = masked_videos_dir_path / video_id
+        if not masked_video_path.exists():
+            print(f"[fetch_mismatch_video_count][{video_id}] Masked video not found at {masked_video_path}. Skipping.")
+            continue
+
+        is_mismatch = check_mismatch_video_count(sampled_video_path, masked_video_path)
+
+        if is_mismatch:
+            print(f"[correct_masked_videos][{video_id}] Frame count mismatch detected. Reprocessing video.")
+            ag_actor_segmentation.combine_masks(video_id)
+            ag_actor_segmentation.save_masked_frames_and_videos(video_id)
+
+
 if __name__ == "__main__":
-    main()
+    # main()
+    correct_masked_videos()
