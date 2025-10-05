@@ -15,7 +15,8 @@ class StandardAGCoCoDataset(BaseAG):
             datasize="full",
             data_path=None,
             filter_nonperson_box_frame=True,
-            filter_small_box=False
+            filter_small_box=False,
+            enable_coco_gt=False
     ):
         super().__init__(phase, mode, datasize, data_path, filter_nonperson_box_frame, filter_small_box)
         self.gt_coco_dict = None
@@ -40,7 +41,8 @@ class StandardAGCoCoDataset(BaseAG):
         self._images_json: List[Dict[str, Any]] = []
         self._annotations_json: List[Dict[str, Any]] = []
 
-        self.build_gt_coco_annotations()
+        if enable_coco_gt:
+            self._build_gt_coco_annotations()
 
     # ------------------------------ GT parsing ------------------------------
     def parse_gt_for_frame(

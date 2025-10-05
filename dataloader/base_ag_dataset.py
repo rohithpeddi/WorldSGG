@@ -20,7 +20,8 @@ class BaseAG(Dataset):
             datasize,
             data_path=None,
             filter_nonperson_box_frame=True,
-            filter_small_box=False
+            filter_small_box=False,
+            enable_coco_gt=False
     ):
 
         root_path = data_path
@@ -67,7 +68,8 @@ class BaseAG(Dataset):
         self._images_json: List[Dict[str, Any]] = []
         self._gt_coco_annotations_json: List[Dict[str, Any]] = []
 
-        self._build_gt_coco_annotations()
+        if enable_coco_gt:
+            self._build_gt_coco_annotations()
 
     def _parse_gt_for_frame(
             self,
