@@ -46,7 +46,7 @@ def dump_frames(args):
                           RuntimeWarning)
 
 
-if __name__ == "__main__":
+def main_setup_dataset():
     parser = argparse.ArgumentParser(description="Dump frames")
     parser.add_argument("--video_dir", default="/data/rohith/ag/videos",
                         help="Folder containing Charades videos.")
@@ -59,3 +59,40 @@ if __name__ == "__main__":
                         help="Set if you want to dump all frames, rather than the frames listed in frame_list.txt")
     args = parser.parse_args()
     dump_frames(args)
+
+
+# ----------------------------------------------------------------------------------------------------------
+# --------------------------------------- STATIC SCENE RELATED --------------------------------------------
+# ----------------------------------------------------------------------------------------------------------
+
+def dump_static_frames(args):
+    video_dir = args.video_dir
+    frame_dir = args.frame_dir
+
+    # For each video, dump frames.
+    for v in tqdm(os.listdir(video_dir)):
+        curr_frame_dir = os.path.join(frame_dir, v)
+        if not os.path.exists(curr_frame_dir):
+            os.makedirs(curr_frame_dir)
+            # Use ffmpeg to extract frames. Different versions of ffmpeg may generate slightly different frames.
+            # We used ffmpeg 2.8.15 to dump our frames.
+            # Note that the frames are extracted according to their original video FPS, which is not always 24.
+            # Therefore, our frame indices are different from Charades extracted frames' indices.
+            os.system('ffmpeg -loglevel panic -i %s/%s %s/%%06d.png' % (video_dir, v, curr_frame_dir))
+        else:
+            warnings.warn('Frame directory %s already exists. Skipping dumping into this directory.' % curr_frame_dir,
+                          RuntimeWarning)
+
+
+def main_setup_static_scene():
+    parser = argparse.ArgumentParser(description="Dump frames")
+    parser.add_argument("--video_dir", default="/data/rohith/ag/static_videos",
+                        help="Folder containing static scene videos.")
+    parser.add_argument("--frame_dir", default="/data/rohith/ag/static_frames",
+                        help="Root folder containing frames to be dumped.")
+    args = parser.parse_args()
+    dump_static_frames(args)
+
+
+if __name__ == "__main__":
+    main_setup_static_scene()
