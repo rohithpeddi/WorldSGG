@@ -687,7 +687,7 @@ def main():
 
 def fetch_mismatch_video_stats():
     sampled_videos_dir_path = Path("/data/rohith/ag/sampled_videos")
-    masked_videos_dir_path = Path("/data/rohith/ag/segmentation/masked_videos/combined_masks_1")
+    masked_videos_dir_path = Path("/data/rohith/ag/segmentation/masked_videos/combined_masks")
 
     mismatch_video_count = 0
     masked_video_not_found = 0
@@ -778,4 +778,5 @@ def correct_masked_videos():
 
 if __name__ == "__main__":
     # main()
-    correct_masked_videos()
+    # correct_masked_videos()
+    fetch_mismatch_video_stats()
