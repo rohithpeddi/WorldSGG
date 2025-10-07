@@ -1,10 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-
-# Work in Progress (WIP)
 """
 VGGT Runner Script
 =================
@@ -34,11 +27,12 @@ Key Features
 • COLMAP Compatibility: exports results in standard COLMAP sparse reconstruction format
 """
 
-import random
-import numpy as np
+import copy
 import glob
 import os
-import copy
+import random
+
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -51,8 +45,7 @@ import argparse
 from pathlib import Path
 import trimesh
 import pycolmap
-
-from typing import Optional
+import cv2
 
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images_square
@@ -66,201 +59,41 @@ from vggt.dependency.np_to_pycolmap import (
 )
 
 
-# ==========================
-# Torch Bundle Adjustment (optional backend)
-# ==========================
-
-def _axis_angle_to_R(axis_angle: torch.Tensor) -> torch.Tensor:
-    """Rodrigues for (B,3) -> (B,3,3)."""
-    theta = torch.norm(axis_angle + 1e-12, dim=-1, keepdim=True)  # (B,1)
-    k = axis_angle / torch.clamp(theta, min=1e-12)
-    k = torch.nan_to_num(k)
-    B = axis_angle.shape[0]
-    Kx = torch.zeros(B, 3, 3, device=axis_angle.device, dtype=axis_angle.dtype)
-    Kx[:, 0, 1] = -k[:, 2]
-    Kx[:, 0, 2] = k[:, 1]
-    Kx[:, 1, 0] = k[:, 2]
-    Kx[:, 1, 2] = -k[:, 0]
-    Kx[:, 2, 0] = -k[:, 1]
-    Kx[:, 2, 1] = k[:, 0]
-    I = torch.eye(3, device=axis_angle.device, dtype=axis_angle.dtype)[None].repeat(B, 1, 1)
-    sin = torch.sin(theta)[:, None]
-    cos = torch.cos(theta)[:, None]
-    R = I + sin * Kx + (1 - cos) * (Kx @ Kx)
-    return R
-
-
-def _se3_project(K: torch.Tensor, R: torch.Tensor, t: torch.Tensor, X: torch.Tensor) -> torch.Tensor:
-    """Project 3D points with intrinsics K (N,3,3), R (N,3,3), t (N,3,1), X (P,3) -> (N,P,2)."""
-    N, P = R.shape[0], X.shape[0]
-    X_h = torch.cat([X, torch.ones(P, 1, device=X.device, dtype=X.dtype)], dim=-1)  # (P,4)
-    RT = torch.cat([R, t], dim=-1)  # (N,3,4)  camera-from-world
-    PX = (K @ (RT @ X_h.T).transpose(1, 2))  # (N,3,P)
-    uv = PX[:, :2, :] / torch.clamp(PX[:, 2:3, :], min=1e-6)
-    return uv.transpose(1, 2)  # (N,P,2)
-
-
-def _log_so3(R: torch.Tensor) -> torch.Tensor:
-    """Matrix log for rotation -> axis angle (approx, robust). (3,3)->(3,)"""
-    tr = torch.trace(R)
-    cos = torch.clamp((tr - 1) / 2, -1 + 1e-6, 1 - 1e-6)
-    theta = torch.acos(cos)
-    if theta < 1e-8:
-        return torch.zeros(3, device=R.device, dtype=R.dtype)
-    w = torch.tensor([
-        R[2, 1] - R[1, 2],
-        R[0, 2] - R[2, 0],
-        R[1, 0] - R[0, 1],
-    ], device=R.device, dtype=R.dtype) / (2 * torch.sin(theta))
-    return w * theta
-
-
-class TorchBA(torch.nn.Module):
-    """Optimize camera extrinsics (axis-angle + translation) and 3D points.
-    Keeps the first camera fixed to remove gauge freedom.
-    """
+class AgStaticVideoDataset:
 
     def __init__(
             self,
-            Ks: torch.Tensor,  # (N,3,3)
-            Tcw_init: torch.Tensor,  # (N,4,4) camera-from-world
-            tracks_uv: torch.Tensor,  # (N,P,2)
-            vis_mask: torch.Tensor,  # (N,P) bool
-            X_init: Optional[torch.Tensor] = None,  # (P,3) initial 3D
+            static_videos_dir: str,
     ):
-        super().__init__()
-        device = Ks.device
-        self.register_buffer("Ks", Ks)
-        self.register_buffer("vis", vis_mask.float())
-        self.N, self.P = tracks_uv.shape[:2]
+        self.static_videos_dir = Path(static_videos_dir)
+        self.static_videos = list(self.static_videos_dir.glob("*"))
 
-        # Initialize rotations/translations from Tcw
-        R0 = Tcw_init[:, :3, :3]
-        t0 = Tcw_init[:, :3, 3]
-        self.rot_aa = torch.nn.Parameter(torch.zeros(self.N, 3, device=device))
-        self.t = torch.nn.Parameter(t0.clone())
-        with torch.no_grad():
-            for i in range(self.N):
-                self.rot_aa[i] = _log_so3(R0[i])
-        # lock first camera
-        self.rot_aa.requires_grad_(True)
-        self.t.requires_grad_(True)
+    def __len__(self):
+        return len(self.static_videos)
 
-        # Initialize 3D points
-        if X_init is None:
-            # Linear triangulation from first & last visible views per point
-            self.X = torch.nn.Parameter(self._triangulate_linear(R0, t0[:, :, None], tracks_uv, vis_mask))
-        else:
-            self.X = torch.nn.Parameter(X_init.clone().to(device))
+    def __getitem__(self, idx):
+        # (1) Loads a videos from the static_videos list
+        video_name = self.static_videos[idx]
+        video_path = self.static_videos_dir / video_name
 
-        self.tracks_uv = torch.nn.Parameter(tracks_uv, requires_grad=False)
-
-    def forward(self):
-        R = _axis_angle_to_R(self.rot_aa)  # (N,3,3)
-        t = self.t[:, :, None]  # (N,3,1)
-        uv_pred = _se3_project(self.Ks, R, t, self.X)  # (N,P,2)
-        diff = (uv_pred - self.tracks_uv) * self.vis[:, :, None]
-        loss = torch.sqrt(torch.sum(diff ** 2, dim=-1) + 1e-6).mean()
-        return loss
-
-    def _triangulate_linear(self, R, t, uv, vis):
-        device = R.device
-        N, P = uv.shape[:2]
-        X = torch.zeros(P, 3, device=device, dtype=R.dtype)
-        # pick first and last visible view per point
-        vis_idx = vis.nonzero(as_tuple=False)  # (M,2)
-        first = torch.full((P,), -1, dtype=torch.long, device=device)
-        last = torch.full((P,), -1, dtype=torch.long, device=device)
-        for n, p in vis_idx:
-            if first[p] == -1:
-                first[p] = n
-            last[p] = n
-        for p in range(P):
-            i = int(first[p].item()) if first[p] >= 0 else 0
-            j = int(last[p].item()) if last[p] >= 0 else min(1, N - 1)
-            Ki = self.Ks[i]
-            Kj = self.Ks[j]
-            Pi = Ki @ torch.cat([R[i], t[i]], dim=-1)  # (3,4)
-            Pj = Kj @ torch.cat([R[j], t[j]], dim=-1)
-            xi, yi = uv[i, p]
-            xj, yj = uv[j, p]
-            A = torch.stack([
-                xi * Pi[2] - Pi[0],
-                yi * Pi[2] - Pi[1],
-                xj * Pj[2] - Pj[0],
-                yj * Pj[2] - Pj[1],
-            ], dim=0)  # (4,4)
-            _, _, V = torch.linalg.svd(A)
-            Xh = V[-1]
-            X[p] = Xh[:3] / torch.clamp(Xh[3], min=1e-9)
-        return X
+        # (2) Load the video using cv2 and extract frames as images and return the images
+        cap = cv2.VideoCapture(str(video_path))
+        frames = []
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(frame)
+        cap.release()
+        frames = np.stack(frames, axis=0)  # (N,H,W,3)
+        return frames, video_path.name
 
 
-def run_torch_ba(
-        Ks_np: np.ndarray,  # (N,3,3)
-        Tcw_np: np.ndarray,  # (N,4,4)
-        tracks_uv_np: np.ndarray,  # (N,P,2)
-        vis_mask_np: np.ndarray,  # (N,P)
-        X_init_np: Optional[np.ndarray] = None,
-        iters: int = 200,
-        lr: float = 1e-2,
-):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    Ks = torch.from_numpy(Ks_np).to(device=device, dtype=torch.float32)
-    Tcw = torch.from_numpy(Tcw_np).to(device=device, dtype=torch.float32)
-    tracks_uv = torch.from_numpy(tracks_uv_np).to(device=device, dtype=torch.float32)
-    vis_mask = torch.from_numpy(vis_mask_np.astype(bool)).to(device=device)
-    X_init = torch.from_numpy(X_init_np).to(device=device, dtype=torch.float32) if X_init_np is not None else None
+class AgVGGT:
 
-    ba = TorchBA(Ks, Tcw, tracks_uv, vis_mask, X_init=X_init).to(device)
-    opt = torch.optim.Adam([p for p in ba.parameters() if p.requires_grad], lr=lr)
-    for _ in range(iters):
-        opt.zero_grad()
-        loss = ba()
-        loss.backward()
-        opt.step()
-    with torch.no_grad():
-        R = _axis_angle_to_R(ba.rot_aa)
-        t = ba.t[:, :, None]
-        Tcw_new = torch.eye(4, device=device).unsqueeze(0).repeat(Ks.shape[0], 1, 1)
-        Tcw_new[:, :3, :3] = R
-        Tcw_new[:, :3, 3:4] = t
-        X_new = ba.X
-    return Tcw_new.detach().cpu().numpy(), X_new.detach().cpu().numpy()
-
-
-# ==========================
-# Original utilities
-# ==========================
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="VGGT Demo")
-    parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-
-    # BA selection
-    parser.add_argument("--use_ba", action="store_true", default=False, help="Use bundle adjustment")
-    parser.add_argument(
-        "--ba_backend", type=str, default="pycolmap", choices=["pycolmap", "torch"],
-        help="Which BA backend to use"
-    )
-    parser.add_argument("--ba_iters", type=int, default=200, help="Iterations for Torch BA")
-    parser.add_argument("--ba_lr", type=float, default=1e-2, help="Learning rate for Torch BA")
-
-    # BA (shared) params
-    parser.add_argument("--max_reproj_error", type=float, default=8.0, help="Max reprojection error for reconstruction")
-    parser.add_argument("--shared_camera", action="store_true", default=False, help="Use shared camera for all images")
-    parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
-    parser.add_argument("--vis_thresh", type=float, default=0.2, help="Visibility threshold for tracks")
-    parser.add_argument("--query_frame_num", type=int, default=8, help="Number of frames to query")
-    parser.add_argument("--max_query_pts", type=int, default=4096, help="Maximum number of query points")
-    parser.add_argument("--fine_tracking", action="store_true", default=True,
-                        help="Use fine tracking (slower but more accurate)")
-
-    # No-BA feed-forward export
-    parser.add_argument("--conf_thres_value", type=float, default=5.0,
-                        help="Confidence threshold for depth filtering (wo BA)")
-    return parser.parse_args()
+    def __init__(self):
+        self.static_video_dataset = AgStaticVideoDataset(static_videos_dir="/data/rohith/ag/static_videos")
 
 
 def run_VGGT(model, images, dtype, resolution=518):
@@ -546,6 +379,36 @@ def rename_colmap_recons_and_rescale_camera(
             rescale_camera = False
 
     return reconstruction
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="VGGT Demo")
+    parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+
+    # BA selection
+    parser.add_argument("--use_ba", action="store_true", default=False, help="Use bundle adjustment")
+    parser.add_argument(
+        "--ba_backend", type=str, default="pycolmap", choices=["pycolmap", "torch"],
+        help="Which BA backend to use"
+    )
+    parser.add_argument("--ba_iters", type=int, default=200, help="Iterations for Torch BA")
+    parser.add_argument("--ba_lr", type=float, default=1e-2, help="Learning rate for Torch BA")
+
+    # BA (shared) params
+    parser.add_argument("--max_reproj_error", type=float, default=8.0, help="Max reprojection error for reconstruction")
+    parser.add_argument("--shared_camera", action="store_true", default=False, help="Use shared camera for all images")
+    parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
+    parser.add_argument("--vis_thresh", type=float, default=0.2, help="Visibility threshold for tracks")
+    parser.add_argument("--query_frame_num", type=int, default=8, help="Number of frames to query")
+    parser.add_argument("--max_query_pts", type=int, default=4096, help="Maximum number of query points")
+    parser.add_argument("--fine_tracking", action="store_true", default=True,
+                        help="Use fine tracking (slower but more accurate)")
+
+    # No-BA feed-forward export
+    parser.add_argument("--conf_thres_value", type=float, default=5.0,
+                        help="Confidence threshold for depth filtering (wo BA)")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":

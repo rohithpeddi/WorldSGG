@@ -11,6 +11,7 @@ import torch
 from torch import nn
 from torch.optim import Adam
 
+
 # ---------------------------------------
 # Helpers
 # ---------------------------------------
@@ -64,18 +65,34 @@ def se3_project(K, R, t, X):
 
 def axis_angle_to_R(axis_angle: torch.Tensor) -> torch.Tensor:
     """Rodrigues for (B,3) -> (B,3,3)."""
-    theta = torch.norm(axis_angle + 1e-9, dim=-1, keepdim=True)
-    k = axis_angle / theta
+    theta = torch.norm(axis_angle + 1e-12, dim=-1, keepdim=True)  # (B,1)
+    k = axis_angle / torch.clamp(theta, min=1e-12)
     k = torch.nan_to_num(k)
-    Kx = torch.zeros(axis_angle.shape[0], 3, 3, device=axis_angle.device, dtype=axis_angle.dtype)
-    Kx[:, 0, 1] = -k[:, 2];
+    B = axis_angle.shape[0]
+    Kx = torch.zeros(B, 3, 3, device=axis_angle.device, dtype=axis_angle.dtype)
+    Kx[:, 0, 1] = -k[:, 2]
     Kx[:, 0, 2] = k[:, 1]
-    Kx[:, 1, 0] = k[:, 2];
+    Kx[:, 1, 0] = k[:, 2]
     Kx[:, 1, 2] = -k[:, 0]
-    Kx[:, 2, 0] = -k[:, 1];
+    Kx[:, 2, 0] = -k[:, 1]
     Kx[:, 2, 1] = k[:, 0]
-    I = torch.eye(3, device=axis_angle.device, dtype=axis_angle.dtype).unsqueeze(0).repeat(axis_angle.shape[0], 1, 1)
-    sin = torch.sin(theta).unsqueeze(-1)
-    cos = torch.cos(theta).unsqueeze(-1)
+    I = torch.eye(3, device=axis_angle.device, dtype=axis_angle.dtype)[None].repeat(B, 1, 1)
+    sin = torch.sin(theta)[:, None]
+    cos = torch.cos(theta)[:, None]
     R = I + sin * Kx + (1 - cos) * (Kx @ Kx)
     return R
+
+
+def log_so3(R: torch.Tensor) -> torch.Tensor:
+    """Matrix log for rotation -> axis angle (approx, robust). (3,3)->(3,)"""
+    tr = torch.trace(R)
+    cos = torch.clamp((tr - 1) / 2, -1 + 1e-6, 1 - 1e-6)
+    theta = torch.acos(cos)
+    if theta < 1e-8:
+        return torch.zeros(3, device=R.device, dtype=R.dtype)
+    w = torch.tensor([
+        R[2, 1] - R[1, 2],
+        R[0, 2] - R[2, 0],
+        R[1, 0] - R[0, 1],
+    ], device=R.device, dtype=R.dtype) / (2 * torch.sin(theta))
+    return w * theta
