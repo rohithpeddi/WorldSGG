@@ -1,255 +1,187 @@
-import os
-import json
-import math
-from pathlib import Path
-from typing import List, Tuple, Dict
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
 
-import cv2
+# Work in Progress (WIP)
+"""
+VGGT Runner Script
+=================
+
+A script to run the VGGT model for 3D reconstruction from image sequences.
+
+Directory Structure
+------------------
+Input:
+    input_folder/
+    └── images/            # Source images for reconstruction
+
+Output:
+    output_folder/
+    ├── images/
+    ├── sparse/           # Reconstruction results
+    │   ├── cameras.bin   # Camera parameters (COLMAP format)
+    │   ├── images.bin    # Pose for each image (COLMAP format)
+    │   ├── points3D.bin  # 3D points (COLMAP format)
+    │   └── points.ply    # Point cloud visualization file
+    └── visuals/          # Visualization outputs TODO
+
+Key Features
+-----------
+• Dual-mode BA: choose --ba_backend pycolmap|torch
+• Resolution Preservation: maintains original image resolution in camera parameters and tracks
+• COLMAP Compatibility: exports results in standard COLMAP sparse reconstruction format
+"""
+
+import random
 import numpy as np
-from tqdm import tqdm
-
+import glob
+import os
+import copy
 import torch
-from torch import nn
-from torch.optim import Adam
+import torch.nn.functional as F
 
-# VGGT imports
+# Configure CUDA settings
+torch.backends.cudnn.enabled = True
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.deterministic = False
+
+import argparse
+from pathlib import Path
+import trimesh
+import pycolmap
+
+from typing import Optional
+
 from vggt.models.vggt import VGGT
-from vggt.utils.load_fn import load_and_preprocess_images
+from vggt.utils.load_fn import load_and_preprocess_images_square
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
+from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues
+from vggt.dependency.track_predict import predict_tracks
+from vggt.dependency.np_to_pycolmap import (
+    batch_np_matrix_to_pycolmap,
+    batch_np_matrix_to_pycolmap_wo_track,
+)
 
-from datasets.preprocess.reconstruction.ag_staticscene.utils import axis_angle_to_R, se3_project, set_torch_flags, \
-    make_grid_points, write_ply
+
+# ==========================
+# Torch Bundle Adjustment (optional backend)
+# ==========================
+
+def _axis_angle_to_R(axis_angle: torch.Tensor) -> torch.Tensor:
+    """Rodrigues for (B,3) -> (B,3,3)."""
+    theta = torch.norm(axis_angle + 1e-12, dim=-1, keepdim=True)  # (B,1)
+    k = axis_angle / torch.clamp(theta, min=1e-12)
+    k = torch.nan_to_num(k)
+    B = axis_angle.shape[0]
+    Kx = torch.zeros(B, 3, 3, device=axis_angle.device, dtype=axis_angle.dtype)
+    Kx[:, 0, 1] = -k[:, 2]
+    Kx[:, 0, 2] = k[:, 1]
+    Kx[:, 1, 0] = k[:, 2]
+    Kx[:, 1, 2] = -k[:, 0]
+    Kx[:, 2, 0] = -k[:, 1]
+    Kx[:, 2, 1] = k[:, 0]
+    I = torch.eye(3, device=axis_angle.device, dtype=axis_angle.dtype)[None].repeat(B, 1, 1)
+    sin = torch.sin(theta)[:, None]
+    cos = torch.cos(theta)[:, None]
+    R = I + sin * Kx + (1 - cos) * (Kx @ Kx)
+    return R
 
 
-# ---------------------------------------
-# VGGT runner with windowing
-# ---------------------------------------
+def _se3_project(K: torch.Tensor, R: torch.Tensor, t: torch.Tensor, X: torch.Tensor) -> torch.Tensor:
+    """Project 3D points with intrinsics K (N,3,3), R (N,3,3), t (N,3,1), X (P,3) -> (N,P,2)."""
+    N, P = R.shape[0], X.shape[0]
+    X_h = torch.cat([X, torch.ones(P, 1, device=X.device, dtype=X.dtype)], dim=-1)  # (P,4)
+    RT = torch.cat([R, t], dim=-1)  # (N,3,4)  camera-from-world
+    PX = (K @ (RT @ X_h.T).transpose(1, 2))  # (N,3,P)
+    uv = PX[:, :2, :] / torch.clamp(PX[:, 2:3, :], min=1e-6)
+    return uv.transpose(1, 2)  # (N,P,2)
 
-class AgVGGT:
+
+def _log_so3(R: torch.Tensor) -> torch.Tensor:
+    """Matrix log for rotation -> axis angle (approx, robust). (3,3)->(3,)"""
+    tr = torch.trace(R)
+    cos = torch.clamp((tr - 1) / 2, -1 + 1e-6, 1 - 1e-6)
+    theta = torch.acos(cos)
+    if theta < 1e-8:
+        return torch.zeros(3, device=R.device, dtype=R.dtype)
+    w = torch.tensor([
+        R[2, 1] - R[1, 2],
+        R[0, 2] - R[2, 0],
+        R[1, 0] - R[0, 1],
+    ], device=R.device, dtype=R.dtype) / (2 * torch.sin(theta))
+    return w * theta
+
+
+class TorchBA(torch.nn.Module):
+    """Optimize camera extrinsics (axis-angle + translation) and 3D points.
+    Keeps the first camera fixed to remove gauge freedom.
+    """
 
     def __init__(
             self,
-            device: str = "cuda",
-            dtype_amp: torch.dtype = None,
-            model_id: str = "facebook/VGGT-1B",
-            image_long_side: int = 512,
-            window: int = 96,
-            overlap: int = 24,
+            Ks: torch.Tensor,  # (N,3,3)
+            Tcw_init: torch.Tensor,  # (N,4,4) camera-from-world
+            tracks_uv: torch.Tensor,  # (N,P,2)
+            vis_mask: torch.Tensor,  # (N,P) bool
+            X_init: Optional[torch.Tensor] = None,  # (P,3) initial 3D
     ):
-        self.device = device
-        if dtype_amp is None:
-            major = torch.cuda.get_device_capability()[0] if torch.cuda.is_available() else 0
-            dtype_amp = torch.bfloat16 if major >= 8 else torch.float16
-        self.dtype_amp = dtype_amp
-        self.image_long_side = image_long_side
-        self.window = window
-        self.overlap = overlap
-
-        self.model = VGGT.from_pretrained(model_id).to(device)
-        self.model.eval()
-
-    def _prep_paths(self, frames: List[np.ndarray], tmp_dir: Path) -> List[str]:
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        paths = []
-        for i, im in enumerate(frames):
-            p = tmp_dir / f"frame_{i:06d}.png"
-            cv2.imwrite(str(p), cv2.cvtColor(im, cv2.COLOR_RGB2BGR))
-            paths.append(str(p))
-        return paths
-
-    @torch.no_grad()
-    def _run_chunk(self, image_paths: List[str]):
-        # VGGT expects a tensor of (T,C,H,W), after load/preprocess
-        images = load_and_preprocess_images(image_paths).to(self.device)
-
-        with torch.cuda.amp.autocast(dtype=self.dtype_amp):
-            # Get shared tokens
-            agg_tokens, ps_idx = self.model.aggregator(images[None])  # add batch dim
-            # Cameras
-            pose_enc = self.model.camera_head(agg_tokens)[-1]
-            extri, intra = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
-            # Depths (optional but handy for dense fusion)
-            depth_map, depth_conf = self.model.depth_head(agg_tokens, images, ps_idx)
-
-        # Squeeze batch
-        extri = extri.squeeze(0)  # (T, 4, 4) or (T,3,4) depending on implementation
-        intra = intra.squeeze(0)  # (T, 3, 3)
-        depth_map = depth_map.squeeze(0)  # (T, H, W)
-        depth_conf = depth_conf.squeeze(0)
-        return {
-            "extri": extri, "intra": intra,
-            "depth": depth_map, "depth_conf": depth_conf,
-            "image_hw": images.shape[-2:]
-        }
-
-    @torch.no_grad()
-    def infer_long_video(
-            self,
-            frame_paths: List[str],
-            want_dense_points: bool = True,
-            dense_stride: int = 8
-    ):
-        N = len(frame_paths)
-        cams_extri = []
-        cams_intra = []
-        depths = []
-        H = W = None
-
-        # sliding windows
-        win = self.window
-        ov = self.overlap
-        starts = list(range(0, N, win - ov))
-        if starts and starts[-1] + win < N:
-            starts.append(N - win)
-
-        for s in tqdm(starts, desc="VGGT windows"):
-            e = min(N, s + win)
-            chunk_paths = frame_paths[s:e]
-            preds = self._run_chunk(chunk_paths)
-
-            if H is None:
-                H, W = preds["image_hw"]
-            # Accumulate; on overlaps keep the earliest estimate
-            for i in range(s, e):
-                j = i - s
-                if i >= len(cams_extri):
-                    cams_extri.append(preds["extri"][j].detach().cpu())
-                    cams_intra.append(preds["intra"][j].detach().cpu())
-                    if want_dense_points:
-                        depths.append(preds["depth"][j].detach().cpu())
-                # else: keep earlier estimate
-
-        cams_extri = torch.stack(cams_extri, dim=0)  # (N, 4,4) or (N,3,4)
-        cams_intra = torch.stack(cams_intra, dim=0)  # (N, 3,3)
-        if want_dense_points:
-            depths = torch.stack(depths, dim=0)  # (N, H, W)
-        else:
-            depths = None
-
-        # Build a fused static point cloud from depth unprojection
-        fused_xyz = []
-        fused_rgb = []
-        if want_dense_points and depths is not None:
-            for i in tqdm(range(N), desc="Unproject depth"):
-                K = cams_intra[i].numpy()
-                ext = cams_extri[i].numpy()
-                d = depths[i].numpy()
-                # Downsample
-                d_ds = d[::dense_stride, ::dense_stride]
-                # Unproject to 3D points (camera->world) via provided util
-                pts_cam = unproject_depth_map_to_point_map(
-                    torch.from_numpy(d_ds).unsqueeze(0),  # (1,h,w)
-                    torch.from_numpy(cams_extri[i:i + 1]),
-                    torch.from_numpy(cams_intra[i:i + 1])
-                ).squeeze(0).numpy().reshape(-1, 3)
-                fused_xyz.append(pts_cam)
-
-        if fused_xyz:
-            fused_xyz = np.concatenate(fused_xyz, axis=0)
-        else:
-            fused_xyz = np.zeros((0, 3), dtype=np.float32)
-
-        return {
-            "K": cams_intra,  # (N,3,3)
-            "Tcw": cams_extri,  # (N,4,4) [OpenCV: camera-from-world]
-            "depths": depths,  # (N,H,W) or None
-            "fused_xyz": fused_xyz,  # (M,3)
-            "image_size": (int(H), int(W))
-        }
-
-
-# ---------------------------------------
-# Minimal Torch Bundle Adjustment
-# ---------------------------------------
-
-class TorchBA(nn.Module):
-    """
-    Optimize camera extrinsic (axis-angle + translation) and 3D points to
-    minimize reprojection error, with the first camera fixed to gauge the system.
-    """
-
-    def __init__(self, Ks: torch.Tensor, R_init: torch.Tensor, t_init: torch.Tensor,
-                 tracks_uv: torch.Tensor, vis_mask: torch.Tensor):
-        """
-        Ks: (N,3,3)
-        R_init: (N,3,3)
-        t_init: (N,3,1)
-        tracks_uv: (N,P,2) pixel coordinates
-        vis_mask: (N,P) boolean
-        """
         super().__init__()
         device = Ks.device
         self.register_buffer("Ks", Ks)
         self.register_buffer("vis", vis_mask.float())
         self.N, self.P = tracks_uv.shape[:2]
 
-        # Initialize 3D from linear triangulation (DLT) using first two well-visible views
-        self.X = nn.Parameter(self._triangulate_dlt(Ks, R_init, t_init, tracks_uv, vis_mask))  # (P,3)
-
-        # Parameterize rotations (except first) via axis-angle, translations as free
-        self.rot_aa = nn.Parameter(torch.zeros(self.N, 3, device=device))
-        self.t = nn.Parameter(t_init.squeeze(-1).clone())  # (N,3)
-
-        # Lock first camera
-        self.rot_aa.data[0] = torch.zeros(3, device=device)
-        self.t.data[0] = t_init[0].squeeze(-1)
-
-        # Set initial rotations from R_init
+        # Initialize rotations/translations from Tcw
+        R0 = Tcw_init[:, :3, :3]
+        t0 = Tcw_init[:, :3, 3]
+        self.rot_aa = torch.nn.Parameter(torch.zeros(self.N, 3, device=device))
+        self.t = torch.nn.Parameter(t0.clone())
         with torch.no_grad():
-            # Convert R_init to axis-angle approximately via log(R)
             for i in range(self.N):
-                R = R_init[i]
-                aa = self._log_so3(R)
-                self.rot_aa.data[i] = aa
+                self.rot_aa[i] = _log_so3(R0[i])
+        # lock first camera
+        self.rot_aa.requires_grad_(True)
+        self.t.requires_grad_(True)
 
-        self.tracks_uv = nn.Parameter(tracks_uv, requires_grad=False)
+        # Initialize 3D points
+        if X_init is None:
+            # Linear triangulation from first & last visible views per point
+            self.X = torch.nn.Parameter(self._triangulate_linear(R0, t0[:, :, None], tracks_uv, vis_mask))
+        else:
+            self.X = torch.nn.Parameter(X_init.clone().to(device))
 
-    def _log_so3(self, R: torch.Tensor) -> torch.Tensor:
-        """Matrix log for rotation -> axis angle (approx, stable for small angles)."""
-        cos = (R.trace() - 1) / 2
-        cos = torch.clamp(cos, -1 + 1e-6, 1 - 1e-6)
-        theta = torch.acos(cos)
-        w = torch.tensor([
-            R[2, 1] - R[1, 2],
-            R[0, 2] - R[2, 0],
-            R[1, 0] - R[0, 1]
-        ], device=R.device) / (2 * torch.sin(theta) + 1e-6)
-        return w * theta
+        self.tracks_uv = torch.nn.Parameter(tracks_uv, requires_grad=False)
 
     def forward(self):
-        B = self.N
-        # Build R from axis-angle
-        R = axis_angle_to_R(self.rot_aa)  # (N,3,3)
-        t = self.t.unsqueeze(-1)  # (N,3,1)
-        uv_pred = se3_project(self.Ks, R, t, self.X)  # (N,P,2)
-        # Reprojection error
-        diff = (uv_pred - self.tracks_uv) * self.vis.unsqueeze(-1)
-        # Charbonnier robust loss
-        loss = torch.sqrt(diff.pow(2).sum(dim=-1) + 1e-6).mean()
+        R = _axis_angle_to_R(self.rot_aa)  # (N,3,3)
+        t = self.t[:, :, None]  # (N,3,1)
+        uv_pred = _se3_project(self.Ks, R, t, self.X)  # (N,P,2)
+        diff = (uv_pred - self.tracks_uv) * self.vis[:, :, None]
+        loss = torch.sqrt(torch.sum(diff ** 2, dim=-1) + 1e-6).mean()
         return loss
 
-    def _triangulate_dlt(self, Ks, R, t, uv, vis):
-        """Simple linear triangulation from first two strongest views per point."""
-        device = Ks.device
-        N, P, _ = uv.shape
-        X = torch.zeros(P, 3, device=device)
-
-        # pick two views with visibility
-        vis_idx = vis.nonzero(as_tuple=False)  # (M,2): [n, p]
-        # naive: use first and last visible frame for each point
+    def _triangulate_linear(self, R, t, uv, vis):
+        device = R.device
+        N, P = uv.shape[:2]
+        X = torch.zeros(P, 3, device=device, dtype=R.dtype)
+        # pick first and last visible view per point
+        vis_idx = vis.nonzero(as_tuple=False)  # (M,2)
         first = torch.full((P,), -1, dtype=torch.long, device=device)
         last = torch.full((P,), -1, dtype=torch.long, device=device)
         for n, p in vis_idx:
             if first[p] == -1:
                 first[p] = n
             last[p] = n
-
         for p in range(P):
             i = int(first[p].item()) if first[p] >= 0 else 0
             j = int(last[p].item()) if last[p] >= 0 else min(1, N - 1)
-            Pi = Ks[i] @ torch.cat([R[i], t[i]], dim=-1)
-            Pj = Ks[j] @ torch.cat([R[j], t[j]], dim=-1)
+            Ki = self.Ks[i]
+            Kj = self.Ks[j]
+            Pi = Ki @ torch.cat([R[i], t[i]], dim=-1)  # (3,4)
+            Pj = Kj @ torch.cat([R[j], t[j]], dim=-1)
             xi, yi = uv[i, p]
             xj, yj = uv[j, p]
             A = torch.stack([
@@ -258,161 +190,365 @@ class TorchBA(nn.Module):
                 xj * Pj[2] - Pj[0],
                 yj * Pj[2] - Pj[1],
             ], dim=0)  # (4,4)
-            # Solve AX=0 via SVD
             _, _, V = torch.linalg.svd(A)
             Xh = V[-1]
-            X[p] = (Xh[:3] / (Xh[3] + 1e-8))
+            X[p] = Xh[:3] / torch.clamp(Xh[3], min=1e-9)
         return X
 
 
 def run_torch_ba(
-        Ks: torch.Tensor, Tcw: torch.Tensor,
-        key_uv: torch.Tensor, vis_mask: torch.Tensor,
-        iters: int = 200, lr: float = 1e-2
+        Ks_np: np.ndarray,  # (N,3,3)
+        Tcw_np: np.ndarray,  # (N,4,4)
+        tracks_uv_np: np.ndarray,  # (N,P,2)
+        vis_mask_np: np.ndarray,  # (N,P)
+        X_init_np: Optional[np.ndarray] = None,
+        iters: int = 200,
+        lr: float = 1e-2,
 ):
-    """
-    Ks: (N,3,3)
-    Tcw: (N,4,4) camera-from-world
-    key_uv: (N,P,2)
-    vis_mask: (N,P) bool
-    """
-    device = Ks.device
-    # Extract initial R,t from Tcw
-    R_init = Tcw[:, :3, :3]
-    t_init = Tcw[:, :3, 3:4]
-    ba = TorchBA(Ks, R_init, t_init, key_uv, vis_mask).to(device)
-    opt = Adam([p for p in ba.parameters() if p.requires_grad], lr=lr)
-    pbar = tqdm(range(iters), desc="Torch BA")
-    for _ in pbar:
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    Ks = torch.from_numpy(Ks_np).to(device=device, dtype=torch.float32)
+    Tcw = torch.from_numpy(Tcw_np).to(device=device, dtype=torch.float32)
+    tracks_uv = torch.from_numpy(tracks_uv_np).to(device=device, dtype=torch.float32)
+    vis_mask = torch.from_numpy(vis_mask_np.astype(bool)).to(device=device)
+    X_init = torch.from_numpy(X_init_np).to(device=device, dtype=torch.float32) if X_init_np is not None else None
+
+    ba = TorchBA(Ks, Tcw, tracks_uv, vis_mask, X_init=X_init).to(device)
+    opt = torch.optim.Adam([p for p in ba.parameters() if p.requires_grad], lr=lr)
+    for _ in range(iters):
         opt.zero_grad()
         loss = ba()
         loss.backward()
         opt.step()
-        pbar.set_postfix({"loss": float(loss.item())})
-    # Rebuild Tcw
     with torch.no_grad():
-        R = axis_angle_to_R(ba.rot_aa)
-        t = ba.t.unsqueeze(-1)
+        R = _axis_angle_to_R(ba.rot_aa)
+        t = ba.t[:, :, None]
         Tcw_new = torch.eye(4, device=device).unsqueeze(0).repeat(Ks.shape[0], 1, 1)
         Tcw_new[:, :3, :3] = R
         Tcw_new[:, :3, 3:4] = t
-        X = ba.X
-    return Tcw_new, X
+        X_new = ba.X
+    return Tcw_new.detach().cpu().numpy(), X_new.detach().cpu().numpy()
 
 
-# ---------------------------------------
-# Pipeline entry
-# ---------------------------------------
+# ==========================
+# Original utilities
+# ==========================
 
-def reconstruct_static_scene(
-        video_path: str,
-        out_dir: str = "vggt_static_out",
-        max_frames: int = 1000,
-        target_frames: int = 480,
-        image_long_side: int = 512,
-        window: int = 96,
-        overlap: int = 24,
-        tracks_per_window: int = 1024,  # for BA
-        do_bundle_adjustment: bool = True
-):
-    set_torch_flags()
+def parse_args():
+    parser = argparse.ArgumentParser(description="VGGT Demo")
+    parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+
+    # BA selection
+    parser.add_argument("--use_ba", action="store_true", default=False, help="Use bundle adjustment")
+    parser.add_argument(
+        "--ba_backend", type=str, default="pycolmap", choices=["pycolmap", "torch"],
+        help="Which BA backend to use"
+    )
+    parser.add_argument("--ba_iters", type=int, default=200, help="Iterations for Torch BA")
+    parser.add_argument("--ba_lr", type=float, default=1e-2, help="Learning rate for Torch BA")
+
+    # BA (shared) params
+    parser.add_argument("--max_reproj_error", type=float, default=8.0, help="Max reprojection error for reconstruction")
+    parser.add_argument("--shared_camera", action="store_true", default=False, help="Use shared camera for all images")
+    parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
+    parser.add_argument("--vis_thresh", type=float, default=0.2, help="Visibility threshold for tracks")
+    parser.add_argument("--query_frame_num", type=int, default=8, help="Number of frames to query")
+    parser.add_argument("--max_query_pts", type=int, default=4096, help="Maximum number of query points")
+    parser.add_argument("--fine_tracking", action="store_true", default=True,
+                        help="Use fine tracking (slower but more accurate)")
+
+    # No-BA feed-forward export
+    parser.add_argument("--conf_thres_value", type=float, default=5.0,
+                        help="Confidence threshold for depth filtering (wo BA)")
+    return parser.parse_args()
+
+
+def run_VGGT(model, images, dtype, resolution=518):
+    # images: [B, 3, H, W]
+    assert len(images.shape) == 4 and images.shape[1] == 3
+    images = F.interpolate(images, size=(resolution, resolution), mode="bilinear", align_corners=False)
+
+    with torch.no_grad():
+        with torch.cuda.amp.autocast(dtype=dtype):
+            images_in = images[None]  # add batch dimension -> (1,B,3,H,W)
+            aggregated_tokens_list, ps_idx = model.aggregator(images_in)
+            pose_enc = model.camera_head(aggregated_tokens_list)[-1]
+            extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, images_in.shape[-2:])
+            depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images_in, ps_idx)
+
+    extrinsic = extrinsic.squeeze(0).cpu().numpy()  # (B,4,4)
+    intrinsic = intrinsic.squeeze(0).cpu().numpy()  # (B,3,3)
+    depth_map = depth_map.squeeze(0).cpu().numpy()  # (B,H,W)
+    depth_conf = depth_conf.squeeze(0).cpu().numpy()  # (B,H,W)
+    return extrinsic, intrinsic, depth_map, depth_conf
+
+
+def demo_fn(args):
+    print("Arguments:", vars(args))
+
+    # Seeds
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+    print(f"Setting seed as: {args.seed}")
+
+    # Device & dtype
+    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability()[
+        0] >= 8 else torch.float16
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[Info] Using device={device}")
+    print(f"Using device: {device}")
+    print(f"Using dtype: {dtype}")
 
-    out = Path(out_dir);
-    out.mkdir(parents=True, exist_ok=True)
-    frames = sample_video_frames(video_path, max_frames=max_frames, target_count=target_frames)
-    print(f"[Info] Sampled {len(frames)} frames")
-    tmp_images = out / "frames_raw"
-    # Prep on-disk PNGs (VGGT loader expects paths)
-    runner = AgVGGT(device=device, image_long_side=image_long_side, window=window, overlap=overlap)
-    frame_paths = runner._prep_paths(frames, tmp_images)
+    # Load VGGT weights
+    model = VGGT()
+    _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
+    model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+    model.eval().to(device)
+    print("Model loaded")
 
-    # VGGT predictions with windowing
-    preds = runner.infer_long_video(frame_paths, want_dense_points=True, dense_stride=8)
-    K = preds["K"].to(device=device, dtype=torch.float32)
-    Tcw = preds["Tcw"].to(device=device, dtype=torch.float32)
-    fused_xyz = preds["fused_xyz"]
-    H, W = preds["image_size"]
+    # Gather images
+    image_dir = os.path.join(args.scene_dir, "images")
+    image_path_list = sorted(glob.glob(os.path.join(image_dir, "*")))
+    if len(image_path_list) == 0:
+        raise ValueError(f"No images found in {image_dir}")
+    base_image_path_list = [os.path.basename(path) for path in image_path_list]
 
-    # Save initial cameras
-    (out / "cameras_init.json").write_text(json.dumps({
-        "image_size": [H, W],
-        "K": K.cpu().numpy().tolist(),
-        "Tcw": Tcw.cpu().numpy().tolist()
-    }))
+    # Load images & original coords (pad+resize to square for VGGT input)
+    vggt_fixed_resolution = 518
+    img_load_resolution = 1024
+    images, original_coords = load_and_preprocess_images_square(image_path_list, img_load_resolution)
+    images = images.to(device)
+    original_coords = original_coords.to(device)
+    print(f"Loaded {len(images)} images from {image_dir}")
 
-    # Optional: Bundle Adjustment using VGGT tracks on a grid
-    if do_bundle_adjustment:
-        # Create a grid of query points in the FIRST window extent
-        npts = min(tracks_per_window, (H // 8) * (W // 8))
-        query_points = make_grid_points(W, H, npts)  # (P,2), xy order
+    # Run VGGT (cameras+depth)
+    extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype, vggt_fixed_resolution)
+    points_3d_dense = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)  # (S,H,W,3)
 
-        # Re-run aggregator and track head ONCE across all frames if feasible,
-        # else do it chunkwise and stitch (kept simple here: single pass; for >~256 frames,
-        # window size ensures memory okay on A40 40GB).
-        with torch.no_grad(), torch.cuda.amp.autocast(dtype=runner.dtype_amp):
-            images = load_and_preprocess_images(frame_paths, long_side=image_long_side).to(device)
-            agg_tokens, ps_idx = runner.model.aggregator(images[None])
-            q = torch.from_numpy(query_points).to(device=device, dtype=torch.float32)[None]  # (1,P,2)
-            track_list, vis_score, conf_score = runner.model.track_head(agg_tokens, images, ps_idx, query_points=q)
+    shared_camera = args.shared_camera
 
-        # track_list: list per stage; use last scale
-        uv_all = track_list[-1].squeeze(0)  # (N,P,2)
-        vis = (vis_score.squeeze(0) > 0.5) & (conf_score.squeeze(0) > 0.5)  # (N,P)
+    if args.use_ba:
+        print(f"Running BA with backend: {args.ba_backend}")
+        image_size = np.array(images.shape[-2:])  # (H,W) at 1024 load-res
+        scale = img_load_resolution / vggt_fixed_resolution
 
-        # Run a light BA
-        Tcw_ba, X_ba = run_torch_ba(K, Tcw, uv_all, vis, iters=200, lr=1e-2)
-        Tcw = Tcw_ba
+        with torch.cuda.amp.autocast(dtype=dtype):
+            # Predict 2D tracks + sparse 3D seeds (VGGSfM tracker)
+            pred_tracks, pred_vis_scores, pred_confs, points_3d_sparse, points_rgb_sparse = predict_tracks(
+                images,
+                conf=depth_conf,
+                points_3d=points_3d_dense,
+                masks=None,
+                max_query_pts=args.max_query_pts,
+                query_frame_num=args.query_frame_num,
+                keypoint_extractor="aliked+sp",
+                fine_tracking=args.fine_tracking,
+            )
+            torch.cuda.empty_cache()
 
-        # Optionally augment fused cloud with BA points
-        fused_xyz = np.concatenate([fused_xyz, X_ba.detach().cpu().numpy()], axis=0)
+        # Rescale intrinsics from 518->1024
+        intrinsic[:, :2, :] *= scale
+        track_mask = pred_vis_scores > args.vis_thresh  # (S,P)
 
-    # Simple voxel downsample (no Open3D)
-    if fused_xyz.shape[0] > 0:
-        # Remove NaNs/Infs and big outliers
-        fused_xyz = fused_xyz[~np.isnan(fused_xyz).any(1)]
-        q = np.quantile(np.linalg.norm(fused_xyz, axis=1), 0.99)
-        fused_xyz = fused_xyz[np.linalg.norm(fused_xyz, axis=1) < (q * 1.5)]
-        # Save PLY
-        write_ply(fused_xyz.astype(np.float32), None, str(out / "static_scene_fused.ply"))
+        if args.ba_backend == "pycolmap":
+            # Build reconstruction from tracks & run COLMAP BA
+            reconstruction, valid_track_mask = batch_np_matrix_to_pycolmap(
+                points_3d_sparse,
+                extrinsic,
+                intrinsic,
+                pred_tracks,
+                image_size,
+                masks=track_mask,
+                max_reproj_error=args.max_reproj_error,
+                shared_camera=shared_camera,
+                camera_type=args.camera_type,
+                points_rgb=points_rgb_sparse,
+            )
 
-    # Save refined cameras
-    (out / "cameras_refined.json").write_text(json.dumps({
-        "image_size": [H, W],
-        "K": K.cpu().numpy().tolist(),
-        "Tcw": Tcw.detach().cpu().numpy().tolist()
-    }))
+            if reconstruction is None:
+                raise ValueError("No reconstruction can be built with BA")
 
-    print(f"[Done] Outputs in: {out.resolve()}")
-    print(" - static_scene_fused.ply")
-    print(" - cameras_init.json / cameras_refined.json")
-    print(" - frames_raw/")
+            ba_options = pycolmap.BundleAdjustmentOptions()
+            pycolmap.bundle_adjustment(reconstruction, ba_options)
+            reconstruction_resolution = img_load_resolution
+
+        else:  # Torch BA backend
+            # Prepare inputs for BA (N,P,2) uv and (N,P) mask
+            uv_np = pred_tracks.astype(np.float32)
+            vis_np = (track_mask & (pred_confs > 0.5)).astype(bool)
+
+            # points_3d_sparse: (P,3) if tracker returns per-track 3D; otherwise None
+            X_init_np = points_3d_sparse if points_3d_sparse is not None and points_3d_sparse.ndim == 2 else None
+
+            # Run differentiable BA to refine cameras & 3D
+            Tcw_refined, X_refined = run_torch_ba(
+                intrinsic.astype(np.float32),
+                extrinsic.astype(np.float32),
+                uv_np,
+                vis_np,
+                X_init_np=X_init_np,
+                iters=args.ba_iters,
+                lr=args.ba_lr,
+            )
+            extrinsic = Tcw_refined  # overwrite with refined
+
+            # Build a COLMAP reconstruction for export/visualization
+            reconstruction, _ = batch_np_matrix_to_pycolmap(
+                X_refined,  # 3D points from BA
+                extrinsic,
+                intrinsic,
+                pred_tracks,
+                image_size,
+                masks=track_mask,
+                max_reproj_error=args.max_reproj_error,
+                shared_camera=shared_camera,
+                camera_type=args.camera_type,
+                points_rgb=points_rgb_sparse,
+            )
+            if reconstruction is None:
+                raise ValueError("Torch BA finished but reconstruction export failed")
+            reconstruction_resolution = img_load_resolution
+
+        # Use BA result to export
+        reconstruction = rename_colmap_recons_and_rescale_camera(
+            reconstruction,
+            base_image_path_list,
+            original_coords.cpu().numpy(),
+            img_size=reconstruction_resolution,
+            shift_point2d_to_original_res=True,
+            shared_camera=shared_camera,
+        )
+
+        print(f"Saving reconstruction to {args.scene_dir}/sparse")
+        sparse_reconstruction_dir = os.path.join(args.scene_dir, "sparse")
+        os.makedirs(sparse_reconstruction_dir, exist_ok=True)
+        reconstruction.write(sparse_reconstruction_dir)
+
+        # Save a quick point cloud (from BA if torch backend, else from dense depth mask)
+        try:
+            if args.ba_backend == "torch":
+                pts = X_refined
+                cols = points_rgb_sparse if points_rgb_sparse is not None else None
+                if cols is not None and cols.ndim == 2 and cols.shape[-1] == 3:
+                    colors = cols
+                else:
+                    colors = np.tile(np.array([[200, 200, 200]], dtype=np.uint8), (pts.shape[0], 1))
+                trimesh.PointCloud(pts, colors=colors).export(os.path.join(args.scene_dir, "sparse/points.ply"))
+            else:
+                # use dense depth points but subsampled
+                S, H, W, _ = points_3d_dense.shape
+                step = max(1, int(np.sqrt((H * W) / 4096)))
+                pts = points_3d_dense[:, ::step, ::step, :].reshape(-1, 3)
+                colors = (F.interpolate(images, size=(vggt_fixed_resolution, vggt_fixed_resolution), mode="bilinear",
+                                        align_corners=False)
+                          .permute(0, 2, 3, 1)
+                          .detach().cpu().numpy())
+                cols = colors[:, ::step, ::step, :].reshape(-1, 3)
+                cols = (cols * 255).astype(np.uint8)
+                trimesh.PointCloud(pts, colors=cols).export(os.path.join(args.scene_dir, "sparse/points.ply"))
+        except Exception as e:
+            print(f"[Warn] Failed to export points.ply: {e}")
+
+        return True
+
+    # ==============================
+    # No-BA feed-forward export path
+    # ==============================
+    conf_thres_value = args.conf_thres_value
+    max_points_for_colmap = 100000
+    shared_camera = False  # feed-forward path: no shared camera
+    camera_type = "PINHOLE"
+
+    image_size = np.array([vggt_fixed_resolution, vggt_fixed_resolution])
+    num_frames, height, width, _ = points_3d_dense.shape
+
+    points_rgb = F.interpolate(
+        images, size=(vggt_fixed_resolution, vggt_fixed_resolution), mode="bilinear", align_corners=False
+    )
+    points_rgb = (points_rgb.detach().cpu().numpy() * 255).astype(np.uint8)
+    points_rgb = points_rgb.transpose(0, 2, 3, 1)
+
+    points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
+    conf_mask = depth_conf >= conf_thres_value
+    conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
+
+    pts3d = points_3d_dense[conf_mask]
+    ptsxyf = points_xyf[conf_mask]
+    ptsrgb = points_rgb[conf_mask]
+
+    print("Converting to COLMAP format (feed-forward)")
+    reconstruction = batch_np_matrix_to_pycolmap_wo_track(
+        pts3d,
+        ptsxyf,
+        ptsrgb,
+        extrinsic,
+        intrinsic,
+        image_size,
+        shared_camera=shared_camera,
+        camera_type=camera_type,
+    )
+
+    reconstruction = rename_colmap_recons_and_rescale_camera(
+        reconstruction,
+        base_image_path_list,
+        original_coords.cpu().numpy(),
+        img_size=vggt_fixed_resolution,
+        shift_point2d_to_original_res=True,
+        shared_camera=shared_camera,
+    )
+
+    print(f"Saving reconstruction to {args.scene_dir}/sparse")
+    sparse_reconstruction_dir = os.path.join(args.scene_dir, "sparse")
+    os.makedirs(sparse_reconstruction_dir, exist_ok=True)
+    reconstruction.write(sparse_reconstruction_dir)
+
+    # Save point cloud for quick visualization
+    try:
+        trimesh.PointCloud(pts3d, colors=ptsrgb).export(os.path.join(args.scene_dir, "sparse/points.ply"))
+    except Exception as e:
+        print(f"[Warn] Failed to export points.ply: {e}")
+
+    return True
+
+
+def rename_colmap_recons_and_rescale_camera(
+        reconstruction, image_paths, original_coords, img_size, shift_point2d_to_original_res=False, shared_camera=False
+):
+    rescale_camera = True
+
+    for pyimageid in reconstruction.images:
+        # Reshape padded&resized image back to the original size + rename
+        pyimage = reconstruction.images[pyimageid]
+        pycamera = reconstruction.cameras[pyimage.camera_id]
+        pyimage.name = image_paths[pyimageid - 1]
+
+        if rescale_camera:
+            pred_params = copy.deepcopy(pycamera.params)
+            real_image_size = original_coords[pyimageid - 1, -2:]
+            resize_ratio = max(real_image_size) / img_size
+            pred_params = pred_params * resize_ratio
+            real_pp = real_image_size / 2
+            pred_params[-2:] = real_pp  # set principal point to image center
+            pycamera.params = pred_params
+            pycamera.width = real_image_size[0]
+            pycamera.height = real_image_size[1]
+
+        if shift_point2d_to_original_res:
+            top_left = original_coords[pyimageid - 1, :2]
+            for point2D in pyimage.points2D:
+                point2D.xy = (point2D.xy - top_left) * resize_ratio
+
+        if shared_camera:
+            # If shared_camera, all images share the same camera (rescale once)
+            rescale_camera = False
+
+    return reconstruction
 
 
 if __name__ == "__main__":
-    import argparse
-
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--video", required=True, help="Path to input video")
-    ap.add_argument("--out", default="vggt_static_out")
-    ap.add_argument("--max_frames", type=int, default=1000)
-    ap.add_argument("--target_frames", type=int, default=480)
-    ap.add_argument("--long_side", type=int, default=512)
-    ap.add_argument("--window", type=int, default=96)
-    ap.add_argument("--overlap", type=int, default=24)
-    ap.add_argument("--tracks_per_window", type=int, default=1024)
-    ap.add_argument("--no_ba", action="store_true", help="Disable bundle adjustment")
-    args = ap.parse_args()
-
-    reconstruct_static_scene(
-        video_path=args.video,
-        out_dir=args.out,
-        max_frames=args.max_frames,
-        target_frames=args.target_frames,
-        image_long_side=args.long_side,
-        window=args.window,
-        overlap=args.overlap,
-        tracks_per_window=args.tracks_per_window,
-        do_bundle_adjustment=(not args.no_ba)
-    )
+    args = parse_args()
+    with torch.no_grad():
+        demo_fn(args)

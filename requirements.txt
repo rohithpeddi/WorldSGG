@@ -28,4 +28,5 @@ pillow
 numpy
 tqdm
 open3d
+pycolmap
 git+https://github.com/facebookresearch/vggt.git
