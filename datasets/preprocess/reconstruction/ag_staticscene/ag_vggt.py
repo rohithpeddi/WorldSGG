@@ -18,116 +18,16 @@ from vggt.utils.load_fn import load_and_preprocess_images
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
 
-
-# ---------------------------------------
-# Helpers
-# ---------------------------------------
-
-def set_torch_flags():
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.set_float32_matmul_precision("high")
-
-
-def sample_video_frames(
-        video_path: str,
-        max_frames: int = 1000,
-        target_count: int = None,
-        stride: int = None
-) -> List[np.ndarray]:
-    """Return a list of RGB frames sampled from the video."""
-    cap = cv2.VideoCapture(video_path)
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total == 0:
-        raise RuntimeError(f"Could not read frames from {video_path}")
-
-    # Choose stride automatically if not given
-    if target_count is not None:
-        stride = max(1, total // min(max_frames, target_count))
-    if stride is None:
-        stride = max(1, total // min(max_frames, total))
-
-    frames = []
-    idx = 0
-    while True:
-        ok, frame_bgr = cap.read()
-        if not ok:
-            break
-        if idx % stride == 0:
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            frames.append(frame_rgb)
-            if len(frames) >= max_frames:
-                break
-        idx += 1
-    cap.release()
-    return frames
-
-
-def write_ply(points_xyz: np.ndarray, colors: np.ndarray, out_path: str):
-    assert points_xyz.shape[1] == 3
-    if colors is None:
-        colors = np.zeros_like(points_xyz, dtype=np.uint8)
-    header = (
-        "ply\nformat ascii 1.0\n"
-        f"element vertex {len(points_xyz)}\n"
-        "property float x\nproperty float y\nproperty float z\n"
-        "property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n"
-    )
-    with open(out_path, "w") as f:
-        f.write(header)
-        for (x, y, z), (r, g, b) in zip(points_xyz, colors):
-            f.write(f"{x:.6f} {y:.6f} {z:.6f} {int(r)} {int(g)} {int(b)}\n")
-
-
-def to_torch(arr, device, dtype=torch.float32):
-    return torch.as_tensor(arr, device=device, dtype=dtype)
-
-
-def make_grid_points(width: int, height: int, n_points: int) -> np.ndarray:
-    """Uniform grid of (x,y) image points."""
-    xs = np.linspace(16, width - 16, int(math.sqrt(n_points)))
-    ys = np.linspace(16, height - 16, int(math.sqrt(n_points)))
-    pts = np.stack(np.meshgrid(xs, ys), axis=-1).reshape(-1, 2)
-    if len(pts) > n_points:
-        pts = pts[:n_points]
-    return pts
-
-
-def se3_project(K, R, t, X):
-    """Project 3D points with intrinsics K (B,3,3), R (B,3,3), t (B,3,1), X (P,3)."""
-    # Expand to batch
-    B = R.shape[0]
-    P = X.shape[0]
-    X_h = torch.cat([X, torch.ones(P, 1, device=X.device, dtype=X.dtype)], dim=-1)  # (P,4)
-    RT = torch.cat([R, t], dim=-1)  # (B,3,4)
-    PX = (K @ (RT @ X_h.T).transpose(1, 2))  # (B,3,P)
-    uv = PX[:, :2, :] / PX[:, 2:3, :].clamp(min=1e-6)
-    return uv.transpose(1, 2)  # (B,P,2)
-
-
-def axis_angle_to_R(axis_angle: torch.Tensor) -> torch.Tensor:
-    """Rodrigues for (B,3) -> (B,3,3)."""
-    theta = torch.norm(axis_angle + 1e-9, dim=-1, keepdim=True)
-    k = axis_angle / theta
-    k = torch.nan_to_num(k)
-    Kx = torch.zeros(axis_angle.shape[0], 3, 3, device=axis_angle.device, dtype=axis_angle.dtype)
-    Kx[:, 0, 1] = -k[:, 2];
-    Kx[:, 0, 2] = k[:, 1]
-    Kx[:, 1, 0] = k[:, 2];
-    Kx[:, 1, 2] = -k[:, 0]
-    Kx[:, 2, 0] = -k[:, 1];
-    Kx[:, 2, 1] = k[:, 0]
-    I = torch.eye(3, device=axis_angle.device, dtype=axis_angle.dtype).unsqueeze(0).repeat(axis_angle.shape[0], 1, 1)
-    sin = torch.sin(theta).unsqueeze(-1)
-    cos = torch.cos(theta).unsqueeze(-1)
-    R = I + sin * Kx + (1 - cos) * (Kx @ Kx)
-    return R
+from datasets.preprocess.reconstruction.ag_staticscene.utils import axis_angle_to_R, se3_project, set_torch_flags, \
+    make_grid_points, write_ply
 
 
 # ---------------------------------------
 # VGGT runner with windowing
 # ---------------------------------------
 
-class VGGTStaticScene:
+class AgVGGT:
+
     def __init__(
             self,
             device: str = "cuda",
@@ -161,10 +61,7 @@ class VGGTStaticScene:
     @torch.no_grad()
     def _run_chunk(self, image_paths: List[str]):
         # VGGT expects a tensor of (T,C,H,W), after load/preprocess
-        images = load_and_preprocess_images(
-            image_paths,
-            long_side=self.image_long_side
-        ).to(self.device)
+        images = load_and_preprocess_images(image_paths).to(self.device)
 
         with torch.cuda.amp.autocast(dtype=self.dtype_amp):
             # Get shared tokens
@@ -268,7 +165,7 @@ class VGGTStaticScene:
 
 class TorchBA(nn.Module):
     """
-    Optimize camera extrinsics (axis-angle + translation) and 3D points to
+    Optimize camera extrinsic (axis-angle + translation) and 3D points to
     minimize reprojection error, with the first camera fixed to gauge the system.
     """
 
@@ -428,7 +325,7 @@ def reconstruct_static_scene(
     print(f"[Info] Sampled {len(frames)} frames")
     tmp_images = out / "frames_raw"
     # Prep on-disk PNGs (VGGT loader expects paths)
-    runner = VGGTStaticScene(device=device, image_long_side=image_long_side, window=window, overlap=overlap)
+    runner = AgVGGT(device=device, image_long_side=image_long_side, window=window, overlap=overlap)
     frame_paths = runner._prep_paths(frames, tmp_images)
 
     # VGGT predictions with windowing
