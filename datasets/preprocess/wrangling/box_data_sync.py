@@ -114,8 +114,8 @@ class SyncService:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--local_dir', default="/data/rohith/ag/segmentation", help='Path to local directory')
-    p.add_argument('--box_folder_id', default='316480458603', help='Box folder ID')
+    p.add_argument('--local_dir', default="/data/rohith/ag/static_videos", help='Path to local directory')
+    p.add_argument('--box_folder_id', default='345011408563', help='Box folder ID')
     p.add_argument('--mode', choices=['upload', 'download', 'sync'], default='sync')
     args = p.parse_args()
     os.makedirs(args.local_dir, exist_ok=True)
