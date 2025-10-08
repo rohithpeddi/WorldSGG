@@ -11,32 +11,24 @@ def _ensure_dir(p: str):
 def _list_images(dir_path: str):
     exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
     files = [f for f in os.listdir(dir_path) if Path(f).suffix.lower() in exts]
+
     # natural-ish sort by numeric substrings if present
     def _key(s):
         import re
         return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)]
+
     return sorted(files, key=_key)
 
 
-def overlay_mask_on_video(video_mask_dir, video_frame_dir, output_dir,
-                          alpha=0.45, overlay_bgr=(0, 255, 0), draw_contour=True,
-                          contour_bgr=(0, 0, 255), contour_thickness=2):
-    """
-    Overlay per-frame masks onto frames and save results into output_dir.
-
-    Args:
-        video_mask_dir (str): directory containing per-frame mask images (0/255).
-        video_frame_dir (str): directory containing per-frame RGB frames.
-        output_dir (str): directory where overlaid frames will be written.
-        alpha (float): blending factor for colored overlay on masked pixels.
-        overlay_bgr (tuple): BGR color for mask tint.
-        draw_contour (bool): whether to outline mask boundaries.
-        contour_bgr (tuple): BGR color for contour lines.
-        contour_thickness (int): thickness of contour lines in pixels.
-
-    Returns:
-        List[str]: absolute paths to saved overlay frames, in order.
-    """
+def overlay_mask_on_video(
+        video_mask_dir,
+        video_frame_dir,
+        output_dir,
+        draw_contour=True,
+        contour_bgr=(0, 0, 0),
+        contour_thickness=2,
+        background_bgr=(0, 0, 0),  # fill color for the masked/removed region (default black)
+):
     _ensure_dir(output_dir)
 
     if not os.path.isdir(video_frame_dir):
@@ -49,16 +41,13 @@ def overlay_mask_on_video(video_mask_dir, video_frame_dir, output_dir,
 
     frame_files = _list_images(video_frame_dir)
     mask_files = _list_images(video_mask_dir)
-
-    # Map by stem for robust matching
     mask_by_stem = {Path(f).stem: f for f in mask_files}
 
     saved_paths = []
     for frame_name in frame_files:
         stem = Path(frame_name).stem
-        mask_name = mask_by_stem.get(stem, None)
+        mask_name = mask_by_stem.get(stem)
         if mask_name is None:
-            # Skip frames without corresponding mask
             continue
 
         frame_path = os.path.join(video_frame_dir, frame_name)
@@ -75,55 +64,38 @@ def overlay_mask_on_video(video_mask_dir, video_frame_dir, output_dir,
             continue
 
         # Resize mask to frame if needed
-        if (mask.shape[0] != frame.shape[0]) or (mask.shape[1] != frame.shape[1]):
-            mask = cv2.resize(mask, (frame.shape[1], frame.shape[0]),
-                              interpolation=cv2.INTER_NEAREST)
+        if mask.shape[:2] != frame.shape[:2]:
+            mask = cv2.resize(mask, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST)
 
-        # Binary mask
-        mask_bin = (mask > 127).astype(np.uint8)
+        # Ensure binary 0/255
+        _, mask255 = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
 
-        # Create tinted overlay
-        overlay = frame.copy()
-        tint = np.zeros_like(frame, dtype=np.uint8)
-        tint[:, :] = overlay_bgr
+        # Inverse mask: 255 where we KEEP (background), 0 where we REMOVE (masked/foreground)
+        inv_mask255 = cv2.bitwise_not(mask255)
 
-        # Alpha blend only on masked pixels
-        # overlay = alpha * tint + (1 - alpha) * frame where mask==1
-        # Efficient vectorized blend:
-        m3 = mask_bin[:, :, None]
-        overlay = (overlay.astype(np.float32) * (1 - alpha) +
-                   tint.astype(np.float32) * alpha * m3 +
-                   overlay.astype(np.float32) * (1 - m3)).astype(np.uint8)
+        # Keep background pixels as-is, zero masked region
+        kept_bg = cv2.bitwise_and(frame, frame, mask=inv_mask255)
 
-        # Optional: draw contours to sharpen boundaries
+        # Optional: fill masked region with a non-black color (otherwise stays zero)
+        out = kept_bg
+        if background_bgr != (0, 0, 0):
+            bg_img = np.full_like(frame, background_bgr, dtype=np.uint8)
+            fill_masked = cv2.bitwise_and(bg_img, bg_img, mask=mask255)
+            out = cv2.add(kept_bg, fill_masked)
+
+        # Optional contour for visualization
         if draw_contour:
-            contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(overlay, contours, -1, contour_bgr, contour_thickness)
+            # findContours expects 8-bit single-channel binary
+            contours, _ = cv2.findContours(mask255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(out, contours, -1, contour_bgr, contour_thickness)
 
         out_path = os.path.join(output_dir, frame_name)
-        ok = cv2.imwrite(out_path, overlay)
-        if ok:
+        if cv2.imwrite(out_path, out):
             saved_paths.append(os.path.abspath(out_path))
         else:
             print(f"[overlay_mask_on_video] Failed to write: {out_path}")
 
     return saved_paths
-
-
-def _infer_fps_from_dir(frame_dir: str, default_fps: float = 30.0) -> float:
-    """
-    Try to read FPS from a companion text file (fps.txt). Fallback to default if missing.
-    """
-    fps_file = os.path.join(frame_dir, "fps.txt")
-    if os.path.isfile(fps_file):
-        try:
-            with open(fps_file, "r") as f:
-                v = float(f.read().strip())
-                if v > 0:
-                    return v
-        except Exception:
-            pass
-    return default_fps
 
 
 def _write_video_from_frames(frames: list, out_video_path: str, fps: float):
@@ -159,11 +131,11 @@ def _write_video_from_frames(frames: list, out_video_path: str, fps: float):
 
 
 def overlay_masks():
-    video_id_list = ["00T1E.mp4"]
-    masks_root_dir = "data/rohith/ag/segmentation/masks/combined_1"
-    frames_root_dir = "data/rohith/ag/sampled_frames/"
-    output_frames_root_dir = "data/rohith/ag/segmentation/masks/overlayed_frames"
-    output_videos_root_dir = "data/rohith/ag/segmentation/masks/overlayed_videos"
+    video_id_list = ["00T1E.mp4", "0DJ6R.mp4"]
+    masks_root_dir = "/data/rohith/ag/segmentation/masks/combined_1"
+    frames_root_dir = "/data/rohith/ag/sampled_frames/"
+    output_frames_root_dir = "/data/rohith/ag/segmentation/masks/overlayed_frames"
+    output_videos_root_dir = "/data/rohith/ag/segmentation/masks/overlayed_videos"
     os.makedirs(output_frames_root_dir, exist_ok=True)
     os.makedirs(output_videos_root_dir, exist_ok=True)
 
@@ -172,32 +144,30 @@ def overlay_masks():
         video_frame_dir = os.path.join(frames_root_dir, video_id)
         output_frame_dir = os.path.join(output_frames_root_dir, video_id)
         output_video_dir = os.path.join(output_videos_root_dir, video_id)
+
+        if os.path.exists(output_frame_dir) and len(os.listdir(output_frame_dir)) > 0:
+            print(f"[main] Skipping existing output for {video_id}: {output_frame_dir}")
+            continue
+
         os.makedirs(output_frame_dir, exist_ok=True)
         os.makedirs(output_video_dir, exist_ok=True)
 
-        # Check if there is a folder corresponding to the video id in the frames directory
         if not os.path.isdir(video_frame_dir):
             print(f"[main] No frames directory for {video_id}: {video_frame_dir}")
             continue
 
-        # 1) Create overlayed frames
         saved = overlay_mask_on_video(
             video_mask_dir=video_mask_dir,
             video_frame_dir=video_frame_dir,
             output_dir=output_frame_dir,
-            alpha=0.45,
-            overlay_bgr=(0, 255, 0),
             draw_contour=True,
-            contour_bgr=(0, 0, 255),
+            contour_bgr=(0, 0, 0),
             contour_thickness=2,
         )
 
-        # 2) Stitch into a video (overlay.mp4) using FPS if available
-        fps = _infer_fps_from_dir(video_frame_dir, default_fps=30.0)
-        out_video_path = os.path.join(output_video_dir, "overlay.mp4")
+        fps = 10
+        out_video_path = os.path.join(output_video_dir, f"{video_id}")
         _write_video_from_frames(saved, out_video_path, fps)
-
-    print("[main] Done.")
 
 
 if __name__ == "__main__":
