@@ -85,9 +85,7 @@ class AgVGGT:
         self.conf_threshold_value = args.conf_thres_value
 
         self.output_dir = Path(args.static_scenes_dir)
-
-        self.static_scenes_dir = args.static_scenes_dir
-        os.makedirs(self.static_scenes_dir, exist_ok=True)
+        os.makedirs(self.output_dir, exist_ok=True)
 
         # Seeds
         seed = 42
@@ -174,7 +172,7 @@ class AgVGGT:
         return reconstruction
 
     def preprocess_static_video(self, frames_path_list, video_id, use_ba=True):
-        self.video_scene_dir = os.path.join(self.static_scenes_dir, video_id)
+        self.video_scene_dir = os.path.join(self.output_dir, video_id)
         os.makedirs(self.video_scene_dir, exist_ok=True)
 
         # Load images & original coords (pad+resize to square for VGGT input)
@@ -292,11 +290,14 @@ class AgVGGT:
     def run(self):
         for (frames_path_list, video_id) in tqdm(self.static_frames_loader):
             print(f"Video name: {video_id}, Number of frames: {len(frames_path_list)}")
-            success = self.preprocess_static_video(frames_path_list, video_id, use_ba=False)
-            if success:
-                print(f"Successfully processed video {video_id}")
-            else:
-                print(f"Failed to process video {video_id}")
+            try:
+                success = self.preprocess_static_video(frames_path_list, video_id, use_ba=False)
+                if success:
+                    print(f"Successfully processed video {video_id}")
+                else:
+                    print(f"Failed to process video {video_id}")
+            except Exception as e:
+                print(f"Error processing video {video_id}: {e}")
 
 
 def parse_args():
@@ -320,7 +321,7 @@ def parse_args():
                         help="Use fine tracking (slower but more accurate)")
 
     # No-BA feed-forward export
-    parser.add_argument("--conf_thres_value", type=float, default=5.0,
+    parser.add_argument("--conf_thres_value", type=float, default=1.0,
                         help="Confidence threshold for depth filtering (wo BA)")
     return parser.parse_args()
 
