@@ -66,11 +66,26 @@ class AgVGGT:
             self,
             args
     ):
+        self.video_scene_dir = None
         self.args = args
         if args.static_frames_dir is not None:
             self.static_videos_dir = Path(args.static_frames_dir)
 
         self.static_video_dataset = AgStaticVideoDataset(static_frames_dir=self.static_videos_dir)
+
+        self.max_reproj_error = args.max_reproj_error
+        self.shared_camera = args.shared_camera
+        self.camera_type = args.camera_type
+        self.vis_thresh = args.vis_thresh
+        self.query_frame_num = args.query_frame_num
+        self.max_query_pts = args.max_query_pts
+        self.fine_tracking = args.fine_tracking
+        self.conf_threshold_value = args.conf_thres_value
+
+        self.output_dir = Path(args.video_scene_dir)
+
+        self.static_scenes_dir = args.static_scenes_dir
+        os.makedirs(self.static_scenes_dir, exist_ok=True)
 
         # Seeds
         seed = 42
@@ -118,9 +133,16 @@ class AgVGGT:
         depth_conf = depth_conf.squeeze(0).cpu().numpy()  # (B,H,W)
         return extrinsic, intrinsic, depth_map, depth_conf
 
-    def preprocess_static_video(self, frames_path_list, use_ba=True):
-        # Load images & original coords (pad+resize to square for VGGT input)
+    def preprocess_static_video(self, video_id, use_ba=True):
+        video_static_frames_dir = self.static_videos_dir / video_id
+        assert video_static_frames_dir.exists(), f"Video frames directory {video_static_frames_dir} does not exist."
 
+        frames_path_list = sorted([str(p) for p in video_static_frames_dir.glob("*.png")])
+
+        self.video_scene_dir = os.path.join(self.static_scenes_dir, video_id)
+        os.makedirs(self.video_scene_dir, exist_ok=True)
+
+        # Load images & original coords (pad+resize to square for VGGT input)
         images, original_coords = load_and_preprocess_images_square(frames_path_list, self.img_load_resolution)
         images = images.to(self.device)
         original_coords = original_coords.to(self.device)
@@ -128,7 +150,7 @@ class AgVGGT:
         # Run VGGT (cameras+depth)
         extrinsic, intrinsic, depth_map, depth_conf = self.run_video_vggt(images, self.vggt_fixed_resolution)
         points_3d_dense = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)  # (S,H,W,3)
-        shared_camera = args.shared_camera
+        shared_camera = self.shared_camera
 
         if use_ba:
             image_size = np.array(images.shape[-2:])  # (H,W) at 1024 load-res
@@ -141,16 +163,16 @@ class AgVGGT:
                     conf=depth_conf,
                     points_3d=points_3d_dense,
                     masks=None,
-                    max_query_pts=args.max_query_pts,
-                    query_frame_num=args.query_frame_num,
+                    max_query_pts=self.max_query_pts,
+                    query_frame_num=self.query_frame_num,
                     keypoint_extractor="aliked+sp",
-                    fine_tracking=args.fine_tracking,
+                    fine_tracking=self.fine_tracking,
                 )
                 torch.cuda.empty_cache()
 
             # Rescale intrinsics from 518->1024
             intrinsic[:, :2, :] *= scale
-            track_mask = pred_vis_scores > args.vis_thresh  # (S,P)
+            track_mask = pred_vis_scores > self.vis_thresh  # (S,P)
 
             # Build reconstruction from tracks & run COLMAP BA
             reconstruction, valid_track_mask = batch_np_matrix_to_pycolmap(
@@ -160,9 +182,9 @@ class AgVGGT:
                 pred_tracks,
                 image_size,
                 masks=track_mask,
-                max_reproj_error=args.max_reproj_error,
+                max_reproj_error=self.max_reproj_error,
                 shared_camera=shared_camera,
-                camera_type=args.camera_type,
+                camera_type=self.camera_type,
                 points_rgb=points_rgb_sparse,
             )
 
@@ -176,7 +198,7 @@ class AgVGGT:
         # ==============================
         # No-BA feed-forward export path
         # ==============================
-        conf_thres_value = args.conf_thres_value
+        conf_thres_value = self.conf_threshold_value
         max_points_for_colmap = 100000
         shared_camera = False  # feed-forward path: no shared camera
         camera_type = "PINHOLE"
@@ -219,14 +241,14 @@ class AgVGGT:
             shared_camera=shared_camera,
         )
 
-        print(f"Saving reconstruction to {args.scene_dir}/sparse")
-        sparse_reconstruction_dir = os.path.join(args.scene_dir, "sparse")
+        print(f"Saving reconstruction to {self.video_scene_dir}/sparse")
+        sparse_reconstruction_dir = os.path.join(self.video_scene_dir, "sparse")
         os.makedirs(sparse_reconstruction_dir, exist_ok=True)
         reconstruction.write(sparse_reconstruction_dir)
 
         # Save point cloud for quick visualization
         try:
-            trimesh.PointCloud(pts3d, colors=ptsrgb).export(os.path.join(args.scene_dir, "sparse/points.ply"))
+            trimesh.PointCloud(pts3d, colors=ptsrgb).export(os.path.join(self.video_scene_dir, "sparse/points.ply"))
         except Exception as e:
             print(f"[Warn] Failed to export points.ply: {e}")
 
@@ -273,7 +295,9 @@ class AgVGGT:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
-    parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
+    parser.add_argument("--static_frames_dir", default="/data/rohith/ag/ag4D/static_frames",
+                        help="Folder containing static scene videos.")
+    parser.add_argument("--static_scenes_dir", default="/data/rohith/ag/ag4D/static_scenes")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
 
     # BA selection
