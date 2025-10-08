@@ -5,6 +5,8 @@ import random
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 
 # Configure CUDA settings
 torch.backends.cudnn.enabled = True
@@ -29,35 +31,25 @@ from vggt.dependency.np_to_pycolmap import (
 )
 
 
-class AgStaticVideoDataset:
+class AgStaticFramesDataset(Dataset):
 
     def __init__(
             self,
             static_frames_dir,
     ):
-        self.static_frames_dir = Path(static_frames_dir)
-        self.static_frames = list(self.static_frames_dir.glob("*"))
+        self.static_frames_dir_root = Path(static_frames_dir)
+        self.static_frames_dir_list = list(self.static_frames_dir_root.glob("*"))
 
     def __len__(self):
-        return len(self.static_frames)
+        return len(self.static_frames_dir_list)
 
     def __getitem__(self, idx):
         # (1) Loads a videos from the static_videos list
-        video_name = self.static_frames[idx]
-        video_path = self.static_frames_dir / video_name
+        video_name = self.static_frames_dir_list[idx]
+        video_static_frames_dir_path = self.static_frames_dir_root / video_name
 
-        # (2) Load the video using cv2 and extract frames as images and return the images
-        cap = cv2.VideoCapture(str(video_path))
-        frames = []
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame)
-        cap.release()
-        frames = np.stack(frames, axis=0)  # (N,H,W,3)
-        return frames, video_path.name
+        frames_path_list = sorted([str(p) for p in video_static_frames_dir_path.glob("*.png")])
+        return frames_path_list, video_name
 
 
 class AgVGGT:
@@ -68,10 +60,17 @@ class AgVGGT:
     ):
         self.video_scene_dir = None
         self.args = args
-        if args.static_frames_dir is not None:
-            self.static_videos_dir = Path(args.static_frames_dir)
+        if args.static_frames_dir_root is not None:
+            self.static_videos_dir = Path(args.static_frames_dir_root)
 
-        self.static_video_dataset = AgStaticVideoDataset(static_frames_dir=self.static_videos_dir)
+        self.static_video_dataset = AgStaticFramesDataset(static_frames_dir=self.static_videos_dir)
+        self.static_frames_loader = DataLoader(
+            self.static_video_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=False
+        )
 
         self.max_reproj_error = args.max_reproj_error
         self.shared_camera = args.shared_camera
@@ -133,11 +132,45 @@ class AgVGGT:
         depth_conf = depth_conf.squeeze(0).cpu().numpy()  # (B,H,W)
         return extrinsic, intrinsic, depth_map, depth_conf
 
-    def preprocess_static_video(self, video_id, use_ba=True):
-        video_static_frames_dir = self.static_videos_dir / video_id
-        assert video_static_frames_dir.exists(), f"Video frames directory {video_static_frames_dir} does not exist."
+    def rename_colmap_recons_and_rescale_camera(
+            self,
+            reconstruction,
+            image_paths,
+            original_coords,
+            img_size,
+            shift_point2d_to_original_res=False,
+            shared_camera=False
+    ):
+        rescale_camera = True
 
-        frames_path_list = sorted([str(p) for p in video_static_frames_dir.glob("*.png")])
+        for pyimageid in reconstruction.images:
+            # Reshape padded&resized image back to the original size + rename
+            pyimage = reconstruction.images[pyimageid]
+            pycamera = reconstruction.cameras[pyimage.camera_id]
+            pyimage.name = image_paths[pyimageid - 1]
+
+            if rescale_camera:
+                pred_params = copy.deepcopy(pycamera.params)
+                real_image_size = original_coords[pyimageid - 1, -2:]
+                resize_ratio = max(real_image_size) / img_size
+                pred_params = pred_params * resize_ratio
+                real_pp = real_image_size / 2
+                pred_params[-2:] = real_pp  # set principal point to image center
+                pycamera.params = pred_params
+                pycamera.width = real_image_size[0]
+                pycamera.height = real_image_size[1]
+
+            if shift_point2d_to_original_res:
+                top_left = original_coords[pyimageid - 1, :2]
+                for point2D in pyimage.points2D:
+                    point2D.xy = (point2D.xy - top_left) * resize_ratio
+
+            if shared_camera:
+                rescale_camera = False
+
+        return reconstruction
+
+    def preprocess_static_video(self, frames_path_list, video_id, use_ba=True):
 
         self.video_scene_dir = os.path.join(self.static_scenes_dir, video_id)
         os.makedirs(self.video_scene_dir, exist_ok=True)
@@ -254,43 +287,18 @@ class AgVGGT:
 
         return True
 
-    def rename_colmap_recons_and_rescale_camera(
-            self,
-            reconstruction,
-            image_paths,
-            original_coords,
-            img_size,
-            shift_point2d_to_original_res=False,
-            shared_camera=False
-    ):
-        rescale_camera = True
+    def run(self):
+        for (frames_path_list, video_id) in tqdm(self.static_frames_loader):
+            print(f"Video name: {video_id}, Number of frames: {len(frames_path_list)}")
 
-        for pyimageid in reconstruction.images:
-            # Reshape padded&resized image back to the original size + rename
-            pyimage = reconstruction.images[pyimageid]
-            pycamera = reconstruction.cameras[pyimage.camera_id]
-            pyimage.name = image_paths[pyimageid - 1]
-
-            if rescale_camera:
-                pred_params = copy.deepcopy(pycamera.params)
-                real_image_size = original_coords[pyimageid - 1, -2:]
-                resize_ratio = max(real_image_size) / img_size
-                pred_params = pred_params * resize_ratio
-                real_pp = real_image_size / 2
-                pred_params[-2:] = real_pp  # set principal point to image center
-                pycamera.params = pred_params
-                pycamera.width = real_image_size[0]
-                pycamera.height = real_image_size[1]
-
-            if shift_point2d_to_original_res:
-                top_left = original_coords[pyimageid - 1, :2]
-                for point2D in pyimage.points2D:
-                    point2D.xy = (point2D.xy - top_left) * resize_ratio
-
-            if shared_camera:
-                rescale_camera = False
-
-        return reconstruction
+            try:
+                success = self.preprocess_static_video(frames_path_list, video_id, use_ba=self.args.use_ba)
+                if success:
+                    print(f"Successfully processed video {video_id}")
+                else:
+                    print(f"Failed to process video {video_id}")
+            except Exception as e:
+                print(f"Error processing video {video_id}: {e}")
 
 
 def parse_args():
