@@ -8,6 +8,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from datasets.preprocess.reconstruction.utils import batch_np_matrix_to_pycolmap_wo_track
+
 # Configure CUDA settings
 torch.backends.cudnn.enabled = True
 torch.backends.cudnn.benchmark = True
@@ -17,7 +19,6 @@ import argparse
 from pathlib import Path
 import trimesh
 import pycolmap
-import cv2
 
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images_square
@@ -25,10 +26,7 @@ from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
 from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues
 from vggt.dependency.track_predict import predict_tracks
-from vggt.dependency.np_to_pycolmap import (
-    batch_np_matrix_to_pycolmap,
-    batch_np_matrix_to_pycolmap_wo_track,
-)
+from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap
 
 
 class AgStaticFramesDataset(Dataset):
@@ -52,6 +50,10 @@ class AgStaticFramesDataset(Dataset):
         return frames_path_list, video_name
 
 
+def cuda_collate_fn(batch):
+    return batch[0]
+
+
 class AgVGGT:
 
     def __init__(
@@ -69,7 +71,8 @@ class AgVGGT:
             batch_size=1,
             shuffle=False,
             num_workers=0,
-            pin_memory=False
+            pin_memory=False,
+            collate_fn=cuda_collate_fn,
         )
 
         self.max_reproj_error = args.max_reproj_error
@@ -81,7 +84,7 @@ class AgVGGT:
         self.fine_tracking = args.fine_tracking
         self.conf_threshold_value = args.conf_thres_value
 
-        self.output_dir = Path(args.video_scene_dir)
+        self.output_dir = Path(args.static_scenes_dir)
 
         self.static_scenes_dir = args.static_scenes_dir
         os.makedirs(self.static_scenes_dir, exist_ok=True)
@@ -171,7 +174,6 @@ class AgVGGT:
         return reconstruction
 
     def preprocess_static_video(self, frames_path_list, video_id, use_ba=True):
-
         self.video_scene_dir = os.path.join(self.static_scenes_dir, video_id)
         os.makedirs(self.video_scene_dir, exist_ok=True)
 
@@ -290,20 +292,16 @@ class AgVGGT:
     def run(self):
         for (frames_path_list, video_id) in tqdm(self.static_frames_loader):
             print(f"Video name: {video_id}, Number of frames: {len(frames_path_list)}")
-
-            try:
-                success = self.preprocess_static_video(frames_path_list, video_id, use_ba=self.args.use_ba)
-                if success:
-                    print(f"Successfully processed video {video_id}")
-                else:
-                    print(f"Failed to process video {video_id}")
-            except Exception as e:
-                print(f"Error processing video {video_id}: {e}")
+            success = self.preprocess_static_video(frames_path_list, video_id, use_ba=False)
+            if success:
+                print(f"Successfully processed video {video_id}")
+            else:
+                print(f"Failed to process video {video_id}")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
-    parser.add_argument("--static_frames_dir", default="/data/rohith/ag/ag4D/static_frames",
+    parser.add_argument("--static_frames_dir_root", default="/data/rohith/ag/ag4D/static_frames",
                         help="Folder containing static scene videos.")
     parser.add_argument("--static_scenes_dir", default="/data/rohith/ag/ag4D/static_scenes")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
@@ -325,3 +323,15 @@ def parse_args():
     parser.add_argument("--conf_thres_value", type=float, default=5.0,
                         help="Confidence threshold for depth filtering (wo BA)")
     return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    print("Arguments:", args)
+
+    vggt_recon = AgVGGT(args)
+    vggt_recon.run()
+
+
+if __name__ == "__main__":
+    main()
