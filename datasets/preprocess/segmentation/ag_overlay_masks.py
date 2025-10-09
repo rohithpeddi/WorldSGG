@@ -117,7 +117,7 @@ def overlay_mask_on_video(
         else:
             print(f"[overlay_mask_on_video] Failed to write: {out_path}")
 
-        # === NEW: rectangular mask + rectangular overlayed frame ===
+        # === NEW: rectangular mask + rectangular overlay frame ===
         if rect_frames_dir is not None or rect_masks_dir is not None:
             if len(contours) > 0:
                 # Compute a single bounding rectangle covering all contours
@@ -166,10 +166,30 @@ def overlay_mask_on_video(
                         print(f"[overlay_mask_on_video] Failed to write rectangular mask: {rect_mask_out_path}")
             else:
                 # No foreground in mask; optionally copy original to rectangular outputs for consistency
-                pass
+                if rect_frames_dir is not None:
+                    rect_frame_out_path = os.path.join(rect_frames_dir, frame_name)
+                    if cv2.imwrite(rect_frame_out_path, frame):
+                        saved_rect_paths.append(os.path.abspath(rect_frame_out_path))
+                    else:
+                        print(f"[overlay_mask_on_video] Failed to write rectangular frame (no fg): {rect_frame_out_path}")
+                if rect_masks_dir is not None:
+                    rect_mask_out_path = os.path.join(rect_masks_dir, f"{stem}.png")
+                    blank_mask = np.zeros_like(mask255, dtype=np.uint8)
+                    if cv2.imwrite(rect_mask_out_path, blank_mask):
+                        saved_rect_mask_paths.append(os.path.abspath(rect_mask_out_path))
+                    else:
+                        print(f"[overlay_mask_on_video] Failed to write rectangular mask (no fg): {rect_mask_out_path}")
+
+    if rect_frames_dir is not None and len(saved_rect_paths) != len(os.listdir(video_frame_dir)):
+        raise ValueError(f"[overlay_mask_on_video] Warning: Number of rectangular frames ({len(saved_rect_paths)}) does not match "
+              f"number of input frames ({len(os.listdir(video_frame_dir))})")
+
+    if rect_masks_dir is not None and len(saved_rect_mask_paths) != len(os.listdir(video_frame_dir)):
+        raise ValueError(f"[overlay_mask_on_video] Warning: Number of rectangular masks ({len(saved_rect_mask_paths)}) does not match "
+              f"number of input frames ({len(os.listdir(video_frame_dir))})")
 
     return {
-        "overlayed_frames": saved_paths,
+        "overlay_frames": saved_paths,
         "rect_frames": saved_rect_paths,
         "rect_masks": saved_rect_mask_paths,
     }
@@ -263,7 +283,7 @@ def overlay_masks():
         # Write video from exact overlayed frames
         fps = 10
         out_video_path = os.path.join(output_video_dir, f"{video_id}")
-        _write_video_from_frames(res["overlayed_frames"], out_video_path, fps)
+        _write_video_from_frames(res["overlay_frames"], out_video_path, fps)
 
         # If you later want a video for rectangular frames, uncomment:
         rect_video_dir = "/data/rohith/ag/segmentation/masks/rectangular_overlayed_videos"
