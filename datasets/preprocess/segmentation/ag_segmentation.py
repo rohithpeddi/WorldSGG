@@ -755,11 +755,13 @@ def check_mismatch_video_count(sampled_video_path: Path, masked_video_path: Path
     return sampled_frame_count != masked_frame_count
 
 
-def correct_masked_videos():
+def correct_masked_videos(split):
     data_dir = Path("/data/rohith/ag")
     ag_actor_segmentation = AgSegmentation(data_dir)
     sampled_videos_dir_path = Path("/data/rohith/ag/sampled_videos")
     masked_videos_dir_path = Path("/data/rohith/ag/segmentation/masked_videos/combined_masks_1")
+
+    mismatched_video_list = []
 
     for video_id in tqdm(os.listdir(sampled_videos_dir_path)):
         sampled_video_path = sampled_videos_dir_path / video_id
@@ -771,6 +773,10 @@ def correct_masked_videos():
         is_mismatch = check_mismatch_video_count(sampled_video_path, masked_video_path)
 
         if is_mismatch:
+            mismatched_video_list.append(video_id)
+
+    for video_id in tqdm(mismatched_video_list):
+        if get_video_belongs_to_split(video_id) == split:
             print(f"[correct_masked_videos][{video_id}] Frame count mismatch detected. Reprocessing video.")
             ag_actor_segmentation.combine_masks(video_id)
             ag_actor_segmentation.save_masked_frames_and_videos(video_id)
@@ -778,5 +784,5 @@ def correct_masked_videos():
 
 if __name__ == "__main__":
     # main()
-    # correct_masked_videos()
-    fetch_mismatch_video_stats()
+    correct_masked_videos("QT")
+    # fetch_mismatch_video_stats()

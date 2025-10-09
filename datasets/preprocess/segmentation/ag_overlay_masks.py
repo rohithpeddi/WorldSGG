@@ -228,7 +228,7 @@ def _write_video_from_frames(frames: list, out_video_path: str, fps: float):
 
 
 def overlay_masks():
-    masks_root_dir = "/data/rohith/ag/segmentation/masks/combined"
+    masks_root_dir = "/data/rohith/ag/segmentation/masks/combined_1"
     video_id_list = os.listdir(masks_root_dir)
 
     frames_root_dir = "/data/rohith/ag/sampled_frames/"
