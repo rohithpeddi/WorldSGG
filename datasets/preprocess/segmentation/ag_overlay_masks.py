@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import cv2
 import numpy as np
+from tqdm import tqdm
 
 
 def _ensure_dir(p: str):
@@ -207,8 +208,9 @@ def _write_video_from_frames(frames: list, out_video_path: str, fps: float):
 
 
 def overlay_masks():
-    video_id_list = ["00T1E.mp4", "0DJ6R.mp4"]
-    masks_root_dir = "/data/rohith/ag/segmentation/masks/combined_1"
+    masks_root_dir = "/data/rohith/ag/segmentation/masks/combined"
+    video_id_list = os.listdir(masks_root_dir)
+
     frames_root_dir = "/data/rohith/ag/sampled_frames/"
     output_frames_root_dir = "/data/rohith/ag/segmentation/masks/overlayed_frames"
     output_videos_root_dir = "/data/rohith/ag/segmentation/masks/overlayed_videos"
@@ -222,7 +224,7 @@ def overlay_masks():
     os.makedirs(rect_frames_root_dir, exist_ok=True)
     os.makedirs(rect_masks_root_dir, exist_ok=True)
 
-    for video_id in video_id_list:
+    for video_id in tqdm(video_id_list):
         video_mask_dir = os.path.join(masks_root_dir, video_id)
         video_frame_dir = os.path.join(frames_root_dir, video_id)
 
@@ -236,8 +238,8 @@ def overlay_masks():
         # Skip if exact overlayed frames already exist
         if os.path.exists(output_frame_dir) and len(os.listdir(output_frame_dir)) > 0:
             print(f"[main] Skipping existing output for {video_id}: {output_frame_dir}")
-            # You can still generate rectangular outputs even if exact ones exist — remove this
-            # continue
+            continue
+
         os.makedirs(output_frame_dir, exist_ok=True)
         os.makedirs(output_video_dir, exist_ok=True)
         os.makedirs(rect_frame_dir, exist_ok=True)
@@ -264,7 +266,7 @@ def overlay_masks():
         _write_video_from_frames(res["overlayed_frames"], out_video_path, fps)
 
         # If you later want a video for rectangular frames, uncomment:
-        rect_video_dir = os.path.join("/data/rohith/ag/segmentation/masks/rectangular_overlayed_videos", video_id)
+        rect_video_dir = "/data/rohith/ag/segmentation/masks/rectangular_overlayed_videos"
         os.makedirs(rect_video_dir, exist_ok=True)
         rect_video_path = os.path.join(rect_video_dir, f"{video_id}")
         _write_video_from_frames(res["rect_frames"], rect_video_path, fps)
