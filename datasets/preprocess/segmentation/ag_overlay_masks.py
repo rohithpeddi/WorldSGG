@@ -258,7 +258,7 @@ def overlay_masks():
 
     for video_id in tqdm(filtered_video_ids):
 
-        if video_id in ["XU2N8.mp4"]:
+        if video_id in ["XU2N8.mp4", "Y2PNC.mp4"]:
             print(f"[main] Skipping problematic video: {video_id}")
             continue
 
