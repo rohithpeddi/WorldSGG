@@ -246,21 +246,19 @@ def overlay_masks():
 
     filtered_video_ids = []
 
-    for video_id in tqdm(video_id_list):
-        output_frame_dir = os.path.join(output_frames_root_dir, video_id)
+    # for video_id in tqdm(video_id_list):
+    #     output_frame_dir = os.path.join(output_frames_root_dir, video_id)
+    #
+    #     # Skip if exact overlayed frames already exist
+    #     if os.path.exists(output_frame_dir) and len(os.listdir(output_frame_dir)) > 0:
+    #         print(f"[main] Skipping existing output for {video_id}: {output_frame_dir}")
+    #         continue
+    #
+    #     filtered_video_ids.append(video_id)
 
-        # Skip if exact overlayed frames already exist
-        if os.path.exists(output_frame_dir) and len(os.listdir(output_frame_dir)) > 0:
-            print(f"[main] Skipping existing output for {video_id}: {output_frame_dir}")
-            continue
-
-        filtered_video_ids.append(video_id)
+    filtered_video_ids = ["XU2N8.mp4", "Y2PNC.mp4"]
 
     for video_id in tqdm(filtered_video_ids):
-
-        if video_id in ["XU2N8.mp4", "Y2PNC.mp4"]:
-            print(f"[main] Skipping problematic video: {video_id}")
-            continue
 
         video_mask_dir = os.path.join(masks_root_dir, video_id)
         video_frame_dir = os.path.join(frames_root_dir, video_id)
