@@ -784,5 +784,5 @@ def correct_masked_videos(split):
 
 if __name__ == "__main__":
     # main()
-    correct_masked_videos("QT")
+    correct_masked_videos("UZ")
     # fetch_mismatch_video_stats()

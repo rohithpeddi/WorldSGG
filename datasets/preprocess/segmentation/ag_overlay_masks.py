@@ -244,7 +244,24 @@ def overlay_masks():
     os.makedirs(rect_frames_root_dir, exist_ok=True)
     os.makedirs(rect_masks_root_dir, exist_ok=True)
 
+    filtered_video_ids = []
+
     for video_id in tqdm(video_id_list):
+        output_frame_dir = os.path.join(output_frames_root_dir, video_id)
+
+        # Skip if exact overlayed frames already exist
+        if os.path.exists(output_frame_dir) and len(os.listdir(output_frame_dir)) > 0:
+            print(f"[main] Skipping existing output for {video_id}: {output_frame_dir}")
+            continue
+
+        filtered_video_ids.append(video_id)
+
+    for video_id in tqdm(filtered_video_ids):
+
+        if video_id in ["XU2N8.mp4"]:
+            print(f"[main] Skipping problematic video: {video_id}")
+            continue
+
         video_mask_dir = os.path.join(masks_root_dir, video_id)
         video_frame_dir = os.path.join(frames_root_dir, video_id)
 
@@ -255,11 +272,7 @@ def overlay_masks():
         rect_frame_dir = os.path.join(rect_frames_root_dir, video_id)
         rect_mask_dir = os.path.join(rect_masks_root_dir, video_id)
 
-        # Skip if exact overlayed frames already exist
-        if os.path.exists(output_frame_dir) and len(os.listdir(output_frame_dir)) > 0:
-            print(f"[main] Skipping existing output for {video_id}: {output_frame_dir}")
-            continue
-
+        # Create output dirs
         os.makedirs(output_frame_dir, exist_ok=True)
         os.makedirs(output_video_dir, exist_ok=True)
         os.makedirs(rect_frame_dir, exist_ok=True)
@@ -280,7 +293,7 @@ def overlay_masks():
             rect_masks_dir=rect_mask_dir,
         )
 
-        # Write video from exact overlayed frames
+        # Write video from exact overlay frames
         fps = 10
         out_video_path = os.path.join(output_video_dir, f"{video_id}")
         _write_video_from_frames(res["overlay_frames"], out_video_path, fps)
