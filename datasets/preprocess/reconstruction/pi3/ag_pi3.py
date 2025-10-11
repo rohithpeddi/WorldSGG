@@ -1,5 +1,8 @@
+import argparse
 import gc
 import os
+from pathlib import Path
+from typing import Optional
 
 import matplotlib
 import numpy as np
@@ -11,6 +14,38 @@ from tqdm import tqdm
 from pi3.models.pi3 import Pi3
 from pi3.utils.basic import load_images_as_tensor, write_ply
 from pi3.utils.geometry import depth_edge
+
+
+# ---------------------------
+# Split logic (yours)
+# ---------------------------
+
+def get_video_belongs_to_split(video_id: str) -> Optional[str]:
+    """
+    Get the split that the video belongs to based on its ID.
+    Accepts either a bare ID (e.g., '0DJ6R') or a filename (e.g., '0DJ6R.mp4').
+    """
+    stem = Path(video_id).stem
+    if not stem:
+        return None
+    first_letter = stem[0]
+    if first_letter.isdigit() and int(first_letter) < 5:
+        return "04"
+    elif first_letter.isdigit() and int(first_letter) >= 5:
+        return "59"
+    elif first_letter in "ABCD":
+        return "AD"
+    elif first_letter in "EFGH":
+        return "EH"
+    elif first_letter in "IJKL":
+        return "IL"
+    elif first_letter in "MNOP":
+        return "MP"
+    elif first_letter in "QRST":
+        return "QT"
+    elif first_letter in "UVWXYZ":
+        return "UZ"
+    return None
 
 
 def predictions_to_glb(
@@ -324,14 +359,7 @@ class AgPi3:
         np.savez(prediction_save_path, **predictions)
 
         glbfile = os.path.join(video_save_dir, f"{video_id[:-4]}.glb")
-
-        # Convert predictions to GLB
-        glbscene = predictions_to_glb(
-            predictions,
-            conf_thres=conf_thres,
-            filter_by_frames="all",
-            show_cam=False,
-        )
+        glbscene = predictions_to_glb(predictions, conf_thres=conf_thres, filter_by_frames="all", show_cam=False)
         glbscene.export(file_obj=glbfile)
 
         # Cleanup
@@ -341,18 +369,52 @@ class AgPi3:
 
         return predictions
 
-    def infer_all_videos(self):
+    def infer_all_videos(self, split):
         video_id_list = os.listdir(self.root_dir_path)
         for video_id in tqdm(video_id_list):
+            if get_video_belongs_to_split(video_id) != split:
+                print(f"Skipping video {video_id} not in split {split}")
+                continue
             self.infer_video(video_id)
 
 
-def main():
-    ag_pi3 = AgPi3(
-        root_dir_path='/data/rohith/ag/segmentation/masks/rectangular_overlayed_frames',
-        output_dir_path='/data/rohith/ag/ag4D/static_scenes/pi3',
+def _parse_split(s: str) -> str:
+    valid = {"04", "59", "AD", "EH", "IL", "MP", "QT", "UZ"}
+    val = s.strip().upper()
+    if val not in valid:
+        raise argparse.ArgumentTypeError(
+            f"Invalid split '{s}'. Choose one of: {sorted(valid)}"
+        )
+    return val
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Sample frames from videos based on homography-overlap filtering."
     )
-    ag_pi3.infer_all_videos()
+    parser.add_argument(
+        "--root_dir_path", type=str, default="/data/rohith/ag/segmentation/masks/rectangular_overlayed_frames",
+        help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
+    )
+    parser.add_argument(
+        "--output_dir_path", type=str, default="/data/rohith/ag/ag4D/static_scenes/pi3",
+        help="Path to output directory where results will be saved."
+    )
+    parser.add_argument(
+        "--split", type=_parse_split, default="04",
+        help="Optional shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}. "
+             "If omitted, processes all videos."
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    ag_pi3 = AgPi3(
+        root_dir_path=args.root_dir_path,
+        output_dir_path=args.output_dir_path,
+    )
+    ag_pi3.infer_all_videos(args.split)
 
 
 if __name__ == "__main__":
