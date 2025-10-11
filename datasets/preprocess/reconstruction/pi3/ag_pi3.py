@@ -318,7 +318,7 @@ class AgPi3:
 
     def infer_video(self, video_id, conf_thres=50.0):
         data_path = f'{self.root_dir_path}/{video_id}'
-        video_save_dir = os.path.join(self.output_dir_path, f"{video_id}_{conf_thres}")
+        video_save_dir = os.path.join(self.output_dir_path, f"{video_id[:-4]}_{int(conf_thres)}")
         os.makedirs(video_save_dir, exist_ok=True)
         save_path = f'{video_save_dir}/{video_id[:-4]}.ply'
 
@@ -366,8 +366,6 @@ class AgPi3:
         del predictions
         gc.collect()
         torch.cuda.empty_cache()
-
-        return predictions
 
     def infer_all_videos(self, split):
         video_id_list = os.listdir(self.root_dir_path)
