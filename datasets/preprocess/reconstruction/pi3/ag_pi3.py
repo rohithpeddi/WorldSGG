@@ -373,7 +373,10 @@ class AgPi3:
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
                 continue
-            self.infer_video(video_id)
+            try:
+                self.infer_video(video_id)
+            except Exception as e:
+                print(f"[ERROR] Error processing video {video_id}: {e}")
 
 
 def _parse_split(s: str) -> str:
