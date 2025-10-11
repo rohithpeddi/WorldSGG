@@ -1,3 +1,4 @@
+import gc
 import os
 
 import matplotlib
@@ -280,9 +281,9 @@ class AgPi3:
         imgs = load_images_as_tensor(data_path, interval=interval).to(self.device)  # (N, 3, H, W)
         return imgs
 
-    def infer_video(self, video_id):
+    def infer_video(self, video_id, conf_thres=50.0):
         data_path = f'{self.root_dir_path}/{video_id}'
-        video_save_dir = os.path.join(self.output_dir_path, video_id)
+        video_save_dir = os.path.join(self.output_dir_path, f"{video_id}_{conf_thres}")
         os.makedirs(video_save_dir, exist_ok=True)
         save_path = f'{video_save_dir}/{video_id[:-4]}.ply'
 
@@ -317,20 +318,19 @@ class AgPi3:
             if isinstance(predictions[key], torch.Tensor):
                 predictions[key] = predictions[key].cpu().numpy().squeeze(0)  # remove batch dimension
 
-        # Clean up
         torch.cuda.empty_cache()
 
         prediction_save_path = os.path.join(video_save_dir, "predictions.npz")
         np.savez(prediction_save_path, **predictions)
 
-        glbfile = os.path.join(video_save_dir, "glbscene.glb")
+        glbfile = os.path.join(video_save_dir, f"{video_id[:-4]}.glb")
 
         # Convert predictions to GLB
         glbscene = predictions_to_glb(
             predictions,
             conf_thres=conf_thres,
-            filter_by_frames=frame_filter,
-            show_cam=show_cam,
+            filter_by_frames="all",
+            show_cam=False,
         )
         glbscene.export(file_obj=glbfile)
 
