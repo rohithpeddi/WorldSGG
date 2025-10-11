@@ -13,37 +13,45 @@ def load_images_as_tensor(path='data/truck', interval=1, PIXEL_LIMIT=255000):
     Loads images from a directory or video, resizes them to a uniform size,
     then converts and stacks them into a single [N, 3, H, W] PyTorch tensor.
     """
-    sources = [] 
+    sources = []
+    print(f"Loading images from directory: {path}")
+    filenames = sorted([x for x in os.listdir(path) if x.lower().endswith(('.png', '.jpg', '.jpeg'))])
+    for i in range(0, len(filenames), interval):
+        img_path = osp.join(path, filenames[i])
+        try:
+            sources.append(Image.open(img_path).convert('RGB'))
+        except Exception as e:
+            print(f"Could not load image {filenames[i]}: {e}")
     
-    # --- 1. Load image paths or video frames ---
-    if osp.isdir(path):
-        print(f"Loading images from directory: {path}")
-        filenames = sorted([x for x in os.listdir(path) if x.lower().endswith(('.png', '.jpg', '.jpeg'))])
-        for i in range(0, len(filenames), interval):
-            img_path = osp.join(path, filenames[i])
-            try:
-                sources.append(Image.open(img_path).convert('RGB'))
-            except Exception as e:
-                print(f"Could not load image {filenames[i]}: {e}")
-    elif path.lower().endswith('.mp4'):
-        print(f"Loading frames from video: {path}")
-        cap = cv2.VideoCapture(path)
-        if not cap.isOpened(): raise IOError(f"Cannot open video file: {path}")
-        frame_idx = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret: break
-            if frame_idx % interval == 0:
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                sources.append(Image.fromarray(rgb_frame))
-            frame_idx += 1
-        cap.release()
-    else:
-        raise ValueError(f"Unsupported path. Must be a directory or a .mp4 file: {path}")
-
-    if not sources:
-        print("No images found or loaded.")
-        return torch.empty(0)
+    # # --- 1. Load image paths or video frames ---
+    # if osp.isdir(path):
+    #     print(f"Loading images from directory: {path}")
+    #     filenames = sorted([x for x in os.listdir(path) if x.lower().endswith(('.png', '.jpg', '.jpeg'))])
+    #     for i in range(0, len(filenames), interval):
+    #         img_path = osp.join(path, filenames[i])
+    #         try:
+    #             sources.append(Image.open(img_path).convert('RGB'))
+    #         except Exception as e:
+    #             print(f"Could not load image {filenames[i]}: {e}")
+    # elif path.lower().endswith('.mp4'):
+    #     print(f"Loading frames from video: {path}")
+    #     cap = cv2.VideoCapture(path)
+    #     if not cap.isOpened(): raise IOError(f"Cannot open video file: {path}")
+    #     frame_idx = 0
+    #     while True:
+    #         ret, frame = cap.read()
+    #         if not ret: break
+    #         if frame_idx % interval == 0:
+    #             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    #             sources.append(Image.fromarray(rgb_frame))
+    #         frame_idx += 1
+    #     cap.release()
+    # else:
+    #     raise ValueError(f"Unsupported path. Must be a directory or a .mp4 file: {path}")
+    #
+    # if not sources:
+    #     print("No images found or loaded.")
+    #     return torch.empty(0)
 
     print(f"Found {len(sources)} images/frames. Processing...")
 
