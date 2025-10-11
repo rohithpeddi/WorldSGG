@@ -12,7 +12,7 @@ from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
 from pi3.models.pi3 import Pi3
-from pi3.utils.basic import load_images_as_tensor, write_ply
+from pi3.utils.basic import load_images_as_tensor
 from pi3.utils.geometry import depth_edge
 
 
@@ -332,11 +332,6 @@ class AgPi3:
         masks = torch.sigmoid(predictions['conf'][..., 0]) > 0.1
         non_edge = ~depth_edge(predictions['local_points'][..., 2], rtol=0.03)
         masks = torch.logical_and(masks, non_edge)[0]
-        #
-        # # Save points
-        # print(f"Saving point cloud to: {save_path}")
-        # write_ply(predictions['points'][0][masks].cpu(), imgs.permute(0, 2, 3, 1)[masks], save_path)
-        # print("Done.")
 
         predictions['images'] = imgs[None].permute(0, 1, 3, 4, 2)
         predictions['conf'] = torch.sigmoid(predictions['conf'])
