@@ -1,6 +1,7 @@
 import os
 
 import torch
+from tqdm import tqdm
 
 from pi3.models.pi3 import Pi3
 from pi3.utils.basic import load_images_as_tensor, write_ply
@@ -17,6 +18,8 @@ class AgPi3:
         self.model = None
         self.root_dir_path = root_dir_path
         self.output_dir_path = output_dir_path if output_dir_path is not None else root_dir_path
+        os.makedirs(self.output_dir_path, exist_ok=True)
+
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
         self.load_model()
@@ -30,13 +33,13 @@ class AgPi3:
         imgs = load_images_as_tensor(data_path, interval=interval).to(self.device)  # (N, 3, H, W)
         return imgs
 
-    def infer(self, video_id):
+    def infer_video(self, video_id):
         data_path = f'{self.root_dir_path}/videos/{video_id}.mp4'
-        video_save_dir = os.path.join(self.output_dir_path, "results", video_id)
+        video_save_dir = os.path.join(self.output_dir_path, video_id)
         os.makedirs(video_save_dir, exist_ok=True)
         save_path = f'{video_save_dir}/{video_id}.ply'
 
-        imgs = self.preprocess_image_list(data_path, is_video=True)
+        imgs = self.preprocess_image_list(data_path, is_video=False)
         print("Running model inference...")
         with torch.no_grad():
             with torch.amp.autocast('cuda', dtype=self.dtype):
@@ -52,9 +55,18 @@ class AgPi3:
         write_ply(res['points'][0][masks].cpu(), imgs.permute(0, 2, 3, 1)[masks], save_path)
         print("Done.")
 
+    def infer_all_videos(self):
+        video_id_list = os.listdir(self.root_dir_path)
+        for video_id in tqdm(video_id_list):
+            self.infer_video(video_id)
+
 
 def main():
-    pass
+    ag_pi3 = AgPi3(
+        root_dir_path='/data/rohith/ag/segmentation/masks/rectangular_overlayed_frames',
+        output_dir_path='/data/rohith/ag/ag4D/static_scenes/pi3',
+    )
+    ag_pi3.infer_all_videos()
 
 
 if __name__ == "__main__":
