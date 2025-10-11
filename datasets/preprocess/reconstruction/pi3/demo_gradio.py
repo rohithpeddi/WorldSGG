@@ -20,15 +20,11 @@ import matplotlib
 from scipy.spatial.transform import Rotation
 
 
-"""
-Gradio utils
-"""
-
 def predictions_to_glb(
-    predictions,
-    conf_thres=50.0,
-    filter_by_frames="all",
-    show_cam=True,
+        predictions,
+        conf_thres=50.0,
+        filter_by_frames="all",
+        show_cam=True,
 ) -> trimesh.Scene:
     """
     Converts VGGT predictions to a 3D scene represented as a GLB file.
@@ -132,16 +128,17 @@ def predictions_to_glb(
             current_color = tuple(int(255 * x) for x in rgba_color[:3])
 
             # integrate_camera_into_scene(scene_3d, camera_to_world, current_color, scene_scale)
-            integrate_camera_into_scene(scene_3d, camera_to_world, current_color, 1.)          # fixed camera size
+            integrate_camera_into_scene(scene_3d, camera_to_world, current_color, 1.)  # fixed camera size
 
     # Rotate scene for better visualize
     align_rotation = np.eye(4)
-    align_rotation[:3, :3] = Rotation.from_euler("y", 100, degrees=True).as_matrix()            # plane rotate
-    align_rotation[:3, :3] = align_rotation[:3, :3] @ Rotation.from_euler("x", 155, degrees=True).as_matrix()           # roll
+    align_rotation[:3, :3] = Rotation.from_euler("y", 100, degrees=True).as_matrix()  # plane rotate
+    align_rotation[:3, :3] = align_rotation[:3, :3] @ Rotation.from_euler("x", 155, degrees=True).as_matrix()  # roll
     scene_3d.apply_transform(align_rotation)
 
     print("GLB Scene built")
     return scene_3d
+
 
 def integrate_camera_into_scene(scene: trimesh.Scene, transform: np.ndarray, face_colors: tuple, scene_scale: float):
     """
@@ -291,14 +288,14 @@ def run_model(target_dir, model) -> dict:
 
     # interval = 10 if target_dir.endswith('.mp4') else 1
     interval = 1
-    imgs = load_images_as_tensor(os.path.join(target_dir, "images"), interval=interval).to(device) # (N, 3, H, W)
+    imgs = load_images_as_tensor(os.path.join(target_dir, "images"), interval=interval).to(device)  # (N, 3, H, W)
 
     # 3. Infer
     print("Running model inference...")
     dtype = torch.bfloat16
     with torch.no_grad():
         with torch.amp.autocast('cuda', dtype=dtype):
-            predictions = model(imgs[None]) # Add batch dimension
+            predictions = model(imgs[None])  # Add batch dimension
     predictions['images'] = imgs[None].permute(0, 1, 3, 4, 2)
     predictions['conf'] = torch.sigmoid(predictions['conf'])
     edge = depth_edge(predictions['local_points'][..., 2], rtol=0.03)
@@ -357,7 +354,7 @@ def handle_uploads(input_video, input_images, interval=-1):
             dst_path = os.path.join(target_dir_images, os.path.basename(file_path))
             shutil.copy(file_path, dst_path)
             image_paths.append(dst_path)
-        
+
     # --- Handle video ---
     if input_video is not None:
         if isinstance(input_video, dict) and "name" in input_video:
@@ -414,10 +411,10 @@ def update_gallery_on_upload(input_video, input_images, interval=-1):
 # commit below for local demo
 # @spaces.GPU(duration=120)
 def gradio_demo(
-    target_dir,
-    conf_thres=3.0,
-    frame_filter="All",
-    show_cam=True,
+        target_dir,
+        conf_thres=3.0,
+        frame_filter="All",
+        show_cam=True,
 ):
     """
     Perform reconstruction using the already-created target_dir/images.
@@ -492,7 +489,7 @@ def update_log():
 
 
 def update_visualization(
-    target_dir, conf_thres, frame_filter, show_cam, is_example
+        target_dir, conf_thres, frame_filter, show_cam, is_example
 ):
     """
     Reload saved predictions from npz, create (or reuse) the GLB for new parameters,
@@ -555,7 +552,6 @@ skiing = "examples/skiing.mp4"
 # -------------------------------------------------------------------------
 
 if __name__ == '__main__':
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print("Initializing and loading Pi3 model...")
@@ -574,8 +570,8 @@ if __name__ == '__main__':
     )
 
     with gr.Blocks(
-        theme=theme,
-        css="""
+            theme=theme,
+            css="""
         /* --- Google 字体导入 (科技感字体) --- */
         @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@400;500;700&display=swap');
 
@@ -694,7 +690,7 @@ if __name__ == '__main__':
         target_dir_output = gr.Textbox(label="Target Dir", visible=False, value="None")
 
         gr.HTML(
-        """
+            """
         <style>
                 /* --- 介绍文字区专属样式 --- */
                 .intro-content { font-size: 17px !important; line-height: 1.7; color: #C0C0C0 !important; }
@@ -764,7 +760,7 @@ if __name__ == '__main__':
             </div>
         </div>
         """
-    )
+        )
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -772,8 +768,9 @@ if __name__ == '__main__':
                     gr.Markdown("### 1. Upload Media")
                     input_video = gr.Video(label="Upload Video", interactive=True)
                     input_images = gr.File(file_count="multiple", label="Or Upload Images", interactive=True)
-                    interval = gr.Number(None, label='Frame/Image Interval', info="Sampling interval. Video default: 1 FPS. Image default: 1 (all images).")
-                
+                    interval = gr.Number(None, label='Frame/Image Interval',
+                                         info="Sampling interval. Video default: 1 FPS. Image default: 1 (all images).")
+
                 image_gallery = gr.Gallery(
                     label="Image Preview",
                     columns=4,
@@ -787,22 +784,24 @@ if __name__ == '__main__':
                 gr.Markdown("### 2. View Reconstruction")
                 log_output = gr.Markdown("Please upload media and click Reconstruct.", elem_classes=["custom-log"])
                 reconstruction_output = gr.Model3D(height=480, zoom_speed=0.5, pan_speed=0.5, label="3D Output")
-                
+
                 with gr.Row():
                     submit_btn = gr.Button("Reconstruct", scale=3, variant="primary")
                     clear_btn = gr.ClearButton(
                         scale=1
                     )
-                
+
                 with gr.Group():
                     gr.Markdown("### 3. Adjust Visualization")
                     with gr.Row():
-                        conf_thres = gr.Slider(minimum=0, maximum=100, value=20, step=0.1, label="Confidence Threshold (%)")
+                        conf_thres = gr.Slider(minimum=0, maximum=100, value=20, step=0.1,
+                                               label="Confidence Threshold (%)")
                         show_cam = gr.Checkbox(label="Show Cameras", value=True)
                     frame_filter = gr.Dropdown(choices=["All"], value="All", label="Show Points from Frame")
 
         # Set clear button targets
-        clear_btn.add([input_video, input_images, reconstruction_output, log_output, target_dir_output, image_gallery, interval])
+        clear_btn.add(
+            [input_video, input_images, reconstruction_output, log_output, target_dir_output, image_gallery, interval])
 
         # ---------------------- Examples section ----------------------
         examples = [
@@ -816,12 +815,13 @@ if __name__ == '__main__':
             [valley, None, 1, 20, True],
         ]
 
+
         def example_pipeline(
-            input_video,
-            input_images,
-            interval,
-            conf_thres,
-            show_cam,
+                input_video,
+                input_images,
+                interval,
+                conf_thres,
+                show_cam,
         ):
             """
             1) Copy example images to new target_dir
@@ -836,6 +836,7 @@ if __name__ == '__main__':
                 target_dir, conf_thres, frame_filter, show_cam
             )
             return glbfile, log_msg, target_dir, dropdown, image_paths
+
 
         gr.Markdown("Click any row to load an example.", elem_classes=["example-log"])
 
@@ -902,7 +903,7 @@ if __name__ == '__main__':
             ],
             [reconstruction_output, log_output],
         )
-    
+
         show_cam.change(
             update_visualization,
             [
