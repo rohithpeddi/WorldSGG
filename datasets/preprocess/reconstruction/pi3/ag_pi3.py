@@ -316,7 +316,7 @@ class AgPi3:
         imgs = load_images_as_tensor(data_path, interval=interval).to(self.device)  # (N, 3, H, W)
         return imgs
 
-    def infer_video(self, video_id, conf_thres=50.0):
+    def infer_video(self, video_id, conf_thres=10.0):
         data_path = f'{self.root_dir_path}/{video_id}'
         video_save_dir = os.path.join(self.output_dir_path, f"{video_id[:-4]}_{int(conf_thres)}")
         os.makedirs(video_save_dir, exist_ok=True)
@@ -332,18 +332,16 @@ class AgPi3:
         masks = torch.sigmoid(predictions['conf'][..., 0]) > 0.1
         non_edge = ~depth_edge(predictions['local_points'][..., 2], rtol=0.03)
         masks = torch.logical_and(masks, non_edge)[0]
-
-        # Save points
-        print(f"Saving point cloud to: {save_path}")
-        write_ply(predictions['points'][0][masks].cpu(), imgs.permute(0, 2, 3, 1)[masks], save_path)
-        print("Done.")
+        #
+        # # Save points
+        # print(f"Saving point cloud to: {save_path}")
+        # write_ply(predictions['points'][0][masks].cpu(), imgs.permute(0, 2, 3, 1)[masks], save_path)
+        # print("Done.")
 
         predictions['images'] = imgs[None].permute(0, 1, 3, 4, 2)
         predictions['conf'] = torch.sigmoid(predictions['conf'])
         edge = depth_edge(predictions['local_points'][..., 2], rtol=0.03)
         predictions['conf'][edge] = 0.0
-        del predictions['local_points']
-
         # # transform to first camera coordinate
         # predictions['points'] = torch.einsum('bij, bnhwj -> bnhwi', se3_inverse(predictions['camera_poses'][:, 0]), homogenize_points(predictions['points']))[..., :3]
         # predictions['camera_poses'] = torch.einsum('bij, bnjk -> bnik', se3_inverse(predictions['camera_poses'][:, 0]), predictions['camera_poses'])
@@ -359,7 +357,7 @@ class AgPi3:
         np.savez(prediction_save_path, **predictions)
 
         glbfile = os.path.join(video_save_dir, f"{video_id[:-4]}.glb")
-        glbscene = predictions_to_glb(predictions, conf_thres=conf_thres, filter_by_frames="all", show_cam=False)
+        glbscene = predictions_to_glb(predictions, conf_thres=conf_thres, filter_by_frames="all", show_cam=True)
         glbscene.export(file_obj=glbfile)
 
         # Cleanup
