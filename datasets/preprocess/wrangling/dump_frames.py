@@ -79,8 +79,7 @@ def dump_static_frames(args):
             # Use ffmpeg to extract frames. Different versions of ffmpeg may generate slightly different frames.
             os.system('ffmpeg -loglevel panic -i %s/%s %s/%%06d.png' % (video_dir, v, curr_frame_dir))
         else:
-            warnings.warn('Frame directory %s already exists. Skipping dumping into this directory.' % curr_frame_dir,
-                          RuntimeWarning)
+            print(f'Frame directory [{curr_frame_dir}] already exists. Skipping dumping into this directory.')
 
 
 def main_setup_static_scene():

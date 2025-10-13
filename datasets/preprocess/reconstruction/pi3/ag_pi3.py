@@ -412,20 +412,20 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Sample frames from videos based on homography-overlap filtering."
     )
-    # parser.add_argument(
-    #     "--root_dir_path", type=str, default="/data/rohith/ag/ag4D/static_frames",
-    #     help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
-    # )
     parser.add_argument(
-        "--root_dir_path", type=str, default="/data/rohith/ag/segmentation/masks/rectangular_overlayed_frames",
+        "--root_dir_path", type=str, default="/data/rohith/ag/ag4D/static_frames",
         help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
     )
+    # parser.add_argument(
+    #     "--root_dir_path", type=str, default="/data/rohith/ag/segmentation/masks/rectangular_overlayed_frames",
+    #     help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
+    # )
     parser.add_argument(
         "--frames_annotated_dir_path", type=str, default="/data/rohith/ag/frames_annotated",
         help="Path to directory containing annotated frames (with masks)."
     )
     parser.add_argument(
-        "--output_dir_path", type=str, default="/data2/rohith/ag/ag4D/static_scenes/pi3",
+        "--output_dir_path", type=str, default="/data2/rohith/ag/ag4D/static_scenes/pi3_inpaint",
         help="Path to output directory where results will be saved."
     )
     parser.add_argument(
