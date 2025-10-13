@@ -295,13 +295,17 @@ class AgPi3:
 
     def __init__(
             self,
-            root_dir_path,
+            root_dir_path, # data/rohith/ag/ag4D/static_frames
             output_dir_path=None,
+            frame_annotated_dir_path=None,
     ):
         self.model = None
         self.root_dir_path = root_dir_path
         self.output_dir_path = output_dir_path if output_dir_path is not None else root_dir_path
         os.makedirs(self.output_dir_path, exist_ok=True)
+
+        self.frame_annotated_dir_path = frame_annotated_dir_path
+        self.sampled_frames_idx_root_dir = "/data/rohith/ag/sampled_frames_idx"
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
@@ -310,19 +314,41 @@ class AgPi3:
     def load_model(self):
         self.model = Pi3.from_pretrained("yyfz233/Pi3").to(self.device).eval()
 
-    def preprocess_image_list(self, data_path, is_video=False):
+    def preprocess_image_list(self, data_path, is_video=False, video_id=None, sample_idx=None):
         interval = 10 if is_video else 1
         print(f'Sampling interval: {interval}')
-        imgs = load_images_as_tensor(data_path, interval=interval).to(self.device)  # (N, 3, H, W)
+        imgs = load_images_as_tensor(
+            data_path,
+            interval=interval,
+            video_id=video_id,
+            sample_idx=sample_idx
+        ).to(self.device)  # (N, 3, H, W)
         return imgs
 
     def infer_video(self, video_id, conf_thres=10.0):
         data_path = f'{self.root_dir_path}/{video_id}'
         video_save_dir = os.path.join(self.output_dir_path, f"{video_id[:-4]}_{int(conf_thres)}")
         os.makedirs(video_save_dir, exist_ok=True)
-        save_path = f'{video_save_dir}/{video_id[:-4]}.ply'
 
-        imgs = self.preprocess_image_list(data_path, is_video=False)
+        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
+        annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
+        annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
+        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4]) # Number only
+
+        # Get the mapping for sampled_frame_id and the actual frame id
+        # Now start from the sampled frame which corresponds to the first annotated frame and keep the rest of the sampled frames
+        video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir, f"{video_id[:-4]}.npy")
+        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()  # Numbers only
+
+        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
+        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, len(video_sampled_frame_id_list)))
+
+        imgs = self.preprocess_image_list(
+            data_path,
+            is_video=False,
+            video_id=video_id,
+            sample_idx=sample_idx
+        )
         print("Running model inference...")
         with torch.no_grad():
             with torch.amp.autocast('cuda', dtype=self.dtype):
@@ -386,12 +412,20 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Sample frames from videos based on homography-overlap filtering."
     )
+    # parser.add_argument(
+    #     "--root_dir_path", type=str, default="/data/rohith/ag/ag4D/static_frames",
+    #     help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
+    # )
     parser.add_argument(
-        "--root_dir_path", type=str, default="/data/rohith/ag/ag4D/static_frames",
+        "--root_dir_path", type=str, default="/data/rohith/ag/segmentation/masks/rectangular_overlayed_frames",
         help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
     )
     parser.add_argument(
-        "--output_dir_path", type=str, default="/data2/rohith/ag/ag4D/static_scenes/pi3_inpaint",
+        "--frames_annotated_dir_path", type=str, default="/data/rohith/ag/frames_annotated",
+        help="Path to directory containing annotated frames (with masks)."
+    )
+    parser.add_argument(
+        "--output_dir_path", type=str, default="/data2/rohith/ag/ag4D/static_scenes/pi3",
         help="Path to output directory where results will be saved."
     )
     parser.add_argument(
@@ -407,6 +441,7 @@ def main():
     ag_pi3 = AgPi3(
         root_dir_path=args.root_dir_path,
         output_dir_path=args.output_dir_path,
+        frame_annotated_dir_path=args.frames_annotated_dir_path,
     )
     ag_pi3.infer_all_videos(args.split)
 

@@ -1,22 +1,26 @@
+import math
 import os
 import os.path as osp
-import math
-import cv2
-from PIL import Image
-import torch
-from torchvision import transforms
-from plyfile import PlyData, PlyElement
-import numpy as np
 
-def load_images_as_tensor(path='data/truck', interval=1, PIXEL_LIMIT=255000):
-    """
-    Loads images from a directory or video, resizes them to a uniform size,
-    then converts and stacks them into a single [N, 3, H, W] PyTorch tensor.
-    """
+import numpy as np
+import torch
+from PIL import Image
+from plyfile import PlyData, PlyElement
+from torchvision import transforms
+
+
+def load_images_as_tensor(path='data/truck', interval=1, PIXEL_LIMIT=255000, sample_idx=None, video_id=None):
     sources = []
     print(f"Loading images from directory: {path}")
     filenames = sorted([x for x in os.listdir(path) if x.lower().endswith(('.png', '.jpg', '.jpeg'))])
     for i in range(0, len(filenames), interval):
+        if sample_idx is not None and i // interval not in sample_idx:
+            if video_id is not None:
+                print(f"[{video_id}] Skipping image index {i} for video as it's not in {sample_idx}.")
+            else:
+                print(f"Skipping image index {i} as it's not in {sample_idx}.")
+            continue
+
         img_path = osp.join(path, filenames[i])
         try:
             sources.append(Image.open(img_path).convert('RGB'))
