@@ -29,4 +29,4 @@ numpy
 tqdm
 open3d
 pycolmap
-git+https://github.com/facebookresearch/vggt.git
+boxsdk==3.14.0

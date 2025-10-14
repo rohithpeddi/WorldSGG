@@ -425,7 +425,7 @@ def parse_args():
         help="Path to directory containing annotated frames (with masks)."
     )
     parser.add_argument(
-        "--output_dir_path", type=str, default="/data2/rohith/ag/ag4D/static_scenes/pi3_inpaint",
+        "--output_dir_path", type=str, default="/data3/rohith/ag/ag4D/static_scenes/pi3_inpaint",
         help="Path to output directory where results will be saved."
     )
     parser.add_argument(

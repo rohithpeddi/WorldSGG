@@ -301,8 +301,8 @@ def parse_ext_list(val: Optional[str]) -> Optional[Set[str]]:
 
 def main():
     p = argparse.ArgumentParser(description="Fast parallel sync between local folder and a Box folder.")
-    p.add_argument("--local_dir", required=False, default="/data/rohith/ag/static_videos")
-    p.add_argument("--box_folder_id", required=False, default="345011408563")
+    p.add_argument("--local_dir", required=False, default="/data2/rohith/ag/ag4D/static_scenes/pi3/")
+    p.add_argument("--box_folder_id", required=False, default="346018144786")
     p.add_argument("--mode", choices=["upload", "download", "sync"], default="sync")
     p.add_argument("--workers", type=int, default=4, help="Parallel workers for up/downloading (default: 4)")
     p.add_argument("--dry-run", action="store_true", help="Plan only; do not perform writes.")
@@ -313,6 +313,16 @@ def main():
     args = p.parse_args()
 
     Path(args.local_dir).mkdir(parents=True, exist_ok=True)
+
+    print("\n-------------------- CONFIGURATION --------------------")
+    print(f"Local directory   : {args.local_dir}")
+    print(f"Box folder ID    : {args.box_folder_id}")
+    print(f"Mode             : {args.mode}")
+    print(f"Workers          : {args.workers}")
+    print(f"Dry run          : {args.dry_run}")
+    print(f"Include ext      : {args.include_ext or 'None'}")
+    print(f"Exclude ext      : {args.exclude_ext or 'None'}")
+    print("-------------------------------------------------------\n")
 
     include_ext = parse_ext_list(args.include_ext)
     exclude_ext = parse_ext_list(args.exclude_ext)
