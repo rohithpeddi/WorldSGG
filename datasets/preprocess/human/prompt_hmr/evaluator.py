@@ -7,12 +7,12 @@ from tqdm import tqdm
 import pickle as pkl
 from torch.amp import autocast
 
-from data_config import SMPL_PATH, SMPLX_PATH, SMPLX2SMPL
-from prompt_hmr.smpl_family import SMPLX, SMPL
-from prompt_hmr.datasets.emdb_dataset import EMDBDataset
-from prompt_hmr.datasets.rich_dataset import RICHDataset
-from prompt_hmr.datasets.test_dataset import TestDataset
-from prompt_hmr.utils.eval_utils import batch_compute_similarity_transform_torch, batch_align_by_pelvis
+from datasets.preprocess.human.data_config import SMPL_PATH, SMPLX_PATH, SMPLX2SMPL
+from datasets.preprocess.human.prompt_hmr.smpl_family import SMPLX, SMPL
+from datasets.preprocess.human.prompt_hmr.datasets.emdb_dataset import EMDBDataset
+from datasets.preprocess.human.prompt_hmr.datasets.rich_dataset import RICHDataset
+from datasets.preprocess.human.prompt_hmr.datasets.test_dataset import TestDataset
+from datasets.preprocess.human.prompt_hmr.utils.eval_utils import batch_compute_similarity_transform_torch, batch_align_by_pelvis
 
 def to_tensor(array):
 	tensor = torch.from_numpy(array).float().cuda()

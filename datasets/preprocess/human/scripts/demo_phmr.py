@@ -10,16 +10,16 @@ from glob import glob
 from torch.amp import autocast
 
 from ultralytics import YOLO
-from data_config import SMPL_PATH, SMPLX_PATH
-from prompt_hmr import load_model_from_folder
-from prompt_hmr.smpl_family import SMPLX, SMPL
-from prompt_hmr.utils.visualizer import draw_boxes, save_ply
+from datasets.preprocess.human.data_config import SMPL_PATH, SMPLX_PATH
+from datasets.preprocess.human.prompt_hmr import load_model_from_folder
+from datasets.preprocess.human.prompt_hmr.smpl_family import SMPLX, SMPL
+from datasets.preprocess.human.prompt_hmr.utils.visualizer import draw_boxes, save_ply
 
-from prompt_hmr.vis.traj import align_meshes_to_ground, align_meshes_to_gravity
-from prompt_hmr.models.inference import prepare_batch, predict_masks
-from prompt_hmr.vis.viser import viser_vis_human
+from datasets.preprocess.human.prompt_hmr.vis.traj import align_meshes_to_ground, align_meshes_to_gravity
+from datasets.preprocess.human.prompt_hmr.models.inference import prepare_batch, predict_masks
+from datasets.preprocess.human.prompt_hmr.vis.viser import viser_vis_human
 
-from pipeline.camcalib.model import CameraRegressorNetwork
+from datasets.preprocess.human.pipeline.camcalib.model import CameraRegressorNetwork
 from segment_anything import SamPredictor, sam_model_registry
 
 
@@ -51,7 +51,7 @@ def main(image='data/examples/example_1.jpg', gravity_align=False, detect_conf=0
     verts = output['vertices']
     focal = batch[0]['cam_int_original'][0,0,0]
     if render_overlap:
-        from prompt_hmr.vis.renderer import Renderer
+        from datasets.preprocess.human.prompt_hmr.vis.renderer import Renderer
         renderer = Renderer(img.shape[1], img.shape[0], focal, bin_size=0)
         img_rend = renderer.render_meshes(verts, smplx.faces, img)
         cv2.imwrite(f'{savedir}/output.jpg', img_rend[:,:,::-1])

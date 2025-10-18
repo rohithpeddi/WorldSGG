@@ -4,8 +4,8 @@ from typing import Any, Dict, List, Tuple
 import pickle as pkl
 from torch.amp import autocast
 
-from prompt_hmr.utils.rotation_utils import rotation_6d_to_matrix
-from prompt_hmr.smpl_family import SMPLX, SMPL
+from datasets.preprocess.human.prompt_hmr.utils.rotation_utils import rotation_6d_to_matrix
+from datasets.preprocess.human.prompt_hmr.smpl_family import SMPLX, SMPL
 from .components import ImageEncoder, PromptEncoder, SMPLDecoder
 
 SMPLX_MODEL_DIR = 'data/body_models/smplx'

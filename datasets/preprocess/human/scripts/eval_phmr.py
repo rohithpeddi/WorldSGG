@@ -5,8 +5,8 @@ os.environ["CUDA_VISIBLE_DEVICES"]="0"
 import torch
 import tyro
 
-from prompt_hmr import load_model_from_folder
-from prompt_hmr.evaluator import Evaluator
+from ..prompt_hmr import load_model_from_folder
+from ..prompt_hmr.evaluator import Evaluator
 
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy('file_system')

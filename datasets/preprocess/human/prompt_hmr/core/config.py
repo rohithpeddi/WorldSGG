@@ -2,7 +2,7 @@ import os
 import shutil
 import argparse
 from yacs.config import CfgNode as CN
-from data_config import *
+from datasets.preprocess.human.data_config import *
 
 
 # Configuration variables

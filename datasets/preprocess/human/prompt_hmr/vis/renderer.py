@@ -19,9 +19,9 @@ from pytorch3d.structures.meshes import join_meshes_as_scene
 from pytorch3d.renderer.cameras import look_at_rotation
 from pytorch3d.renderer.camera_conversions import _cameras_from_opencv_projection
 
-from prompt_hmr.utils.rotation_conversions import rotation_about_x, rotation_about_y
-from prompt_hmr.vis.tools import get_colors, checkerboard_geometry
-from prompt_hmr.vis.traj import align_meshes_to_ground, align_meshes_to_gravity
+from datasets.preprocess.human.prompt_hmr.utils.rotation_conversions import rotation_about_x, rotation_about_y
+from datasets.preprocess.human.prompt_hmr.vis.tools import get_colors, checkerboard_geometry
+from datasets.preprocess.human.prompt_hmr.vis.traj import align_meshes_to_ground, align_meshes_to_gravity
 
 
 def overlay_image_onto_background(image, mask, bbox, background):

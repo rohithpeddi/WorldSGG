@@ -6,7 +6,7 @@ import matplotlib.ticker as ticker
 from scipy.ndimage import gaussian_filter
 
 from .tools import checkerboard_geometry
-from prompt_hmr.utils.rotation_conversions import quaternion_to_matrix, matrix_to_quaternion, axis_angle_to_matrix
+from datasets.preprocess.human.prompt_hmr.utils.rotation_conversions import quaternion_to_matrix, matrix_to_quaternion, axis_angle_to_matrix
 
 
 def traj_filter(pred_vert_w, pred_j3d_w, sigma=3):

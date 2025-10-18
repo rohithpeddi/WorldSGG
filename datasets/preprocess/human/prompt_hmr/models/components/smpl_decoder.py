@@ -11,7 +11,7 @@ from torch.nn import functional as F
 from typing import List, Tuple, Type
 
 from .common import LayerNorm2d
-from prompt_hmr.smpl_family import SMPLX
+from datasets.preprocess.human.prompt_hmr.smpl_family import SMPLX
 
 SMPLX_MODEL_DIR = 'data/body_models/smplx/models/smplx'
 

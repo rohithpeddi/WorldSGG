@@ -6,10 +6,10 @@ from torch.utils.data import Dataset
 from torchvision.transforms import Normalize, ToTensor, Compose
 from PIL import Image, ImageOps
 
-from data_config import DATASET_FILES, DATASET_FOLDERS, SMPLX_PATH
-from prompt_hmr.smpl_family import SMPLX
-from prompt_hmr.utils.rotation_utils import axis_angle_to_matrix
-from prompt_hmr.utils.imutils import read_img
+from datasets.preprocess.human.data_config import DATASET_FILES, DATASET_FOLDERS, SMPLX_PATH
+from datasets.preprocess.human.prompt_hmr.smpl_family import SMPLX
+from datasets.preprocess.human.prompt_hmr.utils.rotation_utils import axis_angle_to_matrix
+from datasets.preprocess.human.prompt_hmr.utils.imutils import read_img
 
 
 np2th = lambda x: torch.from_numpy(x).float()

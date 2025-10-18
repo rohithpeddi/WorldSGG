@@ -6,9 +6,9 @@ from torch.utils.data import Dataset
 from torchvision.transforms import Normalize, ToTensor, Compose
 from PIL import Image, ImageOps
 
-from data_config import DATASET_FILES, DATASET_FOLDERS, SMPL_PATH
-from prompt_hmr.smpl_family import SMPL
-from prompt_hmr.utils.rotation_utils import axis_angle_to_matrix
+from datasets.preprocess.human.data_config import DATASET_FILES, DATASET_FOLDERS, SMPL_PATH
+from datasets.preprocess.human.prompt_hmr.smpl_family import SMPL
+from datasets.preprocess.human.prompt_hmr.utils.rotation_utils import axis_angle_to_matrix
 
 
 def tt(ndarray):

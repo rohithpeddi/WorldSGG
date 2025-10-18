@@ -7,17 +7,17 @@ import torch
 from omegaconf import OmegaConf
 
 from smplx import SMPLX
-from pipeline.detector import segment
-from pipeline.detector.vitpose_estimator import load_vit_model, estimate_kp2ds_from_bbox_vitpose
-from pipeline.kp_utils import convert_kps
-from pipeline.utils import prepare_inputs, load_video_frames, interpolate_bboxes
-from pipeline.tools import detect_track, detect_segment_track_sam, est_camera, est_calib
-from pipeline.phmr_vid import PromptHMR_Video
-from pipeline.camera import run_metric_slam, calibrate_intrinsics, run_slam
-from pipeline.spec import run_cam_calib
-from pipeline.world import world_hps_estimation
-from pipeline.postprocessing import post_optimization
-from pipeline.mcs_export_cam import export_scene_with_camera
+from .detector import segment
+from .detector.vitpose_estimator import load_vit_model, estimate_kp2ds_from_bbox_vitpose
+from .kp_utils import convert_kps
+from .utils import prepare_inputs, load_video_frames, interpolate_bboxes
+from .tools import detect_track, detect_segment_track_sam, est_camera, est_calib
+from .phmr_vid import PromptHMR_Video
+from .camera import run_metric_slam, calibrate_intrinsics, run_slam
+from .spec import run_cam_calib
+from .world import world_hps_estimation
+from .postprocessing import post_optimization
+from .mcs_export_cam import export_scene_with_camera
 from smplcodec import SMPLCodec
 
 
