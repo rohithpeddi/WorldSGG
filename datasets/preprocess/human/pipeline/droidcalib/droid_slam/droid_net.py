@@ -12,7 +12,7 @@ from .modules.clipping import GradientClip
 from lietorch import SE3
 from .geom.ba import BA
 
-import datasets.preprocess.human.pipeline.droidcalib.droid_slam.geom.projective_ops as pops
+from .geom import projective_ops as pops
 from .geom.graph_utils import graph_to_edge_list, keyframe_indicies
 
 from torch_scatter import scatter_mean

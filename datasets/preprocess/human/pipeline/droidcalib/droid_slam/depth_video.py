@@ -7,7 +7,7 @@ from torch.multiprocessing import Process, Queue, Lock, Value
 from collections import OrderedDict
 
 from .droid_net import cvx_upsample
-import datasets.preprocess.human.pipeline.droidcalib.droid_slam.geom.projective_ops as pops
+from .geom import projective_ops as pops
 
 class DepthVideo:
     def __init__(self, image_size=[480, 640], buffer=1024, stereo=False, device="cuda:0", opt_intr=True, camera_model="pinhole", far_threshold=10.0,):

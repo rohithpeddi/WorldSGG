@@ -139,27 +139,24 @@ def detect_segment_track_sam(images, out_path, paths_dict, debug_masks, sam2_typ
     sam2_registry = {
         'tiny': {
             'checkpoint': paths_dict['sam2'] + '/sam2_hiera_tiny.pt',
-            'config': "pipeline/sam2/sam2_hiera_t.yaml",
+            'config': "sam2/sam2_hiera_t.yaml",
         },
         'small': {
             'checkpoint': paths_dict['sam2'] + '/sam2_hiera_small.pt',
-            'config': "pipeline/sam2/sam2_hiera_s.yaml",
+            'config': "sam2/sam2_hiera_s.yaml",
         },
         'base_plus': {
             'checkpoint': paths_dict['sam2'] + '/sam2_hiera_base_plus.pt',
-            'config': "pipeline/sam2/sam2_hiera_b+.yaml",
+            'config': "sam2/sam2_hiera_b+.yaml",
         },
         'large': {
             'checkpoint': paths_dict['sam2'] + '/sam2_hiera_large.pt',
-            'config': "pipeline/sam2/sam2_hiera_l.yaml"
+            'config': "sam2/sam2_hiera_l.yaml"
         },
     }
 
     checkpoint = sam2_registry[sam2_type]['checkpoint']
-    model_cfg = sam2_registry[sam2_type]['config']
-    if not os.path.exists(model_cfg):
-        model_cfg = '/code/' + model_cfg
-    model_cfg = '/' + os.path.abspath(model_cfg)
+    model_cfg = os.path.join(os.path.dirname(__file__), sam2_registry[sam2_type]['config'])
     predictor = build_sam2_video_predictor(model_cfg, checkpoint)
     
     if detector_type == 'detectron2':

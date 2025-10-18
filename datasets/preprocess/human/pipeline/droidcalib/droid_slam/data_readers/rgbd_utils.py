@@ -4,7 +4,8 @@ import os.path as osp
 import torch
 from lietorch import SE3
 
-import datasets.preprocess.human.pipeline.droidcalib.droid_slam.geom.projective_ops as pops
+from ..geom import projective_ops as pops
+
 from scipy.spatial.transform import Rotation
 
 

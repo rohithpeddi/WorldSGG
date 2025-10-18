@@ -9,8 +9,8 @@ from smplx.utils import SMPLOutput
 from .vertex_ids import VertexJointSelector, smplx_ids, \
     smpl_to_openpose, smplx_to_openpose, smplx_lr_hand_inds, split2face_feet_hand_parts
 from ..utils.rotation_conversions import axis_angle_to_matrix
+from ...data_config import SMPLX2SMPL_JOINTS
 
-SMPLX2SMPL_JOINTS = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/body_models/smplx2smpl_joints.npy'
 
 class SMPL(smplx.SMPLLayer):
     def __init__(self, *args, joint_regressor_extra: Optional[str] = None, update_hips: bool = False, **kwargs):

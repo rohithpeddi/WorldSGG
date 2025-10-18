@@ -32,3 +32,7 @@ DATASET_FOLDERS = {'EMDB': f'{ROOT}/EMDB',
 SMPLX_PATH = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/body_models/smplx'
 SMPL_PATH = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/body_models/smpl'
 SMPLX2SMPL = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/body_models/smplx2smpl.pkl'
+SMPLX2SMPL_JOINTS = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/body_models/smplx2smpl_joints.npy'
+
+CONFIG_PATH = "/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/pipeline/config.yaml"
+SMPLX_NEUTRAL_MODEL_PATH = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/body_models/smplx/SMPLX_NEUTRAL.npz'

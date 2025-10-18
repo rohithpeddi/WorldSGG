@@ -2,7 +2,7 @@ import cv2
 import torch
 import lietorch
 
-import datasets.preprocess.human.pipeline.droidcalib.droid_slam.geom.projective_ops as pops
+from .geom import projective_ops as pops
 from .modules.corr import CorrBlock
 
 

@@ -20,14 +20,17 @@ from .postprocessing import post_optimization
 from .mcs_export_cam import export_scene_with_camera
 from smplcodec import SMPLCodec
 
+# import sys
+# sys.path.append('../')
+from datasets.preprocess.human.data_config import CONFIG_PATH, SMPLX_NEUTRAL_MODEL_PATH
 
 class Pipeline:
     def __init__(self, static_cam=False):
         self.images = None
-        self.cfg = OmegaConf.load("/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/pipeline/config.yaml")
+        self.cfg = OmegaConf.load(CONFIG_PATH)
         self.cfg.static_cam = static_cam
         
-        checkpoint_dir = 'data/pretrain'
+        checkpoint_dir = '..data/pretrain'
         self.data_dict = {
             'droid': os.path.join(checkpoint_dir, 'droid.pth'), 
             'sam': os.path.join(checkpoint_dir, "sam_vit_h_4b8939.pth"), 
@@ -37,7 +40,7 @@ class Pipeline:
         }
 
         self.smplx = SMPLX(
-            f'/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/body_models/smplx/SMPLX_NEUTRAL.npz',
+            SMPLX_NEUTRAL_MODEL_PATH,
             use_pca=False, 
             flat_hand_mean=True, 
             num_betas=10
@@ -91,7 +94,7 @@ class Pipeline:
 
 
     def estimate_2d_keypoints(self,):
-        model = load_vit_model(model_path='data/pretrain/vitpose-h-coco_25.pth')
+        model = load_vit_model(model_path='..data/pretrain/vitpose-h-coco_25.pth')
         for k, v in self.results['people'].items():
             kpts_2d = estimate_kp2ds_from_bbox_vitpose(model, self.images, v['bboxes'], k, v['frames'])
             kpts_2d = convert_kps(kpts_2d, 'vitpose25', 'openpose')

@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 
 from .chol import block_solve, schur_solve
-import datasets.preprocess.human.pipeline.droidcalib.droid_slam.geom.projective_ops as pops
+from ..geom import projective_ops as pops
 
 from torch_scatter import scatter_sum
 
