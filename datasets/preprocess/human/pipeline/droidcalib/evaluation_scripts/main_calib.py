@@ -19,13 +19,13 @@ import torch.nn.functional as F
 import numpy as np
 import random
 import torch
-from droid import Droid
+from ..droid_slam.droid import Droid
 from types import SimpleNamespace
-from geom import mapping_error as ma
+from ..droid_slam.geom import mapping_error as ma
 
 from image_stream import image_stream
 from trajectory_eval import compute_ape, compute_ape_tartan
-from video_calib import rescale_intr
+from ..droid_slam.video_calib import rescale_intr
 
 
 def main(args):

@@ -18,7 +18,7 @@ import time
 import argparse
 import time
 
-from droid_slam.droid import Droid
+from .droid_slam.droid import Droid
 import video_calib
 
 

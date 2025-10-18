@@ -463,7 +463,7 @@ def run_spec_calib(images, out_folder=None, loss_type='softargmax_l2', save_res=
         num_fc_channels=1024,
     ).to(device)
     
-    CKPT = 'data/pretrain/camcalib_sa_biased_l2.ckpt'
+    CKPT = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/pretrain/camcalib_sa_biased_l2.ckpt'
     
     if os.path.exists('/.dockerenv') or 'AWS_DEFAULT_REGION' in os.environ.keys():
         CKPT = os.path.abspath(CKPT.replace('data', '/code/data'))

@@ -4,8 +4,8 @@ import numpy as np
 
 import matplotlib.pyplot as plt
 from lietorch import SE3
-from modules.corr import CorrBlock, AltCorrBlock
-import geom.projective_ops as pops
+from .modules.corr import CorrBlock, AltCorrBlock
+import datasets.preprocess.human.pipeline.droidcalib.droid_slam.geom.projective_ops as pops
 from glob import glob
 
 class FactorGraph:

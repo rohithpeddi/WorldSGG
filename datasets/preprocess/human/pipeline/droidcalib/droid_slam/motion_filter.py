@@ -2,11 +2,8 @@ import cv2
 import torch
 import lietorch
 
-from collections import OrderedDict
-from droid_net import DroidNet
-
-import geom.projective_ops as pops
-from modules.corr import CorrBlock
+import datasets.preprocess.human.pipeline.droidcalib.droid_slam.geom.projective_ops as pops
+from .modules.corr import CorrBlock
 
 
 class MotionFilter:

@@ -24,7 +24,7 @@ from smplcodec import SMPLCodec
 class Pipeline:
     def __init__(self, static_cam=False):
         self.images = None
-        self.cfg = OmegaConf.load("pipeline/config.yaml")
+        self.cfg = OmegaConf.load("/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/pipeline/config.yaml")
         self.cfg.static_cam = static_cam
         
         checkpoint_dir = 'data/pretrain'
@@ -37,7 +37,7 @@ class Pipeline:
         }
 
         self.smplx = SMPLX(
-            f'data/body_models/smplx/SMPLX_NEUTRAL.npz', 
+            f'/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/body_models/smplx/SMPLX_NEUTRAL.npz',
             use_pca=False, 
             flat_hand_mean=True, 
             num_betas=10

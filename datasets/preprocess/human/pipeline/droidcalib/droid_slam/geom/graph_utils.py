@@ -4,7 +4,7 @@ import numpy as np
 from collections import OrderedDict
 
 import lietorch
-from data_readers.rgbd_utils import compute_distance_matrix_flow, compute_distance_matrix_flow2
+from ..data_readers.rgbd_utils import compute_distance_matrix_flow, compute_distance_matrix_flow2
 
 
 def graph_to_edge_list(graph):

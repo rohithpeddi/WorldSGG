@@ -29,6 +29,6 @@ DATASET_FOLDERS = {'EMDB': f'{ROOT}/EMDB',
 				  }
 
 # Path to SMPL/SMPLX data
-SMPLX_PATH = 'data/body_models/smplx'
-SMPL_PATH = 'data/body_models/smpl'
-SMPLX2SMPL = 'data/body_models/smplx2smpl.pkl'
+SMPLX_PATH = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/body_models/smplx'
+SMPL_PATH = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/body_models/smpl'
+SMPLX2SMPL = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/body_models/smplx2smpl.pkl'
