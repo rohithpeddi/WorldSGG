@@ -14,15 +14,15 @@ from torchvision.transforms import Resize
 
 import sys
 sys.path.insert(0, 'pipeline/droidcalib/droid_slam')
-from droid import Droid
+from datasets.preprocess.human.pipeline.droidcalib.droid_slam.droid import Droid
 from .depth_utils import prep_metric3d, post_metric3d
 from .slam_utils import slam_args, parser
 from .slam_utils import get_dimention, est_calib, image_stream, preprocess_masks
 from .est_scale import est_scale_hybrid
 from ..image_folder import ImageFolder
 
-from prompt_hmr.utils.rotation_conversions import quaternion_to_matrix
-from pipeline.yvanyin_metric3d_main.hubconf import (
+from datasets.preprocess.human.prompt_hmr.utils.rotation_conversions import quaternion_to_matrix
+from datasets.preprocess.human.pipeline.yvanyin_metric3d_main.hubconf import (
     metric3d_vit_large, 
     metric3d_vit_small, 
     metric3d_vit_giant2,

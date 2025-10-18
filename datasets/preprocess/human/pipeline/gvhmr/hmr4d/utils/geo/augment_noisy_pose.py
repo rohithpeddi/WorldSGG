@@ -1,7 +1,7 @@
 import torch
-from hmr4d.utils.rotation_conversions import axis_angle_to_matrix, matrix_to_axis_angle, matrix_to_rotation_6d
-import hmr4d.utils.matrix as matrix
-from hmr4d import PROJ_ROOT
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.rotation_conversions import axis_angle_to_matrix, matrix_to_axis_angle, matrix_to_rotation_6d
+import datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.matrix as matrix
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d import PROJ_ROOT
 
 COCO17_AUG = {k: v.flatten() for k, v in torch.load(PROJ_ROOT / "hmr4d/utils/body_model/coco_aug_dict.pth").items()}
 COCO17_AUG_CUDA = {}

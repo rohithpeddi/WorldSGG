@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from hmr4d.utils.geo_transform import project_p2d, convert_bbx_xys_to_lurb, cvt_to_bi01_p2d
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.geo_transform import project_p2d, convert_bbx_xys_to_lurb, cvt_to_bi01_p2d
 
 
 def estimate_focal_length(img_w, img_h):

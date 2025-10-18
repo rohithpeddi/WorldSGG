@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import einsum, rearrange, repeat
 
-from hmr4d.utils.rotation_conversions import (
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.rotation_conversions import (
     matrix_to_rotation_6d,
     rotation_6d_to_matrix,
     axis_angle_to_matrix,
@@ -12,8 +12,8 @@ from hmr4d.utils.rotation_conversions import (
     quaternion_to_matrix,
     matrix_to_quaternion,
 )
-import hmr4d.utils.matrix as matrix
-from hmr4d.utils.geo.quaternion import qbetween, qslerp, qinv, qmul, qrot
+import datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.matrix as matrix
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.geo.quaternion import qbetween, qslerp, qinv, qmul, qrot
 
 
 class CCD_IK:

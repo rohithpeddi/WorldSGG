@@ -7,8 +7,8 @@ from smplx.utils import Struct, to_np, to_tensor
 from einops import einsum, rearrange
 from time import time
 
-from hmr4d import PROJ_ROOT
-from hmr4d.utils.rotation_conversions import axis_angle_to_matrix, rotation_6d_to_matrix
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d import PROJ_ROOT
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.rotation_conversions import axis_angle_to_matrix, rotation_6d_to_matrix
 
 
 class SmplxLite(nn.Module):
