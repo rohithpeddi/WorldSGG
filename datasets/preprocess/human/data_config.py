@@ -10,23 +10,25 @@ ROOT = './'
 ANN_ROOT = 'data/annotations'
 
 # Path to converted annotations
-DATASET_FILES = {'EMDB': f'{ANN_ROOT}/emdb_mc_labels.npz',
-                 '3DPW_TEST': f'{ANN_ROOT}/3dpw_test_mc_labels.npz',
-                 'HI4D_TEST': f'{ANN_ROOT}/hi4d_test_mc_labels.npz',
-                 'CHI3D_VAL': f'{ANN_ROOT}/chi3d_val_mc_labels.npz',
-                 'COCO_VAL': f'{ANN_ROOT}/coco_val.npz',
-                 'RICH_TEST': f'{ANN_ROOT}/rich_test_mc_labels.npz'
-				}
+DATASET_FILES = {
+    'EMDB': f'{ANN_ROOT}/emdb_mc_labels.npz',
+    '3DPW_TEST': f'{ANN_ROOT}/3dpw_test_mc_labels.npz',
+    'HI4D_TEST': f'{ANN_ROOT}/hi4d_test_mc_labels.npz',
+    'CHI3D_VAL': f'{ANN_ROOT}/chi3d_val_mc_labels.npz',
+    'COCO_VAL': f'{ANN_ROOT}/coco_val.npz',
+    'RICH_TEST': f'{ANN_ROOT}/rich_test_mc_labels.npz'
+}
 
 
 # Path to image folders
-DATASET_FOLDERS = {'EMDB': f'{ROOT}/EMDB',
-                   '3DPW_TEST': f'{ROOT}/3DPW',
-                   'HI4D_TEST': f'{ROOT}/HI4D',
-                   'CHI3D_VAL': f'{ROOT}/CHI3D',
-                   'COCO_VAL': f'{ROOT}/COCO',
-                   'RICH_TEST': f'{ROOT}/RICH',
-				  }
+DATASET_FOLDERS = {
+    'EMDB': f'{ROOT}/EMDB',
+    '3DPW_TEST': f'{ROOT}/3DPW',
+    'HI4D_TEST': f'{ROOT}/HI4D',
+    'CHI3D_VAL': f'{ROOT}/CHI3D',
+    'COCO_VAL': f'{ROOT}/COCO',
+    'RICH_TEST': f'{ROOT}/RICH',
+}
 
 # Path to SMPL/SMPLX data
 SMPLX_PATH = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/body_models/smplx'
@@ -36,3 +38,7 @@ SMPLX2SMPL_JOINTS = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/d
 
 CONFIG_PATH = "/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/pipeline/config.yaml"
 SMPLX_NEUTRAL_MODEL_PATH = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/body_models/smplx/SMPLX_NEUTRAL.npz'
+
+COLORS_TEXT_PATH = "/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/pipeline/colors.txt"
+
+SMPLX_NEUTRAL_F32_PATH = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/body_models/smplx/SMPLX_neutral_array_f32_slim.npz'

@@ -7,10 +7,7 @@ from torch.amp import autocast
 from datasets.preprocess.human.prompt_hmr.utils.rotation_utils import rotation_6d_to_matrix
 from datasets.preprocess.human.prompt_hmr.smpl_family import SMPLX, SMPL
 from .components import ImageEncoder, PromptEncoder, SMPLDecoder
-
-SMPLX_MODEL_DIR = 'data/body_models/smplx'
-SMPL_MODEL_DIR = 'data/body_models/smpl'
-SMPLX2SMPL = 'data/body_models/smplx2smpl.pkl'
+from ...data_config import SMPLX_PATH as SMPLX_MODEL_DIR, SMPL_PATH as SMPL_MODEL_DIR, SMPLX2SMPL
 
 class PHMR(pl.LightningModule):
     def __init__(

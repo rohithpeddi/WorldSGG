@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 import torch.nn.functional as F
-from prompt_hmr.utils.rotation_conversions import matrix_to_rotation_6d, rotation_6d_to_matrix
+from datasets.preprocess.human.prompt_hmr.utils.rotation_conversions import matrix_to_rotation_6d, rotation_6d_to_matrix
     
 
 def gmof(x, sigma=100):

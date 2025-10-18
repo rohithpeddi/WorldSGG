@@ -1,13 +1,14 @@
 import torch
 import numpy as np
 
-from prompt_hmr.vis.traj import fit_floor_height
-from prompt_hmr.utils.one_euro_filter import smooth_one_euro
-from prompt_hmr.utils.rotation_conversions import (
+from datasets.preprocess.human.prompt_hmr.vis.traj import fit_floor_height
+from datasets.preprocess.human.prompt_hmr.utils.one_euro_filter import smooth_one_euro
+from datasets.preprocess.human.prompt_hmr.utils.rotation_conversions import (
     rotation_about_x, 
     rotation_about_y, 
     matrix_to_axis_angle,
 )
+from ..data_config import COLORS_TEXT_PATH
 
 
 def transform_smpl_params(root_orient, transl, R, t, smpl_t_pose_pelvis):
@@ -35,8 +36,7 @@ def transform_smpl_params(root_orient, transl, R, t, smpl_t_pose_pelvis):
 
 
 def world_hps_estimation(cfg, results, smplx):
-
-    colors = np.loadtxt('pipeline/colors.txt')/255
+    colors = np.loadtxt(COLORS_TEXT_PATH)/255
     colors = torch.from_numpy(colors).float()
 
     locations = []

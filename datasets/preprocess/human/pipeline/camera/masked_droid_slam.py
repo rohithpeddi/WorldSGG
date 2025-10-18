@@ -235,7 +235,7 @@ def run_slam(images, masks=None, calib=None, depths=None, opt_intr=False, stride
     if opt_intr:
         print("Optimizing intrinsics...")
     
-    slam_args.weights = 'data/pretrain/droidcalib.pth'
+    slam_args.weights = os.path.join(os.path.dirname(__file__), '../../data/pretrain/droidcalib.pth')
     slam_args.opt_intr = opt_intr
     for (t, image, intrinsics, depth, size_factor) in image_stream(images, calib, depths=depths, stride=stride, depth_keyframes=depth_keyframes):
 

@@ -1272,7 +1272,7 @@ def build_sam2_video_predictor(
     **kwargs,
 ):
     hydra_overrides = [
-        "++model._target_=pipeline.detector.sam2_video_predictor.SAM2VideoPredictor",
+        "++model._target_=datasets.preprocess.human.pipeline.detector.sam2_video_predictor.SAM2VideoPredictor",
     ]
     if vos_optimized:
         hydra_overrides = [

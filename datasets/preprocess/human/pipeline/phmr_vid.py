@@ -11,19 +11,21 @@ from torchvision.transforms import Normalize, ToTensor, Compose
 
 import sys
 sys.path.insert(0, 'pipeline/gvhmr')
-from prompt_hmr import load_model as load_phmr
-from pipeline.gvhmr.hmr4d.model.gvhmr.gvhmr_pl_demo import DemoPL
-from pipeline.gvhmr.hmr4d.utils.geo_transform import compute_cam_angvel
-from pipeline.gvhmr.hmr4d.utils.geo.hmr_cam import get_bbx_xys_from_xyxy, normalize_kp2d
-from prompt_hmr.utils.rotation_conversions import axis_angle_to_matrix
-
+import os
+from datasets.preprocess.human.prompt_hmr import load_model as load_phmr
+from .gvhmr.hmr4d.model.gvhmr.gvhmr_pl_demo import DemoPL
+from .gvhmr.hmr4d.utils.geo_transform import compute_cam_angvel
+from .gvhmr.hmr4d.utils.geo.hmr_cam import get_bbx_xys_from_xyxy, normalize_kp2d
+from datasets.preprocess.human.prompt_hmr.utils.rotation_conversions import (axis_angle_to_matrix)
+from ..data_config import SMPLX_NEUTRAL_MODEL_PATH
 
 def load_video_head():
-    phmr_vid_cfg =  OmegaConf.load('data/pretrain/phmr_vid/prhmr_release_002.yaml')
-    phmr_vid_ckpt = 'data/pretrain/phmr_vid/prhmr_release_002.ckpt'
+    phmr_config_path = os.path.join(os.path.dirname(__file__), "../data/pretrain/phmr_vid/prhmr_release_002.yaml")
+    phmr_vid_ckpt = os.path.join(os.path.dirname(__file__), "../data/pretrain/phmr_vid/prhmr_release_002.ckpt")
+    phmr_vid_cfg =  OmegaConf.load(phmr_config_path)
     vid_head = DemoPL(
         pipeline=phmr_vid_cfg.model.pipeline,
-        smplx_path='data/body_models/smplx/SMPLX_NEUTRAL.npz',
+        smplx_path=SMPLX_NEUTRAL_MODEL_PATH,
     )
     vid_head = vid_head.eval().cuda()
     vid_head.load_pretrained_model(phmr_vid_ckpt)
@@ -33,7 +35,8 @@ def load_video_head():
 class PromptHMR_Video():
     def __init__(self,):
         super().__init__()
-        self.model = load_phmr('data/pretrain/phmr/checkpoint.ckpt')
+        ckpt_path = os.path.join(os.path.dirname(__file__), "../data/pretrain/phmr/checkpoint.ckpt")
+        self.model = load_phmr(ckpt_path)
         self.vid_head = load_video_head()
     
     @torch.no_grad()

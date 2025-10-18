@@ -22,7 +22,8 @@ from smplcodec import SMPLCodec
 
 # import sys
 # sys.path.append('../')
-from datasets.preprocess.human.data_config import CONFIG_PATH, SMPLX_NEUTRAL_MODEL_PATH
+from ..data_config import CONFIG_PATH, SMPLX_NEUTRAL_MODEL_PATH, SMPLX_NEUTRAL_F32_PATH
+
 
 class Pipeline:
     def __init__(self, static_cam=False):
@@ -30,7 +31,7 @@ class Pipeline:
         self.cfg = OmegaConf.load(CONFIG_PATH)
         self.cfg.static_cam = static_cam
         
-        checkpoint_dir = '..data/pretrain'
+        checkpoint_dir = os.path.join(os.path.dirname(__file__), '../data/pretrain')
         self.data_dict = {
             'droid': os.path.join(checkpoint_dir, 'droid.pth'), 
             'sam': os.path.join(checkpoint_dir, "sam_vit_h_4b8939.pth"), 
@@ -94,7 +95,8 @@ class Pipeline:
 
 
     def estimate_2d_keypoints(self,):
-        model = load_vit_model(model_path='..data/pretrain/vitpose-h-coco_25.pth')
+        model_path = os.path.join(os.path.dirname(__file__), '../data/pretrain/vitpose-h-coco_25.pth')
+        model = load_vit_model(model_path=model_path)
         for k, v in self.results['people'].items():
             kpts_2d = estimate_kp2ds_from_bbox_vitpose(model, self.images, v['bboxes'], k, v['frames'])
             kpts_2d = convert_kps(kpts_2d, 'vitpose25', 'openpose')
@@ -268,14 +270,15 @@ class Pipeline:
             camera[:3, 3] = Twc
 
             if len(track_id) > 0:
-                world4d[i] = {'pose': torch.tensor(np.concatenate(pose)).float().reshape(len(track_id),-1,3),
-                            'shape': torch.tensor(np.concatenate(shape)).float(),
-                            'trans': torch.tensor(np.concatenate(transl)).float(),
-                            'track_id': torch.tensor(np.array(track_id)) - 1,
-                            'camera': camera}
+                world4d[i] = {
+                    'pose': torch.tensor(np.concatenate(pose)).float().reshape(len(track_id),-1,3),
+                    'shape': torch.tensor(np.concatenate(shape)).float(),
+                    'trans': torch.tensor(np.concatenate(transl)).float(),
+                    'track_id': torch.tensor(np.array(track_id)) - 1,
+                    'camera': camera
+                }
             else:
-                world4d[i] = {'track_id': np.array([]),
-                            'camera': camera}
+                world4d[i] = {'track_id': np.array([]), 'camera': camera}
 
         return world4d
 
@@ -290,8 +293,7 @@ class Pipeline:
                 elif isinstance(v, torch.Tensor):
                     d[k] = v.detach().cpu().numpy()
 
-        images, seq_folder = self.load_frames(input_video, 
-                                              output_folder)
+        images, seq_folder = self.load_frames(input_video, output_folder)
 
         self.images = images[:max_frame]
         self.seq_folder = seq_folder
@@ -398,7 +400,7 @@ class Pipeline:
             focal_length=self.results['camera_world']['img_focal'],
             principal_point=self.results['camera_world']['img_center'],
             frame_rate=float(self.cfg.fps),
-            smplx_path='data/body_models/smplx/SMPLX_neutral_array_f32_slim.npz',
+            smplx_path=SMPLX_NEUTRAL_F32_PATH,
         )
 
         print("Usage:")

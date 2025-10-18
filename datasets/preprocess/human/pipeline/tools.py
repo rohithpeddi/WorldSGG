@@ -156,12 +156,13 @@ def detect_segment_track_sam(images, out_path, paths_dict, debug_masks, sam2_typ
     }
 
     checkpoint = sam2_registry[sam2_type]['checkpoint']
-    model_cfg = os.path.join(os.path.dirname(__file__), sam2_registry[sam2_type]['config'])
+    # model_cfg = sam2_registry[sam2_type]['config']
+    model_cfg = "/" + os.path.join(os.path.dirname(__file__), sam2_registry[sam2_type]['config'])
     predictor = build_sam2_video_predictor(model_cfg, checkpoint)
     
     if detector_type == 'detectron2':
         # ViTDet
-        cfg_path = 'pipeline/detectron2/keypoint_rcnn_X_101_32x8d_FPN_3x.yaml'
+        cfg_path = "/" + os.path.join(os.path.dirname(__file__), 'detectron2/keypoint_rcnn_X_101_32x8d_FPN_3x.yaml')
         if not os.path.exists(cfg_path):
             cfg_path = f"/code/{cfg_path}"
         
