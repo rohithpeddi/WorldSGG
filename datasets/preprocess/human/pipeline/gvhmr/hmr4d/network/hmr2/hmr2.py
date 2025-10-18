@@ -5,7 +5,7 @@ from .vit import ViT
 from .smpl_head import SMPLTransformerDecoderHead
 
 from pytorch3d.transforms import matrix_to_axis_angle
-from hmr4d.utils.geo.hmr_cam import compute_transl_full_cam
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.geo.hmr_cam import compute_transl_full_cam
 
 
 class HMR2(pl.LightningModule):

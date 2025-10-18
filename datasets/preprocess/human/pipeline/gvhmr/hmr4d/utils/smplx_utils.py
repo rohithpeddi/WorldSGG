@@ -4,9 +4,9 @@ import numpy as np
 import smplx
 import pickle
 from smplx import SMPL, SMPLX, SMPLXLayer
-from hmr4d.utils.body_model import BodyModelSMPLH, BodyModelSMPLX
-from hmr4d.utils.body_model.smplx_lite import SmplxLiteCoco17, SmplxLiteV437Coco17, SmplxLiteSmplN24
-from hmr4d import PROJ_ROOT
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.body_model import BodyModelSMPLH, BodyModelSMPLX
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.body_model.smplx_lite import SmplxLiteCoco17, SmplxLiteV437Coco17, SmplxLiteSmplN24
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d import PROJ_ROOT
 
 # fmt: off
 SMPLH_PARENTS = torch.tensor([-1,  0,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  9,  9, 12, 13, 14,

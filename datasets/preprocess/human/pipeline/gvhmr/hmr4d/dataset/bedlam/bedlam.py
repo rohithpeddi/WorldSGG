@@ -1,22 +1,22 @@
 from pathlib import Path
 import numpy as np
 import torch
-from hmr4d.utils.pylogger import Log
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.pylogger import Log
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 from time import time
 
-from hmr4d.configs import MainStore, builds
-from hmr4d.utils.smplx_utils import make_smplx
-from hmr4d.utils.wis3d_utils import make_wis3d, add_motion_as_lines
-from hmr4d.utils.vis.renderer_utils import simple_render_mesh_background
-from hmr4d.utils.video_io_utils import read_video_np, save_video
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.configs import MainStore, builds
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.smplx_utils import make_smplx
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.wis3d_utils import make_wis3d, add_motion_as_lines
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.vis.renderer_utils import simple_render_mesh_background
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.video_io_utils import read_video_np, save_video
 
-import hmr4d.utils.matrix as matrix
-from hmr4d.utils.net_utils import get_valid_mask, repeat_to_max_len, repeat_to_max_len_dict
-from hmr4d.dataset.imgfeat_motion.base_dataset import ImgfeatMotionDatasetBase
-from hmr4d.dataset.bedlam.utils import mid2featname, mid2vname
-from hmr4d.utils.geo_transform import compute_cam_angvel, apply_T_on_points
-from hmr4d.utils.geo.hmr_global import get_T_w2c_from_wcparams, get_c_rootparam, get_R_c2gv
+import datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.matrix as matrix
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.net_utils import get_valid_mask, repeat_to_max_len, repeat_to_max_len_dict
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.dataset.imgfeat_motion.base_dataset import ImgfeatMotionDatasetBase
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.dataset.bedlam.utils import mid2featname, mid2vname
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.geo_transform import compute_cam_angvel, apply_T_on_points
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.geo.hmr_global import get_T_w2c_from_wcparams, get_c_rootparam, get_R_c2gv
 
 
 class BedlamDatasetV2(ImgfeatMotionDatasetBase):

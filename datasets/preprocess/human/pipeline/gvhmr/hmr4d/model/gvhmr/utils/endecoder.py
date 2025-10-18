@@ -1,12 +1,12 @@
 import torch
 import torch.nn as nn
 # from hmr4d.configs import MainStore, builds
-from hmr4d.utils.geo.augment_noisy_pose import gaussian_augment
-import hmr4d.utils.matrix as matrix
-from hmr4d.utils.pylogger import Log
-from hmr4d.utils.geo.hmr_global import get_local_transl_vel, rollout_local_transl_vel
-from hmr4d.utils.smplx_utils import make_smplx
-from hmr4d.utils.rotation_conversions import (
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.geo.augment_noisy_pose import gaussian_augment
+import datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.matrix as matrix
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.pylogger import Log
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.geo.hmr_global import get_local_transl_vel, rollout_local_transl_vel
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.smplx_utils import make_smplx
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.rotation_conversions import (
     rotation_6d_to_matrix,
     matrix_to_axis_angle,
     axis_angle_to_matrix,

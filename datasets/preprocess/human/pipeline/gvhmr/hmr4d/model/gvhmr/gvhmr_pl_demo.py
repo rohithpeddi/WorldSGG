@@ -1,11 +1,11 @@
 import torch
 import pytorch_lightning as pl
 # from hydra.utils import instantiate
-from hmr4d.utils.pylogger import Log
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.pylogger import Log
 # from hmr4d.configs import MainStore, builds
 
-from hmr4d.utils.geo.hmr_cam import normalize_kp2d
-from hmr4d.model.gvhmr.pipeline.gvhmr_pipeline import Pipeline
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.geo.hmr_cam import normalize_kp2d
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.model.gvhmr.pipeline.gvhmr_pipeline import Pipeline
 
 class DemoPL(pl.LightningModule):
     def __init__(self, pipeline, smplx_path):

@@ -1,5 +1,5 @@
 from omegaconf import DictConfig, ListConfig
-from hmr4d.configs import MainStore, builds
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.configs import MainStore, builds
 
 # do not perform scheduling
 default = DictConfig({"scheduler": None})

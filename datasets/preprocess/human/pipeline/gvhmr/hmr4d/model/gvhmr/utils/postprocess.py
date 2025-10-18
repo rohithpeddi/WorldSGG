@@ -1,17 +1,17 @@
 import torch
 from torch.amp import autocast
-from hmr4d.utils.rotation_conversions import (
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.rotation_conversions import (
     matrix_to_rotation_6d,
     rotation_6d_to_matrix,
     axis_angle_to_matrix,
     matrix_to_axis_angle,
 )
 
-import hmr4d.utils.matrix as matrix
-from hmr4d.utils.ik.ccd_ik import CCD_IK
-from hmr4d.utils.geo_transform import get_sequence_cammat, transform_mat, apply_T_on_points
-from hmr4d.utils.net_utils import gaussian_smooth
-from hmr4d.model.gvhmr.utils.endecoder import EnDecoder
+import datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.matrix as matrix
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.ik.ccd_ik import CCD_IK
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.geo_transform import get_sequence_cammat, transform_mat, apply_T_on_points
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.net_utils import gaussian_smooth
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.model.gvhmr.utils.endecoder import EnDecoder
 
 # from hmr4d.utils.wis3d_utils import make_wis3d, add_motion_as_lines
 

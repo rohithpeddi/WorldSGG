@@ -4,10 +4,10 @@ import torch.nn.functional as F
 from einops import einsum, rearrange, repeat
 # from hmr4d.configs import MainStore, builds
 
-from hmr4d.network.base_arch.transformer.encoder_rope import EncoderRoPEBlock
-from hmr4d.network.base_arch.transformer.layer import zero_module
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.network.base_arch.transformer.encoder_rope import EncoderRoPEBlock
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.network.base_arch.transformer.layer import zero_module
 
-from hmr4d.utils.net_utils import length_to_mask
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.net_utils import length_to_mask
 from timm.models.vision_transformer import Mlp
 
 

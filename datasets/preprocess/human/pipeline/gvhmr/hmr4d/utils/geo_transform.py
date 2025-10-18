@@ -4,12 +4,12 @@ import torch
 import torch.nn.functional as F
 # from pytorch3d.transforms import so3_exp_map, so3_log_map
 # import pytorch3d.ops.knn as knn
-from hmr4d.utils.pylogger import Log
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.pylogger import Log
 # from pytorch3d.transforms import euler_angles_to_matrix
-import hmr4d.utils.matrix as matrix
+import datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.matrix as matrix
 from einops import einsum, rearrange, repeat
-from hmr4d.utils.geo.quaternion import qbetween
-from hmr4d.utils.rotation_conversions import matrix_to_quaternion, quaternion_to_axis_angle, matrix_to_rotation_6d
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.geo.quaternion import qbetween
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.rotation_conversions import matrix_to_quaternion, quaternion_to_axis_angle, matrix_to_rotation_6d
 
 
 def homo_points(points):

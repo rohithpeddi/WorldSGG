@@ -5,21 +5,21 @@ from pathlib import Path
 import torch
 import pytorch_lightning as pl
 from hydra.utils import instantiate
-from hmr4d.utils.pylogger import Log
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.pylogger import Log
 from einops import rearrange, einsum
-from hmr4d.configs import MainStore, builds
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.configs import MainStore, builds
 
-from hmr4d.utils.geo_transform import compute_T_ayfz2ay, apply_T_on_points
-from hmr4d.utils.wis3d_utils import make_wis3d, add_motion_as_lines
-from hmr4d.utils.smplx_utils import make_smplx
-from hmr4d.utils.geo.augment_noisy_pose import (
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.geo_transform import compute_T_ayfz2ay, apply_T_on_points
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.wis3d_utils import make_wis3d, add_motion_as_lines
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.smplx_utils import make_smplx
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.geo.augment_noisy_pose import (
     get_wham_aug_kp3d,
     get_visible_mask,
     get_invisible_legs_mask,
     randomly_occlude_lower_half,
     randomly_modify_hands_legs,
 )
-from hmr4d.utils.geo.hmr_cam import (
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.geo.hmr_cam import (
     normalize_kp2d,
     # normalize_kp2d_fullimg, 
     perspective_projection, 
@@ -27,11 +27,11 @@ from hmr4d.utils.geo.hmr_cam import (
     get_bbx_xys,
 )
 
-from hmr4d.utils.video_io_utils import save_video
-from hmr4d.utils.vis.cv2_utils import draw_bbx_xys_on_image_batch
-from hmr4d.utils.geo.flip_utils import flip_smplx_params, avg_smplx_aa
-from hmr4d.model.gvhmr.utils.postprocess import pp_static_joint, pp_static_joint_cam, process_ik
-from hmr4d.model.gvhmr.pipeline.gvhmr_pipeline import Pipeline
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.video_io_utils import save_video
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.vis.cv2_utils import draw_bbx_xys_on_image_batch
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.utils.geo.flip_utils import flip_smplx_params, avg_smplx_aa
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.model.gvhmr.utils.postprocess import pp_static_joint, pp_static_joint_cam, process_ik
+from datasets.preprocess.human.pipeline.gvhmr.hmr4d.model.gvhmr.pipeline.gvhmr_pipeline import Pipeline
 
 class GvhmrPL(pl.LightningModule):
     def __init__(
