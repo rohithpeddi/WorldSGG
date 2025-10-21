@@ -30,3 +30,4 @@ tqdm
 open3d
 pycolmap
 boxsdk==3.14.0
+rerun-sdk
