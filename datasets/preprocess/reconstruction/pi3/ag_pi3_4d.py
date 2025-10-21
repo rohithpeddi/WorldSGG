@@ -304,7 +304,7 @@ def merge_static_with_frame(predictions: dict,
                             static_points: np.ndarray,
                             static_colors: np.ndarray,
                             frame_idx: int,
-                            conf_min: float = 0.3,
+                            conf_min: float = 0.1,
                             dedup_voxel: Optional[float] = 0.02) -> tuple[np.ndarray, np.ndarray]:
     """
     Merge per-frame points with static background. Optionally de-duplicate with a small voxel size.
@@ -403,7 +403,7 @@ def visualize_with_rerun(predictions: dict,
                rr.Points3D(
                    positions=P.astype(np.float32),
                    colors=C.astype(np.uint8),
-                   radii=0.02)
+                   radii=0.01)
                )
 
 
@@ -438,6 +438,85 @@ class AgPi3:
         ).to(self.device)  # (N, 3, H, W)
         return imgs
 
+    def infer_video_points_3d(self, video_id, conf_min: float = 0.01, spawn: bool = True):
+        """
+        Load saved predictions for a video and visualize *all* points per frame
+        as a time sequence in Rerun.
+
+        Args:
+            video_id: e.g., "BHP7U" or "BHP7U.mp4"
+            conf_min: confidence threshold in [0,1] to keep a point
+            spawn: whether to spawn the Rerun viewer window
+        """
+        # Use a readable tag for the folder name based on confidence threshold
+        conf_tag = int(conf_min * 100)
+        video_save_dir = os.path.join(self.output_dir_path, f"{video_id}_10")
+        prediction_save_path = os.path.join(video_save_dir, "predictions.npz")
+        if os.path.exists(prediction_save_path):
+            predictions = np.load(prediction_save_path, allow_pickle=True)
+            predictions = {k: predictions[k] for k in predictions.files}
+            print(f"Loaded existing predictions for video {video_id} from {prediction_save_path}")
+        else:
+            raise NotImplementedError("Prediction generation not implemented in this snippet.")
+
+        # Extract tensors
+        points_wh = predictions["points"]  # (S, H, W, 3)
+        conf_wh = predictions.get("conf", np.ones(points_wh.shape[:-1], dtype=np.float32))  # (S, H, W) or (S,H,W,1)
+        images = _ensure_nhwc(predictions["images"])  # to (S, H, W, 3) in [0,1]
+
+        S = points_wh.shape[0]
+        print(f"[viz] Visualizing {S} frames, conf_min={conf_min}")
+
+        # Initialize Rerun
+        rr.init(f"AG-Pi3 Per-Frame Points: {video_id}", spawn=spawn)
+        rr.log("world", rr.ViewCoordinates.RDF, timeless=True)
+
+        # Optionally log cameras (animated by frame if available)
+        if "camera_poses" in predictions:
+            cam_poses = predictions["camera_poses"]  # (S, 4, 4) or (S, 3, 4)
+            for i in range(len(cam_poses)):
+                R, t = _camera_R_t_from_4x4(cam_poses[i])
+                q_xyzw = SciRot.from_matrix(R).as_quat()  # [x, y, z, w]
+                rr.set_time_sequence("frame", i)
+                rr.log(
+                    f"world/cameras/cam",
+                    rr.Transform3D(
+                        translation=t.astype(np.float32),
+                        rotation=rr.Quaternion(xyzw=q_xyzw.astype(np.float32)),
+                    ),
+                )
+
+        # Animate per-frame raw points
+        for i in range(S):
+            rr.set_time_sequence("frame", i)
+
+            # Slice single frame to shapes with batch dim for the helper
+            pts_i = points_wh[i][None]  # (1, H, W, 3)
+            img_i = images[i][None]  # (1, H, W, 3)
+            conf_i = conf_wh[i][None]  # (1, H, W) or (1, H, W, 1)
+
+            P, C, _ = _flatten_points_colors_frames(
+                points_wh=pts_i,
+                colors_wh=img_i,
+                conf_wh=conf_i,
+                conf_min=float(conf_min),
+            )
+
+            if P.size == 0:
+                # Nothing to draw for this frame
+                continue
+
+            rr.log(
+                "world/frame/points_raw",
+                rr.Points3D(
+                    positions=P.astype(np.float32),
+                    colors=C.astype(np.uint8),
+                    radii=0.01,  # tweak if your scale is very small/large
+                ),
+            )
+
+        print("[viz] Done streaming per-frame points to Rerun.")
+
     def infer_video(self, video_id, conf_thres=10.0):
         data_path = f'{self.root_dir_path}/{video_id}'
         video_save_dir = os.path.join(self.output_dir_path, f"{video_id}_{int(conf_thres)}")
@@ -455,6 +534,7 @@ class AgPi3:
         prediction_save_path = os.path.join(video_save_dir, "predictions.npz")
         if os.path.exists(prediction_save_path):
             predictions = np.load(prediction_save_path, allow_pickle=True)
+            predictions = {k: predictions[k] for k in predictions.files}
             print(f"Loaded existing predictions for video {video_id} from {prediction_save_path}")
         else:
             raise NotImplementedError("Prediction generation not implemented in this snippet.")
@@ -465,8 +545,8 @@ class AgPi3:
         # 1) Static background from 'sparse' points (multi-frame consistency via voxels)
         static_P, static_C = build_static_background(
             predictions,
-            conf_min=0.50,  # high-confidence for background
-            voxel_size=0.03,  # 3cm voxels
+            conf_min=0.1,  # high-confidence for background
+            voxel_size=0.01,  # 3cm voxels
             min_frames=3  # seen in >= 3 frames -> static
         )
 
@@ -478,7 +558,7 @@ class AgPi3:
                 predictions,
                 static_P, static_C,
                 frame_idx=fi,
-                conf_min=0.30,  # slightly looser for live frame
+                conf_min=0.01,  # slightly looser for live frame
                 dedup_voxel=0.02  # 2cm dedup to keep clouds tidy
             )
             per_frame_P.append(Pi)
@@ -505,7 +585,8 @@ class AgPi3:
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
                 continue
-            self.infer_video(video_id)
+            # self.infer_video(video_id)
+            self.infer_video_points_3d(video_id)
             # try:
             #     self.infer_video(video_id)
             # except Exception as e:
