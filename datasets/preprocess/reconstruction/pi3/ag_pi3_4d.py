@@ -4,12 +4,16 @@ import os
 from pathlib import Path
 from typing import Optional
 
+import matplotlib
 import numpy as np
 import rerun as rr
 import torch
 from tqdm import tqdm
 from scipy.spatial.transform import Rotation as SciRot
 from pi3.utils.basic import load_images_as_tensor
+import numpy as np
+import trimesh
+from scipy.spatial.transform import Rotation
 
 
 # ---------------------------
@@ -80,70 +84,220 @@ def _voxel_ids(points: np.ndarray, voxel_size: float) -> np.ndarray:
     return np.floor(points / voxel_size).astype(np.int64)
 
 
-def build_static_background(predictions: dict,
-                            conf_min: float = 0.5,
-                            voxel_size: float = 0.03,
-                            min_frames: int = 3) -> tuple[np.ndarray, np.ndarray]:
+def predictions_to_glb(
+        predictions,
+        conf_thres=50.0,
+        filter_by_frames="all",
+        show_cam=True,
+) -> trimesh.Scene:
     """
-    Build a 'sparse' static background:
-      - keep high-confidence points from all frames
-      - aggregate by voxel
-      - mark voxels 'static' if seen in >= min_frames unique frames
-      - output voxel-averaged xyz + averaged color
-    """
-    images = _ensure_nhwc(predictions["images"])  # (S,H,W,3) in [0,1]
-    points = predictions["points"]  # (S,H,W,3)
-    conf = predictions["conf"]  # (S,H,W[,1])
+    Converts VGGT predictions to a 3D scene represented as a GLB file.
 
-    P, C, F = _flatten_points_colors_frames(points, images, conf, conf_min)  # N, N, N
-    if P.size == 0:
+    Args:
+        predictions (dict): Dictionary containing model predictions with keys:
+            - world_points: 3D point coordinates (S, H, W, 3)
+            - world_points_conf: Confidence scores (S, H, W)
+            - images: Input images (S, H, W, 3)
+            - extrinsic: Camera extrinsic matrices (S, 3, 4)
+        conf_thres (float): Percentage of low-confidence points to filter out (default: 50.0)
+        filter_by_frames (str): Frame filter specification (default: "all")
+        show_cam (bool): Include camera visualization (default: True)
+
+    Returns:
+        trimesh.Scene: Processed 3D scene containing point cloud and cameras
+
+    Raises:
+        ValueError: If input predictions structure is invalid
+    """
+    if not isinstance(predictions, dict):
+        raise ValueError("predictions must be a dictionary")
+
+    if conf_thres is None:
+        conf_thres = 10
+
+    print("Building GLB scene")
+    selected_frame_idx = None
+    if filter_by_frames != "all" and filter_by_frames != "All":
+        try:
+            # Extract the index part before the colon
+            selected_frame_idx = int(filter_by_frames.split(":")[0])
+        except (ValueError, IndexError):
+            pass
+
+    pred_world_points = predictions["points"]
+    pred_world_points_conf = predictions.get("conf", np.ones_like(pred_world_points[..., 0]))
+
+    # Get images from predictions
+    images = predictions["images"]
+    # Use extrinsic matrices instead of pred_extrinsic_list
+    camera_poses = predictions["camera_poses"]
+
+    if selected_frame_idx is not None:
+        pred_world_points = pred_world_points[selected_frame_idx][None]
+        pred_world_points_conf = pred_world_points_conf[selected_frame_idx][None]
+        images = images[selected_frame_idx][None]
+        camera_poses = camera_poses[selected_frame_idx][None]
+
+    vertices_3d = pred_world_points.reshape(-1, 3)
+    # Handle different image formats - check if images need transposing
+    if images.ndim == 4 and images.shape[1] == 3:  # NCHW format
+        colors_rgb = np.transpose(images, (0, 2, 3, 1))
+    else:  # Assume already in NHWC format
+        colors_rgb = images
+    colors_rgb = (colors_rgb.reshape(-1, 3) * 255).astype(np.uint8)
+
+    conf = pred_world_points_conf.reshape(-1)
+    # Convert percentage threshold to actual confidence value
+    if conf_thres == 0.0:
+        conf_threshold = 0.0
+    else:
+        # conf_threshold = np.percentile(conf, conf_thres)
+        conf_threshold = conf_thres / 100
+
+    conf_mask = (conf >= conf_threshold) & (conf > 1e-5)
+
+    vertices_3d = vertices_3d[conf_mask]
+    colors_rgb = colors_rgb[conf_mask]
+
+    if vertices_3d is None or np.asarray(vertices_3d).size == 0:
+        vertices_3d = np.array([[1, 0, 0]])
+        colors_rgb = np.array([[255, 255, 255]])
+        scene_scale = 1
+    else:
+        # Calculate the 5th and 95th percentiles along each axis
+        lower_percentile = np.percentile(vertices_3d, 5, axis=0)
+        upper_percentile = np.percentile(vertices_3d, 95, axis=0)
+
+        # Calculate the diagonal length of the percentile bounding box
+        scene_scale = np.linalg.norm(upper_percentile - lower_percentile)
+
+    colormap = matplotlib.colormaps.get_cmap("gist_rainbow")
+
+    # Initialize a 3D scene
+    scene_3d = trimesh.Scene()
+
+    # Add point cloud data to the scene
+    point_cloud_data = trimesh.PointCloud(vertices=vertices_3d, colors=colors_rgb)
+
+    scene_3d.add_geometry(point_cloud_data)
+
+    # Prepare 4x4 matrices for camera extrinsics
+    num_cameras = len(camera_poses)
+
+    # Rotate scene for better visualize
+    align_rotation = np.eye(4)
+    align_rotation[:3, :3] = Rotation.from_euler("y", 100, degrees=True).as_matrix()  # plane rotate
+    align_rotation[:3, :3] = align_rotation[:3, :3] @ Rotation.from_euler("x", 155, degrees=True).as_matrix()  # roll
+    scene_3d.apply_transform(align_rotation)
+
+    print("GLB Scene built")
+    return scene_3d
+
+
+def build_static_background(
+        predictions: dict,
+        conf_min: float = 0.5,
+        voxel_size: float = 0.03,
+        min_frames: int = 3
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Replacement that *uses predictions_to_glb* to generate a background point cloud,
+    then extracts (xyz, rgb) from the returned trimesh.Scene.
+
+    Notes / differences vs the old implementation:
+      - Ignores true 'static across frames' logic (no per-voxel frame counting).
+      - Approximates a static background by aggregating all points that survive
+        predictions_to_glb's confidence filtering, then (optionally) voxel-downsampling.
+      - Automatically *undoes* the visualization rotation applied inside predictions_to_glb,
+        so outputs are back in the original world frame.
+      - 'min_frames' is kept for signature compatibility but not used.
+
+    Returns:
+        static_points: (N,3) float32
+        static_colors: (N,3) uint8
+    """
+    # 1) Call your existing predictions_to_glb with show_cam=False to avoid camera meshes.
+    #    Map conf_min (0..1) -> conf_thres percentage (0..100).
+    conf_thres_pct = float(conf_min) * 100.0
+    scene = predictions_to_glb(
+        predictions=predictions,
+        conf_thres=conf_thres_pct,
+        filter_by_frames="all",
+        show_cam=False
+    )
+
+    # 2) Extract point cloud geometry from the scene (PointCloud only).
+    pts_list, cols_list = [], []
+    for geom in scene.geometry.values():
+        # We only want point clouds, not camera meshes or other geometry
+        if isinstance(geom, trimesh.points.PointCloud):
+            v = np.asarray(geom.vertices, dtype=np.float32)
+            c = np.asarray(geom.colors)
+            # colors can be (N,3) or (N,4); drop alpha if present
+            if c.ndim == 2 and c.shape[1] >= 3:
+                c = c[:, :3]
+            else:
+                # If no colors, default to white
+                c = np.full((v.shape[0], 3), 255, dtype=np.uint8)
+            # Ensure types
+            v = v.astype(np.float32, copy=False)
+            c = c.astype(np.uint8, copy=False)
+            if v.size:
+                pts_list.append(v)
+                cols_list.append(c)
+
+    if not pts_list:
+        # Fallback: empty scene protection
         return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8)
 
-    vox = _voxel_ids(P, voxel_size)  # (N,3)
-    # group id per point
-    # pack voxel triplets to a single key for unique/grouping
-    vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
-    uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
-    G = uniq_keys.shape[0]  # number of voxels
+    points = np.concatenate(pts_list, axis=0)
+    colors = np.concatenate(cols_list, axis=0)
 
-    # count unique frames per voxel (staticness)
-    # do unique over (group, frame)
-    gf = np.stack([inv, F], axis=1)
-    gf_keys = np.ascontiguousarray(gf).view([('', gf.dtype)] * 2).ravel()
-    uniq_gf, _ = np.unique(gf_keys, return_counts=False, return_index=False, return_inverse=False, axis=None), None
-    # Faster: recompute with np.unique along rows
-    uniq_gf_rows = np.unique(gf, axis=0)
-    frames_per_group = np.zeros(G, dtype=np.int32)
-    np.add.at(frames_per_group, uniq_gf_rows[:, 0], 1)
+    # 3) Undo predictions_to_glb's visualization alignment (Y=100°, then X=155°).
+    #    In predictions_to_glb:
+    #        R = R_y(100) @ R_x(155)
+    #    We apply R^T to revert.
+    R = Rotation.from_euler("y", 100, degrees=True).as_matrix()
+    R = R @ Rotation.from_euler("x", 155, degrees=True).as_matrix()
+    points = points @ R.T  # undo rotation
 
-    static_mask_groups = frames_per_group >= int(min_frames)
-    if not np.any(static_mask_groups):
-        # fallback: keep densest 1% groups to avoid empty scene
-        top = max(1, G // 100)
-        # density ~ counts per group
-        counts = np.bincount(inv, minlength=G)
-        keep_idx = np.argpartition(-counts, top - 1)[:top]
-        static_mask_groups = np.zeros(G, dtype=bool)
-        static_mask_groups[keep_idx] = True
+    # 4) Optional voxel downsample to keep the cloud compact (averaging xyz & rgb per voxel).
+    if voxel_size and voxel_size > 0:
+        points, colors = _voxel_downsample_mean(points, colors, voxel_size)
 
-    # voxel-wise mean position & color (only for static groups)
+    return points.astype(np.float32), colors.astype(np.uint8)
+
+
+def _voxel_downsample_mean(points: np.ndarray, colors: np.ndarray, voxel: float):
+    """
+    Simple voxel grid downsampling that averages positions and colors per voxel.
+    """
+    if points.size == 0:
+        return points, colors
+
+    # Compute voxel indices
+    idx = np.floor(points / voxel).astype(np.int64)
+    # Pack 3D indices to a single key for grouping
+    keys = np.ascontiguousarray(idx).view([('', idx.dtype)] * 3).ravel()
+
+    uniq, inv = np.unique(keys, return_inverse=True)
+    G = uniq.shape[0]
+
+    # Aggregate means per voxel
     counts = np.bincount(inv, minlength=G).astype(np.float32)
-    sum_x = np.bincount(inv, weights=P[:, 0], minlength=G)
-    sum_y = np.bincount(inv, weights=P[:, 1], minlength=G)
-    sum_z = np.bincount(inv, weights=P[:, 2], minlength=G)
+    sum_x = np.bincount(inv, weights=points[:, 0], minlength=G)
+    sum_y = np.bincount(inv, weights=points[:, 1], minlength=G)
+    sum_z = np.bincount(inv, weights=points[:, 2], minlength=G)
 
-    sum_r = np.bincount(inv, weights=C[:, 0].astype(np.float32), minlength=G)
-    sum_g = np.bincount(inv, weights=C[:, 1].astype(np.float32), minlength=G)
-    sum_b = np.bincount(inv, weights=C[:, 2].astype(np.float32), minlength=G)
+    sum_r = np.bincount(inv, weights=colors[:, 0].astype(np.float32), minlength=G)
+    sum_g = np.bincount(inv, weights=colors[:, 1].astype(np.float32), minlength=G)
+    sum_b = np.bincount(inv, weights=colors[:, 2].astype(np.float32), minlength=G)
 
-    # safe division
     counts[counts == 0] = 1.0
-    mean_xyz = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
-    mean_rgb = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
+    out_xyz = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
+    out_rgb = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
 
-    static_points = mean_xyz[static_mask_groups]
-    static_colors = mean_rgb[static_mask_groups]
-    return static_points.astype(np.float32), static_colors.astype(np.uint8)
+    return out_xyz.astype(np.float32), out_rgb.astype(np.uint8)
 
 
 def merge_static_with_frame(predictions: dict,
@@ -249,9 +403,8 @@ def visualize_with_rerun(predictions: dict,
                rr.Points3D(
                    positions=P.astype(np.float32),
                    colors=C.astype(np.uint8),
-                   radii=0.0025
+                   radii=0.02)
                )
-            )
 
 
 class AgPi3:
