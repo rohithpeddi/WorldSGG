@@ -17,7 +17,8 @@ from datasets.preprocess.human.pipeline import Pipeline
 
 def main(input_video='data/examples/boxing_short.mp4', 
          static_camera=False,
-         run_viser=True,
+         run_viser=False,
+         run_rerun=True,
          viser_total=1500, 
          viser_subsample=1):
     smplx = SMPLX_Layer(SMPLX_PATH).cuda()
@@ -70,6 +71,24 @@ def main(input_video='data/examples/boxing_short.mp4',
                 gui_timestep.value = (gui_timestep.value + 1) % num_frames
 
             time.sleep(1.0 / gui_framerate.value)
+
+    # Rerun
+    if run_rerun:
+        from datasets.preprocess.human.prompt_hmr.vis import rerun_vis as rrvis
+
+        rrvis.rerun_vis_world4d(
+            images,
+            world4d,
+            smplx.faces,
+            floor=(gv, gf),
+            init_fps=30/viser_subsample,
+            img_maxsize=480,
+        )
+
+        print('Rerun visualization running. Please open the Rerun app to view the results.')
+        print('Press Ctrl+C to terminate.')
+        while True:
+            time.sleep(1)
         
 
 
