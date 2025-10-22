@@ -32,253 +32,94 @@ def _pinhole_from_fov(W: int, H: int, fov_y_rad: float) -> Tuple[float, float, f
     return fx, fy, cx, cy
 
 
-def predictions_to_glb(
-        predictions,
-        conf_thres=50.0,
-        filter_by_frames="all",
-        show_cam=True,
-) -> trimesh.Scene:
+def predictions_to_glb_with_static(
+        predictions: dict,
+        *,
+        conf_min: float = 0.5,           # 0..1 threshold on predictions["conf"]
+        filter_by_frames: str = "all",   # e.g. "12:..." to use only frame index 12
+) -> tuple[trimesh.Scene, np.ndarray, np.ndarray]:
     """
-    Converts VGGT predictions to a 3D scene represented as a GLB file.
+    Build a GLB-ready trimesh.Scene from VGGT-style predictions AND return a background
+    point cloud (xyz,rgb) in the original world frame.
 
-    Args:
-        predictions (dict): Dictionary containing model predictions with keys:
-            - world_points: 3D point coordinates (S, H, W, 3)
-            - world_points_conf: Confidence scores (S, H, W)
-            - images: Input images (S, H, W, 3)
-            - extrinsic: Camera extrinsic matrices (S, 3, 4)
-        conf_thres (float): Percentage of low-confidence points to filter out (default: 50.0)
-        filter_by_frames (str): Frame filter specification (default: "all")
-        show_cam (bool): Include camera visualization (default: True)
+    Inputs (expected prediction keys):
+      - points:  (S, H, W, 3) float32   world-space points
+      - conf:    (S, H, W)    float32   confidence per point in [0,1] (fallback: ones)
+      - images:  (S, H, W, 3) or (S, 3, H, W) float32 in [0,1] for colors
+      - camera_poses: (S, 3, 4) or (S,4,4); kept for signature parity (not visualized here)
 
     Returns:
-        trimesh.Scene: Processed 3D scene containing point cloud and cameras
-
-    Raises:
-        ValueError: If input predictions structure is invalid
+      scene_3d      : trimesh.Scene with a point cloud (rotated for nicer viewing)
+      static_points : (N,3) float32 background points in ORIGINAL world frame
+      static_colors : (N,3) uint8   RGB colors aligned with static_points
     """
     if not isinstance(predictions, dict):
         raise ValueError("predictions must be a dictionary")
 
-    if conf_thres is None:
-        conf_thres = 10
-
-    print("Building GLB scene")
+    # ------------ Frame selection ------------
     selected_frame_idx = None
-    if filter_by_frames != "all" and filter_by_frames != "All":
+    if filter_by_frames not in ("all", "All"):
         try:
-            # Extract the index part before the colon
-            selected_frame_idx = int(filter_by_frames.split(":")[0])
+            selected_frame_idx = int(str(filter_by_frames).split(":")[0])
         except (ValueError, IndexError):
-            pass
+            selected_frame_idx = None
 
-    pred_world_points = predictions["points"]
-    pred_world_points_conf = predictions.get("conf", np.ones_like(pred_world_points[..., 0]))
-
-    # Get images from predictions
-    images = predictions["images"]
-    # Use extrinsic matrices instead of pred_extrinsic_list
-    camera_poses = predictions["camera_poses"]
+    pts = predictions["points"]
+    conf = predictions.get("conf", np.ones_like(pts[..., 0], dtype=np.float32))
+    imgs = predictions["images"]
+    cam_poses = predictions.get("camera_poses", None)
 
     if selected_frame_idx is not None:
-        pred_world_points = pred_world_points[selected_frame_idx][None]
-        pred_world_points_conf = pred_world_points_conf[selected_frame_idx][None]
-        images = images[selected_frame_idx][None]
-        camera_poses = camera_poses[selected_frame_idx][None]
+        pts = pts[selected_frame_idx][None]
+        conf = conf[selected_frame_idx][None]
+        imgs = imgs[selected_frame_idx][None]
+        cam_poses = cam_poses[selected_frame_idx][None] if cam_poses is not None else None
 
-    vertices_3d = pred_world_points.reshape(-1, 3)
-    # Handle different image formats - check if images need transposing
-    if images.ndim == 4 and images.shape[1] == 3:  # NCHW format
-        colors_rgb = np.transpose(images, (0, 2, 3, 1))
-    else:  # Assume already in NHWC format
-        colors_rgb = images
-    colors_rgb = (colors_rgb.reshape(-1, 3) * 255).astype(np.uint8)
-
-    conf = pred_world_points_conf.reshape(-1)
-    # Convert percentage threshold to actual confidence value
-    if conf_thres == 0.0:
-        conf_threshold = 0.0
+    # ------------ Color layout handling ------------
+    if imgs.ndim == 4 and imgs.shape[1] == 3:  # NCHW -> NHWC
+        imgs_nhwc = np.transpose(imgs, (0, 2, 3, 1))
     else:
-        # conf_threshold = np.percentile(conf, conf_thres)
-        conf_threshold = conf_thres / 100
+        imgs_nhwc = imgs
+    colors_rgb = (imgs_nhwc.reshape(-1, 3) * 255.0).clip(0, 255).astype(np.uint8)
 
-    conf_mask = (conf >= conf_threshold) & (conf > 1e-5)
+    # ------------ Confidence filtering ------------
+    verts = pts.reshape(-1, 3)
+    conf_flat = conf.reshape(-1).astype(np.float32)
 
-    vertices_3d = vertices_3d[conf_mask]
-    colors_rgb = colors_rgb[conf_mask]
+    thr = float(conf_min) if conf_min is not None else 0.1
+    mask = (conf_flat >= thr) & (conf_flat > 1e-5)
 
-    if vertices_3d is None or np.asarray(vertices_3d).size == 0:
-        vertices_3d = np.array([[1, 0, 0]])
-        colors_rgb = np.array([[255, 255, 255]])
-        scene_scale = 1
-    else:
-        # Calculate the 5th and 95th percentiles along each axis
-        lower_percentile = np.percentile(vertices_3d, 5, axis=0)
-        upper_percentile = np.percentile(vertices_3d, 95, axis=0)
+    verts = verts[mask]
+    colors_rgb = colors_rgb[mask]
 
-        # Calculate the diagonal length of the percentile bounding box
-        scene_scale = np.linalg.norm(upper_percentile - lower_percentile)
+    if verts.size == 0:
+        # robust fallback
+        verts = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+        colors_rgb = np.array([[255, 255, 255]], dtype=np.uint8)
 
-    colormap = matplotlib.colormaps.get_cmap("gist_rainbow")
+    # Keep an ORIGINAL copy for the background return (world frame)
+    static_points = verts.astype(np.float32, copy=True)
+    static_colors = colors_rgb.astype(np.uint8, copy=True)
 
-    # Initialize a 3D scene
+    # ------------ Build Scene (with visualization alignment rotation) ------------
     scene_3d = trimesh.Scene()
+    point_cloud = trimesh.points.PointCloud(vertices=verts, colors=colors_rgb)
+    scene_3d.add_geometry(point_cloud)
 
-    # Add point cloud data to the scene
-    point_cloud_data = trimesh.PointCloud(vertices=vertices_3d, colors=colors_rgb)
+    # Nice-view rotation: R = R_y(100°) @ R_x(155°)
+    align_R = Rotation.from_euler("y", 100, degrees=True).as_matrix()
+    align_R = align_R @ Rotation.from_euler("x", 155, degrees=True).as_matrix()
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = align_R
+    scene_3d.apply_transform(T)
 
-    scene_3d.add_geometry(point_cloud_data)
-
-    # Prepare 4x4 matrices for camera extrinsics
-    num_cameras = len(camera_poses)
-
-    # Rotate scene for better visualize
-    align_rotation = np.eye(4)
-    align_rotation[:3, :3] = Rotation.from_euler("y", 100, degrees=True).as_matrix()  # plane rotate
-    align_rotation[:3, :3] = align_rotation[:3, :3] @ Rotation.from_euler("x", 155,
-                                                                          degrees=True).as_matrix()  # roll
-    scene_3d.apply_transform(align_rotation)
-
-    print("GLB Scene built")
-    return scene_3d
-
-def build_static_background(
-        predictions: dict,
-        conf_min: float = 0.5,
-        voxel_size: float = 0.03,
-        min_frames: int = 3
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Replacement that *uses predictions_to_glb* to generate a background point cloud,
-    then extracts (xyz, rgb) from the returned trimesh.Scene.
-
-    Notes / differences vs the old implementation:
-      - Ignores true 'static across frames' logic (no per-voxel frame counting).
-      - Approximates a static background by aggregating all points that survive
-        predictions_to_glb's confidence filtering, then (optionally) voxel-downsampling.
-      - Automatically *undoes* the visualization rotation applied inside predictions_to_glb,
-        so outputs are back in the original world frame.
-      - 'min_frames' is kept for signature compatibility but not used.
-
-    Returns:
-        static_points: (N,3) float32
-        static_colors: (N,3) uint8
-    """
-    # 1) Call your existing predictions_to_glb with show_cam=False to avoid camera meshes.
-    #    Map conf_min (0..1) -> conf_thres percentage (0..100).
-    conf_thres_pct = float(conf_min) * 100.0
-    scene = predictions_to_glb(
-        predictions=predictions,
-        conf_thres=conf_thres_pct,
-        filter_by_frames="all",
-        show_cam=False
-    )
-
-    # 2) Extract point cloud geometry from the scene (PointCloud only).
-    pts_list, cols_list = [], []
-    for geom in scene.geometry.values():
-        # We only want point clouds, not camera meshes or other geometry
-        if isinstance(geom, trimesh.points.PointCloud):
-            v = np.asarray(geom.vertices, dtype=np.float32)
-            c = np.asarray(geom.colors)
-            # colors can be (N,3) or (N,4); drop alpha if present
-            if c.ndim == 2 and c.shape[1] >= 3:
-                c = c[:, :3]
-            else:
-                # If no colors, default to white
-                c = np.full((v.shape[0], 3), 255, dtype=np.uint8)
-            # Ensure types
-            v = v.astype(np.float32, copy=False)
-            c = c.astype(np.uint8, copy=False)
-            if v.size:
-                pts_list.append(v)
-                cols_list.append(c)
-
-    if not pts_list:
-        # Fallback: empty scene protection
-        return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8)
-
-    points = np.concatenate(pts_list, axis=0)
-    colors = np.concatenate(cols_list, axis=0)
-
-    # 3) Undo predictions_to_glb's visualization alignment (Y=100°, then X=155°).
-    #    In predictions_to_glb:
-    #        R = R_y(100) @ R_x(155)
-    #    We apply R^T to revert.
+    # (Optional) If you later want to visualize camera frustums/axes, add them here
+    # using cam_poses if available. Currently `show_cam` is a no-op for signature parity.
     R = Rotation.from_euler("y", 100, degrees=True).as_matrix()
     R = R @ Rotation.from_euler("x", 155, degrees=True).as_matrix()
-    points = points @ R.T  # undo rotation
+    static_points = static_points @ R.T  # undo rotation
 
-    # # 4) Optional voxel downsample to keep the cloud compact (averaging xyz & rgb per voxel).
-    # if voxel_size and voxel_size > 0:
-    #     points, colors = _voxel_downsample_mean(points, colors, voxel_size)
-
-    return points.astype(np.float32), colors.astype(np.uint8)
-
-
-# --- NEW: helper to load a static mesh and expose arrays ----------------------
-def load_static_mesh_as_arrays(
-    path_or_mesh,
-    *,
-    default_color=(200, 200, 200)
-) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
-    """
-    Loads a static triangle mesh and returns:
-        vertices: (N, 3) float32
-        faces:    (F, 3) uint32
-        colors:   (N, 3) uint8 or None (if per-vertex colors unavailable)
-
-    Accepts a file path (GLB/GLTF/PLY/OBJ) or a trimesh.Trimesh.
-    If a file is a Scene, it is concatenated into a single mesh.
-    """
-    import trimesh
-
-    if isinstance(path_or_mesh, str):
-        # force='mesh' concatenates scene nodes w/ transforms into a single Trimesh
-        mesh = trimesh.load(path_or_mesh, force='mesh', skip_materials=False)
-    elif isinstance(path_or_mesh, trimesh.Trimesh):
-        mesh = path_or_mesh
-    else:
-        raise TypeError("path_or_mesh must be a filepath or a trimesh.Trimesh")
-
-    if not isinstance(mesh, trimesh.Trimesh):
-        raise ValueError("Failed to coerce input into a Trimesh")
-
-    V = np.asarray(mesh.vertices, dtype=np.float32)
-    F = _faces_u32(np.asarray(mesh.faces))
-
-    C: Optional[np.ndarray] = None
-    # Try vertex colors first
-    try:
-        vc = getattr(mesh.visual, "vertex_colors", None)
-        if vc is not None and len(vc) == len(V):
-            vc = np.asarray(vc)
-            if vc.ndim == 2 and vc.shape[1] >= 3:
-                C = vc[:, :3].astype(np.uint8, copy=False)
-    except Exception:
-        C = None
-
-    # If vertex colors not present, ignore per-face materials and fall back to a flat color
-    if C is None:
-        C = None  # returning None signals to use albedo_factor
-
-    # Small sanity: drop NaNs/Infs
-    mask = np.isfinite(V).all(axis=1)
-    if not mask.all():
-        V = V[mask]
-        # Faces that reference dropped vertices must be cleaned:
-        # build a remap for surviving vertices
-        remap = -np.ones(len(mask), dtype=np.int64)
-        remap[np.flatnonzero(mask)] = np.arange(mask.sum(), dtype=np.int64)
-        F = remap[F]
-        F = F[(F >= 0).all(axis=1)]
-        if C is not None:
-            C = C[mask]
-
-    if V.size == 0 or F.size == 0:
-        raise ValueError("Static mesh is empty after cleaning.")
-
-    return V.astype(np.float32, copy=False), F.astype(np.uint32, copy=False), (C if C is None else C.astype(np.uint8, copy=False))
+    return scene_3d, static_points, static_colors
 
 
 def rerun_vis_world4d(
@@ -393,12 +234,7 @@ def rerun_vis_world4d(
         raise NotImplementedError("Prediction generation not implemented in this snippet.")
 
     # Pre-extract static points from all humans across time.
-    static_points, static_colors = build_static_background(
-        predictions,
-        conf_min=0.1,  # high-confidence for background
-        voxel_size=0.01,  # 3cm voxels
-        min_frames=3  # seen in >= 3 frames -> static
-    )
+    scene_3d, static_points, static_colors = predictions_to_glb_with_static(predictions, conf_min=0.1)
 
     BASE = "world"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
