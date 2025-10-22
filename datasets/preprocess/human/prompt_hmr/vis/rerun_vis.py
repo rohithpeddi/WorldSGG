@@ -399,10 +399,6 @@ def rerun_vis_world4d(
         voxel_size=0.01,  # 3cm voxels
         min_frames=3  # seen in >= 3 frames -> static
     )
-    k = 0  # or a representative frame index
-    R_wc = world4d[k]["camera"][:3, :3]
-    t_wc = world4d[k]["camera"][:3, 3]
-    static_points = (R_wc @ static_points.T).T + t_wc
 
     BASE = "world"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
