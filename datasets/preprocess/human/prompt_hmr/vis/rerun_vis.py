@@ -347,7 +347,6 @@ def rerun_vis_world4d(
             rr.Mesh3D(vertex_positions=fv, triangle_indices=ff),  # drop the ellipsis
         )
 
-    # --- log static background under the same space & make points visible ---
     if static_points.size > 0:
         rr.log(
             f"{BASE}/static",
@@ -358,6 +357,9 @@ def rerun_vis_world4d(
             ),
             timeless=True,
         )
+
+        print("[static] count:", len(static_points), "finite:", np.isfinite(static_points).all(),
+              "min:", np.nanmin(static_points, axis=0), "max:", np.nanmax(static_points, axis=0))
 
     # Sequence logging.
     for i in range(num_frames):
