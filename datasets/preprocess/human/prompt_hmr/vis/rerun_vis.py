@@ -2,10 +2,8 @@ import os
 from typing import Optional, Tuple, List, Dict, Callable
 
 import cv2
-import matplotlib
 import numpy as np
 import rerun as rr  # pip install rerun-sdk
-from scipy.spatial.transform import Rotation as R
 import trimesh
 from scipy.spatial.transform import Rotation
 
@@ -358,6 +356,198 @@ def fuse_humans_into_static_frame(predictions, results, frame_map=None, min_pair
     return results_aligned, (s, R, t), tag, diags
 
 
+# Add near the top of your file (if not already present)
+import numpy as np
+from scipy.spatial.transform import Rotation as SciRot
+
+# Helper to build a wireframe frustum in the *camera's local frame* (RUB; camera looks along -Z).
+def _make_frustum_lines(W, H, fx, fy, cx, cy, near=0.12, far=0.45):
+    def rect_at(depth):
+        z = -float(depth)  # forward along -Z in R-U-B
+        x0 = (0   - cx) * (z / fx)
+        x1 = (W-1 - cx) * (z / fx)
+        y0 = (0   - cy) * (z / fy)
+        y1 = (H-1 - cy) * (z / fy)
+        return np.array([[x0, y0, z],
+                         [x1, y0, z],
+                         [x1, y1, z],
+                         [x0, y1, z]], dtype=np.float32)
+
+    n = rect_at(near)
+    f = rect_at(far)
+    strips = [
+        np.vstack([n, n[0]]),           # near loop
+        np.vstack([f, f[0]]),           # far loop
+        np.vstack([n[0], f[0]]),        # connect near/far
+        np.vstack([n[1], f[1]]),
+        np.vstack([n[2], f[2]]),
+        np.vstack([n[3], f[3]]),
+        np.vstack([np.zeros(3, np.float32), n[0]]),  # rays from center
+        np.vstack([np.zeros(3, np.float32), n[1]]),
+        np.vstack([np.zeros(3, np.float32), n[2]]),
+        np.vstack([np.zeros(3, np.float32), n[3]]),
+    ]
+    return strips
+
+
+
+def visualize_camera_poses_mismatch(
+        images: List[Optional[np.ndarray]],
+        world4d: List[Dict],
+        results: dict,
+        pipeline: AgPipeline,
+        faces: np.ndarray,
+        init_fps: float = 25.0,
+        floor: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        img_maxsize: int = 320,
+        app_id: str = "World4D",
+        *,
+        # NEW: control how the image for a given timestep i is chosen.
+        # Option A: map timeline index -> source image index (e.g., {10: 0} uses images[0] at t=10)
+        image_frame_map: Optional[Dict[int, int]] = None,
+        # Option B: a callback to transform/replace the image for display at time i.
+        # Signature: fn(i, base_image) -> np.ndarray | None
+        image_fn: Optional[Callable[[int, Optional[np.ndarray]], Optional[np.ndarray]]] = None,
+        # NEW: reuse stable entity paths so old frames don't linger on screen.
+        reuse_paths: bool = True,
+) -> None:
+    faces_u32 = _faces_u32(faces)
+    # Start a fresh recording & spawn the viewer.
+    rr.init(app_id, spawn=True)
+    # Set world axes: Right (+X), Up (+Y), Back (+Z)
+    try:
+        rr.log("/", rr.ViewCoordinates.RUB)
+    except Exception:
+        pass  # older rerun versions may not have this enum; safe to skip
+
+    # A timeline named "frame" – the viewer exposes a scrubber for this.
+    rr.set_time_seconds("frame_fps", 1.0 / max(1e-6, float(init_fps)))
+    num_frames = len(world4d)
+
+    # Log the (optional) static floor once (no timeline).
+    if floor is not None:
+        fv, ff = floor
+        fv = np.asarray(fv, dtype=np.float32)
+        ff = _faces_u32(np.asarray(ff))
+        rr.log(
+            "floor",
+            rr.Mesh3D(
+                vertex_positions=fv,
+                triangle_indices=ff,
+                albedo_factor=...,  # keep user's original style (inferred material)
+            ),
+        )
+
+    def _frustum_path(i: int) -> str:
+        return f"{BASE}/frustum" if reuse_paths else f"{BASE}/frames/t{i}/frustum"
+
+    # Helper: select/prepare image for frame i, with remap + transform
+    def _get_image_for_time(i: int) -> Optional[np.ndarray]:
+        src_idx = i
+        if image_frame_map and i in image_frame_map:
+            src_idx = image_frame_map[i]
+        base_img = None
+        if images is not None and 0 <= src_idx < len(images):
+            base_img = images[src_idx]
+        if image_fn is not None:
+            base_img = image_fn(i, base_img)
+
+        if base_img is None:
+            return None
+
+        img = base_img
+        H, W = img.shape[:2]
+        if max(H, W) > img_maxsize:
+            scale = float(img_maxsize) / float(max(H, W))
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        return img
+
+    video_save_dir = os.path.join("/data2/rohith/ag/ag4D/static_scenes/pi3", f"0DJ6R_10")
+    prediction_save_path = os.path.join(video_save_dir, "predictions.npz")
+    if os.path.exists(prediction_save_path):
+        predictions = np.load(prediction_save_path, allow_pickle=True)
+        predictions = {k: predictions[k] for k in predictions.files}
+        print(f"Loaded existing predictions for video from {prediction_save_path}")
+    else:
+        raise NotImplementedError("Prediction generation not implemented in this snippet.")
+    BASE = "world4d_check_camera_mismatch"
+
+    # TODO: Log each frame's camera frustum + image from the predictions.
+    cam_poses = predictions.get("camera_poses", None)
+
+    for i in range(num_frames):
+        rr.set_time_sequence("frame", i)
+
+        # -------------------------------------------------------------------------
+
+        R_i = cam_poses[i][:3, :3]
+        t_i = cam_poses[i][:3, 3]
+        quat_xyzw = SciRot.from_matrix(R_i).as_quat().astype(np.float32)
+        rr.log(
+            f"{BASE}/predicted_camera/frame_{i}",
+            rr.Transform3D(
+                translation=t_i.astype(np.float32),
+                rotation=rr.Quaternion(xyzw=quat_xyzw),
+            )
+        )
+
+        # -------------------------------------------------------------------------
+
+        # Camera frustum + image.
+        cam_3x4 = np.asarray(world4d[i]["camera"], dtype=np.float32)
+        R_wc = cam_3x4[:3, :3]        # (3,3)
+        t_wc = cam_3x4[:3, 3]         # (3,)
+
+        image = _get_image_for_time(i)
+        if image is not None:
+            H, W = image.shape[:2]
+            aspect = W / float(H)
+        else:
+            # No image; pick a reasonable resolution from a default aspect & maxsize.
+            aspect = 16.0 / 9.0
+            H, W = img_maxsize, int(img_maxsize * aspect)
+
+        fov_y = 0.96  # mirrors your viser default
+        fx, fy, cx, cy = _pinhole_from_fov(W, H, fov_y)
+
+        # SciPy returns quats in (x, y, z, w) order
+        quat_xyzw = SciRot.from_matrix(R_wc).as_quat().astype(np.float32)
+
+        # Log transform at a STABLE path (so previous frames don't linger)
+        frus_path = _frustum_path(i)
+        rr.log(
+            frus_path,
+            rr.Transform3D(
+                translation=t_wc.astype(np.float32),
+                rotation=rr.Quaternion(xyzw=quat_xyzw),
+            )
+        )
+        rr.log(
+            f"{frus_path}/camera",
+            rr.Pinhole(
+                focal_length=(fx, fy),
+                principal_point=(cx, cy),
+                resolution=(W, H)
+            ),
+        )
+        if image is not None:
+            rr.log(f"{frus_path}/image", rr.Image(image))
+
+        # Small local axes at the frustum (visual aid).
+        axes_len = 0.3
+        rr.log(
+            f"{frus_path}/axes",
+            rr.Arrows3D(
+                origins=np.zeros((3, 3), dtype=np.float32),
+                vectors=np.asarray(
+                    [[axes_len, 0, 0], [0, axes_len, 0], [0, 0, axes_len]],
+                    dtype=np.float32,
+                ),
+                colors=np.asarray([[255, 0, 0], [0, 255, 0], [0, 0, 255]], dtype=np.uint8),
+            ),
+        )
+
+
 def rerun_vis_world4d(
     images: List[Optional[np.ndarray]],
     world4d: List[Dict],
@@ -378,36 +568,9 @@ def rerun_vis_world4d(
     # NEW: reuse stable entity paths so old frames don't linger on screen.
     reuse_paths: bool = True,
 ):
-    """
-    Visualize a 4D sequence in Rerun.
-
-    Args
-    ----
-    images: list of HxWx{3,4} uint8 frames (or None); one per timestep (unless remapped).
-    world4d: list (len T) of dicts with keys:
-        - 'track_id': Iterable[int] (can be empty)
-        - 'vertices': Iterable[np.ndarray] (per-human vertices as (V,3), world coords)
-        - 'camera': (3x4) camera pose matrix; rotation & translation for the frustum in world
-    faces: (F,3) triangle indices for the human meshes.
-    init_fps: initial playback FPS shown in the Rerun time panel.
-    floor: optional (vertices(FV,3), faces(FF,3)) for a static floor mesh.
-    img_maxsize: if a frame is larger, it will be resized to this longest edge before logging.
-    app_id: rerun recording id/title.
-    image_frame_map: (optional) map time index -> source image index.
-    image_fn: (optional) per-frame function to transform/replace the image before logging.
-    reuse_paths: if True (default), reuse entity paths per track so previous frames don't remain visible.
-
-    Notes
-    -----
-    * Use the Rerun Viewer’s time panel (timeline: "frame") to play/pause/scrub.
-    * Coordinate frame is set to Right-Up-Back (RUB), so +Y is up.
-    * To quickly switch which image is shown at any frame, provide `image_frame_map` or `image_fn`.
-    """
     faces_u32 = _faces_u32(faces)
-
     # Start a fresh recording & spawn the viewer.
     rr.init(app_id, spawn=True)
-
     # Set world axes: Right (+X), Up (+Y), Back (+Z)
     try:
         rr.log("/", rr.ViewCoordinates.RUB)
@@ -416,7 +579,6 @@ def rerun_vis_world4d(
 
     # A timeline named "frame" – the viewer exposes a scrubber for this.
     rr.set_time_seconds("frame_fps", 1.0 / max(1e-6, float(init_fps)))
-
     num_frames = len(world4d)
 
     # Log the (optional) static floor once (no timeline).

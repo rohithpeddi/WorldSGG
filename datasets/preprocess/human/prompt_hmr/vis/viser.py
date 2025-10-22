@@ -211,7 +211,6 @@ def viser_vis_world4d(images, world4d, faces, init_fps=25, block=False, floor=No
     mesh_nodes: list[viser.MeshHandle] = []
 
     for i in tqdm(range(num_frames)):
-        # Add base frame.
         frame_nodes.append(server.scene.add_frame(f"/frames/t{i}", show_axes=False))
 
         # Place meshes in the frame
