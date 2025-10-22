@@ -384,24 +384,28 @@ def rerun_vis_world4d(
 
     video_save_dir = os.path.join("/data2/rohith/ag/ag4D/static_scenes/pi3", f"0DJ6R_10")
     static_mesh_path = os.path.join(video_save_dir, "0DJ6R.glb")
-    # prediction_save_path = os.path.join(video_save_dir, "predictions.npz")
-    # if os.path.exists(prediction_save_path):
-    #     predictions = np.load(prediction_save_path, allow_pickle=True)
-    #     predictions = {k: predictions[k] for k in predictions.files}
-    #     print(f"Loaded existing predictions for video from {prediction_save_path}")
-    # else:
-    #     raise NotImplementedError("Prediction generation not implemented in this snippet.")
+    prediction_save_path = os.path.join(video_save_dir, "predictions.npz")
+    if os.path.exists(prediction_save_path):
+        predictions = np.load(prediction_save_path, allow_pickle=True)
+        predictions = {k: predictions[k] for k in predictions.files}
+        print(f"Loaded existing predictions for video from {prediction_save_path}")
+    else:
+        raise NotImplementedError("Prediction generation not implemented in this snippet.")
 
-    # # Pre-extract static points from all humans across time.
-    # static_points, static_colors = build_static_background(
-    #     predictions,
-    #     conf_min=0.1,  # high-confidence for background
-    #     voxel_size=0.01,  # 3cm voxels
-    #     min_frames=3  # seen in >= 3 frames -> static
-    # )
+    # Pre-extract static points from all humans across time.
+    static_points, static_colors = build_static_background(
+        predictions,
+        conf_min=0.1,  # high-confidence for background
+        voxel_size=0.01,  # 3cm voxels
+        min_frames=3  # seen in >= 3 frames -> static
+    )
+    k = 0  # or a representative frame index
+    R_wc = world4d[k]["camera"][:3, :3]
+    t_wc = world4d[k]["camera"][:3, 3]
+    static_points = (R_wc @ static_points.T).T + t_wc
+
     BASE = "world"
-    rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)  # single, consistent space
-    # (remove rr.log("/", rr.ViewCoordinates.RUB) and the later RDF line)
+    rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
 
     # fix floor (and move it under the same space)
     if floor is not None:
@@ -413,42 +417,18 @@ def rerun_vis_world4d(
             rr.Mesh3D(vertex_positions=fv, triangle_indices=ff),  # drop the ellipsis
         )
 
-    # --- NEW: log static background as a mesh, not a point cloud -----------------
-    # Provide either static_mesh_arrays=(V,F,C?) directly, or a static_mesh_path
-    VFC: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None
+    if static_points.size > 0:
+        rr.log(
+            f"{BASE}/static",
+            rr.Points3D(
+                positions=static_points.astype(np.float32),
+                colors=static_colors.astype(np.uint8),
+                radii=0.01,  # <-- small but visible point size (tweak if needed)
+            ),
+        )
 
-    try:
-        VFC = load_static_mesh_as_arrays(static_mesh_path)
-    except Exception as e:
-        print(f"[static-mesh] Failed to load mesh from '{static_mesh_path}': {e}")
-
-    if VFC is not None:
-        V, F, C = VFC
-        # Note: keep everything in world coords (no extra rotations applied).
-        mesh_kwargs = dict(vertex_positions=V, triangle_indices=F)
-        if C is not None:
-            mesh_kwargs["vertex_colors"] = C
-        else:
-            mesh_kwargs["albedo_factor"] = (200, 200, 200)  # neutral gray fallback
-
-        rr.log(f"{BASE}/static", rr.Mesh3D(**mesh_kwargs))
-        print("[static-mesh] V:", V.shape, "F:", F.shape, "colored:", C is not None)
-    else:
-        print("[static-mesh] No static mesh provided; skipping static background.")
-
-    # if static_points.size > 0:
-    #     rr.log(
-    #         f"{BASE}/static",
-    #         rr.Points3D(
-    #             positions=static_points.astype(np.float32),
-    #             colors=static_colors.astype(np.uint8),
-    #             radii=0.01,  # <-- small but visible point size (tweak if needed)
-    #         ),
-    #         timeless=True,
-    #     )
-    #
-    #     print("[static] count:", len(static_points), "finite:", np.isfinite(static_points).all(),
-    #           "min:", np.nanmin(static_points, axis=0), "max:", np.nanmax(static_points, axis=0))
+        print("[static] count:", len(static_points), "finite:", np.isfinite(static_points).all(),
+              "min:", np.nanmin(static_points, axis=0), "max:", np.nanmax(static_points, axis=0))
 
     # Sequence logging.
     for i in range(num_frames):
