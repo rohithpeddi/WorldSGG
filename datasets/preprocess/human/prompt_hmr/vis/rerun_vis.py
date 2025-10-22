@@ -216,6 +216,71 @@ def build_static_background(
     return points.astype(np.float32), colors.astype(np.uint8)
 
 
+# --- NEW: helper to load a static mesh and expose arrays ----------------------
+def load_static_mesh_as_arrays(
+    path_or_mesh,
+    *,
+    default_color=(200, 200, 200)
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    """
+    Loads a static triangle mesh and returns:
+        vertices: (N, 3) float32
+        faces:    (F, 3) uint32
+        colors:   (N, 3) uint8 or None (if per-vertex colors unavailable)
+
+    Accepts a file path (GLB/GLTF/PLY/OBJ) or a trimesh.Trimesh.
+    If a file is a Scene, it is concatenated into a single mesh.
+    """
+    import trimesh
+
+    if isinstance(path_or_mesh, str):
+        # force='mesh' concatenates scene nodes w/ transforms into a single Trimesh
+        mesh = trimesh.load(path_or_mesh, force='mesh', skip_materials=False)
+    elif isinstance(path_or_mesh, trimesh.Trimesh):
+        mesh = path_or_mesh
+    else:
+        raise TypeError("path_or_mesh must be a filepath or a trimesh.Trimesh")
+
+    if not isinstance(mesh, trimesh.Trimesh):
+        raise ValueError("Failed to coerce input into a Trimesh")
+
+    V = np.asarray(mesh.vertices, dtype=np.float32)
+    F = _faces_u32(np.asarray(mesh.faces))
+
+    C: Optional[np.ndarray] = None
+    # Try vertex colors first
+    try:
+        vc = getattr(mesh.visual, "vertex_colors", None)
+        if vc is not None and len(vc) == len(V):
+            vc = np.asarray(vc)
+            if vc.ndim == 2 and vc.shape[1] >= 3:
+                C = vc[:, :3].astype(np.uint8, copy=False)
+    except Exception:
+        C = None
+
+    # If vertex colors not present, ignore per-face materials and fall back to a flat color
+    if C is None:
+        C = None  # returning None signals to use albedo_factor
+
+    # Small sanity: drop NaNs/Infs
+    mask = np.isfinite(V).all(axis=1)
+    if not mask.all():
+        V = V[mask]
+        # Faces that reference dropped vertices must be cleaned:
+        # build a remap for surviving vertices
+        remap = -np.ones(len(mask), dtype=np.int64)
+        remap[np.flatnonzero(mask)] = np.arange(mask.sum(), dtype=np.int64)
+        F = remap[F]
+        F = F[(F >= 0).all(axis=1)]
+        if C is not None:
+            C = C[mask]
+
+    if V.size == 0 or F.size == 0:
+        raise ValueError("Static mesh is empty after cleaning.")
+
+    return V.astype(np.float32, copy=False), F.astype(np.uint32, copy=False), (C if C is None else C.astype(np.uint8, copy=False))
+
+
 def rerun_vis_world4d(
     images: List[Optional[np.ndarray]],
     world4d: List[Dict],
@@ -318,21 +383,22 @@ def rerun_vis_world4d(
         return f"{BASE}/frustum" if reuse_paths else f"{BASE}/frames/t{i}/frustum"
 
     video_save_dir = os.path.join("/data2/rohith/ag/ag4D/static_scenes/pi3", f"0DJ6R_10")
-    prediction_save_path = os.path.join(video_save_dir, "predictions.npz")
-    if os.path.exists(prediction_save_path):
-        predictions = np.load(prediction_save_path, allow_pickle=True)
-        predictions = {k: predictions[k] for k in predictions.files}
-        print(f"Loaded existing predictions for video from {prediction_save_path}")
-    else:
-        raise NotImplementedError("Prediction generation not implemented in this snippet.")
+    static_mesh_path = os.path.join(video_save_dir, "0DJ6R.glb")
+    # prediction_save_path = os.path.join(video_save_dir, "predictions.npz")
+    # if os.path.exists(prediction_save_path):
+    #     predictions = np.load(prediction_save_path, allow_pickle=True)
+    #     predictions = {k: predictions[k] for k in predictions.files}
+    #     print(f"Loaded existing predictions for video from {prediction_save_path}")
+    # else:
+    #     raise NotImplementedError("Prediction generation not implemented in this snippet.")
 
-    # Pre-extract static points from all humans across time.
-    static_points, static_colors = build_static_background(
-        predictions,
-        conf_min=0.1,  # high-confidence for background
-        voxel_size=0.01,  # 3cm voxels
-        min_frames=3  # seen in >= 3 frames -> static
-    )
+    # # Pre-extract static points from all humans across time.
+    # static_points, static_colors = build_static_background(
+    #     predictions,
+    #     conf_min=0.1,  # high-confidence for background
+    #     voxel_size=0.01,  # 3cm voxels
+    #     min_frames=3  # seen in >= 3 frames -> static
+    # )
     BASE = "world"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)  # single, consistent space
     # (remove rr.log("/", rr.ViewCoordinates.RUB) and the later RDF line)
@@ -347,19 +413,42 @@ def rerun_vis_world4d(
             rr.Mesh3D(vertex_positions=fv, triangle_indices=ff),  # drop the ellipsis
         )
 
-    if static_points.size > 0:
-        rr.log(
-            f"{BASE}/static",
-            rr.Points3D(
-                positions=static_points.astype(np.float32),
-                colors=static_colors.astype(np.uint8),
-                radii=0.01,  # <-- small but visible point size (tweak if needed)
-            ),
-            timeless=True,
-        )
+    # --- NEW: log static background as a mesh, not a point cloud -----------------
+    # Provide either static_mesh_arrays=(V,F,C?) directly, or a static_mesh_path
+    VFC: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None
 
-        print("[static] count:", len(static_points), "finite:", np.isfinite(static_points).all(),
-              "min:", np.nanmin(static_points, axis=0), "max:", np.nanmax(static_points, axis=0))
+    try:
+        VFC = load_static_mesh_as_arrays(static_mesh_path)
+    except Exception as e:
+        print(f"[static-mesh] Failed to load mesh from '{static_mesh_path}': {e}")
+
+    if VFC is not None:
+        V, F, C = VFC
+        # Note: keep everything in world coords (no extra rotations applied).
+        mesh_kwargs = dict(vertex_positions=V, triangle_indices=F)
+        if C is not None:
+            mesh_kwargs["vertex_colors"] = C
+        else:
+            mesh_kwargs["albedo_factor"] = (200, 200, 200)  # neutral gray fallback
+
+        rr.log(f"{BASE}/static", rr.Mesh3D(**mesh_kwargs))
+        print("[static-mesh] V:", V.shape, "F:", F.shape, "colored:", C is not None)
+    else:
+        print("[static-mesh] No static mesh provided; skipping static background.")
+
+    # if static_points.size > 0:
+    #     rr.log(
+    #         f"{BASE}/static",
+    #         rr.Points3D(
+    #             positions=static_points.astype(np.float32),
+    #             colors=static_colors.astype(np.uint8),
+    #             radii=0.01,  # <-- small but visible point size (tweak if needed)
+    #         ),
+    #         timeless=True,
+    #     )
+    #
+    #     print("[static] count:", len(static_points), "finite:", np.isfinite(static_points).all(),
+    #           "min:", np.nanmin(static_points, axis=0), "max:", np.nanmax(static_points, axis=0))
 
     # Sequence logging.
     for i in range(num_frames):
