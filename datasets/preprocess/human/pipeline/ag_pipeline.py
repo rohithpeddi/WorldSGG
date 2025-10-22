@@ -26,7 +26,7 @@ from smplcodec import SMPLCodec
 from ..data_config import CONFIG_PATH, SMPLX_NEUTRAL_MODEL_PATH, SMPLX_NEUTRAL_F32_PATH
 
 
-class Pipeline:
+class AgPipeline:
     def __init__(self, static_cam=False):
         self.images = None
         self.cfg = OmegaConf.load(CONFIG_PATH)
@@ -57,11 +57,11 @@ class Pipeline:
         assert os.path.exists(frames_path), f"{frames_path} does not exist"
         if os.path.isdir(frames_path):
             print(f"Processing image folder {frames_path}")
-            fps = 10
+            self.fps = 10
             imgfiles = sorted(glob.glob(f'{frames_path}/*.jpg'))
             seq_folder = frames_path
             frames = np.stack([cv2.imread(f)[..., ::-1] for f in imgfiles])
-            return frames, seq_folder, fps
+            return frames, seq_folder
         return None
 
     def run_detect_track(self, ):
@@ -319,9 +319,7 @@ class Pipeline:
 
             ### spec camera
         if not self.results['has_slam']:
-            stride = len(self.images) // 30
-            if stride == 0:
-                stride = 1
+            stride = len(self.images)
             spec_calib = run_cam_calib(self.images, out_folder=seq_folder + '/spec_calib',
                                        save_res=True, stride=stride, method='spec',
                                        first_frame_idx=0)
@@ -375,7 +373,6 @@ class Pipeline:
         per_body_frame_presence = []
         for k, v in self.results['people'].items():
             out_smpl_f = f'{os.path.abspath(self.cfg.seq_folder)}/subject-{k}.smpl'
-
             SMPLCodec(
                 shape_parameters=v['smplx_world']['shape'].mean(0),
                 body_pose=v['smplx_world']['pose'][:, :22 * 3].reshape(-1, 22, 3),
