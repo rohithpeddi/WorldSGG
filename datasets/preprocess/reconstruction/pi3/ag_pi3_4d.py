@@ -261,9 +261,9 @@ def build_static_background(
     R = R @ Rotation.from_euler("x", 155, degrees=True).as_matrix()
     points = points @ R.T  # undo rotation
 
-    # 4) Optional voxel downsample to keep the cloud compact (averaging xyz & rgb per voxel).
-    if voxel_size and voxel_size > 0:
-        points, colors = _voxel_downsample_mean(points, colors, voxel_size)
+    # # 4) Optional voxel downsample to keep the cloud compact (averaging xyz & rgb per voxel).
+    # if voxel_size and voxel_size > 0:
+    #     points, colors = _voxel_downsample_mean(points, colors, voxel_size)
 
     return points.astype(np.float32), colors.astype(np.uint8)
 

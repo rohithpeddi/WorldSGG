@@ -1,10 +1,13 @@
-import copy
-import time
+import os
 from typing import Optional, Tuple, List, Dict, Callable
-from scipy.spatial.transform import Rotation as R
+
 import cv2
+import matplotlib
 import numpy as np
 import rerun as rr  # pip install rerun-sdk
+from scipy.spatial.transform import Rotation as R
+import trimesh
+from scipy.spatial.transform import Rotation
 
 
 def _faces_u32(faces: np.ndarray) -> np.ndarray:
@@ -27,6 +30,190 @@ def _pinhole_from_fov(W: int, H: int, fov_y_rad: float) -> Tuple[float, float, f
     cx = W * 0.5
     cy = H * 0.5
     return fx, fy, cx, cy
+
+
+def predictions_to_glb(
+        predictions,
+        conf_thres=50.0,
+        filter_by_frames="all",
+        show_cam=True,
+) -> trimesh.Scene:
+    """
+    Converts VGGT predictions to a 3D scene represented as a GLB file.
+
+    Args:
+        predictions (dict): Dictionary containing model predictions with keys:
+            - world_points: 3D point coordinates (S, H, W, 3)
+            - world_points_conf: Confidence scores (S, H, W)
+            - images: Input images (S, H, W, 3)
+            - extrinsic: Camera extrinsic matrices (S, 3, 4)
+        conf_thres (float): Percentage of low-confidence points to filter out (default: 50.0)
+        filter_by_frames (str): Frame filter specification (default: "all")
+        show_cam (bool): Include camera visualization (default: True)
+
+    Returns:
+        trimesh.Scene: Processed 3D scene containing point cloud and cameras
+
+    Raises:
+        ValueError: If input predictions structure is invalid
+    """
+    if not isinstance(predictions, dict):
+        raise ValueError("predictions must be a dictionary")
+
+    if conf_thres is None:
+        conf_thres = 10
+
+    print("Building GLB scene")
+    selected_frame_idx = None
+    if filter_by_frames != "all" and filter_by_frames != "All":
+        try:
+            # Extract the index part before the colon
+            selected_frame_idx = int(filter_by_frames.split(":")[0])
+        except (ValueError, IndexError):
+            pass
+
+    pred_world_points = predictions["points"]
+    pred_world_points_conf = predictions.get("conf", np.ones_like(pred_world_points[..., 0]))
+
+    # Get images from predictions
+    images = predictions["images"]
+    # Use extrinsic matrices instead of pred_extrinsic_list
+    camera_poses = predictions["camera_poses"]
+
+    if selected_frame_idx is not None:
+        pred_world_points = pred_world_points[selected_frame_idx][None]
+        pred_world_points_conf = pred_world_points_conf[selected_frame_idx][None]
+        images = images[selected_frame_idx][None]
+        camera_poses = camera_poses[selected_frame_idx][None]
+
+    vertices_3d = pred_world_points.reshape(-1, 3)
+    # Handle different image formats - check if images need transposing
+    if images.ndim == 4 and images.shape[1] == 3:  # NCHW format
+        colors_rgb = np.transpose(images, (0, 2, 3, 1))
+    else:  # Assume already in NHWC format
+        colors_rgb = images
+    colors_rgb = (colors_rgb.reshape(-1, 3) * 255).astype(np.uint8)
+
+    conf = pred_world_points_conf.reshape(-1)
+    # Convert percentage threshold to actual confidence value
+    if conf_thres == 0.0:
+        conf_threshold = 0.0
+    else:
+        # conf_threshold = np.percentile(conf, conf_thres)
+        conf_threshold = conf_thres / 100
+
+    conf_mask = (conf >= conf_threshold) & (conf > 1e-5)
+
+    vertices_3d = vertices_3d[conf_mask]
+    colors_rgb = colors_rgb[conf_mask]
+
+    if vertices_3d is None or np.asarray(vertices_3d).size == 0:
+        vertices_3d = np.array([[1, 0, 0]])
+        colors_rgb = np.array([[255, 255, 255]])
+        scene_scale = 1
+    else:
+        # Calculate the 5th and 95th percentiles along each axis
+        lower_percentile = np.percentile(vertices_3d, 5, axis=0)
+        upper_percentile = np.percentile(vertices_3d, 95, axis=0)
+
+        # Calculate the diagonal length of the percentile bounding box
+        scene_scale = np.linalg.norm(upper_percentile - lower_percentile)
+
+    colormap = matplotlib.colormaps.get_cmap("gist_rainbow")
+
+    # Initialize a 3D scene
+    scene_3d = trimesh.Scene()
+
+    # Add point cloud data to the scene
+    point_cloud_data = trimesh.PointCloud(vertices=vertices_3d, colors=colors_rgb)
+
+    scene_3d.add_geometry(point_cloud_data)
+
+    # Prepare 4x4 matrices for camera extrinsics
+    num_cameras = len(camera_poses)
+
+    # Rotate scene for better visualize
+    align_rotation = np.eye(4)
+    align_rotation[:3, :3] = Rotation.from_euler("y", 100, degrees=True).as_matrix()  # plane rotate
+    align_rotation[:3, :3] = align_rotation[:3, :3] @ Rotation.from_euler("x", 155,
+                                                                          degrees=True).as_matrix()  # roll
+    scene_3d.apply_transform(align_rotation)
+
+    print("GLB Scene built")
+    return scene_3d
+
+def build_static_background(
+        predictions: dict,
+        conf_min: float = 0.5,
+        voxel_size: float = 0.03,
+        min_frames: int = 3
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Replacement that *uses predictions_to_glb* to generate a background point cloud,
+    then extracts (xyz, rgb) from the returned trimesh.Scene.
+
+    Notes / differences vs the old implementation:
+      - Ignores true 'static across frames' logic (no per-voxel frame counting).
+      - Approximates a static background by aggregating all points that survive
+        predictions_to_glb's confidence filtering, then (optionally) voxel-downsampling.
+      - Automatically *undoes* the visualization rotation applied inside predictions_to_glb,
+        so outputs are back in the original world frame.
+      - 'min_frames' is kept for signature compatibility but not used.
+
+    Returns:
+        static_points: (N,3) float32
+        static_colors: (N,3) uint8
+    """
+    # 1) Call your existing predictions_to_glb with show_cam=False to avoid camera meshes.
+    #    Map conf_min (0..1) -> conf_thres percentage (0..100).
+    conf_thres_pct = float(conf_min) * 100.0
+    scene = predictions_to_glb(
+        predictions=predictions,
+        conf_thres=conf_thres_pct,
+        filter_by_frames="all",
+        show_cam=False
+    )
+
+    # 2) Extract point cloud geometry from the scene (PointCloud only).
+    pts_list, cols_list = [], []
+    for geom in scene.geometry.values():
+        # We only want point clouds, not camera meshes or other geometry
+        if isinstance(geom, trimesh.points.PointCloud):
+            v = np.asarray(geom.vertices, dtype=np.float32)
+            c = np.asarray(geom.colors)
+            # colors can be (N,3) or (N,4); drop alpha if present
+            if c.ndim == 2 and c.shape[1] >= 3:
+                c = c[:, :3]
+            else:
+                # If no colors, default to white
+                c = np.full((v.shape[0], 3), 255, dtype=np.uint8)
+            # Ensure types
+            v = v.astype(np.float32, copy=False)
+            c = c.astype(np.uint8, copy=False)
+            if v.size:
+                pts_list.append(v)
+                cols_list.append(c)
+
+    if not pts_list:
+        # Fallback: empty scene protection
+        return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8)
+
+    points = np.concatenate(pts_list, axis=0)
+    colors = np.concatenate(cols_list, axis=0)
+
+    # 3) Undo predictions_to_glb's visualization alignment (Y=100°, then X=155°).
+    #    In predictions_to_glb:
+    #        R = R_y(100) @ R_x(155)
+    #    We apply R^T to revert.
+    R = Rotation.from_euler("y", 100, degrees=True).as_matrix()
+    R = R @ Rotation.from_euler("x", 155, degrees=True).as_matrix()
+    points = points @ R.T  # undo rotation
+
+    # # 4) Optional voxel downsample to keep the cloud compact (averaging xyz & rgb per voxel).
+    # if voxel_size and voxel_size > 0:
+    #     points, colors = _voxel_downsample_mean(points, colors, voxel_size)
+
+    return points.astype(np.float32), colors.astype(np.uint8)
 
 
 def rerun_vis_world4d(
@@ -123,13 +310,54 @@ def rerun_vis_world4d(
             img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         return img
 
-    # Entity path helpers:
+    # entity path helpers now live under BASE
     def _human_path(tid: int, i: int) -> str:
-        # If reusing paths (recommended), keep one path per track id.
-        return f"humans/h{tid}" if reuse_paths else f"frames/t{i}/human_{tid}"
+        return f"{BASE}/humans/h{tid}" if reuse_paths else f"{BASE}/frames/t{i}/human_{tid}"
 
     def _frustum_path(i: int) -> str:
-        return "frustum" if reuse_paths else f"frames/t{i}/frustum"
+        return f"{BASE}/frustum" if reuse_paths else f"{BASE}/frames/t{i}/frustum"
+
+    video_save_dir = os.path.join("/data2/rohith/ag/ag4D/static_scenes/pi3", f"0DJ6R_10")
+    prediction_save_path = os.path.join(video_save_dir, "predictions.npz")
+    if os.path.exists(prediction_save_path):
+        predictions = np.load(prediction_save_path, allow_pickle=True)
+        predictions = {k: predictions[k] for k in predictions.files}
+        print(f"Loaded existing predictions for video from {prediction_save_path}")
+    else:
+        raise NotImplementedError("Prediction generation not implemented in this snippet.")
+
+    # Pre-extract static points from all humans across time.
+    static_points, static_colors = build_static_background(
+        predictions,
+        conf_min=0.1,  # high-confidence for background
+        voxel_size=0.01,  # 3cm voxels
+        min_frames=3  # seen in >= 3 frames -> static
+    )
+    BASE = "world"
+    rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)  # single, consistent space
+    # (remove rr.log("/", rr.ViewCoordinates.RUB) and the later RDF line)
+
+    # fix floor (and move it under the same space)
+    if floor is not None:
+        fv, ff = floor
+        fv = np.asarray(fv, dtype=np.float32)
+        ff = _faces_u32(np.asarray(ff))
+        rr.log(
+            f"{BASE}/floor",
+            rr.Mesh3D(vertex_positions=fv, triangle_indices=ff),  # drop the ellipsis
+        )
+
+    # --- log static background under the same space & make points visible ---
+    if static_points.size > 0:
+        rr.log(
+            f"{BASE}/static",
+            rr.Points3D(
+                positions=static_points.astype(np.float32),
+                colors=static_colors.astype(np.uint8),
+                radii=0.01,  # <-- small but visible point size (tweak if needed)
+            ),
+            timeless=True,
+        )
 
     # Sequence logging.
     for i in range(num_frames):
@@ -179,16 +407,10 @@ def rerun_vis_world4d(
                 rotation=rr.Quaternion(xyzw=quat_xyzw),
             )
         )
-
         rr.log(
             f"{frus_path}/camera",
-            rr.Pinhole(
-                focal_length=(fx, fy),
-                principal_point=(cx, cy),
-                resolution=(W, H),
-            ),
+            rr.Pinhole(focal_length=(fx, fy), principal_point=(cx, cy), resolution=(W, H)),
         )
-
         if image is not None:
             rr.log(f"{frus_path}/image", rr.Image(image))
 
