@@ -80,6 +80,8 @@ def main(input_video='data/examples/boxing_short.mp4',
         rrvis.rerun_vis_world4d(
             images,
             world4d,
+            results,
+            pipeline,
             smplx.faces,
             floor=(gv, gf),
             init_fps=30/viser_subsample,

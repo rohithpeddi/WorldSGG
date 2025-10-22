@@ -9,6 +9,8 @@ from scipy.spatial.transform import Rotation as R
 import trimesh
 from scipy.spatial.transform import Rotation
 
+from datasets.preprocess.human.pipeline.ag_pipeline import AgPipeline
+
 
 def _faces_u32(faces: np.ndarray) -> np.ndarray:
     faces = np.asarray(faces)
@@ -121,10 +123,246 @@ def predictions_to_glb_with_static(
 
     return scene_3d, static_points, static_colors
 
+import numpy as np
+from scipy.spatial.transform import Rotation as SciRot
+
+# ---------- Umeyama Sim(3) ----------
+def umeyama_sim3(A, B, allow_reflection=False):
+    """
+    Solve B ≈ s * R * A + t, with A,B of shape (N,3).
+    Returns (s, R, t) with R (3,3), t (3,).
+    """
+    assert A.ndim == 2 and B.ndim == 2 and A.shape == B.shape and A.shape[1] == 3
+    N = A.shape[0]
+    muA, muB = A.mean(0), B.mean(0)
+    A0, B0 = A - muA, B - muB
+    Sigma = (B0.T @ A0) / N
+    U, D, Vt = np.linalg.svd(Sigma)
+    R = U @ Vt
+    if not allow_reflection and np.linalg.det(R) < 0:
+        U[:, -1] *= -1
+        D[-1] *= -1
+        R = U @ Vt
+    varA = (A0 ** 2).sum() / N
+    s = D.sum() / varA
+    t = muB - s * (R @ muA)
+    return float(s), R.astype(np.float64), t.astype(np.float64)
+
+# ---------- Camera center helpers ----------
+def centers_from_extrinsics_wc(Rwc, Twc):
+    """
+    camera→world extrinsics: x_w = Rwc x_c + Twc  =>  center is Twc.
+    Rwc: (...,3,3), Twc: (...,3)
+    """
+    C = Twc.reshape(-1, 3).copy()
+    return C
+
+def centers_from_extrinsics_cw(Rcw, Tcw):
+    """
+    world→camera extrinsics: x_c = Rcw x_w + Tcw  =>  center is -Rcw^T Tcw.
+    Rcw: (...,3,3), Tcw: (...,3)
+    """
+    Rcw = Rcw.reshape(-1, 3, 3)
+    Tcw = Tcw.reshape(-1, 3)
+    C = -(np.transpose(Rcw, (0, 2, 1)) @ Tcw[..., None])[..., 0]
+    return C
+
+def _split_R_t_from_3x4(E):
+    """E: (S,3,4) -> R( S,3,3 ), t( S,3 )"""
+    R = E[..., :3]
+    t = E[..., 3]
+    return R, t
+
+def _coerce_R_t_stack(cam_poses):
+    """
+    Accepts (S,3,4) or (S,4,4) or dict with R/t.
+    Returns a list of candidate (centers, tag), where tag ∈ {'wc','cw'}.
+    """
+    S = None
+    candidates = []
+
+    if isinstance(cam_poses, dict):
+        # try common key patterns
+        if {'Rwc', 'Twc'} <= cam_poses.keys():
+            C_wc = centers_from_extrinsics_wc(np.asarray(cam_poses['Rwc']),
+                                              np.asarray(cam_poses['Twc']))
+            candidates.append((C_wc, 'wc'))
+        if {'Rcw', 'Tcw'} <= cam_poses.keys():
+            C_cw = centers_from_extrinsics_cw(np.asarray(cam_poses['Rcw']),
+                                              np.asarray(cam_poses['Tcw']))
+            candidates.append((C_cw, 'cw'))
+        return candidates
+
+    E = np.asarray(cam_poses)
+    if E.ndim == 3 and E.shape[1:] == (3, 4):
+        R, t = _split_R_t_from_3x4(E)
+        # Treat as BOTH possibilities; we'll choose by residuals
+        C_wc = centers_from_extrinsics_wc(R, t)   # assume camera→world
+        C_cw = centers_from_extrinsics_cw(R, t)   # assume world→camera
+        candidates.extend([(C_wc, 'wc'), (C_cw, 'cw')])
+    elif E.ndim == 3 and E.shape[1:] == (4, 4):
+        R = E[:, :3, :3]
+        t = E[:, :3, 3]
+        C_wc = centers_from_extrinsics_wc(R, t)
+        C_cw = centers_from_extrinsics_cw(R, t)
+        candidates.extend([(C_wc, 'wc'), (C_cw, 'cw')])
+    else:
+        raise ValueError(f"Unsupported camera_poses shape: {E.shape}")
+
+    return candidates
+
+def _select_frames_with_baseline(C, min_pair_dist=0.05, max_frames=200):
+    """
+    Keep frames that contribute baseline; helps robustness.
+    min_pair_dist in scene units; tune if your units are meters.
+    """
+    C = np.asarray(C)
+    if len(C) <= 3:
+        return np.arange(len(C))
+    keep = [0]
+    last = 0
+    for i in range(1, len(C)):
+        if np.linalg.norm(C[i] - C[last]) >= min_pair_dist:
+            keep.append(i)
+            last = i
+        if len(keep) >= max_frames:
+            break
+    if len(keep) < max(4, min(10, len(C)//10)):  # fall back if too few
+        return np.arange(min(len(C), max_frames))
+    return np.asarray(keep)
+
+# ---------- Build Sim(3) from cameras ----------
+def sim3_from_cameras(predictions, results, frame_map=None, min_pair_dist=0.05):
+    """
+    Compute Sim(3) that maps HUMAN world -> STATIC world.
+
+    Args:
+      predictions: dict with predictions["camera_poses"] as (S,3,4)/(S,4,4) or dict (Rwc/Twc or Rcw/Tcw)
+      results:     dict with results['camera_world']['Rwc'], ['Twc'] (camera→world)
+      frame_map:   Optional np.array of indices mapping human frames to static frames.
+                   If None, assumes 1:1 up to min length.
+
+    Returns: (s, R, t, chosen_tag), where tag ∈ {'wc','cw'} for static pose convention tried.
+    """
+    # Human camera centers
+    CW = results.get('camera_world', None)
+    if CW is None or 'Rwc' not in CW or 'Twc' not in CW:
+        raise KeyError("results['camera_world'] must contain 'Rwc' and 'Twc'")
+    C_human = centers_from_extrinsics_wc(np.asarray(CW['Rwc']), np.asarray(CW['Twc']))
+
+    # Static camera centers (try both conventions and pick the best)
+    static_candidates = _coerce_R_t_stack(predictions.get('camera_poses'))
+    if len(static_candidates) == 0:
+        raise KeyError("predictions['camera_poses'] missing or unsupported format")
+
+    best = None
+    for C_static, tag in static_candidates:
+        # Pair frames
+        if frame_map is None:
+            L = min(len(C_static), len(C_human))
+            idx_s = np.arange(L)
+            idx_h = np.arange(L)
+        else:
+            idx_h = np.asarray([i for i, j in frame_map if i is not None and j is not None])
+            idx_s = np.asarray([j for i, j in frame_map if i is not None and j is not None])
+
+        A = np.asarray(C_human)[idx_h]
+        B = np.asarray(C_static)[idx_s]
+
+        # Select informative frames
+        keepA = _select_frames_with_baseline(A, min_pair_dist=min_pair_dist)
+        keepB = _select_frames_with_baseline(B, min_pair_dist=min_pair_dist)
+        keep = np.intersect1d(keepA, keepB)
+        if keep.size < 4:
+            keep = np.arange(min(len(A), 200))
+
+        A_use, B_use = A[keep], B[keep]
+        s, R, t = umeyama_sim3(A_use, B_use)
+
+        # Compute residual
+        A2B = (s * (A_use @ R.T)) + t
+        rmse = float(np.sqrt(np.mean(np.sum((A2B - B_use) ** 2, axis=1))))
+
+        if (best is None) or (rmse < best['rmse']):
+            best = dict(s=s, R=R, t=t, rmse=rmse, tag=tag)
+
+    return best['s'], best['R'], best['t'], best['tag']
+
+# ---------- Apply Sim(3) to the human pipeline ----------
+def apply_sim3_to_results(results, s, R, t, rotate_global_orient=True):
+    """
+    Mutates 'results' (human pipeline) in-place to align to the static frame.
+    Updates:
+      - people[*]['smplx_world']['trans']
+      - people[*]['smplx_world']['pose'] (first 3 dims as global orient, axis-angle), if requested
+      - camera_world ('Rwc','Twc')
+    """
+    # Humans
+    for pid, track in results.get('people', {}).items():
+        W = track.get('smplx_world', None)
+        if W is None:
+            continue
+        if 'trans' in W:
+            trans = np.asarray(W['trans'])
+            W['trans'] = (s * (trans @ R.T)) + t  # (T,3)
+
+        if rotate_global_orient and 'pose' in W:
+            pose = np.asarray(W['pose'])
+            if pose.ndim == 2 and pose.shape[1] >= 3:
+                glob_aa = pose[:, :3]
+                Rg = SciRot.from_rotvec(glob_aa)
+                Rfix = SciRot.from_matrix(R)
+                Rg_new = Rfix * Rg  # left-multiply in world
+                pose[:, :3] = Rg_new.as_rotvec()
+                W['pose'] = pose
+
+    # Cameras (camera→world)
+    CW = results.get('camera_world', None)
+    if CW is not None and 'Rwc' in CW and 'Twc' in CW:
+        Rwc = np.asarray(CW['Rwc']).reshape(-1, 3, 3)
+        Twc = np.asarray(CW['Twc']).reshape(-1, 3)
+        CW['Rwc'] = (R @ Rwc.reshape(-1, 3, 3)).reshape(Rwc.shape)
+        CW['Twc'] = (s * (Twc @ R.T)) + t
+
+    return results
+
+def fuse_humans_into_static_frame(predictions, results, frame_map=None, min_pair_dist=0.05):
+    """
+    Compute Sim(3) from cameras and apply it so that human pipeline lives in the static scene frame.
+    Returns (results_aligned, (s,R,t), chosen_tag, diagnostics_dict)
+    """
+    s, R, t, tag = sim3_from_cameras(predictions, results, frame_map=frame_map, min_pair_dist=min_pair_dist)
+
+    # Diagnostics: residual on the paired (kept) frames
+    CW = results['camera_world']
+    C_human = centers_from_extrinsics_wc(np.asarray(CW['Rwc']), np.asarray(CW['Twc']))
+
+    # Pick the same static candidate used
+    static_candidates = _coerce_R_t_stack(predictions.get('camera_poses'))
+    C_static = None
+    for C, tg in static_candidates:
+        if tg == tag:
+            C_static = C
+            break
+
+    L = min(len(C_human), len(C_static))
+    A = C_human[:L]
+    B = C_static[:L]
+    A2B = (s * (A @ R.T)) + t
+    rmse_all = float(np.sqrt(np.mean(np.sum((A2B - B) ** 2, axis=1))))
+
+    # Mutate results in-place (return anyway for convenience)
+    results_aligned = apply_sim3_to_results(results, s, R, t, rotate_global_orient=True)
+
+    diags = dict(rmse_all=rmse_all, frames_compared=L, static_pose_convention=tag)
+    return results_aligned, (s, R, t), tag, diags
+
 
 def rerun_vis_world4d(
     images: List[Optional[np.ndarray]],
     world4d: List[Dict],
+    results: dict,
+    pipeline: AgPipeline,
     faces: np.ndarray,
     init_fps: float = 25.0,
     floor: Optional[Tuple[np.ndarray, np.ndarray]] = None,
@@ -236,6 +474,14 @@ def rerun_vis_world4d(
     # Pre-extract static points from all humans across time.
     scene_3d, static_points, static_colors = predictions_to_glb_with_static(predictions, conf_min=0.1)
 
+    results, (s, R, t), tag, diags = fuse_humans_into_static_frame(predictions, results)
+
+    print("Chosen static convention:", tag)  # 'wc' or 'cw'
+    print("Global Sim(3): scale", s, "\nR=\n", R, "\nt=", t)
+    print("Camera-center RMSE (all):", diags['rmse_all'])
+
+    world4d = pipeline.create_world4d(results=results, step=1, total=1500)  # or your instance method call
+
     BASE = "world"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
 
@@ -299,7 +545,7 @@ def rerun_vis_world4d(
         fx, fy, cx, cy = _pinhole_from_fov(W, H, fov_y)
 
         # SciPy returns quats in (x, y, z, w) order
-        quat_xyzw = R.from_matrix(R_wc).as_quat().astype(np.float32)
+        quat_xyzw = SciRot.from_matrix(R_wc).as_quat().astype(np.float32)
 
         # Log transform at a STABLE path (so previous frames don't linger)
         frus_path = _frustum_path(i)
