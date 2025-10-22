@@ -32,3 +32,4 @@ pycolmap
 boxsdk==3.14.0
 rerun-sdk
 plyfile
+rerun-animation

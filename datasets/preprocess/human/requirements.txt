@@ -23,6 +23,8 @@ pyequilib==0.3.0
 mmcv-lite==2.2.0
 mmengine==0.10.4
 rerun-sdk
+plyfile
+rerun-animation
 
 opencv-python-headless==4.10.0.84
 imageio[ffmpeg]

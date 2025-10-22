@@ -20,7 +20,7 @@ save_depth: false
 bbox_interp: true
 load_images_to_cpu: true
 run_post_opt: true
-run_post_opt_cam: true
+run_post_opt_cam: false
 floor_fitting: ransac
 fps: 30
 postopt_lr: 1e-2
