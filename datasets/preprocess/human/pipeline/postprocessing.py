@@ -94,7 +94,6 @@ def post_optimization(cfg, results, images, smplx, opt_contact=True, loss_kp_w=0
         cam_init_r6d.requires_grad = False
         optim = torch.optim.Adam([transl], lr=cfg.postopt_lr)
 
-
     contact_joint_ids = [7, 10, 8, 11] #, 20, 21]  # [L_Ankle, L_foot, R_Ankle, R_foot, L_wrist, R_wrist]
     joint_mapping = np.array([
         55, 12, 17, 19, 21, 16, 18, 20, 0, 2, 5,

@@ -72,7 +72,6 @@ def world_hps_estimation(cfg, results, smplx):
 
     # Transform smpl: from camera to gravity-aligned camera
     for k, v in results['people'].items():
-
         pred_smpl = v['smplx_cam']
         for k_, v_ in pred_smpl.items():
             pred_smpl[k_] = torch.from_numpy(v_)
@@ -116,7 +115,6 @@ def world_hps_estimation(cfg, results, smplx):
         
         pred_vert_w = pred.vertices
         pred_j3d_w = pred.joints[:, :22]
-        
         locations.append(pred_j3d_w[:, 0])
         
         results['people'][k]['smplx_world'] = {

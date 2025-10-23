@@ -314,16 +314,15 @@ class AgPipeline:
         }
 
         ### naive camera
-        if not self.results['has_slam']:
-            self.results['camera'] = est_camera(images[0])
+        self.results['camera'] = est_camera(images[0])
 
-            ### spec camera
-        if not self.results['has_slam']:
-            stride = len(self.images)
-            spec_calib = run_cam_calib(self.images, out_folder=seq_folder + '/spec_calib',
-                                       save_res=True, stride=stride, method='spec',
-                                       first_frame_idx=0)
-            self.results['spec_calib'] = spec_calib
+        ### spec camera
+        # if not self.results['has_slam']:
+        #     stride = len(self.images)
+        #     spec_calib = run_cam_calib(self.images, out_folder=seq_folder + '/spec_calib',
+        #                                save_res=True, stride=stride, method='spec',
+        #                                first_frame_idx=0)
+        #     self.results['spec_calib'] = spec_calib
 
         ### detect_segment_track
         if not self.results['has_tracks']:
@@ -331,9 +330,9 @@ class AgPipeline:
             self.run_detect_track()
 
         ### slam
-        if not self.results['has_slam']:
-            print("Running camera motion estimation...")
-            self.camera_motion_estimation(static_cam)
+        # if not self.results['has_slam']:
+        #     print("Running camera motion estimation...")
+        #     self.camera_motion_estimation(static_cam)
 
         ### keypoints detection
         if not self.results['has_2d_kpts']:
