@@ -121,8 +121,6 @@ def predictions_to_glb_with_static(
 
     return scene_3d, static_points, static_colors
 
-import numpy as np
-from scipy.spatial.transform import Rotation as SciRot
 
 # ---------- Umeyama Sim(3) ----------
 def umeyama_sim3(A, B, allow_reflection=False):
@@ -471,78 +469,120 @@ def visualize_camera_poses_mismatch(
     else:
         raise NotImplementedError("Prediction generation not implemented in this snippet.")
     BASE = "world4d_check_camera_mismatch"
+    WORLD_COLOR = np.array([0, 200, 255], dtype=np.uint8)  # cyan
+    PRED_COLOR = np.array([255, 140, 0], dtype=np.uint8)  # orange
 
-    # TODO: Log each frame's camera frustum + image from the predictions.
+    rr.log("legend", rr.TextLog([
+        "World4D cameras = cyan",
+        "Predicted cameras = orange",
+    ]))
+
     cam_poses = predictions.get("camera_poses", None)
+    if cam_poses is None:
+        raise ValueError("predictions['camera_poses'] is missing")
 
     for i in range(num_frames):
         rr.set_time_sequence("frame", i)
 
-        # -------------------------------------------------------------------------
-
-        R_i = cam_poses[i][:3, :3]
-        t_i = cam_poses[i][:3, 3]
-        quat_xyzw = SciRot.from_matrix(R_i).as_quat().astype(np.float32)
-        rr.log(
-            f"{BASE}/predicted_camera/frame_{i}",
-            rr.Transform3D(
-                translation=t_i.astype(np.float32),
-                rotation=rr.Quaternion(xyzw=quat_xyzw),
-            )
-        )
-
-        # -------------------------------------------------------------------------
-
-        # Camera frustum + image.
-        cam_3x4 = np.asarray(world4d[i]["camera"], dtype=np.float32)
-        R_wc = cam_3x4[:3, :3]        # (3,3)
-        t_wc = cam_3x4[:3, 3]         # (3,)
-
+        # ---------- intrinsics / image ----------
         image = _get_image_for_time(i)
         if image is not None:
             H, W = image.shape[:2]
             aspect = W / float(H)
         else:
-            # No image; pick a reasonable resolution from a default aspect & maxsize.
             aspect = 16.0 / 9.0
             H, W = img_maxsize, int(img_maxsize * aspect)
 
-        fov_y = 0.96  # mirrors your viser default
+        fov_y = 0.96
         fx, fy, cx, cy = _pinhole_from_fov(W, H, fov_y)
+        frustum_strips = _make_frustum_lines(W, H, fx, fy, cx, cy, near=0.12, far=0.45)
 
-        # SciPy returns quats in (x, y, z, w) order
-        quat_xyzw = SciRot.from_matrix(R_wc).as_quat().astype(np.float32)
+        # ---------- WORLD4D camera ----------
+        cam_3x4 = np.asarray(world4d[i]["camera"], dtype=np.float32)
+        R_wc = cam_3x4[:3, :3]
+        t_wc = cam_3x4[:3, 3]
+        quat_xyzw_world = SciRot.from_matrix(R_wc).as_quat().astype(np.float32)
 
-        # Log transform at a STABLE path (so previous frames don't linger)
-        frus_path = _frustum_path(i)
+        frus_path_world = _frustum_path(i)
         rr.log(
-            frus_path,
+            frus_path_world,
             rr.Transform3D(
                 translation=t_wc.astype(np.float32),
-                rotation=rr.Quaternion(xyzw=quat_xyzw),
+                rotation=rr.Quaternion(xyzw=quat_xyzw_world),
             )
         )
         rr.log(
-            f"{frus_path}/camera",
-            rr.Pinhole(
-                focal_length=(fx, fy),
-                principal_point=(cx, cy),
-                resolution=(W, H)
-            ),
+            f"{frus_path_world}/camera",
+            rr.Pinhole(focal_length=(fx, fy), principal_point=(cx, cy), resolution=(W, H)),
         )
         if image is not None:
-            rr.log(f"{frus_path}/image", rr.Image(image))
+            rr.log(f"{frus_path_world}/image", rr.Image(image))
 
-        # Small local axes at the frustum (visual aid).
-        axes_len = 0.3
+        # world4d frustum wire + center dot (CYAN)
         rr.log(
-            f"{frus_path}/axes",
+            f"{frus_path_world}/frustum_wire",
+            rr.LineStrips3D(
+                frustum_strips,  # <-- positional instead of line_strips=
+                colors=[WORLD_COLOR] * len(frustum_strips),
+                radii=0.003,
+            ),
+        )
+        rr.log(
+            f"{frus_path_world}/center",
+            rr.Points3D(
+                positions=np.zeros((1, 3), dtype=np.float32),
+                colors=WORLD_COLOR[None, :],
+                radii=0.01,
+            ),
+        )
+
+        # ---------- PREDICTED camera ----------
+        R_i = cam_poses[i][:3, :3]
+        t_i = cam_poses[i][:3, 3]
+
+        Rot = Rotation.from_euler("y", 100, degrees=True).as_matrix()
+        Rot = Rot @ Rotation.from_euler("x", 155, degrees=True).as_matrix()
+        t_i = (t_i @ Rot.T).astype(np.float32)
+        R_i = (Rot @ R_i).astype(np.float32)
+        quat_xyzw_pred = SciRot.from_matrix(R_i).as_quat().astype(np.float32)
+
+        pred_path = f"{BASE}/predicted/frustum" if reuse_paths else f"{BASE}/frames/t{i}/predicted/frustum"
+        rr.log(
+            pred_path,
+            rr.Transform3D(
+                translation=t_i.astype(np.float32),
+                rotation=rr.Quaternion(xyzw=quat_xyzw_pred),
+            )
+        )
+        # Use same intrinsics for visualization; swap to predicted intrinsics if you have them.
+        rr.log(
+            f"{pred_path}/camera",
+            rr.Pinhole(focal_length=(fx, fy), principal_point=(cx, cy), resolution=(W, H)),
+        )
+        # predicted frustum wire + center dot (ORANGE)
+        rr.log(
+            f"{pred_path}/frustum_wire",
+            rr.LineStrips3D(
+                frustum_strips,  # <-- positional instead of line_strips=
+                colors=[PRED_COLOR] * len(frustum_strips),
+                radii=0.003,
+            ),
+        )
+        rr.log(
+            f"{pred_path}/center",
+            rr.Points3D(
+                positions=np.zeros((1, 3), dtype=np.float32),
+                colors=PRED_COLOR[None, :],
+                radii=0.01,
+            ),
+        )
+
+        # Optional: tiny triad at the world4d frustum for orientation cue
+        rr.log(
+            f"{frus_path_world}/axes",
             rr.Arrows3D(
                 origins=np.zeros((3, 3), dtype=np.float32),
-                vectors=np.asarray(
-                    [[axes_len, 0, 0], [0, axes_len, 0], [0, 0, axes_len]],
-                    dtype=np.float32,
-                ),
+                vectors=np.asarray([[0.3, 0, 0], [0, 0.3, 0], [0, 0, 0.3]], dtype=np.float32),
                 colors=np.asarray([[255, 0, 0], [0, 255, 0], [0, 0, 255]], dtype=np.uint8),
             ),
         )
