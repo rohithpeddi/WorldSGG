@@ -333,7 +333,7 @@ class AgPi3:
         video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
         annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
         annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
-        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4]) # Number only
+        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
 
         # Get the mapping for sampled_frame_id and the actual frame id
         # Now start from the sampled frame which corresponds to the first annotated frame and keep the rest of the sampled frames
@@ -387,7 +387,8 @@ class AgPi3:
         torch.cuda.empty_cache()
 
     def infer_all_videos(self, split):
-        video_id_list = os.listdir(self.root_dir_path)
+        # video_id_list = os.listdir(self.root_dir_path)
+        video_id_list = ["0DJ6R.mp4"]
         for video_id in tqdm(video_id_list):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
@@ -413,9 +414,13 @@ def parse_args():
         description="Sample frames from videos based on homography-overlap filtering."
     )
     parser.add_argument(
-        "--root_dir_path", type=str, default="/data/rohith/ag/ag4D/static_frames",
+        "--root_dir_path", type=str, default="/data/rohith/ag/frames",
         help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
     )
+    # parser.add_argument(
+    #     "--root_dir_path", type=str, default="/data/rohith/ag/ag4D/static_frames",
+    #     help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
+    # )
     # parser.add_argument(
     #     "--root_dir_path", type=str, default="/data/rohith/ag/segmentation/masks/rectangular_overlayed_frames",
     #     help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
@@ -425,7 +430,7 @@ def parse_args():
         help="Path to directory containing annotated frames (with masks)."
     )
     parser.add_argument(
-        "--output_dir_path", type=str, default="/data3/rohith/ag/ag4D/static_scenes/pi3_inpaint",
+        "--output_dir_path", type=str, default="/data3/rohith/ag/ag4D/static_scenes/pi3_full",
         help="Path to output directory where results will be saved."
     )
     parser.add_argument(

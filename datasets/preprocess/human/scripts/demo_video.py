@@ -77,27 +77,27 @@ def main(input_video='data/examples/boxing_short.mp4',
     if run_rerun:
         from datasets.preprocess.human.prompt_hmr.vis import rerun_vis as rrvis
 
-        rrvis.visualize_camera_poses_mismatch(
-            images,
-            world4d,
-            results,
-            pipeline,
-            smplx.faces,
-            floor=(gv, gf),
-            init_fps=30 / viser_subsample,
-            img_maxsize=480,
-        )
-
-        # rrvis.rerun_vis_world4d(
+        # rrvis.visualize_camera_poses_mismatch(
         #     images,
         #     world4d,
         #     results,
         #     pipeline,
         #     smplx.faces,
         #     floor=(gv, gf),
-        #     init_fps=30/viser_subsample,
+        #     init_fps=30 / viser_subsample,
         #     img_maxsize=480,
         # )
+
+        rrvis.rerun_vis_world4d(
+            images,
+            world4d,
+            results,
+            pipeline,
+            smplx.faces,
+            floor=(gv, gf),
+            init_fps=30/viser_subsample,
+            img_maxsize=480,
+        )
 
         print('Rerun visualization running. Please open the Rerun app to view the results.')
         print('Press Ctrl+C to terminate.')

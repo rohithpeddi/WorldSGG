@@ -676,13 +676,13 @@ def rerun_vis_world4d(
     # Pre-extract static points from all humans across time.
     scene_3d, static_points, static_colors = predictions_to_glb_with_static(predictions, conf_min=0.1)
 
-    results, (s, R, t), tag, diags = fuse_humans_into_static_frame(predictions, results)
-
-    print("Chosen static convention:", tag)  # 'wc' or 'cw'
-    print("Global Sim(3): scale", s, "\nR=\n", R, "\nt=", t)
-    print("Camera-center RMSE (all):", diags['rmse_all'])
-
-    world4d = pipeline.create_world4d(results=results, step=1, total=1500)  # or your instance method call
+    # results, (s, R, t), tag, diags = fuse_humans_into_static_frame(predictions, results)
+    #
+    # print("Chosen static convention:", tag)  # 'wc' or 'cw'
+    # print("Global Sim(3): scale", s, "\nR=\n", R, "\nt=", t)
+    # print("Camera-center RMSE (all):", diags['rmse_all'])
+    #
+    # world4d = pipeline.create_world4d(results=results, step=1, total=1500)  # or your instance method call
 
     BASE = "world"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)

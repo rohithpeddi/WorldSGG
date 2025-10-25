@@ -580,7 +580,7 @@ class AgPi3:
 
     def infer_all_videos(self, split):
         video_id_list = os.listdir(self.root_dir_path)
-        video_id_list = ["BHP7U"]
+        video_id_list = ["0DJ6R"]
         for video_id in tqdm(video_id_list):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
@@ -608,7 +608,7 @@ def parse_args():
         description="Sample frames from videos based on homography-overlap filtering."
     )
     parser.add_argument(
-        "--root_dir_path", type=str, default=r"E:\DATA\COLLECTED\AG4D\Pi3",
+        "--root_dir_path", type=str, default="/data/rohith/ag/frames",
         help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
     )
     # parser.add_argument(
@@ -624,7 +624,7 @@ def parse_args():
         help="Path to directory containing annotated frames (with masks)."
     )
     parser.add_argument(
-        "--output_dir_path", type=str, default=r"E:\DATA\COLLECTED\AG4D\Pi3",
+        "--output_dir_path", type=str, default="/data3/rohith/ag/ag4D/static_scenes/pi3_full",
         help="Path to output directory where results will be saved."
     )
     # parser.add_argument(
@@ -632,7 +632,7 @@ def parse_args():
     #     help="Path to output directory where results will be saved."
     # )
     parser.add_argument(
-        "--split", type=_parse_split, default="AD",
+        "--split", type=_parse_split, default="04",
         help="Optional shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}. "
              "If omitted, processes all videos."
     )
