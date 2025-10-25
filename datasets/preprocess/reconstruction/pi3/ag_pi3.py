@@ -328,6 +328,11 @@ class AgPi3:
     def infer_video(self, video_id, conf_thres=10.0):
         data_path = f'{self.root_dir_path}/{video_id}'
         video_save_dir = os.path.join(self.output_dir_path, f"{video_id[:-4]}_{int(conf_thres)}")
+
+        if os.path.exists(os.path.join(video_save_dir, "predictions.npz")):
+            print(f"Skipping video {video_id} as output already exists.")
+            return
+
         os.makedirs(video_save_dir, exist_ok=True)
 
         video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
@@ -390,8 +395,7 @@ class AgPi3:
         torch.cuda.empty_cache()
 
     def infer_all_videos(self, split):
-        # video_id_list = os.listdir(self.root_dir_path)
-        video_id_list = ["0DJ6R.mp4"]
+        video_id_list = os.listdir(self.root_dir_path)
         for video_id in tqdm(video_id_list):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")

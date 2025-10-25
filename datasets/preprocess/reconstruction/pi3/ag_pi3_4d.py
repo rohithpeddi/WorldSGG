@@ -266,7 +266,7 @@ def _log_cameras(predictions: Dict, fov_y: float, W: int, H: int):
 
     for i, Tcw in enumerate(cam_poses):
         Rcw, tcw = _camera_R_t_from_4x4(Tcw)
-        q_xyzw = R.from_matrix(Rcw).as_quat().astype(np.float32)  # [x, y, z, w]
+        q_xyzw = Rot.from_matrix(Rcw).as_quat().astype(np.float32)  # [x, y, z, w]
 
         frus_path = _frustum_path(i)
         rr.log(
@@ -294,16 +294,16 @@ class AgPi3:
     def __init__(
         self,
         root_dir_path: str,
-        output_dir_path: Optional[str] = None,
+        dynamic_scene_dir_path: Optional[str] = None,
         static_scene_dir_path: Optional[str] = None,  # accepted for parity; not used here
         frame_annotated_dir_path: Optional[str] = None,  # accepted for parity; not used here
     ):
         self.model = None
         self.root_dir_path = root_dir_path
         self.static_scene_dir_path = static_scene_dir_path
-        self.output_dir_path = output_dir_path if output_dir_path is not None else root_dir_path
+        self.dynamic_scene_dir_path = dynamic_scene_dir_path if dynamic_scene_dir_path is not None else root_dir_path
         self.frame_annotated_dir_path = frame_annotated_dir_path
-        os.makedirs(self.output_dir_path, exist_ok=True)
+        os.makedirs(self.dynamic_scene_dir_path, exist_ok=True)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -330,53 +330,46 @@ class AgPi3:
         assert mode in {"raw", "merged", "both"}, "mode must be one of {'raw','merged','both'}"
 
         # ---- Load predictions once ----
-        pred_path = os.path.join(self.static_scene_dir_path, f"{video_id}_{10}", "predictions.npz")
-        if not os.path.exists(pred_path):
-            raise FileNotFoundError(
-                f"predictions.npz not found for {video_id} under {self.output_dir_path} (looked for {video_id}_*/predictions.npz)"
-            )
+        static_scene_pred_path = os.path.join(self.static_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
+        dynamic_scene_pred_path = os.path.join(self.dynamic_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
+        if not os.path.exists(static_scene_pred_path) or not os.path.exists(dynamic_scene_pred_path):
+            raise FileNotFoundError(f"predictions.npz not found for {video_id}")
 
-        arr = np.load(pred_path, allow_pickle=True, mmap_mode=None)
-        predictions = {k: arr[k] for k in arr.files}
-        points_wh = predictions["points"]  # (S,H,W,3)
-        images = _ensure_nhwc(predictions["images"])  # (S,H,W,3) in [0,1]
-        conf_wh = predictions.get("conf")  # (S,H,W) or (S,H,W,1)
+        static_scene_arr = np.load(static_scene_pred_path, allow_pickle=True, mmap_mode=None)
+        dynamic_scene_arr = np.load(dynamic_scene_pred_path, allow_pickle=True, mmap_mode=None)
 
-        S, H, W = points_wh.shape[:3]
+        static_scene_predictions = {k: static_scene_arr[k] for k in static_scene_arr.files}
+        dynamic_scene_predictions = {k: dynamic_scene_arr[k] for k in dynamic_scene_arr.files}
+
+        static_scene_points_wh = static_scene_predictions["points"]  # (S,H,W,3)
+        dynamic_scene_points_wh = dynamic_scene_predictions["points"]  # (S,H,W,3)
+
+        static_scene_images = _ensure_nhwc(static_scene_predictions["images"])  # (S,H,W,3) in [0,1]
+        dynamic_scene_images = _ensure_nhwc(dynamic_scene_predictions["images"])  # (S,H,W,3) in [0,1]
+
+        static_scene_conf_wh = static_scene_predictions.get("conf")  # (S,H,W) or (S,H,W,1)
+        dynamic_scene_conf_wh = dynamic_scene_predictions.get("conf")  # (S,H,W) or (S,H,W,1)
+
+        S, H, W = static_scene_points_wh.shape[:3]
         print(f"[viz] {video_id}: {S} frames | HxW={H}x{W} | conf_static={conf_static} | conf_frame={conf_frame} | mode={mode}")
 
         # ---- Build static background (once) ----
-        _scene_3d, static_P, static_C = predictions_to_glb_with_static(
-            predictions, conf_min=float(conf_static)
+        scene_3d, static_P, static_C = predictions_to_glb_with_static(
+            static_scene_predictions, conf_min=float(conf_static)
         )
 
         # ---- Precompute per-frame RAW points (avoid recomputing for both branches) ----
         raw_P: List[np.ndarray] = []
         raw_C: List[np.ndarray] = []
-        for i in range(S):
+        for i in tqdm(range(S), desc=f"[viz] Flattening raw frames for {video_id}"):
             P_i, C_i, _ = _flatten_points_colors_frames(
-                points_wh=points_wh[i][None],
-                colors_wh=images[i][None],
-                conf_wh=conf_wh[i][None],
+                points_wh=static_scene_points_wh[i][None],
+                colors_wh=static_scene_images[i][None],
+                conf_wh=static_scene_conf_wh[i][None],
                 conf_min=float(conf_frame),
             )
             raw_P.append(P_i)
             raw_C.append(C_i)
-
-        # ---- Precompute per-frame MERGED with static ----
-        merged_P: List[np.ndarray] = []
-        merged_C: List[np.ndarray] = []
-        if mode in {"merged", "both"}:
-            for i in range(S):
-                Pi, Ci = merge_static_with_frame(
-                    predictions,
-                    static_P, static_C,
-                    frame_idx=i,
-                    conf_min=float(conf_frame),
-                    dedup_voxel=dedup_voxel,
-                )
-                merged_P.append(Pi)
-                merged_C.append(Ci)
 
         # ---- Rerun setup ----
         rr.init(f"AG-Pi3: {video_id}", spawn=spawn)
@@ -396,37 +389,39 @@ class AgPi3:
         # Cameras & frustums (timeless transforms, separate camera nodes per frame)
         if log_cameras:
             _fx, _fy, _cx, _cy = _pinhole_from_fov(W, H, fov_y)
-            _log_cameras(predictions, fov_y=fov_y, W=W, H=H)
+            _log_cameras(static_scene_predictions, fov_y=fov_y, W=W, H=H)
 
-        # ---- Animate per-frame content ----
-        for i in range(S):
+        # ---- Precompute per-frame MERGED with static ----
+        merged_P: List[np.ndarray] = []
+        merged_C: List[np.ndarray] = []
+        for i in tqdm(range(S), desc=f"[viz] Merging frames for {video_id}"):
+            Pi, Ci = merge_static_with_frame(
+                dynamic_scene_predictions,
+                static_P, static_C,
+                frame_idx=i,
+                conf_min=float(conf_frame),
+                dedup_voxel=dedup_voxel,
+            )
+            merged_P.append(Pi)
+            merged_C.append(Ci)
+
             rr.set_time_sequence("frame", i)
 
-            if mode in {"raw", "both"} and raw_P[i].size:
+            if merged_P[i].size:
                 rr.log(
-                    "world/frame/points_raw",
+                    "world/frame/points_merged",
                     rr.Points3D(
-                        positions=raw_P[i].astype(np.float32),
-                        colors=raw_C[i].astype(np.uint8),
+                        positions=merged_P[i].astype(np.float32),
+                        colors=merged_C[i].astype(np.uint8),
                         radii=0.01,
                     ),
                 )
 
-            if mode in {"merged", "both"} and merged_P:
-                if merged_P[i].size:
-                    rr.log(
-                        "world/frame/points_merged",
-                        rr.Points3D(
-                            positions=merged_P[i].astype(np.float32),
-                            colors=merged_C[i].astype(np.uint8),
-                            radii=0.01,
-                        ),
-                    )
-
         print("[viz] Done streaming frames to Rerun.")
 
         # Cleanup
-        del predictions
+        del static_scene_predictions
+        del dynamic_scene_predictions
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -443,6 +438,8 @@ class AgPi3:
         """Process all videos in a split (optionally restricted by an allowlist)."""
         video_id_list = sorted(os.listdir(self.root_dir_path))
 
+        video_id_list = ["0DJ6R.mp4"]
+
         # Filter by naming convention and split
         filtered: List[str] = []
         for vid in video_id_list:
@@ -456,10 +453,7 @@ class AgPi3:
             return
 
         for video_id in tqdm(filtered, desc=f"Split {split}"):
-            try:
-                self.infer_video(video_id, mode=mode, **kwargs)
-            except Exception as e:
-                print(f"[ERROR] {video_id}: {e}")
+            self.infer_video(video_id, mode=mode, **kwargs)
 
 
 # ---------------------------
@@ -505,6 +499,11 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="/data2/rohith/ag/ag4D/static_scenes/pi3",
         help="Path to output directory where predictions folders live (e.g., <video>_10/).",
+    )
+    parser.add_argument(
+        "--dynamic_scene_dir_path",
+        type=str,
+        default="/data3/rohith/ag/ag4D/static_scenes/pi3_full"
     )
 
     # Selection
@@ -574,32 +573,21 @@ def main() -> None:
 
     ag_pi3 = AgPi3(
         root_dir_path=args.root_dir_path,
-        output_dir_path=args.output_dir_path,
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
+        static_scene_dir_path=args.static_scene_dir_path,
         frame_annotated_dir_path=args.frames_annotated_dir_path,
     )
 
-    if args.video_id:
-        ag_pi3.infer_video(
-            args.video_id,
-            mode=args.mode,
-            conf_static=args.conf_static,
-            conf_frame=args.conf_frame,
-            dedup_voxel=dedup,
-            fov_y=args.fov_y,
-            spawn=not args.no_spawn,
-            log_cameras=not args.no_cam,
-        )
-    else:
-        ag_pi3.infer_all_videos(
-            split=args.split,
-            mode=args.mode,
-            conf_static=args.conf_static,
-            conf_frame=args.conf_frame,
-            dedup_voxel=dedup,
-            fov_y=args.fov_y,
-            spawn=not args.no_spawn,
-            log_cameras=not args.no_cam,
-        )
+    ag_pi3.infer_all_videos(
+        split=args.split,
+        mode=args.mode,
+        conf_static=args.conf_static,
+        conf_frame=args.conf_frame,
+        dedup_voxel=dedup,
+        fov_y=args.fov_y,
+        spawn=not args.no_spawn,
+        log_cameras=not args.no_cam,
+    )
 
 
 if __name__ == "__main__":
