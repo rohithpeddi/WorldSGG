@@ -14,19 +14,21 @@ def load_images_as_tensor(path='data/truck', interval=1, PIXEL_LIMIT=255000, sam
     print(f"Loading images from directory: {path}")
     filenames = sorted([x for x in os.listdir(path) if x.lower().endswith(('.png', '.jpg', '.jpeg'))])
     print(f"[{video_id}] [{interval}] Following are the sampled image indices (0-based) {sample_idx} .")
+    skipped_list = []
     for i in range(0, len(filenames), interval):
         if sample_idx is not None and i // interval not in sample_idx:
-            if video_id is not None:
-                print(f"[{video_id}] Skipping image index {i} for video as it's not in sample_idx.")
-            else:
-                print(f"Skipping image index {i} as it's not in sample_idx.")
+            skipped_list.append(i)
             continue
-
         img_path = osp.join(path, filenames[i])
         try:
             sources.append(Image.open(img_path).convert('RGB'))
         except Exception as e:
             print(f"Could not load image {filenames[i]}: {e}")
+
+    if video_id is not None:
+        print(f"[{video_id}] Skipping image indices (0-based): {skipped_list} .")
+    else:
+        print(f"Skipping image indices (0-based): {skipped_list} .")
     
     # # --- 1. Load image paths or video frames ---
     # if osp.isdir(path):
