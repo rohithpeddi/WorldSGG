@@ -358,19 +358,6 @@ class AgPi3:
             static_scene_predictions, conf_min=float(conf_static)
         )
 
-        # ---- Precompute per-frame RAW points (avoid recomputing for both branches) ----
-        raw_P: List[np.ndarray] = []
-        raw_C: List[np.ndarray] = []
-        for i in tqdm(range(S), desc=f"[viz] Flattening raw frames for {video_id}"):
-            P_i, C_i, _ = _flatten_points_colors_frames(
-                points_wh=static_scene_points_wh[i][None],
-                colors_wh=static_scene_images[i][None],
-                conf_wh=static_scene_conf_wh[i][None],
-                conf_min=float(conf_frame),
-            )
-            raw_P.append(P_i)
-            raw_C.append(C_i)
-
         # ---- Rerun setup ----
         rr.init(f"AG-Pi3: {video_id}", spawn=spawn)
         rr.log("world", rr.ViewCoordinates.RDF, timeless=True)
@@ -382,8 +369,7 @@ class AgPi3:
                 rr.Points3D(
                     positions=static_P.astype(np.float32),
                     colors=static_C.astype(np.uint8),
-                ),
-                timeless=True,
+                )
             )
 
         # Cameras & frustums (timeless transforms, separate camera nodes per frame)
