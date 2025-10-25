@@ -2,7 +2,7 @@ import argparse
 import gc
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import matplotlib
 import numpy as np
@@ -424,9 +424,6 @@ class AgPi3:
         self.sampled_frames_idx_root_dir = "/data/rohith/ag/sampled_frames_idx"
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    def load_model(self):
-        pass
-
     def preprocess_image_list(self, data_path, is_video=False, video_id=None, sample_idx=None):
         interval = 10 if is_video else 1
         print(f'Sampling interval: {interval}')
@@ -439,15 +436,6 @@ class AgPi3:
         return imgs
 
     def infer_video_points_3d(self, video_id, conf_min: float = 0.01, spawn: bool = True):
-        """
-        Load saved predictions for a video and visualize *all* points per frame
-        as a time sequence in Rerun.
-
-        Args:
-            video_id: e.g., "BHP7U" or "BHP7U.mp4"
-            conf_min: confidence threshold in [0,1] to keep a point
-            spawn: whether to spawn the Rerun viewer window
-        """
         # Use a readable tag for the folder name based on confidence threshold
         conf_tag = int(conf_min * 100)
         video_save_dir = os.path.join(self.output_dir_path, f"{video_id}_10")
@@ -464,6 +452,8 @@ class AgPi3:
         conf_wh = predictions.get("conf", np.ones(points_wh.shape[:-1], dtype=np.float32))  # (S, H, W) or (S,H,W,1)
         images = _ensure_nhwc(predictions["images"])  # to (S, H, W, 3) in [0,1]
 
+        S, H, W = points_wh.shape[:3]
+
         S = points_wh.shape[0]
         print(f"[viz] Visualizing {S} frames, conf_min={conf_min}")
 
@@ -471,20 +461,18 @@ class AgPi3:
         rr.init(f"AG-Pi3 Per-Frame Points: {video_id}", spawn=spawn)
         rr.log("world", rr.ViewCoordinates.RDF, timeless=True)
 
-        # Optionally log cameras (animated by frame if available)
-        if "camera_poses" in predictions:
-            cam_poses = predictions["camera_poses"]  # (S, 4, 4) or (S, 3, 4)
-            for i in range(len(cam_poses)):
-                R, t = _camera_R_t_from_4x4(cam_poses[i])
-                q_xyzw = SciRot.from_matrix(R).as_quat()  # [x, y, z, w]
-                rr.set_time_sequence("frame", i)
-                rr.log(
-                    f"world/cameras/cam",
-                    rr.Transform3D(
-                        translation=t.astype(np.float32),
-                        rotation=rr.Quaternion(xyzw=q_xyzw.astype(np.float32)),
-                    ),
-                )
+        cam_poses = predictions["camera_poses"]  # (S, 4, 4) or (S, 3, 4)
+
+        def _frustum_path(i: int) -> str:
+            return f"world/frames/t{i}/frustum"
+
+        def _pinhole_from_fov(W: int, H: int, fov_y_rad: float) -> Tuple[float, float, float, float]:
+            """Compute fx, fy, cx, cy from vertical FOV (in radians) and resolution."""
+            fy = (H * 0.5) / np.tan(0.5 * fov_y_rad)
+            fx = fy * (W / H)
+            cx = W * 0.5
+            cy = H * 0.5
+            return fx, fy, cx, cy
 
         # Animate per-frame raw points
         for i in range(S):
@@ -500,6 +488,29 @@ class AgPi3:
                 colors_wh=img_i,
                 conf_wh=conf_i,
                 conf_min=float(conf_min),
+            )
+
+            R, t = _camera_R_t_from_4x4(cam_poses[i])
+            R_wc = R
+            t_wc = t
+
+            fov_y = 0.96  # mirrors your viser default
+            fx, fy, cx, cy = _pinhole_from_fov(W, H, fov_y)
+
+            q_xyzw = SciRot.from_matrix(R).as_quat()  # [x, y, z, w]
+            rr.set_time_sequence("frame", i)
+
+            frus_path = _frustum_path(i)
+            rr.log(
+                frus_path,
+                rr.Transform3D(
+                    translation=t_wc.astype(np.float32),
+                    rotation=rr.Quaternion(xyzw=q_xyzw),
+                )
+            )
+            rr.log(
+                f"{frus_path}/camera",
+                rr.Pinhole(focal_length=(fx, fy), principal_point=(cx, cy), resolution=(W, H)),
             )
 
             if P.size == 0:

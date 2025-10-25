@@ -460,7 +460,7 @@ def visualize_camera_poses_mismatch(
             img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         return img
 
-    video_save_dir = os.path.join("/data2/rohith/ag/ag4D/static_scenes/pi3", f"0DJ6R_10")
+    video_save_dir = os.path.join("/data3/rohith/ag/ag4D/static_scenes/pi3_full", f"0DJ6R_10")
     prediction_save_path = os.path.join(video_save_dir, "predictions.npz")
     if os.path.exists(prediction_save_path):
         predictions = np.load(prediction_save_path, allow_pickle=True)
