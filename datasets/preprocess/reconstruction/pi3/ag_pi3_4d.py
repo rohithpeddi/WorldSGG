@@ -58,10 +58,10 @@ def _ensure_nhwc(images: np.ndarray) -> np.ndarray:
 
 
 def _flatten_points_colors_frames(
-    points_wh: np.ndarray,
-    colors_wh: np.ndarray,
-    conf_wh: np.ndarray,
-    conf_min: float,
+        points_wh: np.ndarray,
+        colors_wh: np.ndarray,
+        conf_wh: np.ndarray,
+        conf_min: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Flatten (S,H,W,3) points/colors and (S,H,W[,1]) conf to arrays:
@@ -116,10 +116,10 @@ def _frustum_path(i: int) -> str:
 # ---------------------------
 
 def predictions_to_glb_with_static(
-    predictions: Dict,
-    *,
-    conf_min: float = 0.5,  # 0..1 threshold on predictions["conf"]
-    filter_by_frames: str = "all",  # e.g. "12:..." to use only frame index 12
+        predictions: Dict,
+        *,
+        conf_min: float = 0.5,  # 0..1 threshold on predictions["conf"]
+        filter_by_frames: str = "all",  # e.g. "12:..." to use only frame index 12
 ) -> Tuple[trimesh.Scene, np.ndarray, np.ndarray]:
     """
     Build a GLB-ready trimesh.Scene from VGGT-style predictions AND return a background
@@ -204,12 +204,12 @@ def predictions_to_glb_with_static(
 
 
 def merge_static_with_frame(
-    predictions: Dict,
-    static_points: np.ndarray,
-    static_colors: np.ndarray,
-    frame_idx: int,
-    conf_min: float = 0.1,
-    dedup_voxel: Optional[float] = 0.02,
+        predictions: Dict,
+        static_points: np.ndarray,
+        static_colors: np.ndarray,
+        frame_idx: int,
+        conf_min: float = 0.1,
+        dedup_voxel: Optional[float] = 0.02,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Merge per-frame points with static background. Optionally de-duplicate with a small voxel size."""
     images = _ensure_nhwc(predictions["images"])  # (S,H,W,3)
@@ -219,7 +219,7 @@ def merge_static_with_frame(
     # slice this frame
     pts_f = points[frame_idx]  # (H,W,3)
     img_f = images[frame_idx]  # (H,W,3)
-    conf_f = conf[frame_idx]   # (H,W[,1])
+    conf_f = conf[frame_idx]  # (H,W[,1])
 
     P, C, _ = _flatten_points_colors_frames(pts_f[None], img_f[None], conf_f[None], conf_min)
 
@@ -258,7 +258,44 @@ def merge_static_with_frame(
 # Rerun visualization
 # ---------------------------
 
-def _log_cameras(predictions: Dict, fov_y: float, W: int, H: int):
+# Helper to build a wireframe frustum in the *camera's local frame* (RUB; camera looks along -Z).
+def _make_frustum_lines(W, H, fx, fy, cx, cy, near=0.12, far=0.45):
+    def rect_at(depth):
+        z = -float(depth)  # forward along -Z in R-U-B
+        x0 = (0 - cx) * (z / fx)
+        x1 = (W - 1 - cx) * (z / fx)
+        y0 = (0 - cy) * (z / fy)
+        y1 = (H - 1 - cy) * (z / fy)
+        return np.array([[x0, y0, z],
+                         [x1, y0, z],
+                         [x1, y1, z],
+                         [x0, y1, z]], dtype=np.float32)
+
+    n = rect_at(near)
+    f = rect_at(far)
+    strips = [
+        np.vstack([n, n[0]]),  # near loop
+        np.vstack([f, f[0]]),  # far loop
+        np.vstack([n[0], f[0]]),  # connect near/far
+        np.vstack([n[1], f[1]]),
+        np.vstack([n[2], f[2]]),
+        np.vstack([n[3], f[3]]),
+        np.vstack([np.zeros(3, np.float32), n[0]]),  # rays from center
+        np.vstack([np.zeros(3, np.float32), n[1]]),
+        np.vstack([np.zeros(3, np.float32), n[2]]),
+        np.vstack([np.zeros(3, np.float32), n[3]]),
+    ]
+    return strips
+
+
+def _log_cameras(
+        predictions: Dict,
+        fov_y: float,
+        W: int,
+        H: int,
+        type: str,
+        color
+) -> None:
     if "camera_poses" not in predictions:
         return
     cam_poses = predictions["camera_poses"]  # (S, 4, 4) or (S, 3, 4)
@@ -276,12 +313,30 @@ def _log_cameras(predictions: Dict, fov_y: float, W: int, H: int):
                 rotation=rr.Quaternion(xyzw=q_xyzw),
             ),
         )
+
+        frustum_strips = _make_frustum_lines(W, H, fx, fy, cx, cy, near=0.12, far=0.45)
+
+        pred_path = f"world/{type}/frames/t{i}/predicted/frustum"
+        # Use same intrinsics for visualization; swap to predicted intrinsics if you have them.
         rr.log(
-            f"{frus_path}/camera",
-            rr.Pinhole(
-                focal_length=(float(fx), float(fy)),
-                principal_point=(float(cx), float(cy)),
-                resolution=(int(W), int(H)),
+            f"{pred_path}/camera",
+            rr.Pinhole(focal_length=(fx, fy), principal_point=(cx, cy), resolution=(W, H)),
+        )
+        # predicted frustum wire + center dot (ORANGE)
+        rr.log(
+            f"{pred_path}/frustum_wire",
+            rr.LineStrips3D(
+                frustum_strips,  # <-- positional instead of line_strips=
+                colors=[color] * len(frustum_strips),
+                radii=0.003,
+            ),
+        )
+        rr.log(
+            f"{pred_path}/center",
+            rr.Points3D(
+                positions=np.zeros((1, 3), dtype=np.float32),
+                colors=color[None, :],
+                radii=0.01,
             ),
         )
 
@@ -292,11 +347,11 @@ def _log_cameras(predictions: Dict, fov_y: float, W: int, H: int):
 
 class AgPi3:
     def __init__(
-        self,
-        root_dir_path: str,
-        dynamic_scene_dir_path: Optional[str] = None,
-        static_scene_dir_path: Optional[str] = None,  # accepted for parity; not used here
-        frame_annotated_dir_path: Optional[str] = None,  # accepted for parity; not used here
+            self,
+            root_dir_path: str,
+            dynamic_scene_dir_path: Optional[str] = None,
+            static_scene_dir_path: Optional[str] = None,  # accepted for parity; not used here
+            frame_annotated_dir_path: Optional[str] = None,  # accepted for parity; not used here
     ):
         self.model = None
         self.root_dir_path = root_dir_path
@@ -307,18 +362,18 @@ class AgPi3:
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --------- Unified pipeline ---------
-    def infer_video(
-        self,
-        video_id: str,
-        *,
-        mode: str = "both",            # one of {"raw", "merged", "both"}
-        conf_static: float = 0.10,      # confidence for static background build
-        conf_frame: float = 0.01,       # confidence for per-frame points
-        dedup_voxel: Optional[float] = 0.02,  # meters; None to disable
-        fov_y: float = 0.96,            # radians; matches your earlier default
-        spawn: bool = True,
-        log_cameras: bool = True,
+    # ----------------------------- Infer basic video visualization -----------------------------
+    def infer_basic_video(
+            self,
+            video_id: str,
+            *,
+            mode: str = "both",  # one of {"raw", "merged", "both"}
+            conf_static: float = 0.10,  # confidence for static background build
+            conf_frame: float = 0.01,  # confidence for per-frame points
+            dedup_voxel: Optional[float] = 0.02,  # meters; None to disable
+            fov_y: float = 0.96,  # radians; matches your earlier default
+            spawn: bool = True,
+            log_cameras: bool = True,
     ) -> None:
         """
         Unified visualization that replaces the old `infer_video` and `infer_video_points_3d`.
@@ -351,7 +406,115 @@ class AgPi3:
         dynamic_scene_conf_wh = dynamic_scene_predictions.get("conf")  # (S,H,W) or (S,H,W,1)
 
         S, H, W = static_scene_points_wh.shape[:3]
-        print(f"[viz] {video_id}: {S} frames | HxW={H}x{W} | conf_static={conf_static} | conf_frame={conf_frame} | mode={mode}")
+        print(
+            f"[viz] {video_id}: {S} frames | HxW={H}x{W} | conf_static={conf_static} | conf_frame={conf_frame} | mode={mode}")
+
+        # ---- Build static background (once) ----
+        scene_3d, static_P, static_C = predictions_to_glb_with_static(
+            static_scene_predictions, conf_min=float(conf_static)
+        )
+
+        # ---- Rerun setup ----
+        rr.init(f"AG-Pi3: {video_id}", spawn=spawn)
+        rr.log("world", rr.ViewCoordinates.RDF, timeless=True)
+
+        # Log static background timelessly
+        if static_P.size > 0:
+            rr.log(
+                "world/static",
+                rr.Points3D(
+                    positions=static_P.astype(np.float32),
+                    colors=static_C.astype(np.uint8),
+                )
+            )
+
+        # Cameras & frustums (timeless transforms, separate camera nodes per frame)
+        if log_cameras:
+            _fx, _fy, _cx, _cy = _pinhole_from_fov(W, H, fov_y)
+            _log_cameras(static_scene_predictions, fov_y=fov_y, W=W, H=H, type="static", color=[255, 0, 0])  # RED for static
+            _log_cameras(dynamic_scene_predictions, fov_y=fov_y, W=W, H=H, type="dynamic", color=[0, 255, 0])  # GREEN for dynamic
+
+        # ---- Precompute per-frame MERGED with static ----
+        merged_P: List[np.ndarray] = []
+        merged_C: List[np.ndarray] = []
+        for i in tqdm(range(S), desc=f"[viz] Merging frames for {video_id}"):
+            Pi, Ci = merge_static_with_frame(
+                dynamic_scene_predictions,
+                static_P, static_C,
+                frame_idx=i,
+                conf_min=float(conf_frame),
+                dedup_voxel=dedup_voxel,
+            )
+            merged_P.append(Pi)
+            merged_C.append(Ci)
+
+            rr.set_time_sequence("frame", i)
+
+            if merged_P[i].size:
+                rr.log(
+                    "world/frame/points_merged",
+                    rr.Points3D(
+                        positions=merged_P[i].astype(np.float32),
+                        colors=merged_C[i].astype(np.uint8),
+                        radii=0.01,
+                    ),
+                )
+
+        print("[viz] Done streaming frames to Rerun.")
+
+        # Cleanup
+        del static_scene_predictions
+        del dynamic_scene_predictions
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # --------- Unified pipeline ---------
+    def infer_video(
+            self,
+            video_id: str,
+            *,
+            mode: str = "both",  # one of {"raw", "merged", "both"}
+            conf_static: float = 0.10,  # confidence for static background build
+            conf_frame: float = 0.01,  # confidence for per-frame points
+            dedup_voxel: Optional[float] = 0.02,  # meters; None to disable
+            fov_y: float = 0.96,  # radians; matches your earlier default
+            spawn: bool = True,
+            log_cameras: bool = True,
+    ) -> None:
+        """
+        Unified visualization that replaces the old `infer_video` and `infer_video_points_3d`.
+
+        - Builds a static background once (using `conf_static`).
+        - Optionally logs per-frame RAW points (like the old `infer_video_points_3d`).
+        - Optionally logs per-frame MERGED (static + frame) points (like the old `infer_video`).
+        """
+        assert mode in {"raw", "merged", "both"}, "mode must be one of {'raw','merged','both'}"
+
+        # ---- Load predictions once ----
+        static_scene_pred_path = os.path.join(self.static_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
+        dynamic_scene_pred_path = os.path.join(self.dynamic_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
+        if not os.path.exists(static_scene_pred_path) or not os.path.exists(dynamic_scene_pred_path):
+            raise FileNotFoundError(f"predictions.npz not found for {video_id}")
+
+        static_scene_arr = np.load(static_scene_pred_path, allow_pickle=True, mmap_mode=None)
+        dynamic_scene_arr = np.load(dynamic_scene_pred_path, allow_pickle=True, mmap_mode=None)
+
+        static_scene_predictions = {k: static_scene_arr[k] for k in static_scene_arr.files}
+        dynamic_scene_predictions = {k: dynamic_scene_arr[k] for k in dynamic_scene_arr.files}
+
+        static_scene_points_wh = static_scene_predictions["points"]  # (S,H,W,3)
+        dynamic_scene_points_wh = dynamic_scene_predictions["points"]  # (S,H,W,3)
+
+        static_scene_images = _ensure_nhwc(static_scene_predictions["images"])  # (S,H,W,3) in [0,1]
+        dynamic_scene_images = _ensure_nhwc(dynamic_scene_predictions["images"])  # (S,H,W,3) in [0,1]
+
+        static_scene_conf_wh = static_scene_predictions.get("conf")  # (S,H,W) or (S,H,W,1)
+        dynamic_scene_conf_wh = dynamic_scene_predictions.get("conf")  # (S,H,W) or (S,H,W,1)
+
+        S, H, W = static_scene_points_wh.shape[:3]
+        print(
+            f"[viz] {video_id}: {S} frames | HxW={H}x{W} | conf_static={conf_static} | conf_frame={conf_frame} | mode={mode}")
 
         # ---- Build static background (once) ----
         scene_3d, static_P, static_C = predictions_to_glb_with_static(
@@ -414,12 +577,12 @@ class AgPi3:
 
     # --------- Batch over a split ---------
     def infer_all_videos(
-        self,
-        split: str,
-        *,
-        mode: str = "both",
-        allowlist: Optional[List[str]] = None,
-        **kwargs,
+            self,
+            split: str,
+            *,
+            mode: str = "both",
+            allowlist: Optional[List[str]] = None,
+            **kwargs,
     ) -> None:
         """Process all videos in a split (optionally restricted by an allowlist)."""
         video_id_list = sorted(os.listdir(self.root_dir_path))
@@ -483,13 +646,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--static_scene_dir_path",
         type=str,
-        default="/data2/rohith/ag/ag4D/static_scenes/pi3",
+        default="/data/rohith/ag/ag4D/static_scenes/pi3",
         help="Path to output directory where predictions folders live (e.g., <video>_10/).",
     )
     parser.add_argument(
         "--dynamic_scene_dir_path",
         type=str,
-        default="/data3/rohith/ag/ag4D/static_scenes/pi3_full"
+        default="/data/rohith/ag/ag4D/static_scenes/pi3_full"
     )
 
     # Selection
