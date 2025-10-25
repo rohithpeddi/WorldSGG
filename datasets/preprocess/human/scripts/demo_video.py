@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import joblib
 import torch
 import tyro
 import argparse
@@ -158,15 +159,20 @@ class AgPromptHMR:
         self.root_dir_path = root_dir_path
 
     def process_video(self, video_id):
+        print(f"[{video_id}] Starting processing...")
         video_output_folder = os.path.join(self.output_root, video_id)
         os.makedirs(video_output_folder, exist_ok=True)
         results = self.pipeline.__call__(video_id,
                                          video_output_folder,
                                          save_only_essential=True)
 
+        output_pkl_file = os.path.join(video_output_folder, 'results.pkl')
+        joblib.dump(results, output_pkl_file)
+        print(f"Processed video {video_id} and saved results to {output_pkl_file}")
+
     def infer_all_videos(self, split):
         video_id_list = os.listdir(self.root_dir_path)
-        for video_id in tqdm(video_id_list):
+        for video_id in tqdm(video_id_list, desc=f"Processing videos in split {split}", unit="video"):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
                 continue
@@ -200,19 +206,15 @@ def parse_args():
     )
     parser.add_argument(
         "--split", default="04",
-        help="Optional shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}. "
+        help="Optional shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}."
              "If omitted, processes all videos."
     )
     return parser.parse_args()
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Process a video with AgPromptHMR.')
-    parser.add_argument('--output_root', type=str, default='results', help='Directory to save the output results.')
-
-    args = parser.parse_args()
-
-    processor = AgPromptHMR(output_root=args.output_root, root_dir_path='/data/rohith/ag/videos')
+    args = parse_args()
+    processor = AgPromptHMR(output_root=args.output_dir_path, root_dir_path=args.root_dir_path)
     processor.infer_all_videos(split=args.split)
 
 
