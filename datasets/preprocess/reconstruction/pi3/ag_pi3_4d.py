@@ -10,6 +10,7 @@ import torch
 import trimesh
 from scipy.spatial.transform import Rotation as Rot
 from tqdm import tqdm
+from scipy.spatial import cKDTree
 
 
 # ---------------------------
@@ -210,30 +211,160 @@ def merge_static_with_frame(
         frame_idx: int,
         conf_min: float = 0.1,
         dedup_voxel: Optional[float] = 0.02,
+        *,
+        # ICP knobs (safe defaults)
+        icp_max_iters: int = 30,
+        icp_tol: float = 1e-5,
+        trim_frac: float = 0.8,  # keep this fraction of closest pairs each iter
+        max_corr_dist: Optional[float] = None,  # meters; None disables
+        src_sample_max: int = 20000,  # subsample source for speed
+        tgt_sample_max: int = 100000,  # subsample target for speed
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Merge per-frame points with static background. Optionally de-duplicate with a small voxel size."""
+    """
+    Align per-frame points to the static background via ICP and return the merged cloud.
+
+    Returns:
+        mean_xyz (N,3) float32, mean_rgb (N,3) uint8
+    """
+    # ---------- Helpers ----------
+    def _weighted_rigid_fit(A: np.ndarray, B: np.ndarray, w: Optional[np.ndarray] = None) -> Tuple[
+        np.ndarray, np.ndarray]:
+        """Find R,t minimizing sum_i w_i || R A_i + t - B_i ||^2 using Kabsch with optional weights."""
+        if w is None:
+            w = np.ones((A.shape[0],), dtype=np.float64)
+        w = w.astype(np.float64)
+        w_sum = np.sum(w) + 1e-12
+        mu_A = (A * w[:, None]).sum(axis=0) / w_sum
+        mu_B = (B * w[:, None]).sum(axis=0) / w_sum
+        AA = A - mu_A
+        BB = B - mu_B
+        H = (AA * w[:, None]).T @ BB  # 3x3
+        U, S, Vt = np.linalg.svd(H, full_matrices=True)
+        R = Vt.T @ U.T
+        if np.linalg.det(R) < 0:
+            Vt[-1, :] *= -1
+            R = Vt.T @ U.T
+        t = mu_B - R @ mu_A
+        return R.astype(np.float64), t.astype(np.float64)
+
+    def _apply(R: np.ndarray, t: np.ndarray, X: np.ndarray) -> np.ndarray:
+        return (R @ X.T).T + t[None, :]
+
+    # ---------- Prepare frame data ----------
     images = _ensure_nhwc(predictions["images"])  # (S,H,W,3)
     points = predictions["points"]  # (S,H,W,3)
-    conf = predictions.get("conf", np.ones(points.shape[:-1], dtype=np.float32))  # (S,H,W[,1])
+    conf = predictions.get("conf", np.ones(points.shape[:-1], dtype=np.float32))
 
-    # slice this frame
     pts_f = points[frame_idx]  # (H,W,3)
     img_f = images[frame_idx]  # (H,W,3)
-    conf_f = conf[frame_idx]  # (H,W[,1])
+    conf_f = conf[frame_idx]  # (H,W) or (H,W,1)
 
-    P, C, _ = _flatten_points_colors_frames(pts_f[None], img_f[None], conf_f[None], conf_min)
+    pts_flat = pts_f.reshape(-1, 3).astype(np.float64)
+    col_flat = (img_f.reshape(-1, 3) * 255.0).clip(0, 255).astype(np.uint8)
+    conf_flat = conf_f[..., 0] if (conf_f.ndim == 3 and conf_f.shape[-1] == 1) else conf_f.reshape(-1)
+    conf_flat = conf_flat.astype(np.float64)
 
-    if P.size == 0:
-        merged_P = static_points
-        merged_C = static_colors
+    good = np.isfinite(pts_flat).all(axis=1) & (conf_flat >= conf_min) & (conf_flat > 1e-5)
+    src_full = pts_flat[good]  # dynamic frame points (source)
+    col_full = col_flat[good]
+    w_full = conf_flat[good]
+
+    if src_full.shape[0] == 0 or static_points.shape[0] == 0:
+        # Nothing to register; return static only or simple concat
+        if src_full.shape[0] == 0:
+            merged_P = static_points
+            merged_C = static_colors
+        else:
+            merged_P = np.concatenate([static_points, src_full.astype(np.float32)], axis=0)
+            merged_C = np.concatenate([static_colors, col_full], axis=0)
+        if dedup_voxel is None or merged_P.size == 0:
+            return merged_P.astype(np.float32), merged_C.astype(np.uint8)
+        # voxel average (same as below)
+        vox = _voxel_ids(merged_P, dedup_voxel)
+        vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
+        uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
+        G = uniq_keys.shape[0]
+        counts = np.bincount(inv, minlength=G).astype(np.float32)
+        sum_x = np.bincount(inv, weights=merged_P[:, 0], minlength=G)
+        sum_y = np.bincount(inv, weights=merged_P[:, 1], minlength=G)
+        sum_z = np.bincount(inv, weights=merged_P[:, 2], minlength=G)
+        sum_r = np.bincount(inv, weights=merged_C[:, 0].astype(np.float32), minlength=G)
+        sum_g = np.bincount(inv, weights=merged_C[:, 1].astype(np.float32), minlength=G)
+        sum_b = np.bincount(inv, weights=merged_C[:, 2].astype(np.float32), minlength=G)
+        counts[counts == 0] = 1.0
+        mean_xyz = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1).astype(np.float32)
+        mean_rgb = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
+        return mean_xyz, mean_rgb
+
+    # ---------- Subsample for speed (registration only; we still transform full set) ----------
+    rng = np.random.default_rng(1337 + frame_idx)
+    if src_full.shape[0] > src_sample_max:
+        idx = rng.choice(src_full.shape[0], size=src_sample_max, replace=False)
+        src = src_full[idx]
+        w_src = w_full[idx]
     else:
-        merged_P = np.concatenate([static_points, P], axis=0)
-        merged_C = np.concatenate([static_colors, C], axis=0)
+        src = src_full
+        w_src = w_full
+
+    if static_points.shape[0] > tgt_sample_max:
+        jdx = rng.choice(static_points.shape[0], size=tgt_sample_max, replace=False)
+        tgt = static_points[jdx].astype(np.float64)
+    else:
+        tgt = static_points.astype(np.float64)
+
+    # ---------- ICP loop ----------
+    tree = cKDTree(tgt)
+    R_total = np.eye(3, dtype=np.float64)
+    t_total = np.zeros(3, dtype=np.float64)
+    prev_err = np.inf
+
+    src_iter = src.copy()
+
+    for it in range(max(1, icp_max_iters)):
+        # nearest neighbors in target
+        dists, nn = tree.query(src_iter, k=1, workers=-1)
+        valid = np.isfinite(dists)
+
+        if max_corr_dist is not None:
+            valid &= (dists <= max_corr_dist)
+
+        if not np.any(valid):
+            break
+
+        # trim the worst matches
+        if trim_frac < 1.0:
+            cutoff = np.percentile(dists[valid], trim_frac * 100.0)
+            valid &= (dists <= cutoff)
+
+        A = src_iter[valid]  # current transformed source (subset)
+        B = tgt[nn[valid]]  # matched target
+        w = w_src[valid]
+        if A.shape[0] < 10:
+            break
+
+        R_inc, t_inc = _weighted_rigid_fit(A, B, w)
+
+        # compose transforms: new_total = R_inc * old_total, t_inc + R_inc * t_total
+        R_total = R_inc @ R_total
+        t_total = R_inc @ t_total + t_inc
+
+        src_iter = _apply(R_inc, t_inc, src_iter)
+
+        err = float(np.mean((A - B) ** 2))
+        if abs(prev_err - err) < icp_tol:
+            break
+        prev_err = err
+
+    # ---------- Apply final transform to full frame points ----------
+    src_full_aligned = _apply(R_total, t_total, src_full)
+
+    # ---------- Merge with static and optional voxel de-dup ----------
+    merged_P = np.concatenate([static_points.astype(np.float64), src_full_aligned], axis=0)
+    merged_C = np.concatenate([static_colors, col_full], axis=0)
 
     if dedup_voxel is None or merged_P.size == 0:
         return merged_P.astype(np.float32), merged_C.astype(np.uint8)
 
-    # light voxel de-dup to reduce overlap
     vox = _voxel_ids(merged_P, dedup_voxel)
     vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
     uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
@@ -431,8 +562,10 @@ class AgPi3:
         # Cameras & frustums (timeless transforms, separate camera nodes per frame)
         if log_cameras:
             _fx, _fy, _cx, _cy = _pinhole_from_fov(W, H, fov_y)
-            _log_cameras(static_scene_predictions, fov_y=fov_y, W=W, H=H, type="static", color=[255, 0, 0])  # RED for static
-            _log_cameras(dynamic_scene_predictions, fov_y=fov_y, W=W, H=H, type="dynamic", color=[0, 255, 0])  # GREEN for dynamic
+            _log_cameras(static_scene_predictions, fov_y=fov_y, W=W, H=H, type="static",
+                         color=[255, 0, 0])  # RED for static
+            _log_cameras(dynamic_scene_predictions, fov_y=fov_y, W=W, H=H, type="dynamic",
+                         color=[0, 255, 0])  # GREEN for dynamic
 
         # ---- Precompute per-frame MERGED with static ----
         merged_P: List[np.ndarray] = []
