@@ -291,8 +291,10 @@ def merge_static_with_frame(
         else:
             merged_P = np.concatenate([static_points, src_full.astype(np.float32)], axis=0)
             merged_C = np.concatenate([static_colors, col_full], axis=0)
+
         if dedup_voxel is None or merged_P.size == 0:
             return merged_P.astype(np.float32), merged_C.astype(np.uint8)
+
         # voxel average (same as below)
         vox = _voxel_ids(merged_P, dedup_voxel)
         vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
@@ -624,7 +626,6 @@ class AgPi3:
             self,
             video_id: str,
             *,
-            mode: str = "both",  # one of {"raw", "merged", "both"}
             conf_static: float = 0.10,  # confidence for static background build
             conf_frame: float = 0.01,  # confidence for per-frame points
             dedup_voxel: Optional[float] = 0.02,  # meters; None to disable
@@ -639,8 +640,6 @@ class AgPi3:
         - Optionally logs per-frame RAW points (like the old `infer_video_points_3d`).
         - Optionally logs per-frame MERGED (static + frame) points (like the old `infer_video`).
         """
-        assert mode in {"raw", "merged", "both"}, "mode must be one of {'raw','merged','both'}"
-
         # ---- Load predictions once ----
         static_scene_pred_path = os.path.join(self.static_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
         dynamic_scene_pred_path = os.path.join(self.dynamic_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
@@ -654,17 +653,9 @@ class AgPi3:
         dynamic_scene_predictions = {k: dynamic_scene_arr[k] for k in dynamic_scene_arr.files}
 
         static_scene_points_wh = static_scene_predictions["points"]  # (S,H,W,3)
-        dynamic_scene_points_wh = dynamic_scene_predictions["points"]  # (S,H,W,3)
-
-        static_scene_images = _ensure_nhwc(static_scene_predictions["images"])  # (S,H,W,3) in [0,1]
-        dynamic_scene_images = _ensure_nhwc(dynamic_scene_predictions["images"])  # (S,H,W,3) in [0,1]
-
-        static_scene_conf_wh = static_scene_predictions.get("conf")  # (S,H,W) or (S,H,W,1)
-        dynamic_scene_conf_wh = dynamic_scene_predictions.get("conf")  # (S,H,W) or (S,H,W,1)
 
         S, H, W = static_scene_points_wh.shape[:3]
-        print(
-            f"[viz] {video_id}: {S} frames | HxW={H}x{W} | conf_static={conf_static} | conf_frame={conf_frame} | mode={mode}")
+        print(f"[viz] {video_id}: {S} frames | HxW={H}x{W} | conf_static={conf_static} | conf_frame={conf_frame}")
 
         # ---- Build static background (once) ----
         scene_3d, static_P, static_C = predictions_to_glb_with_static(
@@ -688,7 +679,10 @@ class AgPi3:
         # Cameras & frustums (timeless transforms, separate camera nodes per frame)
         if log_cameras:
             _fx, _fy, _cx, _cy = _pinhole_from_fov(W, H, fov_y)
-            _log_cameras(static_scene_predictions, fov_y=fov_y, W=W, H=H)
+            _log_cameras(static_scene_predictions, fov_y=fov_y, W=W, H=H, type="static",
+                         color=np.array([255, 0, 0], dtype=np.uint8))  # RED
+            _log_cameras(dynamic_scene_predictions, fov_y=fov_y, W=W, H=H, type="dynamic",
+                         color=np.array([0, 255, 0], dtype=np.uint8))  # GREEN
 
         # ---- Precompute per-frame MERGED with static ----
         merged_P: List[np.ndarray] = []
