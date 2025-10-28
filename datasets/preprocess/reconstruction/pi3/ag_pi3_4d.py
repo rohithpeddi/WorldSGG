@@ -200,7 +200,7 @@ def predictions_to_glb_with_static(
     # (Optional) If you later want to visualize camera frustums/axes, add them here
     # using cam_poses if available. Currently `show_cam` is a no-op for signature parity.
     # Undo the visualization rotation for the returned static points (stay in world frame)
-    static_points = static_points @ align_R.T
+    # static_points = static_points @ align_R.T
     return scene_3d, static_points, static_colors
 
 
