@@ -116,27 +116,11 @@ def _frustum_path(i: int) -> str:
 # Static scene builder
 # ---------------------------
 
-def predictions_to_glb_with_static(
+def predictions_to_colors(
         predictions: Dict,
-        *,
         conf_min: float = 0.5,  # 0..1 threshold on predictions["conf"]
         filter_by_frames: str = "all",  # e.g. "12:..." to use only frame index 12
-) -> Tuple[trimesh.Scene, np.ndarray, np.ndarray]:
-    """
-    Build a GLB-ready trimesh.Scene from VGGT-style predictions AND return a background
-    point cloud (xyz,rgb) in the original world frame.
-
-    Inputs (expected prediction keys):
-      - points:        (S, H, W, 3) float32   world-space points
-      - conf:          (S, H, W)    float32   confidence per point in [0,1] (fallback: ones)
-      - images:        (S, H, W, 3) or (S, 3, H, W) float32 in [0,1] for colors
-      - camera_poses:  (S, 3, 4) or (S,4,4); kept for signature parity (not visualized here)
-
-    Returns:
-      scene_3d      : trimesh.Scene with a point cloud (rotated for nicer viewing)
-      static_points : (N,3) float32 background points in ORIGINAL world frame
-      static_colors : (N,3) uint8   RGB colors aligned with static_points
-    """
+):
     if not isinstance(predictions, dict):
         raise ValueError("predictions must be a dictionary")
 
@@ -147,6 +131,8 @@ def predictions_to_glb_with_static(
             selected_frame_idx = int(str(filter_by_frames).split(":")[0])
         except (ValueError, IndexError):
             selected_frame_idx = None
+
+    print("Selected frame index for extraction:", selected_frame_idx)
 
     pts = predictions["points"]
     conf = predictions.get("conf", np.ones_like(pts[..., 0], dtype=np.float32))
@@ -184,6 +170,35 @@ def predictions_to_glb_with_static(
     # Keep an ORIGINAL copy for the background return (world frame)
     static_points = verts.astype(np.float32, copy=True)
     static_colors = colors_rgb.astype(np.uint8, copy=True)
+
+    return static_points, static_colors, verts, colors_rgb
+
+
+
+def predictions_to_glb_with_static(
+        predictions: Dict,
+        *,
+        conf_min: float = 0.5,  # 0..1 threshold on predictions["conf"]
+        filter_by_frames: str = "all",  # e.g. "12:..." to use only frame index 12
+) -> Tuple[trimesh.Scene, np.ndarray, np.ndarray]:
+    """
+    Build a GLB-ready trimesh.Scene from VGGT-style predictions AND return a background
+    point cloud (xyz,rgb) in the original world frame.
+
+    Inputs (expected prediction keys):
+      - points:        (S, H, W, 3) float32   world-space points
+      - conf:          (S, H, W)    float32   confidence per point in [0,1] (fallback: ones)
+      - images:        (S, H, W, 3) or (S, 3, H, W) float32 in [0,1] for colors
+      - camera_poses:  (S, 3, 4) or (S,4,4); kept for signature parity (not visualized here)
+
+    Returns:
+      scene_3d      : trimesh.Scene with a point cloud (rotated for nicer viewing)
+      static_points : (N,3) float32 background points in ORIGINAL world frame
+      static_colors : (N,3) uint8   RGB colors aligned with static_points
+    """
+    static_points, static_colors, verts, colors_rgb = predictions_to_colors(
+        predictions, conf_min=conf_min, filter_by_frames=filter_by_frames
+    )
 
     # ------------ Build Scene (with visualization alignment rotation) ------------
     scene_3d = trimesh.Scene()
@@ -462,15 +477,15 @@ def _log_cameras(
                 radii=0.003,
             ),
         )
+        col = np.asarray(color, dtype=np.uint8).reshape(1, 3)  # (1,3), 0–255
         rr.log(
             f"{pred_path}/center",
             rr.Points3D(
                 positions=np.zeros((1, 3), dtype=np.float32),
-                colors=color[None, :],
-                radii=0.01,
+                colors=col,
+                radii=0.01,  # or np.array([0.01], dtype=np.float32)
             ),
         )
-
 
 # ---------------------------
 # Main class
@@ -508,7 +523,6 @@ class AgPi3:
     ) -> None:
         """
         Unified visualization that replaces the old `infer_video` and `infer_video_points_3d`.
-
         - Builds a static background once (using `conf_static`).
         - Optionally logs per-frame RAW points (like the old `infer_video_points_3d`).
         - Optionally logs per-frame MERGED (static + frame) points (like the old `infer_video`).
@@ -528,13 +542,6 @@ class AgPi3:
         dynamic_scene_predictions = {k: dynamic_scene_arr[k] for k in dynamic_scene_arr.files}
 
         static_scene_points_wh = static_scene_predictions["points"]  # (S,H,W,3)
-        dynamic_scene_points_wh = dynamic_scene_predictions["points"]  # (S,H,W,3)
-
-        static_scene_images = _ensure_nhwc(static_scene_predictions["images"])  # (S,H,W,3) in [0,1]
-        dynamic_scene_images = _ensure_nhwc(dynamic_scene_predictions["images"])  # (S,H,W,3) in [0,1]
-
-        static_scene_conf_wh = static_scene_predictions.get("conf")  # (S,H,W) or (S,H,W,1)
-        dynamic_scene_conf_wh = dynamic_scene_predictions.get("conf")  # (S,H,W) or (S,H,W,1)
 
         S, H, W = static_scene_points_wh.shape[:3]
         print(
@@ -568,30 +575,20 @@ class AgPi3:
                          color=[0, 255, 0])  # GREEN for dynamic
 
         # ---- Precompute per-frame MERGED with static ----
-        merged_P: List[np.ndarray] = []
-        merged_C: List[np.ndarray] = []
         for i in tqdm(range(S), desc=f"[viz] Merging frames for {video_id}"):
-            Pi, Ci = merge_static_with_frame(
-                dynamic_scene_predictions,
-                static_P, static_C,
-                frame_idx=i,
-                conf_min=float(conf_frame),
-                dedup_voxel=dedup_voxel,
+            dynamic_points, dynamic_colors, _, _ = predictions_to_colors(
+                dynamic_scene_predictions, conf_min=float(conf_static), filter_by_frames=f"{i}:"
             )
-            merged_P.append(Pi)
-            merged_C.append(Ci)
 
             rr.set_time_sequence("frame", i)
-
-            if merged_P[i].size:
-                rr.log(
-                    "world/frame/points_merged",
-                    rr.Points3D(
-                        positions=merged_P[i].astype(np.float32),
-                        colors=merged_C[i].astype(np.uint8),
-                        radii=0.01,
-                    ),
-                )
+            rr.log(
+                "world/frame/points_merged",
+                rr.Points3D(
+                    positions=dynamic_points,
+                    colors=dynamic_colors,
+                    radii=0.01,
+                ),
+            )
 
         print("[viz] Done streaming frames to Rerun.")
 
@@ -735,7 +732,7 @@ class AgPi3:
             return
 
         for video_id in tqdm(filtered, desc=f"Split {split}"):
-            self.infer_video(video_id, mode=mode, **kwargs)
+            self.infer_basic_video(video_id, mode=mode, **kwargs)
 
 
 # ---------------------------
@@ -779,13 +776,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--static_scene_dir_path",
         type=str,
-        default="/data/rohith/ag/ag4D/static_scenes/pi3",
+        default="/data2/rohith/ag/ag4D/static_scenes/pi3",
         help="Path to output directory where predictions folders live (e.g., <video>_10/).",
     )
     parser.add_argument(
         "--dynamic_scene_dir_path",
         type=str,
-        default="/data/rohith/ag/ag4D/static_scenes/pi3_full"
+        default="/data3/rohith/ag/ag4D/static_scenes/pi3_full"
     )
 
     # Selection
