@@ -8,9 +8,9 @@ import numpy as np
 import rerun as rr
 import torch
 import trimesh
+from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as Rot
 from tqdm import tqdm
-from scipy.spatial import cKDTree
 
 
 # ---------------------------
@@ -172,7 +172,6 @@ def predictions_to_colors(
     static_colors = colors_rgb.astype(np.uint8, copy=True)
 
     return static_points, static_colors, verts, colors_rgb
-
 
 
 def predictions_to_glb_with_static(
@@ -492,6 +491,7 @@ def _log_cameras(
 # ---------------------------
 
 class AgPi3:
+
     def __init__(
             self,
             root_dir_path: str,
@@ -509,83 +509,104 @@ class AgPi3:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ----------------------------- Infer basic video visualization -----------------------------
+
+    def voxel_merge(self, static_P, static_C, dyn_P, dyn_C, voxel_size=None):
+        """Concatenate static & dynamic. If voxel_size is set, dedup by quantizing."""
+        if dyn_P is None or dyn_P.size == 0:
+            return static_P, static_C
+
+        P = np.concatenate([static_P, dyn_P], axis=0)
+        C = np.concatenate([static_C, dyn_C], axis=0)
+
+        if voxel_size is None:
+            return P, C
+
+        # Quantize to voxel grid and keep first occurrence per voxel.
+        q = np.floor(P / float(voxel_size)).astype(np.int64)
+        # Pack rows for fast unique:
+        q_view = q.view([('', q.dtype)] * q.shape[1]).reshape(q.shape[0])
+        uniq, idx = np.unique(q_view, return_index=True)
+        idx = np.sort(idx)
+        return P[idx], C[idx]
+
     def infer_basic_video(
             self,
             video_id: str,
             *,
-            mode: str = "both",  # one of {"raw", "merged", "both"}
-            conf_static: float = 0.10,  # confidence for static background build
-            conf_frame: float = 0.01,  # confidence for per-frame points
+            conf_static: float = 0.10,
+            conf_frame: float = 0.01,
             dedup_voxel: Optional[float] = 0.02,  # meters; None to disable
-            fov_y: float = 0.96,  # radians; matches your earlier default
+            fov_y: float = 0.96,
             spawn: bool = True,
             log_cameras: bool = True,
     ) -> None:
-        """
-        Unified visualization that replaces the old `infer_video` and `infer_video_points_3d`.
-        - Builds a static background once (using `conf_static`).
-        - Optionally logs per-frame RAW points (like the old `infer_video_points_3d`).
-        - Optionally logs per-frame MERGED (static + frame) points (like the old `infer_video`).
-        """
-        assert mode in {"raw", "merged", "both"}, "mode must be one of {'raw','merged','both'}"
 
-        # ---- Load predictions once ----
-        static_scene_pred_path = os.path.join(self.static_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
-        dynamic_scene_pred_path = os.path.join(self.dynamic_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
-        if not os.path.exists(static_scene_pred_path) or not os.path.exists(dynamic_scene_pred_path):
+        # ---- Load predictions ----
+        stem = video_id[:-4] if video_id.endswith(".mp4") else video_id
+        static_scene_pred_path = os.path.join(self.static_scene_dir_path, f"{stem}_{10}", "predictions.npz")
+        dynamic_scene_pred_path = os.path.join(self.dynamic_scene_dir_path, f"{stem}_{10}", "predictions.npz")
+        if not (os.path.exists(static_scene_pred_path) and os.path.exists(dynamic_scene_pred_path)):
             raise FileNotFoundError(f"predictions.npz not found for {video_id}")
 
-        static_scene_arr = np.load(static_scene_pred_path, allow_pickle=True, mmap_mode=None)
-        dynamic_scene_arr = np.load(dynamic_scene_pred_path, allow_pickle=True, mmap_mode=None)
+        static_npz = np.load(static_scene_pred_path, allow_pickle=True, mmap_mode=None)
+        dynamic_npz = np.load(dynamic_scene_pred_path, allow_pickle=True, mmap_mode=None)
+        static_pred = {k: static_npz[k] for k in static_npz.files}
+        dynamic_pred = {k: dynamic_npz[k] for k in dynamic_npz.files}
 
-        static_scene_predictions = {k: static_scene_arr[k] for k in static_scene_arr.files}
-        dynamic_scene_predictions = {k: dynamic_scene_arr[k] for k in dynamic_scene_arr.files}
+        static_points_wh = static_pred["points"]  # (S,H,W,3)
+        S_static, H, W = static_points_wh.shape[:3]
+        # Prefer the dynamic sequence length for the loop if present:
+        S_dynamic = dynamic_pred.get("points", static_points_wh).shape[0]
+        S = min(S_static, S_dynamic)
 
-        static_scene_points_wh = static_scene_predictions["points"]  # (S,H,W,3)
-
-        S, H, W = static_scene_points_wh.shape[:3]
-        print(
-            f"[viz] {video_id}: {S} frames | HxW={H}x{W} | conf_static={conf_static} | conf_frame={conf_frame} | mode={mode}")
+        print(f"[viz] {video_id}: {S} frames | HxW={H}x{W} | conf_static={conf_static} | conf_frame={conf_frame}")
 
         # ---- Build static background (once) ----
-        scene_3d, static_P, static_C = predictions_to_glb_with_static(
-            static_scene_predictions, conf_min=float(conf_static)
-        )
+        # Returns (scene_3d, static_P, static_C); we only need P,C here.
+        _, static_P, static_C = predictions_to_glb_with_static(static_pred, conf_min=float(conf_static))
+        static_P = static_P.astype(np.float32, copy=False)
+        static_C = static_C.astype(np.uint8, copy=False)
 
         # ---- Rerun setup ----
         rr.init(f"AG-Pi3: {video_id}", spawn=spawn)
         rr.log("world", rr.ViewCoordinates.RDF, timeless=True)
 
-        # Log static background timelessly
+        # Log static background timelessly (persists across all frames)
         if static_P.size > 0:
             rr.log(
                 "world/static",
                 rr.Points3D(
-                    positions=static_P.astype(np.float32),
-                    colors=static_C.astype(np.uint8),
-                )
+                    positions=static_P,
+                    colors=static_C,
+                ),
             )
 
-        # Cameras & frustums (timeless transforms, separate camera nodes per frame)
+        # Cameras (do this once; use np.array for color to avoid list-indexing errors)
         if log_cameras:
             _fx, _fy, _cx, _cy = _pinhole_from_fov(W, H, fov_y)
-            _log_cameras(static_scene_predictions, fov_y=fov_y, W=W, H=H, type="static",
-                         color=[255, 0, 0])  # RED for static
-            _log_cameras(dynamic_scene_predictions, fov_y=fov_y, W=W, H=H, type="dynamic",
-                         color=[0, 255, 0])  # GREEN for dynamic
+            _log_cameras(static_pred, fov_y=fov_y, W=W, H=H, type="static",
+                         color=np.array([255, 0, 0], dtype=np.uint8))  # RED
+            _log_cameras(dynamic_pred, fov_y=fov_y, W=W, H=H, type="dynamic",
+                         color=np.array([0, 255, 0], dtype=np.uint8))  # GREEN
 
-        # ---- Precompute per-frame MERGED with static ----
-        for i in tqdm(range(S), desc=f"[viz] Merging frames for {video_id}"):
-            dynamic_points, dynamic_colors, _, _ = predictions_to_colors(
-                dynamic_scene_predictions, conf_min=float(conf_static), filter_by_frames=f"{i}:"
+        # ---- Stream frames ----
+        for i in tqdm(range(S), desc=f"[viz] Streaming frames for {video_id}"):
+            # Dynamic points/colors for frame i
+            dyn_P, dyn_C, _, _ = predictions_to_colors(
+                dynamic_pred, conf_min=float(conf_frame), filter_by_frames=f"{i}:"
             )
+            dyn_P = np.asarray(dyn_P, dtype=np.float32)
+            dyn_C = np.asarray(dyn_C, dtype=np.uint8)
 
             rr.set_time_sequence("frame", i)
+
+            # Merged = static ⊕ dynamic (with optional voxel dedup)
+            merged_P, merged_C = self.voxel_merge(static_P, static_C, dyn_P, dyn_C, voxel_size=dedup_voxel)
             rr.log(
                 "world/frame/points_merged",
                 rr.Points3D(
-                    positions=dynamic_points,
-                    colors=dynamic_colors,
+                    positions=merged_P.astype(np.float32, copy=False),
+                    colors=merged_C.astype(np.uint8, copy=False),
                     radii=0.01,
                 ),
             )
@@ -593,8 +614,7 @@ class AgPi3:
         print("[viz] Done streaming frames to Rerun.")
 
         # Cleanup
-        del static_scene_predictions
-        del dynamic_scene_predictions
+        del static_pred, dynamic_pred
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -732,7 +752,7 @@ class AgPi3:
             return
 
         for video_id in tqdm(filtered, desc=f"Split {split}"):
-            self.infer_basic_video(video_id, mode=mode, **kwargs)
+            self.infer_basic_video(video_id, **kwargs)
 
 
 # ---------------------------
