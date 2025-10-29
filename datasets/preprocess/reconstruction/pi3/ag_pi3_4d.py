@@ -217,6 +217,32 @@ def predictions_to_glb_with_static(
     # static_points = static_points @ align_R.T
     return scene_3d, static_points, static_colors
 
+def _conf_to_hw(conf_f: np.ndarray, H: int, W: int) -> np.ndarray:
+    """
+    Normalize a per-frame confidence array to shape (H, W), handling common variants:
+      - (H, W)
+      - (H, W, 1)
+      - (H,)  -> repeat across W
+      - (W,)  -> repeat across H
+      - (H*W,) -> reshape to (H, W)
+    Falls back to ones(H,W) if shape is unexpected.
+    """
+    c = np.asarray(conf_f)
+    if c.ndim == 2 and c.shape == (H, W):
+        return c
+    if c.ndim == 3 and c.shape[2] == 1 and c.shape[:2] == (H, W):
+        return c[..., 0]
+    if c.ndim == 1:
+        if c.shape[0] == H * W:
+            return c.reshape(H, W)
+        if c.shape[0] == H:
+            return np.repeat(c[:, None], W, axis=1)
+        if c.shape[0] == W:
+            return np.repeat(c[None, :], H, axis=0)
+    # Fallback: uniform confidence
+    return np.ones((H, W), dtype=np.float64)
+
+
 
 def merge_static_with_frame(
         predictions: Dict,
@@ -265,23 +291,43 @@ def merge_static_with_frame(
         return (R @ X.T).T + t[None, :]
 
     # ---------- Prepare frame data ----------
+    # ---------- Prepare frame data ----------
     images = _ensure_nhwc(predictions["images"])  # (S,H,W,3)
-    points = predictions["points"]  # (S,H,W,3)
-    conf = predictions.get("conf", np.ones(points.shape[:-1], dtype=np.float32))
+    points = predictions["points"]                # (S,H,W,3)
+    conf    = predictions.get("conf", None)
 
     pts_f = points[frame_idx]  # (H,W,3)
     img_f = images[frame_idx]  # (H,W,3)
-    conf_f = conf[frame_idx]  # (H,W) or (H,W,1)
 
-    pts_flat = pts_f.reshape(-1, 3).astype(np.float64)
+    H, W = pts_f.shape[:2]
+
+    # Normalize confidence to (H,W) then to a flat vector of length H*W
+    if conf is None:
+        conf_hw = np.ones((H, W), dtype=np.float64)
+    else:
+        conf_f = conf[frame_idx]
+        conf_hw = _conf_to_hw(conf_f, H, W).astype(np.float64)
+
+    # Optional: clamp/clean confidences
+    conf_hw = np.nan_to_num(conf_hw, nan=0.0, posinf=0.0, neginf=0.0)
+    conf_hw = np.maximum(conf_hw, 0.0)
+
+    pts_flat = pts_f.reshape(-1, 3).astype(np.float64)                # (H*W, 3)
     col_flat = (img_f.reshape(-1, 3) * 255.0).clip(0, 255).astype(np.uint8)
-    conf_flat = conf_f[..., 0] if (conf_f.ndim == 3 and conf_f.shape[-1] == 1) else conf_f.reshape(-1)
-    conf_flat = conf_flat.astype(np.float64)
+    conf_vec = conf_hw.reshape(-1)                                    # (H*W,)
 
-    good = np.isfinite(pts_flat).all(axis=1) & (conf_flat >= conf_min) & (conf_flat > 1e-5)
+    # Sanity check
+    if conf_vec.shape[0] != pts_flat.shape[0]:
+        raise ValueError(
+            f"conf has {conf_vec.shape[0]} elems but points have {pts_flat.shape[0]} rows. "
+            f"Original conf frame shape: {getattr(conf_f, 'shape', None)} normalized to {(H,W)}"
+        )
+
+    good = np.isfinite(pts_flat).all(axis=1) & (conf_vec >= conf_min) & (conf_vec > 1e-5)
+
     src_full = pts_flat[good]  # dynamic frame points (source)
     col_full = col_flat[good]
-    w_full = conf_flat[good]
+    w_full   = conf_vec[good].astype(np.float64)
 
     if src_full.shape[0] == 0 or static_points.shape[0] == 0:
         # Nothing to register; return static only or simple concat
@@ -746,7 +792,7 @@ class AgPi3:
             return
 
         for video_id in tqdm(filtered, desc=f"Split {split}"):
-            self.infer_basic_video(video_id, **kwargs)
+            self.infer_video(video_id, **kwargs)
 
 
 # ---------------------------
