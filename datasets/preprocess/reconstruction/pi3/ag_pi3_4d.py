@@ -8,6 +8,7 @@ import numpy as np
 import rerun as rr
 import torch
 import trimesh
+from PIL import Image
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as Rot
 from tqdm import tqdm
@@ -278,10 +279,15 @@ def _conf_to_hw(conf_f: np.ndarray, H: int, W: int) -> np.ndarray:
 
 
 
+from typing import Dict, Optional, Tuple
+import numpy as np
+from scipy.spatial import cKDTree
+
 def merge_static_with_frame(
         predictions: Dict,
         static_points: np.ndarray,
         static_colors: np.ndarray,
+        interaction_masks: np.ndarray,
         frame_idx: int,
         conf_min: float = 0.1,
         dedup_voxel: Optional[float] = 0.02,
@@ -291,21 +297,23 @@ def merge_static_with_frame(
         icp_tol: float = 1e-5,
         trim_frac: float = 0.8,  # keep this fraction of closest pairs each iter
         max_corr_dist: Optional[float] = None,  # meters; None disables
-        src_sample_max: int = 50000,  # subsample source for speed
-        tgt_sample_max: int = 100000,  # subsample target for speed
+        src_sample_max: int = 50000,  # NOTE: ignored for ICP (we use full dynamic), kept for API compat
+        tgt_sample_max: int = 100000,  # we may still subsample static for speed
         dynamic_voxel: Optional[float] = 0.01,
         merge_voxel: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Align per-frame points to the static background via ICP and return the merged cloud.
 
+    Changes vs previous:
+      (1) ICP uses the full dynamic frame (no source subsampling).
+      (2) Only dynamic points within the frame interaction mask are merged with static.
     Returns:
         mean_xyz (N,3) float32, mean_rgb (N,3) uint8
     """
     # ---------- Helpers ----------
-    def _weighted_rigid_fit(A: np.ndarray, B: np.ndarray, w: Optional[np.ndarray] = None) -> Tuple[
-        np.ndarray, np.ndarray]:
-        """Find R,t minimizing sum_i w_i || R A_i + t - B_i ||^2 using Kabsch with optional weights."""
+    def _weighted_rigid_fit(A: np.ndarray, B: np.ndarray, w: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+        """Find R,t minimizing sum_i w_i || R A_i + t - B_i ||^2 via weighted Kabsch."""
         if w is None:
             w = np.ones((A.shape[0],), dtype=np.float64)
         w = w.astype(np.float64)
@@ -333,23 +341,26 @@ def merge_static_with_frame(
 
     pts_f = points[frame_idx]  # (H,W,3)
     img_f = images[frame_idx]  # (H,W,3)
+    mask_f = interaction_masks[frame_idx]  # (H,W) boolean/0-1
 
     H, W = pts_f.shape[:2]
 
-    # Normalize confidence to (H,W) then to a flat vector of length H*W
+    # Normalize confidence to (H,W)
     if conf is None:
         conf_hw = np.ones((H, W), dtype=np.float64)
     else:
         conf_f = conf[frame_idx]
         conf_hw = _conf_to_hw(conf_f, H, W).astype(np.float64)
 
-    # Optional: clamp/clean confidences
+    # Clean confidences
     conf_hw = np.nan_to_num(conf_hw, nan=0.0, posinf=0.0, neginf=0.0)
     conf_hw = np.maximum(conf_hw, 0.0)
 
-    pts_flat = pts_f.reshape(-1, 3).astype(np.float64)                # (H*W, 3)
-    col_flat = (img_f.reshape(-1, 3) * 255.0).clip(0, 255).astype(np.uint8)
-    conf_vec = conf_hw.reshape(-1)                                    # (H*W,)
+    # Flatten
+    pts_flat  = pts_f.reshape(-1, 3).astype(np.float64)                # (H*W,3)
+    col_flat  = (img_f.reshape(-1, 3) * 255.0).clip(0, 255).astype(np.uint8)
+    conf_vec  = conf_hw.reshape(-1)                                    # (H*W,)
+    mask_vec  = (mask_f.reshape(-1) > 0)                               # (H*W,) bool
 
     # Sanity check
     if conf_vec.shape[0] != pts_flat.shape[0]:
@@ -357,94 +368,123 @@ def merge_static_with_frame(
             f"conf has {conf_vec.shape[0]} elems but points have {pts_flat.shape[0]} rows. "
             f"Original conf frame shape: {getattr(conf_f, 'shape', None)} normalized to {(H,W)}"
         )
+    if mask_vec.shape[0] != pts_flat.shape[0]:
+        raise ValueError(f"interaction mask shape {mask_f.shape} incompatible with points frame {(H,W)}")
 
-    good = np.isfinite(pts_flat).all(axis=1) & (conf_vec >= conf_min) & (conf_vec > 1e-5)
+    # Base validity (finite + confidence)
+    good_all = np.isfinite(pts_flat).all(axis=1) & (conf_vec >= conf_min) & (conf_vec > 1e-5)
 
-    src_full = pts_flat[good]  # dynamic frame points (source)
-    col_full = col_flat[good]
-    w_full   = conf_vec[good].astype(np.float64)
+    # Split into: full dynamic for ICP vs masked dynamic for merging
+    sel_all   = good_all
+    sel_mask  = good_all & mask_vec   # merge only these later
 
+    # Build dynamic sets
+    src_full        = pts_flat[sel_all]        # used for ICP (full)
+    col_full        = col_flat[sel_all]
+    w_full          = conf_vec[sel_all].astype(np.float64)
+
+    src_masked_raw  = pts_flat[sel_mask]       # used for MERGE (subset)
+    col_masked_raw  = col_flat[sel_mask]
+
+    # Early exits if empty
+    if static_points.shape[0] == 0 and src_masked_raw.shape[0] == 0:
+        return np.empty((0,3), np.float32), np.empty((0,3), np.uint8)
     if src_full.shape[0] == 0 or static_points.shape[0] == 0:
-        # Nothing to register; return static only or simple concat
-        if src_full.shape[0] == 0:
+        # Nothing to register; just merge masked dynamic (if any) with static
+        if src_masked_raw.shape[0] == 0 or static_points.shape[0] == 0:
             merged_P = static_points
             merged_C = static_colors
         else:
-            merged_P = np.concatenate([static_points, src_full.astype(np.float32)], axis=0)
-            merged_C = np.concatenate([static_colors, col_full], axis=0)
+            dyn_P, dyn_C = src_masked_raw.astype(np.float64), col_masked_raw
+            if dynamic_voxel is not None and dyn_P.size:
+                vox = _voxel_ids(dyn_P, dynamic_voxel)
+                vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
+                uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
+                G = uniq_keys.shape[0]
+                counts = np.bincount(inv, minlength=G).astype(np.float32)
+                sum_x = np.bincount(inv, weights=dyn_P[:, 0], minlength=G)
+                sum_y = np.bincount(inv, weights=dyn_P[:, 1], minlength=G)
+                sum_z = np.bincount(inv, weights=dyn_P[:, 2], minlength=G)
+                sum_r = np.bincount(inv, weights=dyn_C[:, 0].astype(np.float32), minlength=G)
+                sum_g = np.bincount(inv, weights=dyn_C[:, 1].astype(np.float32), minlength=G)
+                sum_b = np.bincount(inv, weights=dyn_C[:, 2].astype(np.float32), minlength=G)
+                counts[counts == 0] = 1.0
+                dyn_P = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
+                dyn_C = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
+            merged_P = np.concatenate([static_points.astype(np.float64), dyn_P], axis=0)
+            merged_C = np.concatenate([static_colors, dyn_C], axis=0)
 
-        if dedup_voxel is None or merged_P.size == 0:
-            return merged_P.astype(np.float32), merged_C.astype(np.uint8)
+        # Optional final global voxel
+        if dedup_voxel is not None and merged_P.size:
+            vox = _voxel_ids(merged_P, dedup_voxel)
+            vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
+            uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
+            G = uniq_keys.shape[0]
+            counts = np.bincount(inv, minlength=G).astype(np.float32)
+            sum_x = np.bincount(inv, weights=merged_P[:, 0], minlength=G)
+            sum_y = np.bincount(inv, weights=merged_P[:, 1], minlength=G)
+            sum_z = np.bincount(inv, weights=merged_P[:, 2], minlength=G)
+            sum_r = np.bincount(inv, weights=merged_C[:, 0].astype(np.float32), minlength=G)
+            sum_g = np.bincount(inv, weights=merged_C[:, 1].astype(np.float32), minlength=G)
+            sum_b = np.bincount(inv, weights=merged_C[:, 2].astype(np.float32), minlength=G)
+            counts[counts == 0] = 1.0
+            merged_P = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
+            merged_C = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
+        if merge_voxel is not None and merged_P.size:
+            vox = _voxel_ids(merged_P, merge_voxel)
+            vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
+            uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
+            G = uniq_keys.shape[0]
+            counts = np.bincount(inv, minlength=G).astype(np.float32)
+            sum_x = np.bincount(inv, weights=merged_P[:, 0], minlength=G)
+            sum_y = np.bincount(inv, weights=merged_P[:, 1], minlength=G)
+            sum_z = np.bincount(inv, weights=merged_P[:, 2], minlength=G)
+            sum_r = np.bincount(inv, weights=merged_C[:, 0].astype(np.float32), minlength=G)
+            sum_g = np.bincount(inv, weights=merged_C[:, 1].astype(np.float32), minlength=G)
+            sum_b = np.bincount(inv, weights=merged_C[:, 2].astype(np.float32), minlength=G)
+            counts[counts == 0] = 1.0
+            merged_P = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
+            merged_C = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
+        return merged_P.astype(np.float32), merged_C.astype(np.uint8)
 
-        # voxel average (same as below)
-        vox = _voxel_ids(merged_P, dedup_voxel)
-        vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
-        uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
-        G = uniq_keys.shape[0]
-        counts = np.bincount(inv, minlength=G).astype(np.float32)
-        sum_x = np.bincount(inv, weights=merged_P[:, 0], minlength=G)
-        sum_y = np.bincount(inv, weights=merged_P[:, 1], minlength=G)
-        sum_z = np.bincount(inv, weights=merged_P[:, 2], minlength=G)
-        sum_r = np.bincount(inv, weights=merged_C[:, 0].astype(np.float32), minlength=G)
-        sum_g = np.bincount(inv, weights=merged_C[:, 1].astype(np.float32), minlength=G)
-        sum_b = np.bincount(inv, weights=merged_C[:, 2].astype(np.float32), minlength=G)
-        counts[counts == 0] = 1.0
-        mean_xyz = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1).astype(np.float32)
-        mean_rgb = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
-        return mean_xyz, mean_rgb
-
-    # ---------- Subsample for speed (registration only; we still transform full set) ----------
-    rng = np.random.default_rng(1337 + frame_idx)
-    if src_full.shape[0] > src_sample_max:
-        idx = rng.choice(src_full.shape[0], size=src_sample_max, replace=False)
-        src = src_full[idx]
-        w_src = w_full[idx]
-    else:
-        src = src_full
-        w_src = w_full
-
+    # ---------- Build static target (optionally subsampled for speed) ----------
     if static_points.shape[0] > tgt_sample_max:
+        rng = np.random.default_rng(1337 + frame_idx)
         jdx = rng.choice(static_points.shape[0], size=tgt_sample_max, replace=False)
         tgt = static_points[jdx].astype(np.float64)
     else:
         tgt = static_points.astype(np.float64)
 
-    # ---------- ICP loop ----------
+    # ---------- ICP using the FULL dynamic cloud ----------
     tree = cKDTree(tgt)
     R_total = np.eye(3, dtype=np.float64)
     t_total = np.zeros(3, dtype=np.float64)
     prev_err = np.inf
-
-    src_iter = src.copy()
+    src_iter = src_full.copy()
 
     for it in range(max(1, icp_max_iters)):
-        # nearest neighbors in target
         dists, nn = tree.query(src_iter, k=1, workers=-1)
         valid = np.isfinite(dists)
-
         if max_corr_dist is not None:
             valid &= (dists <= max_corr_dist)
-
         if not np.any(valid):
             break
 
-        # trim the worst matches
         if trim_frac < 1.0:
             cutoff = np.percentile(dists[valid], trim_frac * 100.0)
             valid &= (dists <= cutoff)
 
-        A = src_iter[valid]  # current transformed source (subset)
-        B = tgt[nn[valid]]  # matched target
-        w = w_src[valid]
+        A = src_iter[valid]     # transformed source samples
+        B = tgt[nn[valid]]      # matched static
+        w = w_full[valid]
         if A.shape[0] < 10:
             break
 
         R_inc, t_inc = _weighted_rigid_fit(A, B, w)
 
-        # compose transforms: new_total = R_inc * old_total, t_inc + R_inc * t_total
+        # compose transforms
         R_total = R_inc @ R_total
         t_total = R_inc @ t_total + t_inc
-
         src_iter = _apply(R_inc, t_inc, src_iter)
 
         err = float(np.mean((A - B) ** 2))
@@ -452,20 +492,17 @@ def merge_static_with_frame(
             break
         prev_err = err
 
-    # ---------- Apply final transform to full frame points ----------
-    src_full_aligned = _apply(R_total, t_total, src_full)
+    # ---------- Apply final transform to MASKED dynamic only (for merging) ----------
+    dyn_P = _apply(R_total, t_total, src_masked_raw).astype(np.float64)
+    dyn_C = col_masked_raw
 
-    # ---------- Merge with static and optional voxel de-dup ----------
-    dyn_P = src_full_aligned.astype(np.float64)
-    dyn_C = col_full
-
+    # Voxel-reduce the dynamic subset if requested
     if dynamic_voxel is not None and dyn_P.size:
         vox = _voxel_ids(dyn_P, dynamic_voxel)
         vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
         uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
         G = uniq_keys.shape[0]
         counts = np.bincount(inv, minlength=G).astype(np.float32)
-
         sum_x = np.bincount(inv, weights=dyn_P[:, 0], minlength=G)
         sum_y = np.bincount(inv, weights=dyn_P[:, 1], minlength=G)
         sum_z = np.bincount(inv, weights=dyn_P[:, 2], minlength=G)
@@ -473,16 +510,19 @@ def merge_static_with_frame(
         sum_g = np.bincount(inv, weights=dyn_C[:, 1].astype(np.float32), minlength=G)
         sum_b = np.bincount(inv, weights=dyn_C[:, 2].astype(np.float32), minlength=G)
         counts[counts == 0] = 1.0
-
         dyn_P = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
         dyn_C = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
 
-    # Concatenate with static WITHOUT voxelizing static
-    merged_P = np.concatenate([static_points.astype(np.float64), dyn_P], axis=0)
-    merged_C = np.concatenate([static_colors, dyn_C], axis=0)
+    # ---------- Merge with static (do NOT voxelize static by default) ----------
+    if dyn_P.size:
+        merged_P = np.concatenate([static_points.astype(np.float64), dyn_P], axis=0)
+        merged_C = np.concatenate([static_colors,              dyn_C], axis=0)
+    else:
+        merged_P = static_points.astype(np.float64)
+        merged_C = static_colors
 
-    # Optional final global voxel (generally keep None to preserve static density)
-    if merge_voxel is not None:
+    # Optional final global voxel (usually keep None to preserve static density)
+    if merge_voxel is not None and merged_P.size:
         vox = _voxel_ids(merged_P, merge_voxel)
         vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
         uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
@@ -600,14 +640,18 @@ class AgPi3:
             dynamic_scene_dir_path: Optional[str] = None,
             static_scene_dir_path: Optional[str] = None,  # accepted for parity; not used here
             frame_annotated_dir_path: Optional[str] = None,  # accepted for parity; not used here
+            masks_dir_path: Optional[str] = None,  # accepted for parity; not used here
     ):
         self.model = None
         self.root_dir_path = root_dir_path
         self.static_scene_dir_path = static_scene_dir_path
         self.dynamic_scene_dir_path = dynamic_scene_dir_path if dynamic_scene_dir_path is not None else root_dir_path
         self.frame_annotated_dir_path = frame_annotated_dir_path
+        self.masks_dir_path = masks_dir_path
+
         os.makedirs(self.dynamic_scene_dir_path, exist_ok=True)
 
+        self.sampled_frames_idx_root_dir = "/data/rohith/ag/sampled_frames_idx"
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ----------------------------- Infer basic video visualization -----------------------------
@@ -642,7 +686,6 @@ class AgPi3:
             spawn: bool = True,
             log_cameras: bool = True,
     ) -> None:
-
         # ---- Load predictions ----
         stem = video_id[:-4] if video_id.endswith(".mp4") else video_id
         static_scene_pred_path = os.path.join(self.static_scene_dir_path, f"{stem}_{10}", "predictions.npz")
@@ -722,6 +765,37 @@ class AgPi3:
             torch.cuda.empty_cache()
 
     # --------- Unified pipeline ---------
+    def load_masks_for_video(self, video_id: str) -> np.ndarray:
+        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
+        annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
+        annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
+        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
+
+        # Get the mapping for sampled_frame_id and the actual frame id
+        # Now start from the sampled frame which corresponds to the first annotated frame and keep the rest of the sampled frames
+        video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir, f"{video_id[:-4]}.npy")
+        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()  # Numbers only
+
+        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
+        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, len(video_sampled_frame_id_list)))
+        video_sampled_frame_id_list = [video_sampled_frame_id_list[i] for i in sample_idx]
+
+        video_masks_dir_path = os.path.join(self.masks_dir_path, video_id) if self.masks_dir_path is not None else None
+        assert video_masks_dir_path is not None
+
+        # Load the masks from the video masks dir path
+        masks = []
+        for frame_id in video_sampled_frame_id_list:
+            mask_path = os.path.join(video_masks_dir_path, f"{frame_id:06d}.png")
+            # Load image mask as numpy array
+            mask_img = Image.open(mask_path).convert("L")  # Convert to grayscale
+            mask_np = np.array(mask_img)
+            masks.append(mask_np)
+        masks = np.stack(masks, axis=0)  # (S, H, W)
+
+        return masks  # (S, H, W)
+
+
     def infer_video(
             self,
             video_id: str,
@@ -751,6 +825,8 @@ class AgPi3:
         dynamic_scene_arr = np.load(dynamic_scene_pred_path, allow_pickle=True, mmap_mode=None)
         dynamic_scene_predictions = {k: dynamic_scene_arr[k] for k in dynamic_scene_arr.files}
         S, H, W = dynamic_scene_predictions["points"].shape[:3]
+
+        interaction_masks = self.load_masks_for_video(video_id)
 
         if load_from_glb:
             print(f"[viz] Loading static scene from GLB for {video_id}...")
@@ -798,6 +874,7 @@ class AgPi3:
             Pi, Ci = merge_static_with_frame(
                 dynamic_scene_predictions,
                 static_P, static_C,
+                interaction_masks,
                 frame_idx=i,
                 conf_min=float(conf_frame),
                 dedup_voxel=dedup_voxel,
@@ -889,6 +966,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional: directory containing annotated frames (unused here).",
     )
     parser.add_argument(
+        "--mask_dir_path",
+        type=str,
+        default="/data/rohith/ag/segmentation/masks/rectangular_overlayed_masks",
+        help="Path to directory containing trained model checkpoints.",
+    )
+    parser.add_argument(
         "--output_dir_path",
         type=str,
         default="/data3/rohith/ag/ag4D/static_scenes/pi3_full",
@@ -976,6 +1059,7 @@ def main() -> None:
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
         static_scene_dir_path=args.static_scene_dir_path,
         frame_annotated_dir_path=args.frames_annotated_dir_path,
+        masks_dir_path=args.mask_dir_path,
     )
 
     ag_pi3.infer_all_videos(
