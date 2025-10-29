@@ -287,12 +287,14 @@ def merge_static_with_frame(
         dedup_voxel: Optional[float] = 0.02,
         *,
         # ICP knobs (safe defaults)
-        icp_max_iters: int = 30,
+        icp_max_iters: int = 100,
         icp_tol: float = 1e-5,
         trim_frac: float = 0.8,  # keep this fraction of closest pairs each iter
         max_corr_dist: Optional[float] = None,  # meters; None disables
-        src_sample_max: int = 20000,  # subsample source for speed
+        src_sample_max: int = 50000,  # subsample source for speed
         tgt_sample_max: int = 100000,  # subsample target for speed
+        dynamic_voxel: Optional[float] = 0.01,
+        merge_voxel: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Align per-frame points to the static background via ICP and return the merged cloud.
@@ -454,30 +456,49 @@ def merge_static_with_frame(
     src_full_aligned = _apply(R_total, t_total, src_full)
 
     # ---------- Merge with static and optional voxel de-dup ----------
-    merged_P = np.concatenate([static_points.astype(np.float64), src_full_aligned], axis=0)
-    merged_C = np.concatenate([static_colors, col_full], axis=0)
+    dyn_P = src_full_aligned.astype(np.float64)
+    dyn_C = col_full
 
-    if dedup_voxel is None or merged_P.size == 0:
-        return merged_P.astype(np.float32), merged_C.astype(np.uint8)
+    if dynamic_voxel is not None and dyn_P.size:
+        vox = _voxel_ids(dyn_P, dynamic_voxel)
+        vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
+        uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
+        G = uniq_keys.shape[0]
+        counts = np.bincount(inv, minlength=G).astype(np.float32)
 
-    vox = _voxel_ids(merged_P, dedup_voxel)
-    vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
-    uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
-    G = uniq_keys.shape[0]
+        sum_x = np.bincount(inv, weights=dyn_P[:, 0], minlength=G)
+        sum_y = np.bincount(inv, weights=dyn_P[:, 1], minlength=G)
+        sum_z = np.bincount(inv, weights=dyn_P[:, 2], minlength=G)
+        sum_r = np.bincount(inv, weights=dyn_C[:, 0].astype(np.float32), minlength=G)
+        sum_g = np.bincount(inv, weights=dyn_C[:, 1].astype(np.float32), minlength=G)
+        sum_b = np.bincount(inv, weights=dyn_C[:, 2].astype(np.float32), minlength=G)
+        counts[counts == 0] = 1.0
 
-    counts = np.bincount(inv, minlength=G).astype(np.float32)
-    sum_x = np.bincount(inv, weights=merged_P[:, 0], minlength=G)
-    sum_y = np.bincount(inv, weights=merged_P[:, 1], minlength=G)
-    sum_z = np.bincount(inv, weights=merged_P[:, 2], minlength=G)
+        dyn_P = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
+        dyn_C = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
 
-    sum_r = np.bincount(inv, weights=merged_C[:, 0].astype(np.float32), minlength=G)
-    sum_g = np.bincount(inv, weights=merged_C[:, 1].astype(np.float32), minlength=G)
-    sum_b = np.bincount(inv, weights=merged_C[:, 2].astype(np.float32), minlength=G)
+    # Concatenate with static WITHOUT voxelizing static
+    merged_P = np.concatenate([static_points.astype(np.float64), dyn_P], axis=0)
+    merged_C = np.concatenate([static_colors, dyn_C], axis=0)
 
-    counts[counts == 0] = 1.0
-    mean_xyz = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1).astype(np.float32)
-    mean_rgb = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
-    return mean_xyz, mean_rgb
+    # Optional final global voxel (generally keep None to preserve static density)
+    if merge_voxel is not None:
+        vox = _voxel_ids(merged_P, merge_voxel)
+        vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
+        uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
+        G = uniq_keys.shape[0]
+        counts = np.bincount(inv, minlength=G).astype(np.float32)
+        sum_x = np.bincount(inv, weights=merged_P[:, 0], minlength=G)
+        sum_y = np.bincount(inv, weights=merged_P[:, 1], minlength=G)
+        sum_z = np.bincount(inv, weights=merged_P[:, 2], minlength=G)
+        sum_r = np.bincount(inv, weights=merged_C[:, 0].astype(np.float32), minlength=G)
+        sum_g = np.bincount(inv, weights=merged_C[:, 1].astype(np.float32), minlength=G)
+        sum_b = np.bincount(inv, weights=merged_C[:, 2].astype(np.float32), minlength=G)
+        counts[counts == 0] = 1.0
+        merged_P = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
+        merged_C = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
+
+    return merged_P.astype(np.float32), merged_C.astype(np.uint8)
 
 
 # ---------------------------
@@ -876,7 +897,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--static_scene_dir_path",
         type=str,
-        default="/data3/rohith/ag/ag4D/static_scenes/pi3_inpaint",
+        default="/data2/rohith/ag/ag4D/static_scenes/pi3",
         help="Path to output directory where predictions folders live (e.g., <video>_10/).",
     )
     parser.add_argument(
