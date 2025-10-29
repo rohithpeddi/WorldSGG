@@ -174,6 +174,40 @@ def predictions_to_colors(
     return static_points, static_colors, verts, colors_rgb
 
 
+def glb_to_points(glb_scene_path:  str) -> Tuple[np.ndarray, np.ndarray]:
+    scene = trimesh.load(glb_scene_path, force='scene')
+    all_points = []
+    all_colors = []
+
+    for geom_name, geom in scene.geometry.items():
+        if isinstance(geom, trimesh.points.PointCloud):
+            all_points.append(geom.vertices.astype(np.float32))
+            if geom.colors is not None:
+                all_colors.append(geom.colors.astype(np.uint8))
+            else:
+                # Default to white if no colors
+                all_colors.append(np.ones((geom.vertices.shape[0], 3), dtype=np.uint8) * 255)
+
+    if len(all_points) == 0:
+        raise ValueError(f"No point clouds found in GLB file: {glb_scene_path}")
+
+    points = np.vstack(all_points)
+    colors = np.vstack(all_colors)
+
+    # Ensure colors are uint8 and in the correct range and points in float32
+    colors = np.clip(colors, 0, 255).astype(np.uint8)
+    points = points.astype(np.float32)
+
+    align_R = Rot.from_euler("y", 100, degrees=True).as_matrix()
+    align_R = align_R @ Rot.from_euler("x", 155, degrees=True).as_matrix()
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = align_R
+
+    points = (points @ align_R.T).astype(np.float32)
+
+    return points, colors
+
+
 def predictions_to_glb_with_static(
         predictions: Dict,
         *,
@@ -290,7 +324,6 @@ def merge_static_with_frame(
     def _apply(R: np.ndarray, t: np.ndarray, X: np.ndarray) -> np.ndarray:
         return (R @ X.T).T + t[None, :]
 
-    # ---------- Prepare frame data ----------
     # ---------- Prepare frame data ----------
     images = _ensure_nhwc(predictions["images"])  # (S,H,W,3)
     points = predictions["points"]                # (S,H,W,3)
@@ -672,12 +705,13 @@ class AgPi3:
             self,
             video_id: str,
             *,
-            conf_static: float = 0.10,  # confidence for static background build
+            conf_static: float = 0.01,  # confidence for static background build
             conf_frame: float = 0.01,  # confidence for per-frame points
             dedup_voxel: Optional[float] = 0.02,  # meters; None to disable
             fov_y: float = 0.96,  # radians; matches your earlier default
             spawn: bool = True,
             log_cameras: bool = True,
+            load_from_glb: bool = False,
     ) -> None:
         """
         Unified visualization that replaces the old `infer_video` and `infer_video_points_3d`.
@@ -694,19 +728,24 @@ class AgPi3:
 
         static_scene_arr = np.load(static_scene_pred_path, allow_pickle=True, mmap_mode=None)
         dynamic_scene_arr = np.load(dynamic_scene_pred_path, allow_pickle=True, mmap_mode=None)
-
-        static_scene_predictions = {k: static_scene_arr[k] for k in static_scene_arr.files}
         dynamic_scene_predictions = {k: dynamic_scene_arr[k] for k in dynamic_scene_arr.files}
+        S, H, W = dynamic_scene_predictions["points"].shape[:3]
 
-        static_scene_points_wh = static_scene_predictions["points"]  # (S,H,W,3)
+        if load_from_glb:
+            print(f"[viz] Loading static scene from GLB for {video_id}...")
+            glb_path = os.path.join(self.static_scene_dir_path, f"{video_id[:-4]}_{10}", f"{video_id[:-4]}.glb")
+            static_P, static_C = glb_to_points(glb_path)
+        else:
+            print("Loading static scene from predictions...")
+            static_scene_predictions = {k: static_scene_arr[k] for k in static_scene_arr.files}
+            static_scene_points_wh = static_scene_predictions["points"]  # (S,H,W,3)
+            S, H, W = static_scene_points_wh.shape[:3]
+            print(f"[viz] {video_id}: {S} frames | HxW={H}x{W} | conf_static={conf_static} | conf_frame={conf_frame}")
 
-        S, H, W = static_scene_points_wh.shape[:3]
-        print(f"[viz] {video_id}: {S} frames | HxW={H}x{W} | conf_static={conf_static} | conf_frame={conf_frame}")
-
-        # ---- Build static background (once) ----
-        scene_3d, static_P, static_C = predictions_to_glb_with_static(
-            static_scene_predictions, conf_min=float(conf_static)
-        )
+            # ---- Build static background (once) ----
+            scene_3d, static_P, static_C = predictions_to_glb_with_static(
+                static_scene_predictions, conf_min=float(conf_static)
+            )
 
         # ---- Rerun setup ----
         rr.init(f"AG-Pi3: {video_id}", spawn=spawn)
@@ -725,8 +764,9 @@ class AgPi3:
         # Cameras & frustums (timeless transforms, separate camera nodes per frame)
         if log_cameras:
             _fx, _fy, _cx, _cy = _pinhole_from_fov(W, H, fov_y)
-            _log_cameras(static_scene_predictions, fov_y=fov_y, W=W, H=H, type="static",
-                         color=np.array([255, 0, 0], dtype=np.uint8))  # RED
+            if not load_from_glb:
+                _log_cameras(static_scene_predictions, fov_y=fov_y, W=W, H=H, type="static",
+                             color=np.array([255, 0, 0], dtype=np.uint8))  # RED
             _log_cameras(dynamic_scene_predictions, fov_y=fov_y, W=W, H=H, type="dynamic",
                          color=np.array([0, 255, 0], dtype=np.uint8))  # GREEN
 
@@ -836,7 +876,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--static_scene_dir_path",
         type=str,
-        default="/data2/rohith/ag/ag4D/static_scenes/pi3",
+        default="/data3/rohith/ag/ag4D/static_scenes/pi3_inpaint",
         help="Path to output directory where predictions folders live (e.g., <video>_10/).",
     )
     parser.add_argument(
