@@ -2,7 +2,8 @@ import argparse
 import gc
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
+from typing import List
 
 import numpy as np
 import rerun as rr
@@ -277,11 +278,6 @@ def _conf_to_hw(conf_f: np.ndarray, H: int, W: int) -> np.ndarray:
     # Fallback: uniform confidence
     return np.ones((H, W), dtype=np.float64)
 
-
-
-from typing import Dict, Optional, Tuple
-import numpy as np
-from scipy.spatial import cKDTree
 
 def merge_static_with_frame(
         predictions: Dict,
@@ -764,37 +760,62 @@ class AgPi3:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # --------- Unified pipeline ---------
-    def load_masks_for_video(self, video_id: str) -> np.ndarray:
+    def load_masks_for_video(
+            self,
+            video_id: str,
+            target_hw: Optional[Tuple[int, int]] = None,  # (H_out, W_out); default: (H, W)
+    ) -> np.ndarray:
+        """
+        Load masks for a video and (optionally) resample each frame spatially to (H_out, W_out).
+        No temporal (S) interpolation is performed.
+
+        Args:
+            video_id: Video identifier (folder name under masks dir).
+            H, W: Output spatial size if target_hw is None.
+            target_hw: Optional (H_out, W_out). If None, uses (H, W).
+            mode:
+                - "labels": integer IDs preserved via nearest-neighbor.
+                - "probs": treats masks as probabilities in [0,1]; bilinear per-frame,
+                           then thresholds back to {0,255} using prob_threshold.
+            prob_threshold: Threshold used for "probs" binarization.
+
+        Returns:
+            np.ndarray of shape (S, H_out, W_out), dtype=uint8.
+        """
+        # --- Determine output spatial size ---
+        H_out, W_out = int(target_hw[0]), int(target_hw[1])
+
+        # --- Identify annotated frames and the sampled-frame mapping ---
         video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
-        annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
-        annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
-        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
+        annotated_frame_id_list = [f for f in os.listdir(video_frames_annotated_dir_path) if f.endswith('.png')]
+        if not annotated_frame_id_list:
+            raise FileNotFoundError(f"No annotated frames found in: {video_frames_annotated_dir_path}")
+        # Ensure deterministic first frame
+        annotated_first_frame_id = int(sorted(annotated_frame_id_list)[0][:-4])
 
-        # Get the mapping for sampled_frame_id and the actual frame id
-        # Now start from the sampled frame which corresponds to the first annotated frame and keep the rest of the sampled frames
         video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir, f"{video_id[:-4]}.npy")
-        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()  # Numbers only
+        video_sampled_frame_id_list: List[int] = np.load(video_sampled_frames_npy_path).tolist()
+        start_idx = video_sampled_frame_id_list.index(annotated_first_frame_id)
+        video_sampled_frame_id_list = video_sampled_frame_id_list[start_idx:]
 
-        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
-        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, len(video_sampled_frame_id_list)))
-        video_sampled_frame_id_list = [video_sampled_frame_id_list[i] for i in sample_idx]
-
+        # --- Load & per-frame resize (2D only) ---
         video_masks_dir_path = os.path.join(self.masks_dir_path, video_id) if self.masks_dir_path is not None else None
-        assert video_masks_dir_path is not None
+        assert video_masks_dir_path is not None, "self.masks_dir_path must be set."
 
-        # Load the masks from the video masks dir path
-        masks = []
+        masks_out = []
         for frame_id in video_sampled_frame_id_list:
             mask_path = os.path.join(video_masks_dir_path, f"{frame_id:06d}.png")
-            # Load image mask as numpy array
-            mask_img = Image.open(mask_path).convert("L")  # Convert to grayscale
-            mask_np = np.array(mask_img)
-            masks.append(mask_np)
-        masks = np.stack(masks, axis=0)  # (S, H, W)
+            if not os.path.exists(mask_path):
+                raise FileNotFoundError(f"Mask not found: {mask_path}")
 
-        return masks  # (S, H, W)
+            # Keep integer IDs crisp
+            img = Image.open(mask_path).convert("L")
+            img = img.resize((W_out, H_out), resample=Image.NEAREST)
+            mask_np = np.array(img, dtype=np.uint8)
+            masks_out.append(mask_np)
 
+        masks = np.stack(masks_out, axis=0)  # (S, H_out, W_out)
+        return masks
 
     def infer_video(
             self,
@@ -826,7 +847,7 @@ class AgPi3:
         dynamic_scene_predictions = {k: dynamic_scene_arr[k] for k in dynamic_scene_arr.files}
         S, H, W = dynamic_scene_predictions["points"].shape[:3]
 
-        interaction_masks = self.load_masks_for_video(video_id)
+        interaction_masks = self.load_masks_for_video(video_id, target_hw=(H, W))  # (S,H,W), uint8
 
         if load_from_glb:
             print(f"[viz] Loading static scene from GLB for {video_id}...")
