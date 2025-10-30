@@ -311,6 +311,224 @@ def _conf_to_hw(conf_f: np.ndarray, H: int, W: int) -> np.ndarray:
     return np.ones((H, W), dtype=np.float64)
 
 
+def ground_dynamic_scene_to_static_scene(
+        predictions: Dict,
+        static_points: np.ndarray,
+        static_colors: np.ndarray,  # kept for API parity; unused here
+        frame_idx: int,
+        conf_min: float = 0.1,
+        dedup_voxel: Optional[float] = 0.02,  # used in fallback paths only
+        *,
+        # ICP knobs (safe defaults)
+        icp_max_iters: int = 100,
+        icp_tol: float = 1e-5,
+        trim_frac: float = 0.8,  # keep this fraction of closest pairs each iter
+        max_corr_dist: Optional[float] = None,  # meters; None disables
+        src_sample_max: int = 50000,  # NOTE: ignored for ICP (we use full dynamic), kept for API compat
+        tgt_sample_max: int = 100000,  # we may still subsample static for speed
+        dynamic_voxel: Optional[float] = 0.01,
+        merge_voxel: Optional[float] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Register the dynamic points of a single frame to the static background via ICP,
+    then return ONLY the grounded dynamic cloud (discard the static).
+
+    Returns:
+        dyn_P (N,3) float32, dyn_C (N,3) uint8
+    """
+    # ---------- Helpers ----------
+    def _weighted_rigid_fit(A: np.ndarray, B: np.ndarray, w: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+        """Weighted Kabsch: find R,t minimizing sum_i w_i || R A_i + t - B_i ||^2."""
+        if w is None:
+            w = np.ones((A.shape[0],), dtype=np.float64)
+        w = w.astype(np.float64)
+        w_sum = np.sum(w) + 1e-12
+        mu_A = (A * w[:, None]).sum(axis=0) / w_sum
+        mu_B = (B * w[:, None]).sum(axis=0) / w_sum
+        AA = A - mu_A
+        BB = B - mu_B
+        H = (AA * w[:, None]).T @ BB
+        U, S, Vt = np.linalg.svd(H, full_matrices=True)
+        R = Vt.T @ U.T
+        if np.linalg.det(R) < 0:
+            Vt[-1, :] *= -1
+            R = Vt.T @ U.T
+        t = mu_B - R @ mu_A
+        return R.astype(np.float64), t.astype(np.float64)
+
+    def _apply(R: np.ndarray, t: np.ndarray, X: np.ndarray) -> np.ndarray:
+        return (R @ X.T).T + t[None, :]
+
+    # ---------- Prepare frame data ----------
+    images = _ensure_nhwc(predictions["images"])   # (S,H,W,3)
+    points = predictions["points"]                 # (S,H,W,3)
+    conf    = predictions.get("conf", None)
+
+    pts_f = points[frame_idx]  # (H,W,3)
+    img_f = images[frame_idx]  # (H,W,3)
+    H, W = pts_f.shape[:2]
+
+    # Normalize confidence to (H,W)
+    if conf is None:
+        conf_hw = np.ones((H, W), dtype=np.float64)
+        orig_conf_shape = None
+    else:
+        conf_f = conf[frame_idx]
+        conf_hw = _conf_to_hw(conf_f, H, W).astype(np.float64)
+        orig_conf_shape = getattr(conf_f, "shape", None)
+
+    # Clean confidences
+    conf_hw = np.nan_to_num(conf_hw, nan=0.0, posinf=0.0, neginf=0.0)
+    conf_hw = np.maximum(conf_hw, 0.0)
+
+    # Flatten
+    pts_flat = pts_f.reshape(-1, 3).astype(np.float64)                    # (H*W,3)
+    col_flat = (img_f.reshape(-1, 3) * 255.0).clip(0, 255).astype(np.uint8)
+    conf_vec = conf_hw.reshape(-1)                                        # (H*W,)
+
+    # Sanity check
+    if conf_vec.shape[0] != pts_flat.shape[0]:
+        raise ValueError(
+            f"conf has {conf_vec.shape[0]} elems but points have {pts_flat.shape[0]} rows. "
+            f"Original conf frame shape: {orig_conf_shape} normalized to {(H, W)}"
+        )
+
+    # Base validity (finite + confidence)
+    good = np.isfinite(pts_flat).all(axis=1) & (conf_vec >= conf_min) & (conf_vec > 1e-5)
+
+    # Dynamic sets (full frame)
+    src_full = pts_flat[good]
+    col_full = col_flat[good]
+    w_full   = conf_vec[good].astype(np.float64)
+
+    # Early outs
+    if src_full.shape[0] == 0:
+        return np.empty((0, 3), np.float32), np.empty((0, 3), np.uint8)
+
+    # If no static target, we cannot register; just (optionally) voxel-reduce and return the raw dynamic
+    if static_points is None or static_points.shape[0] == 0:
+        dyn_P = src_full.copy()
+        dyn_C = col_full.copy()
+        # Prefer dynamic_voxel; if None but dedup_voxel is set, use it as fallback
+        vox_sz = dynamic_voxel if dynamic_voxel is not None else dedup_voxel
+        if vox_sz is not None and dyn_P.size:
+            vox = _voxel_ids(dyn_P, vox_sz)
+            vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
+            uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
+            G = uniq_keys.shape[0]
+            counts = np.bincount(inv, minlength=G).astype(np.float32)
+            sum_x = np.bincount(inv, weights=dyn_P[:, 0], minlength=G)
+            sum_y = np.bincount(inv, weights=dyn_P[:, 1], minlength=G)
+            sum_z = np.bincount(inv, weights=dyn_P[:, 2], minlength=G)
+            sum_r = np.bincount(inv, weights=dyn_C[:, 0].astype(np.float32), minlength=G)
+            sum_g = np.bincount(inv, weights=dyn_C[:, 1].astype(np.float32), minlength=G)
+            sum_b = np.bincount(inv, weights=dyn_C[:, 2].astype(np.float32), minlength=G)
+            counts[counts == 0] = 1.0
+            dyn_P = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
+            dyn_C = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
+        if merge_voxel is not None and dyn_P.size:
+            vox = _voxel_ids(dyn_P, merge_voxel)
+            vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
+            uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
+            G = uniq_keys.shape[0]
+            counts = np.bincount(inv, minlength=G).astype(np.float32)
+            sum_x = np.bincount(inv, weights=dyn_P[:, 0], minlength=G)
+            sum_y = np.bincount(inv, weights=dyn_P[:, 1], minlength=G)
+            sum_z = np.bincount(inv, weights=dyn_P[:, 2], minlength=G)
+            sum_r = np.bincount(inv, weights=dyn_C[:, 0].astype(np.float32), minlength=G)
+            sum_g = np.bincount(inv, weights=dyn_C[:, 1].astype(np.float32), minlength=G)
+            sum_b = np.bincount(inv, weights=dyn_C[:, 2].astype(np.float32), minlength=G)
+            counts[counts == 0] = 1.0
+            dyn_P = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
+            dyn_C = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
+        return dyn_P.astype(np.float32), dyn_C.astype(np.uint8)
+
+    # ---------- Build static target (optionally subsampled for speed) ----------
+    if static_points.shape[0] > tgt_sample_max:
+        rng = np.random.default_rng(1337 + frame_idx)
+        jdx = rng.choice(static_points.shape[0], size=tgt_sample_max, replace=False)
+        tgt = static_points[jdx].astype(np.float64)
+    else:
+        tgt = static_points.astype(np.float64)
+
+    # ---------- ICP using the FULL dynamic cloud ----------
+    tree = cKDTree(tgt)
+    R_total = np.eye(3, dtype=np.float64)
+    t_total = np.zeros(3, dtype=np.float64)
+    prev_err = np.inf
+    src_iter = src_full.copy()
+
+    for it in range(max(1, icp_max_iters)):
+        dists, nn = tree.query(src_iter, k=1, workers=-1)
+        valid = np.isfinite(dists)
+        if max_corr_dist is not None:
+            valid &= (dists <= max_corr_dist)
+        if not np.any(valid):
+            break
+
+        if trim_frac < 1.0:
+            cutoff = np.percentile(dists[valid], trim_frac * 100.0)
+            valid &= (dists <= cutoff)
+
+        A = src_iter[valid]
+        B = tgt[nn[valid]]
+        w = w_full[valid]
+        if A.shape[0] < 10:
+            break
+
+        R_inc, t_inc = _weighted_rigid_fit(A, B, w)
+
+        # compose transforms
+        R_total = R_inc @ R_total
+        t_total = R_inc @ t_total + t_inc
+        src_iter = _apply(R_inc, t_inc, src_iter)
+
+        err = float(np.mean((A - B) ** 2))
+        if abs(prev_err - err) < icp_tol:
+            break
+        prev_err = err
+
+    # ---------- Apply final transform to ALL dynamic points of this frame ----------
+    dyn_P = _apply(R_total, t_total, src_full).astype(np.float64)
+    dyn_C = col_full
+
+    # ---------- Optional voxel reductions on the grounded dynamic cloud ----------
+    if dynamic_voxel is not None and dyn_P.size:
+        vox = _voxel_ids(dyn_P, dynamic_voxel)
+        vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
+        uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
+        G = uniq_keys.shape[0]
+        counts = np.bincount(inv, minlength=G).astype(np.float32)
+        sum_x = np.bincount(inv, weights=dyn_P[:, 0], minlength=G)
+        sum_y = np.bincount(inv, weights=dyn_P[:, 1], minlength=G)
+        sum_z = np.bincount(inv, weights=dyn_P[:, 2], minlength=G)
+        sum_r = np.bincount(inv, weights=dyn_C[:, 0].astype(np.float32), minlength=G)
+        sum_g = np.bincount(inv, weights=dyn_C[:, 1].astype(np.float32), minlength=G)
+        sum_b = np.bincount(inv, weights=dyn_C[:, 2].astype(np.float32), minlength=G)
+        counts[counts == 0] = 1.0
+        dyn_P = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
+        dyn_C = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
+
+    if merge_voxel is not None and dyn_P.size:
+        vox = _voxel_ids(dyn_P, merge_voxel)
+        vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
+        uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
+        G = uniq_keys.shape[0]
+        counts = np.bincount(inv, minlength=G).astype(np.float32)
+        sum_x = np.bincount(inv, weights=dyn_P[:, 0], minlength=G)
+        sum_y = np.bincount(inv, weights=dyn_P[:, 1], minlength=G)
+        sum_z = np.bincount(inv, weights=dyn_P[:, 2], minlength=G)
+        sum_r = np.bincount(inv, weights=dyn_C[:, 0].astype(np.float32), minlength=G)
+        sum_g = np.bincount(inv, weights=dyn_C[:, 1].astype(np.float32), minlength=G)
+        sum_b = np.bincount(inv, weights=dyn_C[:, 2].astype(np.float32), minlength=G)
+        counts[counts == 0] = 1.0
+        dyn_P = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
+        dyn_C = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
+
+    return dyn_P.astype(np.float32), dyn_C.astype(np.uint8)
+
+
+
 def merge_static_with_frame(
         predictions: Dict,
         static_points: np.ndarray,
@@ -804,28 +1022,112 @@ class AgPi3:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    # ----------------------------- Infer grounded dynamic video visualization -----------------------------
+
+    def infer_grounded_dynamic_video(
+            self,
+            video_id: str,
+            *,
+            conf_static: float = 0.1,  # confidence for static background build
+            conf_frame: float = 0.01,  # confidence for per-frame points
+            dedup_voxel: Optional[float] = 0.02,  # meters; None to disable
+            fov_y: float = 0.96,  # radians; matches your earlier default
+            spawn: bool = True,
+            log_cameras: bool = True,
+            load_from_glb: bool = False,
+    ) -> None:
+        static_scene_pred_path = os.path.join(self.static_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
+        dynamic_scene_pred_path = os.path.join(self.dynamic_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
+        if not os.path.exists(static_scene_pred_path) or not os.path.exists(dynamic_scene_pred_path):
+            raise FileNotFoundError(f"predictions.npz not found for {video_id}")
+
+        static_scene_arr = np.load(static_scene_pred_path, allow_pickle=True, mmap_mode=None)
+        dynamic_scene_arr = np.load(dynamic_scene_pred_path, allow_pickle=True, mmap_mode=None)
+        dynamic_scene_predictions = {k: dynamic_scene_arr[k] for k in dynamic_scene_arr.files}
+        S, H, W = dynamic_scene_predictions["points"].shape[:3]
+
+        if load_from_glb:
+            print(f"[viz] Loading static scene from GLB for {video_id}...")
+            glb_path = os.path.join(self.static_scene_dir_path, f"{video_id[:-4]}_{10}", f"{video_id[:-4]}.glb")
+            static_P, static_C = glb_to_points(glb_path)
+        else:
+            print("Loading static scene from predictions...")
+            static_scene_predictions = {k: static_scene_arr[k] for k in static_scene_arr.files}
+            static_scene_points_wh = static_scene_predictions["points"]  # (S,H,W,3)
+            S, H, W = static_scene_points_wh.shape[:3]
+            print(f"[viz] {video_id}: {S} frames | HxW={H}x{W} | conf_static={conf_static} | conf_frame={conf_frame}")
+
+            # ---- Build static background (once) ----
+            scene_3d, static_P, static_C = predictions_to_glb_with_static(
+                static_scene_predictions, conf_min=float(conf_static),
+            )
+
+        # ---- Rerun setup ----
+        rr.init(f"AG-Pi3: {video_id}", spawn=spawn)
+        rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+        rr.log("world", rr.ViewCoordinates.RDF, timeless=True)
+
+        # Log static background timelessly
+        if static_P.size > 0:
+            rr.log(
+                "world/static",
+                rr.Points3D(
+                    positions=static_P.astype(np.float32),
+                    colors=static_C.astype(np.uint8),
+                )
+            )
+
+        # Cameras & frustums (timeless transforms, separate camera nodes per frame)
+        if log_cameras:
+            _fx, _fy, _cx, _cy = _pinhole_from_fov(W, H, fov_y)
+            if not load_from_glb:
+                _log_cameras(static_scene_predictions, fov_y=fov_y, W=W, H=H, type="static",
+                             color=np.array([255, 0, 0], dtype=np.uint8))  # RED
+            _log_cameras(dynamic_scene_predictions, fov_y=fov_y, W=W, H=H, type="dynamic",
+                         color=np.array([0, 255, 0], dtype=np.uint8))  # GREEN
+
+        # ---- Precompute per-frame MERGED with static ----
+        grounded_P: List[np.ndarray] = []
+        grounded_C: List[np.ndarray] = []
+        for i in tqdm(range(S), desc=f"[viz] Merging frames for {video_id}"):
+            Pi, Ci = ground_dynamic_scene_to_static_scene(
+                dynamic_scene_predictions,
+                static_P, static_C,
+                frame_idx=i,
+                conf_min=float(conf_frame),
+                dedup_voxel=dedup_voxel,
+            )
+            grounded_P.append(Pi)
+            grounded_C.append(Ci)
+
+            rr.set_time_sequence("frame", i)
+
+            if grounded_P[i].size:
+                rr.log(
+                    "world/frame/points_merged",
+                    rr.Points3D(
+                        positions=grounded_P[i].astype(np.float32),
+                        colors=grounded_C[i].astype(np.uint8),
+                        radii=0.01,
+                    ),
+                )
+
+        print("[viz] Done streaming frames to Rerun.")
+
+        # Cleanup
+        del static_scene_predictions
+        del dynamic_scene_predictions
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # ----------------------------- Infer 4D reconstruction video -----------------------------
+
     def load_masks_for_video(
             self,
             video_id: str,
             target_hw: Optional[Tuple[int, int]] = None,  # (H_out, W_out); default: (H, W)
     ) -> np.ndarray:
-        """
-        Load masks for a video and (optionally) resample each frame spatially to (H_out, W_out).
-        No temporal (S) interpolation is performed.
-
-        Args:
-            video_id: Video identifier (folder name under masks dir).
-            H, W: Output spatial size if target_hw is None.
-            target_hw: Optional (H_out, W_out). If None, uses (H, W).
-            mode:
-                - "labels": integer IDs preserved via nearest-neighbor.
-                - "probs": treats masks as probabilities in [0,1]; bilinear per-frame,
-                           then thresholds back to {0,255} using prob_threshold.
-            prob_threshold: Threshold used for "probs" binarization.
-
-        Returns:
-            np.ndarray of shape (S, H_out, W_out), dtype=uint8.
-        """
         # --- Determine output spatial size ---
         H_out, W_out = int(target_hw[0]), int(target_hw[1])
 
@@ -861,7 +1163,7 @@ class AgPi3:
         masks = np.stack(masks_out, axis=0)  # (S, H_out, W_out)
         return masks
 
-    def infer_video(
+    def infer_4d_reconstruction_video(
             self,
             video_id: str,
             *,
@@ -996,7 +1298,7 @@ class AgPi3:
             return
 
         for video_id in tqdm(filtered, desc=f"Split {split}"):
-            self.infer_video(video_id, **kwargs)
+            self.infer_grounded_dynamic_video(video_id, **kwargs)
 
 
 # ---------------------------

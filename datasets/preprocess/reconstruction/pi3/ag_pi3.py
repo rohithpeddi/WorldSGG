@@ -348,7 +348,7 @@ class AgPi3:
         an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
         sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, len(video_sampled_frame_id_list)))
 
-        # Use this for full frames not the sampled frames
+        # NOTE: Use this for full frames not the sampled frames (Comment it for the other case)
         sample_idx = [video_sampled_frame_id_list[i] for i in sample_idx]
 
         imgs = self.preprocess_image_list(
