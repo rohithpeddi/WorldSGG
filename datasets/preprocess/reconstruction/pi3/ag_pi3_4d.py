@@ -1293,6 +1293,49 @@ class AgPi3:
             torch.cuda.empty_cache()
 
     # --------- Batch over a split ---------
+    def verify_static_and_dynamic_scenes_exist(self, video_id: str) -> bool:
+        static_scene_pred_path = os.path.join(self.static_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
+        dynamic_scene_pred_path = os.path.join(self.dynamic_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
+        if not os.path.exists(static_scene_pred_path) or not os.path.exists(dynamic_scene_pred_path):
+            raise FileNotFoundError(f"predictions.npz not found for {video_id}")
+
+        static_scene_arr = np.load(static_scene_pred_path, allow_pickle=True, mmap_mode=None)
+        dynamic_scene_arr = np.load(dynamic_scene_pred_path, allow_pickle=True, mmap_mode=None)
+        dynamic_scene_predictions = {k: dynamic_scene_arr[k] for k in dynamic_scene_arr.files}
+        S_dyn, H_dyn, W_dyn = dynamic_scene_predictions["points"].shape[:3]
+
+        static_scene_predictions = {k: static_scene_arr[k] for k in static_scene_arr.files}
+        static_scene_points_wh = static_scene_predictions["points"]  # (S,H,W,3)
+        S_stat, H_stat, W_stat = static_scene_points_wh.shape[:3]
+
+        if S_dyn != S_stat or H_dyn != H_stat or W_dyn != W_stat:
+            print("--------------------------------------------------------------------------------")
+            print(
+                f"[warn] Mismatched shapes for static and dynamic scenes in video {video_id}: "
+                f"static (S={S_stat}, H={H_stat}, W={W_stat}), "
+                f"dynamic (S={S_dyn}, H={H_dyn}, W={W_dyn}). Skipping inference."
+            )
+            print("--------------------------------------------------------------------------------")
+            return False
+
+        return True
+
+    def verify_all_videos(self):
+        """Verify that all videos have matching static and dynamic scenes."""
+        video_id_list = sorted(os.listdir(self.root_dir_path))
+        good_counter = 0
+        for video_id in tqdm(video_id_list, desc="Verifying videos"):
+            try:
+                if self.verify_static_and_dynamic_scenes_exist(video_id):
+                    good_counter += 1
+            except FileNotFoundError as e:
+                print(f"[warn] {e}")
+            except Exception as e:
+                print(f"[error] Unexpected error for video {video_id}: {e}")
+
+        print(f"[verify] {good_counter}/{len(video_id_list)} videos have matching static and dynamic scenes.")
+
+
     def infer_all_videos(
             self,
             split: str,
@@ -1304,7 +1347,7 @@ class AgPi3:
         """Process all videos in a split (optionally restricted by an allowlist)."""
         video_id_list = sorted(os.listdir(self.root_dir_path))
 
-        video_id_list = ["0DJ6R.mp4"]
+        video_id_list = ["A015X.mp4"]
 
         # Filter by naming convention and split
         filtered: List[str] = []
@@ -1387,7 +1430,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--split",
         type=_parse_split,
-        default="04",
+        default="AD",
         help="Shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}.",
     )
     parser.add_argument(
@@ -1457,16 +1500,21 @@ def main() -> None:
         masks_dir_path=args.mask_dir_path,
     )
 
-    ag_pi3.infer_all_videos(
-        split=args.split,
-        mode=args.mode,
-        conf_static=args.conf_static,
-        conf_frame=args.conf_frame,
-        dedup_voxel=dedup,
-        fov_y=args.fov_y,
-        spawn=not args.no_spawn,
-        log_cameras=not args.no_cam,
+    ag_pi3.verify_all_videos(
+
     )
+
+    # ag_pi3.infer_all_videos(
+    #     split=args.split,
+    #     mode=args.mode,
+    #     conf_static=args.conf_static,
+    #     conf_frame=args.conf_frame,
+    #     dedup_voxel=dedup,
+    #     fov_y=args.fov_y,
+    #     spawn=not args.no_spawn,
+    #     log_cameras=not args.no_cam,
+    #     vis=True,
+    # )
 
 
 if __name__ == "__main__":
