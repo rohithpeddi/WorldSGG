@@ -120,8 +120,12 @@ def _frustum_path(i: int) -> str:
 
 def predictions_to_colors(
         predictions: Dict,
-        conf_min: float = 0.5,  # 0..1 threshold on predictions["conf"]
-        filter_by_frames: str = "all",  # e.g. "12:..." to use only frame index 12
+        conf_min: float = 0.5,                  # 0..1 threshold on predictions["conf"]
+        filter_by_frames: str = "all",          # e.g. "12:..." to use only frame index 12
+        filter_low_conf_black: bool = False,    # enable extra filtering
+        *,
+        black_rgb_max: int = 8,                 # 0..255; <= this per-channel is considered "black"
+        black_conf_max: float = 1.0,           # 0..1; if conf < this AND pixel is black -> drop
 ):
     if not isinstance(predictions, dict):
         raise ValueError("predictions must be a dictionary")
@@ -136,9 +140,9 @@ def predictions_to_colors(
 
     print("Selected frame index for extraction:", selected_frame_idx)
 
-    pts = predictions["points"]
-    conf = predictions.get("conf", np.ones_like(pts[..., 0], dtype=np.float32))
-    imgs = predictions["images"]
+    pts = predictions["points"]                             # (S,H,W,3)
+    conf = predictions.get("conf", np.ones_like(pts[..., 0], dtype=np.float32))  # (S,H,W) or (S,H,W,1)
+    imgs = predictions["images"]                            # (S,?,H,W) or (S,H,W,3/4/1)
     cam_poses = predictions.get("camera_poses", None)
 
     if selected_frame_idx is not None:
@@ -148,10 +152,21 @@ def predictions_to_colors(
         cam_poses = cam_poses[selected_frame_idx][None] if cam_poses is not None else None
 
     # ------------ Color layout handling ------------
-    if imgs.ndim == 4 and imgs.shape[1] == 3:  # NCHW -> NHWC
+    # Normalize to NHWC; keep only the first 3 channels (RGB); expand grayscale to RGB.
+    if imgs.ndim == 4 and imgs.shape[1] in (1, 3, 4):            # NCHW
         imgs_nhwc = np.transpose(imgs, (0, 2, 3, 1))
-    else:
+    elif imgs.ndim == 4 and imgs.shape[-1] in (1, 3, 4):         # already NHWC
         imgs_nhwc = imgs
+    else:
+        raise ValueError(f"`images` must be 4D with channels in {{1,3,4}}, got shape {imgs.shape}")
+
+    C = imgs_nhwc.shape[-1]
+    if C == 1:
+        imgs_nhwc = np.repeat(imgs_nhwc, 3, axis=-1)
+    elif C >= 3:
+        imgs_nhwc = imgs_nhwc[..., :3]  # drop alpha if present
+
+    # Convert to uint8 RGB for color output
     colors_rgb = (imgs_nhwc.reshape(-1, 3) * 255.0).clip(0, 255).astype(np.uint8)
 
     # ------------ Confidence filtering ------------
@@ -159,8 +174,22 @@ def predictions_to_colors(
     conf_flat = conf.reshape(-1).astype(np.float32)
 
     thr = float(conf_min) if conf_min is not None else 0.1
-    mask = (conf_flat >= thr) & (conf_flat > 1e-5)
+    base_mask = (conf_flat >= thr) & (conf_flat > 1e-5)
 
+    # Optional: drop pixels that are BOTH near-black AND have low confidence (below black_conf_max)
+    if filter_low_conf_black:
+        # Per-channel black check (inclusive): 0..black_rgb_max
+        is_black = (
+            (colors_rgb[:, 0] <= black_rgb_max) &
+            (colors_rgb[:, 1] <= black_rgb_max) &
+            (colors_rgb[:, 2] <= black_rgb_max)
+        )
+        low_conf_black = is_black & (conf_flat < float(black_conf_max))
+        mask = base_mask & (~low_conf_black)
+    else:
+        mask = base_mask
+
+    # Apply mask
     verts = verts[mask]
     colors_rgb = colors_rgb[mask]
 
@@ -231,8 +260,11 @@ def predictions_to_glb_with_static(
       static_points : (N,3) float32 background points in ORIGINAL world frame
       static_colors : (N,3) uint8   RGB colors aligned with static_points
     """
+
+    print("Estimating static scene with a confidence mask threshold of:", conf_min)
+
     static_points, static_colors, verts, colors_rgb = predictions_to_colors(
-        predictions, conf_min=conf_min, filter_by_frames=filter_by_frames
+        predictions, conf_min=conf_min, filter_by_frames=filter_by_frames, filter_low_conf_black=True
     )
 
     # ------------ Build Scene (with visualization alignment rotation) ------------
@@ -821,7 +853,7 @@ class AgPi3:
             self,
             video_id: str,
             *,
-            conf_static: float = 0.01,  # confidence for static background build
+            conf_static: float = 0.1,  # confidence for static background build
             conf_frame: float = 0.01,  # confidence for per-frame points
             dedup_voxel: Optional[float] = 0.02,  # meters; None to disable
             fov_y: float = 0.96,  # radians; matches your earlier default
@@ -862,7 +894,7 @@ class AgPi3:
 
             # ---- Build static background (once) ----
             scene_3d, static_P, static_C = predictions_to_glb_with_static(
-                static_scene_predictions, conf_min=float(conf_static)
+                static_scene_predictions, conf_min=float(conf_static),
             )
 
         # ---- Rerun setup ----
@@ -936,7 +968,7 @@ class AgPi3:
         """Process all videos in a split (optionally restricted by an allowlist)."""
         video_id_list = sorted(os.listdir(self.root_dir_path))
 
-        video_id_list = ["0DJ6R.mp4"]
+        video_id_list = ["0A8CF.mp4"]
 
         # Filter by naming convention and split
         filtered: List[str] = []
