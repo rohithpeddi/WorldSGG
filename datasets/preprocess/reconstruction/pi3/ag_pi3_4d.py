@@ -1038,11 +1038,20 @@ class AgPi3:
             spawn: bool = True,
             log_cameras: bool = True,
             load_from_glb: bool = False,
+            vis: bool = False,
     ) -> None:
         static_scene_pred_path = os.path.join(self.static_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
         dynamic_scene_pred_path = os.path.join(self.dynamic_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
         if not os.path.exists(static_scene_pred_path) or not os.path.exists(dynamic_scene_pred_path):
             raise FileNotFoundError(f"predictions.npz not found for {video_id}")
+
+        grounded_dynamic_scene_pred_path = os.path.join(
+            self.grounded_dynamic_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions_grounded.pkl"
+        )
+        os.makedirs(os.path.dirname(grounded_dynamic_scene_pred_path), exist_ok=True)
+        if os.path.exists(grounded_dynamic_scene_pred_path):
+            print(f"[viz] Grounded dynamic scene predictions already exist at {grounded_dynamic_scene_pred_path}. Skipping inference.")
+            return
 
         static_scene_arr = np.load(static_scene_pred_path, allow_pickle=True, mmap_mode=None)
         dynamic_scene_arr = np.load(dynamic_scene_pred_path, allow_pickle=True, mmap_mode=None)
@@ -1066,28 +1075,29 @@ class AgPi3:
             )
 
         # ---- Rerun setup ----
-        rr.init(f"AG-Pi3: {video_id}", spawn=spawn)
-        rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-        rr.log("world", rr.ViewCoordinates.RDF, timeless=True)
+        if vis:
+            rr.init(f"AG-Pi3: {video_id}", spawn=spawn)
+            rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+            rr.log("world", rr.ViewCoordinates.RDF, timeless=True)
 
-        # Log static background timelessly
-        if static_P.size > 0:
-            rr.log(
-                "world/static",
-                rr.Points3D(
-                    positions=static_P.astype(np.float32),
-                    colors=static_C.astype(np.uint8),
+            # Log static background timelessly
+            if static_P.size > 0:
+                rr.log(
+                    "world/static",
+                    rr.Points3D(
+                        positions=static_P.astype(np.float32),
+                        colors=static_C.astype(np.uint8),
+                    )
                 )
-            )
 
-        # Cameras & frustums (timeless transforms, separate camera nodes per frame)
-        if log_cameras:
-            _fx, _fy, _cx, _cy = _pinhole_from_fov(W, H, fov_y)
-            if not load_from_glb:
-                _log_cameras(static_scene_predictions, fov_y=fov_y, W=W, H=H, type="static",
-                             color=np.array([255, 0, 0], dtype=np.uint8))  # RED
-            _log_cameras(dynamic_scene_predictions, fov_y=fov_y, W=W, H=H, type="dynamic",
-                         color=np.array([0, 255, 0], dtype=np.uint8))  # GREEN
+            # Cameras & frustums (timeless transforms, separate camera nodes per frame)
+            if log_cameras:
+                _fx, _fy, _cx, _cy = _pinhole_from_fov(W, H, fov_y)
+                if not load_from_glb:
+                    _log_cameras(static_scene_predictions, fov_y=fov_y, W=W, H=H, type="static",
+                                 color=np.array([255, 0, 0], dtype=np.uint8))  # RED
+                _log_cameras(dynamic_scene_predictions, fov_y=fov_y, W=W, H=H, type="dynamic",
+                             color=np.array([0, 255, 0], dtype=np.uint8))  # GREEN
 
         # ---- Precompute per-frame MERGED with static ----
         grounded_P: List[np.ndarray] = []
@@ -1105,7 +1115,7 @@ class AgPi3:
 
             rr.set_time_sequence("frame", i)
 
-            if grounded_P[i].size:
+            if grounded_P[i].size and vis:
                 rr.log(
                     "world/frame/points_merged",
                     rr.Points3D(
@@ -1119,12 +1129,7 @@ class AgPi3:
         dynamic_scene_predictions_grounded = dynamic_scene_predictions.copy()
         dynamic_scene_predictions_grounded['grounded_points'] = grounded_P
         dynamic_scene_predictions_grounded['grounded_colors'] = grounded_C
-        grounded_dynamic_scene_pred_path = os.path.join(
-            self.grounded_dynamic_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions_grounded.pkl"
-        )
 
-        # Dump as a pickle file
-        os.makedirs(os.path.dirname(grounded_dynamic_scene_pred_path), exist_ok=True)
         with open(grounded_dynamic_scene_pred_path, 'wb') as f:
             pickle.dump(dynamic_scene_predictions_grounded, f)
 
