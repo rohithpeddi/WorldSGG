@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 from typing import List
 
+import pickle
 import numpy as np
 import rerun as rr
 import torch
@@ -886,6 +887,7 @@ class AgPi3:
             dynamic_scene_dir_path: Optional[str] = None,
             static_scene_dir_path: Optional[str] = None,  # accepted for parity; not used here
             frame_annotated_dir_path: Optional[str] = None,  # accepted for parity; not used here
+            grounded_dynamic_scene_dir_path: Optional[str] = None,  # accepted for parity; not used here
             masks_dir_path: Optional[str] = None,  # accepted for parity; not used here
     ):
         self.model = None
@@ -893,6 +895,7 @@ class AgPi3:
         self.static_scene_dir_path = static_scene_dir_path
         self.dynamic_scene_dir_path = dynamic_scene_dir_path if dynamic_scene_dir_path is not None else root_dir_path
         self.frame_annotated_dir_path = frame_annotated_dir_path
+        self.grounded_dynamic_scene_dir_path = grounded_dynamic_scene_dir_path
         self.masks_dir_path = masks_dir_path
 
         os.makedirs(self.dynamic_scene_dir_path, exist_ok=True)
@@ -1112,7 +1115,20 @@ class AgPi3:
                     ),
                 )
 
-        print("[viz] Done streaming frames to Rerun.")
+        # Clone the dynamic scene predictions and add grounded points and grounded colors and store them as a new npz file
+        dynamic_scene_predictions_grounded = dynamic_scene_predictions.copy()
+        dynamic_scene_predictions_grounded['grounded_points'] = grounded_P
+        dynamic_scene_predictions_grounded['grounded_colors'] = grounded_C
+        grounded_dynamic_scene_pred_path = os.path.join(
+            self.grounded_dynamic_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions_grounded.pkl"
+        )
+
+        # Dump as a pickle file
+        os.makedirs(os.path.dirname(grounded_dynamic_scene_pred_path), exist_ok=True)
+        with open(grounded_dynamic_scene_pred_path, 'wb') as f:
+            pickle.dump(dynamic_scene_predictions_grounded, f)
+
+        print(f"[viz] Saved grounded dynamic scene predictions to {grounded_dynamic_scene_pred_path}")
 
         # Cleanup
         del static_scene_predictions
@@ -1356,6 +1372,11 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="/data3/rohith/ag/ag4D/static_scenes/pi3_full"
     )
+    parser.add_argument(
+        "--grounded_dynamic_scene_dir_path",
+        type=str,
+        default="/data3/rohith/ag/ag4D/static_scenes/pi3_grounded"
+    )
 
     # Selection
     parser.add_argument(
@@ -1427,6 +1448,7 @@ def main() -> None:
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
         static_scene_dir_path=args.static_scene_dir_path,
         frame_annotated_dir_path=args.frames_annotated_dir_path,
+        grounded_dynamic_scene_dir_path=args.grounded_dynamic_scene_dir_path,
         masks_dir_path=args.mask_dir_path,
     )
 
