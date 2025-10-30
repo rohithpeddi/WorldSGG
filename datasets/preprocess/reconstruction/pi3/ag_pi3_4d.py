@@ -713,6 +713,7 @@ class AgPi3:
             fov_y: float = 0.96,
             spawn: bool = True,
             log_cameras: bool = True,
+            apply_transform: bool = True
     ) -> None:
         # ---- Load predictions ----
         stem = video_id[:-4] if video_id.endswith(".mp4") else video_id
@@ -734,6 +735,12 @@ class AgPi3:
 
         print(f"[viz] {video_id}: {S} frames | HxW={H}x{W} | conf_static={conf_static} | conf_frame={conf_frame}")
 
+        if apply_transform:
+            align_R = Rot.from_euler("y", 100, degrees=True).as_matrix()
+            align_R = align_R @ Rot.from_euler("x", 155, degrees=True).as_matrix()
+            T = np.eye(4, dtype=np.float64)
+            T[:3, :3] = align_R
+
         # ---- Build static background (once) ----
         # Returns (scene_3d, static_P, static_C); we only need P,C here.
         _, static_P, static_C = predictions_to_glb_with_static(static_pred, conf_min=float(conf_static))
@@ -746,6 +753,8 @@ class AgPi3:
 
         # Log static background timelessly (persists across all frames)
         if static_P.size > 0:
+            if apply_transform:
+                static_P = static_P @ align_R.T
             rr.log(
                 "world/static",
                 rr.Points3D(
@@ -770,6 +779,9 @@ class AgPi3:
             )
             dyn_P = np.asarray(dyn_P, dtype=np.float32)
             dyn_C = np.asarray(dyn_C, dtype=np.uint8)
+
+            if apply_transform:
+                dyn_P = dyn_P @ align_R.T
 
             rr.set_time_sequence("frame", i)
 
@@ -859,7 +871,7 @@ class AgPi3:
             fov_y: float = 0.96,  # radians; matches your earlier default
             spawn: bool = True,
             log_cameras: bool = True,
-            load_from_glb: bool = False,
+            load_from_glb: bool = False
     ) -> None:
         """
         Unified visualization that replaces the old `infer_video` and `infer_video_points_3d`.
@@ -899,6 +911,7 @@ class AgPi3:
 
         # ---- Rerun setup ----
         rr.init(f"AG-Pi3: {video_id}", spawn=spawn)
+        rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
         rr.log("world", rr.ViewCoordinates.RDF, timeless=True)
 
         # Log static background timelessly
@@ -968,7 +981,7 @@ class AgPi3:
         """Process all videos in a split (optionally restricted by an allowlist)."""
         video_id_list = sorted(os.listdir(self.root_dir_path))
 
-        video_id_list = ["0A8CF.mp4"]
+        video_id_list = ["0DJ6R.mp4"]
 
         # Filter by naming convention and split
         filtered: List[str] = []
