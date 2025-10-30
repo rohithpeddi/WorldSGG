@@ -871,7 +871,7 @@ class AgPi3:
             fov_y: float = 0.96,  # radians; matches your earlier default
             spawn: bool = True,
             log_cameras: bool = True,
-            load_from_glb: bool = False
+            load_from_glb: bool = False,
     ) -> None:
         """
         Unified visualization that replaces the old `infer_video` and `infer_video_points_3d`.
