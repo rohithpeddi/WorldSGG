@@ -291,6 +291,84 @@ class AgPi3:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+
+    def visualize_grounded_dynamic_video(
+            self,
+            video_id: str,
+            *,
+            conf_static: float = 0.1,  # confidence for static background build
+            conf_frame: float = 0.01,  # confidence for per-frame points
+            dedup_voxel: Optional[float] = 0.02,  # meters; None to disable
+            fov_y: float = 0.96,  # radians; matches your earlier default
+            spawn: bool = True,
+            log_cameras: bool = True,
+            load_from_glb: bool = False,
+            vis: bool = True,
+    ) -> None:
+        static_scene_pred_path = os.path.join(self.static_scene_dir_path, f"{video_id[:-4]}_{10}",
+                                              "predictions.npz")
+        dynamic_scene_pred_path = os.path.join(self.dynamic_scene_dir_path, f"{video_id[:-4]}_{10}",
+                                               "predictions.npz")
+        if not os.path.exists(static_scene_pred_path) or not os.path.exists(dynamic_scene_pred_path):
+            raise FileNotFoundError(f"predictions.npz not found for {video_id}")
+
+        grounded_dynamic_scene_pred_path = os.path.join(
+            self.grounded_dynamic_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions_grounded.pkl"
+        )
+        grounded_dynamic_scene_predictions = pickle.load(open(grounded_dynamic_scene_pred_path, 'rb'))
+        grounded_P = grounded_dynamic_scene_predictions['grounded_points']
+        grounded_C = grounded_dynamic_scene_predictions['grounded_colors']
+        updated_poses = grounded_dynamic_scene_predictions['updated_camera_poses']
+
+        static_scene_arr = np.load(static_scene_pred_path, allow_pickle=True, mmap_mode=None)
+
+        print("Loading static scene from predictions...")
+        static_scene_predictions = {k: static_scene_arr[k] for k in static_scene_arr.files}
+        static_scene_points_wh = static_scene_predictions["points"]  # (S,H,W,3)
+        S, H, W = static_scene_points_wh.shape[:3]
+        print(
+            f"[viz] {video_id}: {S} frames | HxW={H}x{W} | conf_static={conf_static} | conf_frame={conf_frame}")
+
+        # ---- Build static background (once) ----
+        scene_3d, static_P, static_C = predictions_to_glb_with_static(
+            static_scene_predictions, conf_min=float(conf_static),
+        )
+
+        # ---- Rerun setup ----
+        rr.init(f"AG-Pi3: {video_id}", spawn=spawn)
+        rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+        rr.log("world", rr.ViewCoordinates.RDF, timeless=True)
+
+        # Log static background timelessly
+        if static_P.size > 0:
+            rr.log(
+                "world/static",
+                rr.Points3D(
+                    positions=static_P.astype(np.float32),
+                    colors=static_C.astype(np.uint8),
+                )
+            )
+
+        # ---- Precompute per-frame MERGED with static ----
+        for i in tqdm(range(S), desc=f"[viz] Merging frames for {video_id}"):
+            rr.set_time_sequence("frame", i)
+
+            if grounded_P[i].size and vis:
+                rr.log(
+                    "world/frame/points_merged",
+                    rr.Points3D(
+                        positions=grounded_P[i].astype(np.float32),
+                        colors=grounded_C[i].astype(np.uint8),
+                        radii=0.01,
+                    ),
+                )
+
+        # Cleanup
+        del static_scene_predictions
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     # ----------------------------- Infer 4D reconstruction video -----------------------------
 
     def load_masks_for_video(
@@ -454,7 +532,7 @@ class AgPi3:
         """Process all videos in a split (optionally restricted by an allowlist)."""
         video_id_list = sorted(os.listdir(self.root_dir_path))
 
-        video_id_list = ["A015X.mp4"]
+        video_id_list = ["0DJ6R.mp4"]
 
         # Filter by naming convention and split
         filtered: List[str] = []
@@ -469,7 +547,7 @@ class AgPi3:
             return
 
         for video_id in tqdm(filtered, desc=f"Split {split}"):
-            self.infer_grounded_dynamic_video(video_id, **kwargs)
+            self.visualize_grounded_dynamic_video(video_id, **kwargs)
 
 def _parse_split(s: str) -> str:
     valid = {"04", "59", "AD", "EH", "IL", "MP", "QT", "UZ"}
@@ -513,24 +591,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--static_scene_dir_path",
         type=str,
-        default="/data2/rohith/ag/ag4D/static_scenes/pi3",
+        default="/data3/rohith/ag/ag4D/static_scenes/pi3_static",
         help="Path to output directory where predictions folders live (e.g., <video>_10/).",
     )
     parser.add_argument(
         "--dynamic_scene_dir_path",
         type=str,
-        default="/data3/rohith/ag/ag4D/static_scenes/pi3_full"
+        default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
     )
     parser.add_argument(
         "--grounded_dynamic_scene_dir_path",
         type=str,
-        default="/data3/rohith/ag/ag4D/static_scenes/pi3_grounded"
+        default="/data2/rohith/ag/ag4D/dynamic_scenes/pi3_grounded_dynamic"
     )
     # Selection
     parser.add_argument(
         "--split",
         type=_parse_split,
-        default="AD",
+        default="04",
         help="Shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}.",
     )
     parser.add_argument(
