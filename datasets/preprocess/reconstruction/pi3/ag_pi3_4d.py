@@ -248,8 +248,9 @@ class AgPi3:
         # ---- Precompute per-frame MERGED with static ----
         grounded_P: List[np.ndarray] = []
         grounded_C: List[np.ndarray] = []
+        updated_poses: List[np.ndarray] = []
         for i in tqdm(range(S), desc=f"[viz] Merging frames for {video_id}"):
-            Pi, Ci = ground_dynamic_scene_to_static_scene(
+            Pi, Ci, updated_pose = ground_dynamic_scene_to_static_scene(
                 dynamic_scene_predictions,
                 static_P, static_C,
                 frame_idx=i,
@@ -258,6 +259,7 @@ class AgPi3:
             )
             grounded_P.append(Pi)
             grounded_C.append(Ci)
+            updated_poses.append(updated_pose)
 
             rr.set_time_sequence("frame", i)
 
@@ -275,6 +277,7 @@ class AgPi3:
         dynamic_scene_predictions_grounded = dynamic_scene_predictions.copy()
         dynamic_scene_predictions_grounded['grounded_points'] = grounded_P
         dynamic_scene_predictions_grounded['grounded_colors'] = grounded_C
+        dynamic_scene_predictions_grounded['updated_poses'] = updated_poses
 
         with open(grounded_dynamic_scene_pred_path, 'wb') as f:
             pickle.dump(dynamic_scene_predictions_grounded, f)

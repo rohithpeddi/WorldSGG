@@ -200,17 +200,18 @@ class AgPi3:
             # ---- Precompute per-frame MERGED with static ----
             grounded_P: List[np.ndarray] = [None] * S
             grounded_C: List[np.ndarray] = [None] * S
-
+            updated_poses: List[np.ndarray] = [None] * S
             def _merge_one(idx: int):
                 # Read-only access; no mutation of shared arrays
-                Pi, Ci = ground_dynamic_scene_to_static_scene(
+                Pi, Ci, updated_pose = ground_dynamic_scene_to_static_scene(
                     dynamic_predictions,
                     static_P, static_C,
                     frame_idx=idx,
                     conf_min=conf_min,
                     dedup_voxel=dedup_voxel,
                 )
-                return idx, Pi, Ci
+                assert updated_pose is not None
+                return idx, Pi, Ci, updated_pose
 
             # Reasonable default: leave 1 core free; cap to avoid oversubscription
             max_workers = min(max(1, (os.cpu_count() or 4) - 1), 16)
@@ -219,14 +220,16 @@ class AgPi3:
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 futures = [ex.submit(_merge_one, i) for i in range(S)]
                 for fut in tqdm(as_completed(futures), total=S, desc=desc):
-                    idx, Pi, Ci = fut.result()
+                    idx, Pi, Ci, updated_pose = fut.result()
                     grounded_P[idx] = Pi
                     grounded_C[idx] = Ci
+                    updated_poses[idx] = updated_pose
 
             # Clone the dynamic scene predictions and add grounded points and grounded colors and store them as a new npz file
             dynamic_scene_predictions_grounded = dynamic_predictions.copy()
             dynamic_scene_predictions_grounded['grounded_points'] = grounded_P
             dynamic_scene_predictions_grounded['grounded_colors'] = grounded_C
+            dynamic_scene_predictions_grounded['updated_camera_poses'] = np.array(updated_poses)
 
             with open(grounded_dynamic_scene_pred_path, 'wb') as f:
                 pickle.dump(dynamic_scene_predictions_grounded, f)

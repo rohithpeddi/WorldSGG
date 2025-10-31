@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
-from typing import Dict, Tuple
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import matplotlib
 import numpy as np
@@ -567,14 +566,10 @@ def ground_dynamic_scene_to_static_scene(
         tgt_sample_max: int = 100000,  # we may still subsample static for speed
         dynamic_voxel: Optional[float] = 0.01,
         merge_voxel: Optional[float] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Register the dynamic points of a single frame to the static background via ICP,
-    then return ONLY the grounded dynamic cloud (discard the static).
-
-    Returns:
-        dyn_P (N,3) float32, dyn_C (N,3) uint8
-    """
+        camera_pose: Optional[np.ndarray] = None,   # pose for this frame
+        pose_convention: str = "c2w",               # "c2w" or "w2c"
+        return_pose: bool = True,                   # return updated pose
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     # ---------- Helpers ----------
     def _weighted_rigid_fit(A: np.ndarray, B: np.ndarray, w: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
         """Weighted Kabsch: find R,t minimizing sum_i w_i || R A_i + t - B_i ||^2."""
@@ -598,6 +593,20 @@ def ground_dynamic_scene_to_static_scene(
     def _apply(R: np.ndarray, t: np.ndarray, X: np.ndarray) -> np.ndarray:
         return (R @ X.T).T + t[None, :]
 
+    def _to_4x4(T: np.ndarray) -> np.ndarray:
+        if T.shape == (4, 4):
+            return T.astype(np.float64)
+        if T.shape == (3, 4):
+            T4 = np.eye(4, dtype=np.float64)
+            T4[:3, :4] = T
+            return T4
+        raise ValueError(f"camera_pose must be (4,4) or (3,4), got {T.shape}")
+
+    def _to_like(T_ref: Optional[np.ndarray], T4: np.ndarray) -> np.ndarray:
+        if T_ref is None:
+            return T4
+        return T4[:3, :4] if T_ref.shape == (3, 4) else T4
+
     # ---------- Prepare frame data ----------
     images = _ensure_nhwc(predictions["images"])   # (S,H,W,3)
     points = predictions["points"]                 # (S,H,W,3)
@@ -606,6 +615,13 @@ def ground_dynamic_scene_to_static_scene(
     pts_f = points[frame_idx]  # (H,W,3)
     img_f = images[frame_idx]  # (H,W,3)
     H, W = pts_f.shape[:2]
+
+    # Try to fetch camera pose if not supplied
+    pose_in = camera_pose
+    if pose_in is None:
+        cam_poses = predictions.get("camera_poses", None)
+        if cam_poses is not None:
+            pose_in = cam_poses[frame_idx]
 
     # Normalize confidence to (H,W)
     if conf is None:
@@ -642,9 +658,12 @@ def ground_dynamic_scene_to_static_scene(
 
     # Early outs
     if src_full.shape[0] == 0:
-        return np.empty((0, 3), np.float32), np.empty((0, 3), np.uint8)
+        updated_pose = None
+        if pose_in is not None:
+            updated_pose = _to_like(pose_in, _to_4x4(pose_in))  # identity
+        return src_full.astype(np.float32), col_full.astype(np.uint8), (updated_pose if return_pose else None)
 
-    # If no static target, we cannot register; just (optionally) voxel-reduce and return the raw dynamic
+    # If no static target, we cannot register; just (optionally) voxel-reduce and return raw dynamic
     if static_points is None or static_points.shape[0] == 0:
         dyn_P = src_full.copy()
         dyn_C = col_full.copy()
@@ -655,14 +674,13 @@ def ground_dynamic_scene_to_static_scene(
             vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
             uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
             G = uniq_keys.shape[0]
-            counts = np.bincount(inv, minlength=G).astype(np.float32)
+            counts = np.bincount(inv, minlength=G).astype(np.float32); counts[counts == 0] = 1.0
             sum_x = np.bincount(inv, weights=dyn_P[:, 0], minlength=G)
             sum_y = np.bincount(inv, weights=dyn_P[:, 1], minlength=G)
             sum_z = np.bincount(inv, weights=dyn_P[:, 2], minlength=G)
             sum_r = np.bincount(inv, weights=dyn_C[:, 0].astype(np.float32), minlength=G)
             sum_g = np.bincount(inv, weights=dyn_C[:, 1].astype(np.float32), minlength=G)
             sum_b = np.bincount(inv, weights=dyn_C[:, 2].astype(np.float32), minlength=G)
-            counts[counts == 0] = 1.0
             dyn_P = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
             dyn_C = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
         if merge_voxel is not None and dyn_P.size:
@@ -670,17 +688,21 @@ def ground_dynamic_scene_to_static_scene(
             vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
             uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
             G = uniq_keys.shape[0]
-            counts = np.bincount(inv, minlength=G).astype(np.float32)
+            counts = np.bincount(inv, minlength=G).astype(np.float32); counts[counts == 0] = 1.0
             sum_x = np.bincount(inv, weights=dyn_P[:, 0], minlength=G)
             sum_y = np.bincount(inv, weights=dyn_P[:, 1], minlength=G)
             sum_z = np.bincount(inv, weights=dyn_P[:, 2], minlength=G)
             sum_r = np.bincount(inv, weights=dyn_C[:, 0].astype(np.float32), minlength=G)
             sum_g = np.bincount(inv, weights=dyn_C[:, 1].astype(np.float32), minlength=G)
             sum_b = np.bincount(inv, weights=dyn_C[:, 2].astype(np.float32), minlength=G)
-            counts[counts == 0] = 1.0
             dyn_P = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
             dyn_C = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
-        return dyn_P.astype(np.float32), dyn_C.astype(np.uint8)
+
+        # Pose unchanged if we didn't ICP
+        updated_pose = None
+        if pose_in is not None:
+            updated_pose = _to_like(pose_in, _to_4x4(pose_in))  # identity
+        return dyn_P.astype(np.float32), dyn_C.astype(np.uint8), (updated_pose if return_pose else None)
 
     # ---------- Build static target (optionally subsampled for speed) ----------
     if static_points.shape[0] > tgt_sample_max:
@@ -737,14 +759,13 @@ def ground_dynamic_scene_to_static_scene(
         vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
         uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
         G = uniq_keys.shape[0]
-        counts = np.bincount(inv, minlength=G).astype(np.float32)
+        counts = np.bincount(inv, minlength=G).astype(np.float32); counts[counts == 0] = 1.0
         sum_x = np.bincount(inv, weights=dyn_P[:, 0], minlength=G)
         sum_y = np.bincount(inv, weights=dyn_P[:, 1], minlength=G)
         sum_z = np.bincount(inv, weights=dyn_P[:, 2], minlength=G)
         sum_r = np.bincount(inv, weights=dyn_C[:, 0].astype(np.float32), minlength=G)
         sum_g = np.bincount(inv, weights=dyn_C[:, 1].astype(np.float32), minlength=G)
         sum_b = np.bincount(inv, weights=dyn_C[:, 2].astype(np.float32), minlength=G)
-        counts[counts == 0] = 1.0
         dyn_P = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
         dyn_C = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
 
@@ -753,19 +774,38 @@ def ground_dynamic_scene_to_static_scene(
         vox_keys = np.ascontiguousarray(vox).view([('', vox.dtype)] * 3).ravel()
         uniq_keys, inv = np.unique(vox_keys, return_inverse=True)
         G = uniq_keys.shape[0]
-        counts = np.bincount(inv, minlength=G).astype(np.float32)
+        counts = np.bincount(inv, minlength=G).astype(np.float32); counts[counts == 0] = 1.0
         sum_x = np.bincount(inv, weights=dyn_P[:, 0], minlength=G)
         sum_y = np.bincount(inv, weights=dyn_P[:, 1], minlength=G)
         sum_z = np.bincount(inv, weights=dyn_P[:, 2], minlength=G)
         sum_r = np.bincount(inv, weights=dyn_C[:, 0].astype(np.float32), minlength=G)
         sum_g = np.bincount(inv, weights=dyn_C[:, 1].astype(np.float32), minlength=G)
         sum_b = np.bincount(inv, weights=dyn_C[:, 2].astype(np.float32), minlength=G)
-        counts[counts == 0] = 1.0
         dyn_P = np.stack([sum_x / counts, sum_y / counts, sum_z / counts], axis=1)
         dyn_C = np.stack([sum_r / counts, sum_g / counts, sum_b / counts], axis=1).astype(np.uint8)
 
-    return dyn_P.astype(np.float32), dyn_C.astype(np.uint8)
+    # ---------- Build ICP transform as 4x4 and update camera pose ----------
+    T_icp = np.eye(4, dtype=np.float64)
+    T_icp[:3, :3] = R_total
+    T_icp[:3, 3]  = t_total
 
+    updated_pose = None
+    if pose_in is not None:
+        T_in4 = _to_4x4(np.asarray(pose_in))
+        if pose_convention.lower() == "c2w":
+            # points: X'_W = T_icp X_W  =>  pose: T'_cw = T_icp T_cw
+            T_out4 = T_icp @ T_in4
+        elif pose_convention.lower() == "w2c":
+            # points: X'_W = T_icp X_W  =>  extrinsic: E'_wc = E_wc T_icp^{-1}
+            T_out4 = T_in4 @ np.linalg.inv(T_icp)
+        else:
+            raise ValueError("pose_convention must be 'c2w' or 'w2c'")
+        updated_pose = _to_like(np.asarray(pose_in), T_out4).astype(np.float64)
+
+    dyn_P = dyn_P.astype(np.float32)
+    dyn_C = dyn_C.astype(np.uint8)
+
+    return dyn_P, dyn_C, updated_pose
 
 
 def merge_static_with_frame(
