@@ -1,13 +1,15 @@
 import argparse
 import gc
 import os
+import pickle
+from typing import List
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
 from datasets.preprocess.reconstruction.pi3.recon_utils import get_video_belongs_to_split, \
-    predictions_to_glb_with_static
+    predictions_to_glb_with_static, ground_dynamic_scene_to_static_scene
 from pi3.models.pi3 import Pi3
 from pi3.utils.basic import load_images_as_tensor
 from pi3.utils.geometry import depth_edge
@@ -21,6 +23,7 @@ class AgPi3:
             dynamic_root_dir_path,
             static_output_dir_path,
             dynamic_output_dir_path,
+            grounded_dynamic_output_dir_path,
             frame_annotated_dir_path=None,
     ):
         self.model = None
@@ -33,6 +36,8 @@ class AgPi3:
         os.makedirs(self.dynamic_output_dir_path, exist_ok=True)
 
         self.frame_annotated_dir_path = frame_annotated_dir_path
+        self.grounded_dynamic_scene_dir_path = grounded_dynamic_output_dir_path
+        os.makedirs(self.grounded_dynamic_scene_dir_path, exist_ok=True)
         self.sampled_frames_idx_root_dir = "/data/rohith/ag/sampled_frames_idx"
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -131,6 +136,9 @@ class AgPi3:
 
     def infer_video(self, video_id, conf_thres=10.0, conf_static=0.1):
         video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
+        grounded_dynamic_scene_pred_path = os.path.join(
+            self.grounded_dynamic_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions_grounded.pkl"
+        )
         annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
         annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
         annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
@@ -184,15 +192,42 @@ class AgPi3:
                 (f"Predictions shape mismatch between static {static_predictions['points'].shape} "
                  f"and dynamic {dynamic_predictions['points'].shape} scenes for video {video_id}.")
 
-        # Cleanup
-        del static_predictions
-        del dynamic_predictions
+            S, H, W = dynamic_predictions["points"].shape[:3]
+
+            # ---- Precompute per-frame MERGED with static ----
+            grounded_P: List[np.ndarray] = []
+            grounded_C: List[np.ndarray] = []
+            for i in tqdm(range(S), desc=f"[viz] Merging frames for {video_id}"):
+                Pi, Ci = ground_dynamic_scene_to_static_scene(
+                    dynamic_predictions,
+                    static_P, static_C,
+                    frame_idx=i,
+                    conf_min=float(0.01),
+                    dedup_voxel=0.02,
+                )
+                grounded_P.append(Pi)
+                grounded_C.append(Ci)
+
+            # Clone the dynamic scene predictions and add grounded points and grounded colors and store them as a new npz file
+            dynamic_scene_predictions_grounded = dynamic_predictions.copy()
+            dynamic_scene_predictions_grounded['grounded_points'] = grounded_P
+            dynamic_scene_predictions_grounded['grounded_colors'] = grounded_C
+
+            with open(grounded_dynamic_scene_pred_path, 'wb') as f:
+                pickle.dump(dynamic_scene_predictions_grounded, f)
+
+            print(f"[viz] Saved grounded dynamic scene predictions to {grounded_dynamic_scene_pred_path}")
+
+            # Cleanup
+            del static_predictions
+            del dynamic_predictions
+
         gc.collect()
         torch.cuda.empty_cache()
 
     def infer_all_videos(self, split):
-        # video_id_list = os.listdir(self.static_root_dir_path)
-        video_id_list = ["0DJ6R.mp4"]
+        video_id_list = os.listdir(self.static_root_dir_path)
+        # video_id_list = ["0DJ6R.mp4"]
         for video_id in tqdm(video_id_list):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
@@ -246,6 +281,11 @@ def parse_args():
         "--dynamic_output_dir_path", type=str, default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
         help="Path to output directory where results will be saved."
     )
+    parser.add_argument(
+        "--grounded_dynamic_output_dir_path",
+        type=str,
+        default="/data2/rohith/ag/ag4D/dynamic_scenes/pi3_grounded_dynamic"
+    )
 
     parser.add_argument(
         "--split", type=_parse_split, default="04",
@@ -262,6 +302,7 @@ def main():
         dynamic_root_dir_path=args.dynamic_root_dir_path,
         static_output_dir_path=args.static_output_dir_path,
         dynamic_output_dir_path=args.dynamic_output_dir_path,
+        grounded_dynamic_output_dir_path=args.grounded_dynamic_output_dir_path,
         frame_annotated_dir_path=args.frames_annotated_dir_path,
     )
     ag_pi3.infer_all_videos(args.split)

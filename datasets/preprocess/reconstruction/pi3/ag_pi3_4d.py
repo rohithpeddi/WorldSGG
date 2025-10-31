@@ -482,7 +482,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Visualize static + per-frame 3D points with Rerun (AG-Pi3 unified)."
     )
-
     # Paths
     parser.add_argument(
         "--root_dir_path",
@@ -524,7 +523,6 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="/data3/rohith/ag/ag4D/static_scenes/pi3_grounded"
     )
-
     # Selection
     parser.add_argument(
         "--split",
