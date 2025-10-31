@@ -13,6 +13,7 @@ from datasets.preprocess.reconstruction.pi3.recon_utils import get_video_belongs
 from pi3.models.pi3 import Pi3
 from pi3.utils.basic import load_images_as_tensor
 from pi3.utils.geometry import depth_edge
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class AgPi3:
@@ -134,11 +135,13 @@ class AgPi3:
 
         return imgs
 
-    def infer_video(self, video_id, conf_thres=10.0, conf_static=0.1):
+    def infer_video(self, video_id, conf_thres=10.0, conf_static=0.1, dedup_voxel=0.02, conf_min=0.01):
         video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
         grounded_dynamic_scene_pred_path = os.path.join(
             self.grounded_dynamic_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions_grounded.pkl"
         )
+        os.makedirs(os.path.dirname(grounded_dynamic_scene_pred_path), exist_ok=True)
+
         annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
         annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
         annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
@@ -195,18 +198,30 @@ class AgPi3:
             S, H, W = dynamic_predictions["points"].shape[:3]
 
             # ---- Precompute per-frame MERGED with static ----
-            grounded_P: List[np.ndarray] = []
-            grounded_C: List[np.ndarray] = []
-            for i in tqdm(range(S), desc=f"[viz] Merging frames for {video_id}"):
+            grounded_P: List[np.ndarray] = [None] * S
+            grounded_C: List[np.ndarray] = [None] * S
+
+            def _merge_one(idx: int):
+                # Read-only access; no mutation of shared arrays
                 Pi, Ci = ground_dynamic_scene_to_static_scene(
                     dynamic_predictions,
                     static_P, static_C,
-                    frame_idx=i,
-                    conf_min=float(0.01),
-                    dedup_voxel=0.02,
+                    frame_idx=idx,
+                    conf_min=conf_min,
+                    dedup_voxel=dedup_voxel,
                 )
-                grounded_P.append(Pi)
-                grounded_C.append(Ci)
+                return idx, Pi, Ci
+
+            # Reasonable default: leave 1 core free; cap to avoid oversubscription
+            max_workers = min(max(1, (os.cpu_count() or 4) - 1), 16)
+            desc = f"[viz] Merging frames for {video_id} (parallel x{max_workers})"
+
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = [ex.submit(_merge_one, i) for i in range(S)]
+                for fut in tqdm(as_completed(futures), total=S, desc=desc):
+                    idx, Pi, Ci = fut.result()
+                    grounded_P[idx] = Pi
+                    grounded_C[idx] = Ci
 
             # Clone the dynamic scene predictions and add grounded points and grounded colors and store them as a new npz file
             dynamic_scene_predictions_grounded = dynamic_predictions.copy()
@@ -226,8 +241,8 @@ class AgPi3:
         torch.cuda.empty_cache()
 
     def infer_all_videos(self, split):
-        video_id_list = os.listdir(self.static_root_dir_path)
-        # video_id_list = ["0DJ6R.mp4"]
+        # video_id_list = os.listdir(self.static_root_dir_path)
+        video_id_list = ["0DJ6R.mp4"]
         for video_id in tqdm(video_id_list):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
