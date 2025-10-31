@@ -244,8 +244,8 @@ class AgPi3:
         torch.cuda.empty_cache()
 
     def infer_all_videos(self, split):
-        # video_id_list = os.listdir(self.static_root_dir_path)
-        video_id_list = ["0DJ6R.mp4"]
+        video_id_list = os.listdir(self.static_root_dir_path)
+        # video_id_list = ["0DJ6R.mp4"]
         for video_id in tqdm(video_id_list):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
