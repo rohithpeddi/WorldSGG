@@ -295,14 +295,20 @@ class AgPi3:
 
     def __init__(
             self,
-            root_dir_path, # data/rohith/ag/ag4D/static_frames
-            output_dir_path=None,
+            static_root_dir_path,
+            dynamic_root_dir_path,
+            static_output_dir_path,
+            dynamic_output_dir_path,
             frame_annotated_dir_path=None,
     ):
         self.model = None
-        self.root_dir_path = root_dir_path
-        self.output_dir_path = output_dir_path if output_dir_path is not None else root_dir_path
-        os.makedirs(self.output_dir_path, exist_ok=True)
+        self.static_root_dir_path = static_root_dir_path
+        self.dynamic_root_dir_path = dynamic_root_dir_path
+
+        self.static_output_dir_path = static_output_dir_path
+        os.makedirs(self.static_output_dir_path, exist_ok=True)
+        self.dynamic_output_dir_path = dynamic_output_dir_path
+        os.makedirs(self.dynamic_output_dir_path, exist_ok=True)
 
         self.frame_annotated_dir_path = frame_annotated_dir_path
         self.sampled_frames_idx_root_dir = "/data/rohith/ag/sampled_frames_idx"
@@ -325,38 +331,7 @@ class AgPi3:
         ).to(self.device)  # (N, 3, H, W)
         return imgs
 
-    def infer_video(self, video_id, conf_thres=10.0):
-        data_path = f'{self.root_dir_path}/{video_id}'
-        video_save_dir = os.path.join(self.output_dir_path, f"{video_id[:-4]}_{int(conf_thres)}")
-
-        if os.path.exists(os.path.join(video_save_dir, "predictions.npz")):
-            print(f"Skipping video {video_id} as output already exists.")
-            return
-
-        os.makedirs(video_save_dir, exist_ok=True)
-
-        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
-        annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
-        annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
-        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
-
-        # Get the mapping for sampled_frame_id and the actual frame id
-        # Now start from the sampled frame which corresponds to the first annotated frame and keep the rest of the sampled frames
-        video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir, f"{video_id[:-4]}.npy")
-        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()  # Numbers only
-
-        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
-        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, len(video_sampled_frame_id_list)))
-
-        # NOTE: Use this for full frames not the sampled frames (Comment it for the other case)
-        sample_idx = [video_sampled_frame_id_list[i] for i in sample_idx]
-
-        imgs = self.preprocess_image_list(
-            data_path,
-            is_video=False,
-            video_id=video_id,
-            sample_idx=sample_idx
-        )
+    def fetch_predictions(self, imgs):
         print("Running model inference...")
         with torch.no_grad():
             with torch.amp.autocast('cuda', dtype=self.dtype):
@@ -380,22 +355,106 @@ class AgPi3:
             if isinstance(predictions[key], torch.Tensor):
                 predictions[key] = predictions[key].cpu().numpy().squeeze(0)  # remove batch dimension
 
-        torch.cuda.empty_cache()
+        return predictions
 
-        prediction_save_path = os.path.join(video_save_dir, "predictions.npz")
-        np.savez(prediction_save_path, **predictions)
+    def infer_static_scene(
+            self,
+            video_id,
+            conf_thres=10.0,
+            sample_idx=None,
+            video_sampled_frame_id_list=None
+    ):
+        data_path = f'{self.static_root_dir_path}/{video_id}'
+        video_save_dir = os.path.join(self.static_output_dir_path, f"{video_id[:-4]}_{int(conf_thres)}")
+        if os.path.exists(os.path.join(video_save_dir, "predictions.npz")):
+            print(f"Skipping video {video_id} static scene creation as output already exists.")
+            return None
+        os.makedirs(video_save_dir, exist_ok=True)
 
-        glbfile = os.path.join(video_save_dir, f"{video_id[:-4]}.glb")
-        glbscene = predictions_to_glb(predictions, conf_thres=conf_thres, filter_by_frames="all", show_cam=True)
-        glbscene.export(file_obj=glbfile)
+        imgs = self.preprocess_image_list(
+            data_path,
+            is_video=False,
+            video_id=video_id,
+            sample_idx=sample_idx
+        )
+
+        return imgs
+
+    def infer_dynamic_scene(
+            self,
+            video_id,
+            conf_thres=10.0,
+            sample_idx=None,
+            video_sampled_frame_id_list=None
+    ):
+        data_path = f'{self.dynamic_root_dir_path}/{video_id}'
+        video_save_dir = os.path.join(self.dynamic_output_dir_path, f"{video_id[:-4]}_{int(conf_thres)}")
+
+        if os.path.exists(os.path.join(video_save_dir, "predictions.npz")):
+            print(f"Skipping video {video_id} as output already exists.")
+            return
+        os.makedirs(video_save_dir, exist_ok=True)
+
+        # NOTE: Use this for full frames not the sampled frames (Comment it for the other case)
+        sample_idx = [video_sampled_frame_id_list[i] for i in sample_idx]
+
+        imgs = self.preprocess_image_list(
+            data_path,
+            is_video=False,
+            video_id=video_id,
+            sample_idx=sample_idx
+        )
+
+        return imgs
+
+    def infer_video(self, video_id, conf_thres=10.0):
+        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
+        annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
+        annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
+        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
+        annotated_last_frame_id = int(annotated_frame_id_list[-1][:-4])
+
+        # Get the mapping for sampled_frame_id and the actual frame id
+        # Now start from the sampled frame which corresponds to the first annotated frame and keep the rest of the sampled frames
+        video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir, f"{video_id[:-4]}.npy")
+        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()  # Numbers only
+
+        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
+        an_last_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_last_frame_id)
+        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, an_last_id_in_vid_sam_frame_id_list + 1))
+
+        # Infer static scene
+        static_images = self.infer_static_scene(video_id, conf_thres=conf_thres, sample_idx=sample_idx, video_sampled_frame_id_list=video_sampled_frame_id_list)
+        if static_images is not None:
+            static_predictions = self.fetch_predictions(static_images)
+            static_video_save_dir = os.path.join(self.static_output_dir_path, f"{video_id[:-4]}_{int(conf_thres)}")
+
+            prediction_save_path = os.path.join(static_video_save_dir, "predictions.npz")
+            np.savez(prediction_save_path, **static_predictions)
+
+            glbfile = os.path.join(static_video_save_dir, f"{video_id[:-4]}.glb")
+            glbscene = predictions_to_glb(static_predictions, conf_thres=conf_thres, filter_by_frames="all", show_cam=True)
+            glbscene.export(file_obj=glbfile)
+        else:
+            print(f"[{video_id}] Static scene for video already exists. Skipping static scene creation.")
+
+        # Infer dynamic scene
+        dynamic_images = self.infer_dynamic_scene(video_id, conf_thres=conf_thres, sample_idx=sample_idx, video_sampled_frame_id_list=video_sampled_frame_id_list)
+        if dynamic_images is not None:
+            dynamic_predictions = self.fetch_predictions(dynamic_images)
+            dynamic_video_save_dir = os.path.join(self.dynamic_output_dir_path, f"{video_id[:-4]}_{int(conf_thres)}")
+
+            prediction_save_path = os.path.join(dynamic_video_save_dir, "predictions.npz")
+            np.savez(prediction_save_path, **dynamic_predictions)
 
         # Cleanup
-        del predictions
+        del static_predictions
         gc.collect()
         torch.cuda.empty_cache()
 
     def infer_all_videos(self, split):
         video_id_list = os.listdir(self.root_dir_path)
+        video_id_list = ["1YDCG.mp4"]
         for video_id in tqdm(video_id_list):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
@@ -420,26 +479,36 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Sample frames from videos based on homography-overlap filtering."
     )
-    parser.add_argument(
-        "--root_dir_path", type=str, default="/data/rohith/ag/frames",
-        help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
-    )
+
+    # Note: Use this for in-painting of frames
     # parser.add_argument(
     #     "--root_dir_path", type=str, default="/data/rohith/ag/ag4D/static_frames",
     #     help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
     # )
-    # parser.add_argument(
-    #     "--root_dir_path", type=str, default="/data/rohith/ag/segmentation/masks/rectangular_overlayed_frames",
-    #     help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
-    # )
+
+    parser.add_argument(
+        "--static_root_dir_path", type=str, default="/data/rohith/ag/segmentation/masks/rectangular_overlayed_frames",
+        help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
+    )
+    parser.add_argument(
+        "--dynamic_root_dir_path", type=str, default="/data/rohith/ag/frames",
+        help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
+    )
+
     parser.add_argument(
         "--frames_annotated_dir_path", type=str, default="/data/rohith/ag/frames_annotated",
         help="Path to directory containing annotated frames (with masks)."
     )
+
     parser.add_argument(
-        "--output_dir_path", type=str, default="/data3/rohith/ag/ag4D/static_scenes/pi3_full",
+        "--static_output_dir_path", type=str, default="/data3/rohith/ag/ag4D/static_scenes/pi3_static",
         help="Path to output directory where results will be saved."
     )
+    parser.add_argument(
+        "--dynamic_output_dir_path", type=str, default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
+        help="Path to output directory where results will be saved."
+    )
+
     parser.add_argument(
         "--split", type=_parse_split, default="04",
         help="Optional shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}. "

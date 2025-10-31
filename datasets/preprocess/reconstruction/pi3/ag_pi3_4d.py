@@ -1293,9 +1293,12 @@ class AgPi3:
             torch.cuda.empty_cache()
 
     # --------- Batch over a split ---------
+
     def verify_static_and_dynamic_scenes_exist(self, video_id: str) -> bool:
-        static_scene_pred_path = os.path.join(self.static_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
-        dynamic_scene_pred_path = os.path.join(self.dynamic_scene_dir_path, f"{video_id[:-4]}_{10}", "predictions.npz")
+        static_scene_pred_path = os.path.join(self.static_scene_dir_path, f"{video_id[:-4]}_{10}",
+                                              "predictions.npz")
+        dynamic_scene_pred_path = os.path.join(self.dynamic_scene_dir_path, f"{video_id[:-4]}_{10}",
+                                               "predictions.npz")
         if not os.path.exists(static_scene_pred_path) or not os.path.exists(dynamic_scene_pred_path):
             raise FileNotFoundError(f"predictions.npz not found for {video_id}")
 
@@ -1320,21 +1323,63 @@ class AgPi3:
 
         return True
 
-    def verify_all_videos(self):
-        """Verify that all videos have matching static and dynamic scenes."""
+    def verify_all_videos_parallel(
+            self,
+            *,
+            max_workers: Optional[int] = None,
+            chunksize: int = 16,
+            conf_tag: int = 10,
+            key: str = "points",
+    ) -> None:
+        """
+        Fast, parallel verifier. Uses processes (good for .npz decompression) and reads only array headers.
+        """
         video_id_list = sorted(os.listdir(self.root_dir_path))
-        good_counter = 0
-        for video_id in tqdm(video_id_list, desc="Verifying videos"):
-            try:
-                if self.verify_static_and_dynamic_scenes_exist(video_id):
-                    good_counter += 1
-            except FileNotFoundError as e:
-                print(f"[warn] {e}")
-            except Exception as e:
-                print(f"[error] Unexpected error for video {video_id}: {e}")
 
-        print(f"[verify] {good_counter}/{len(video_id_list)} videos have matching static and dynamic scenes.")
+        # Sensible default: don't oversubscribe heavily; many workloads are I/O bound too.
+        if max_workers is None:
+            cpu = os.cpu_count() or 1
+            max_workers = min(32, max(1, cpu))
 
+        print(f"[verify] Running in parallel with {max_workers} workers (chunksize={chunksize})")
+
+        worker = partial(
+            _verify_worker,
+            static_scene_dir_path=self.static_scene_dir_path,
+            dynamic_scene_dir_path=self.dynamic_scene_dir_path,
+            conf_tag=conf_tag,
+            key=key,
+        )
+
+        good = 0
+        warnings = []
+        errors = []
+
+        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(worker, vid): vid for vid in video_id_list}
+
+            for fut in tqdm(as_completed(futures), total=len(futures), desc="Verifying videos (parallel)"):
+                res = fut.result()
+                if res.get("ok"):
+                    good += 1
+                elif "warning" in res:
+                    warnings.append(res["warning"])
+                elif "error" in res:
+                    errors.append(res["error"])
+
+        # Print warnings/errors once, neatly (avoids interleaved prints from many processes)
+        for w in warnings:
+            print(w)
+        for e in errors:
+            print(e)
+
+        print(f"[verify] {good}/{len(video_id_list)} videos have matching static and dynamic scenes."
+              f" ({len(warnings)} warnings, {len(errors)} errors)")
+
+    # If you want to replace the original method name:
+    def verify_all_videos(self, **kwargs):
+        """Parallel version; keep signature compatibility by forwarding kwargs."""
+        return self.verify_all_videos_parallel(**kwargs)
 
     def infer_all_videos(
             self,
@@ -1368,6 +1413,86 @@ class AgPi3:
 # ---------------------------
 # CLI
 # ---------------------------
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
+from typing import Dict, Optional, Tuple
+from zipfile import ZipFile
+
+import numpy as np
+from numpy.lib.format import read_magic, read_array_header_1_0, read_array_header_2_0
+from tqdm import tqdm
+
+# ---------- Ultra-lightweight header reader (no full array load) ----------
+def _peek_npy_shape(fileobj) -> Tuple[int, ...]:
+    """Read only the .npy header to get the shape; avoids loading the array."""
+    major_minor = read_magic(fileobj)  # (major, minor)
+    if major_minor == (1, 0):
+        shape, _, _ = read_array_header_1_0(fileobj)
+        return shape
+    elif major_minor == (2, 0):
+        shape, _, _ = read_array_header_2_0(fileobj)
+        return shape
+    else:
+        # Rare (npy 3.0 for >4GB headers). Fallback to full np.load for this file only.
+        return None
+
+def _get_array_shape_from_npz(npz_path: str, key: str = "points") -> Tuple[int, ...]:
+    """Get array shape from an .npz by reading the embedded .npy header only."""
+    key_npy = key if key.endswith(".npy") else f"{key}.npy"
+    with ZipFile(npz_path) as zf:
+        if key_npy not in zf.namelist():
+            raise KeyError(f"Key '{key}' not found in {npz_path}")
+        with zf.open(key_npy, "r") as fobj:
+            shape = _peek_npy_shape(fobj)
+            if shape is not None:
+                return shape
+
+    # Fallback for unusual headers: load only this array
+    with np.load(npz_path, allow_pickle=True, mmap_mode=None) as npz:
+        return npz[key].shape
+
+# ---------- Worker run in a separate process ----------
+def _verify_worker(
+        video_id: str,
+        static_scene_dir_path: str,
+        dynamic_scene_dir_path: str,
+        conf_tag: int = 10,
+        key: str = "points",
+) -> Dict:
+    """
+    Verify a single video in isolation (safe for multiprocessing).
+    Returns a small dict with status and optional warning/error text.
+    """
+    try:
+        base = video_id[:-4] if len(video_id) > 4 and video_id[-4] == "." else os.path.splitext(video_id)[0]
+        static_scene_pred_path = os.path.join(static_scene_dir_path, f"{base}_{conf_tag}", "predictions.npz")
+        dynamic_scene_pred_path = os.path.join(dynamic_scene_dir_path, f"{base}_{conf_tag}", "predictions.npz")
+
+        if not os.path.exists(static_scene_pred_path) or not os.path.exists(dynamic_scene_pred_path):
+            return {
+                "video_id": video_id,
+                "ok": False,
+                "warning": f"predictions.npz not found for {video_id}",
+            }
+
+        S_dyn, H_dyn, W_dyn = _get_array_shape_from_npz(dynamic_scene_pred_path, key)[:3]
+        S_stat, H_stat, W_stat = _get_array_shape_from_npz(static_scene_pred_path, key)[:3]
+
+        if (S_dyn, H_dyn, W_dyn) != (S_stat, H_stat, W_stat):
+            warn = (
+                "--------------------------------------------------------------------------------\n"
+                f"[warn] Mismatched shapes for static and dynamic scenes in video {video_id}: "
+                f"static (S={S_stat}, H={H_stat}, W={W_stat}), "
+                f"dynamic (S={S_dyn}, H={H_dyn}, W={W_dyn}). Skipping inference.\n"
+                "--------------------------------------------------------------------------------"
+            )
+            return {"video_id": video_id, "ok": False, "warning": warn}
+
+        return {"video_id": video_id, "ok": True}
+
+    except Exception as e:
+        return {"video_id": video_id, "ok": False, "error": f"[error] Unexpected error for video {video_id}: {e}"}
 
 def _parse_split(s: str) -> str:
     valid = {"04", "59", "AD", "EH", "IL", "MP", "QT", "UZ"}
@@ -1500,9 +1625,7 @@ def main() -> None:
         masks_dir_path=args.mask_dir_path,
     )
 
-    ag_pi3.verify_all_videos(
-
-    )
+    ag_pi3.verify_all_videos()
 
     # ag_pi3.infer_all_videos(
     #     split=args.split,
