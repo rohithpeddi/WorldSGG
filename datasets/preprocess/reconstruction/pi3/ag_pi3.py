@@ -6,7 +6,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from datasets.preprocess.reconstruction.pi3.recon_utils import predictions_to_glb, get_video_belongs_to_split
+from datasets.preprocess.reconstruction.pi3.recon_utils import get_video_belongs_to_split, \
+    predictions_to_glb_with_static
 from pi3.models.pi3 import Pi3
 from pi3.utils.basic import load_images_as_tensor
 from pi3.utils.geometry import depth_edge
@@ -128,7 +129,7 @@ class AgPi3:
 
         return imgs
 
-    def infer_video(self, video_id, conf_thres=10.0):
+    def infer_video(self, video_id, conf_thres=10.0, conf_static=0.1):
         video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
         annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
         annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
@@ -151,13 +152,16 @@ class AgPi3:
             static_predictions = self.fetch_predictions(static_images)
             static_video_save_dir = os.path.join(self.static_output_dir_path, f"{video_id[:-4]}_{int(conf_thres)}")
 
+            glbfile = os.path.join(static_video_save_dir, f"{video_id[:-4]}.glb")
+            glbscene, static_P, static_C = predictions_to_glb_with_static(static_predictions, conf_min=float(conf_static))
+            glbscene.export(file_obj=glbfile)
+
+            static_predictions["static_points"] = static_P
+            static_predictions["static_colors"] = static_C
+
             prediction_save_path = os.path.join(static_video_save_dir, "predictions.npz")
             np.savez(prediction_save_path, **static_predictions)
             print("--------------------------------------------------------------------------------------------")
-
-            glbfile = os.path.join(static_video_save_dir, f"{video_id[:-4]}.glb")
-            glbscene = predictions_to_glb(static_predictions, conf_thres=conf_thres, filter_by_frames="all", show_cam=True)
-            glbscene.export(file_obj=glbfile)
         else:
             print(f"[{video_id}] Static scene for video already exists. Skipping static scene creation.")
 
@@ -187,8 +191,8 @@ class AgPi3:
         torch.cuda.empty_cache()
 
     def infer_all_videos(self, split):
-        video_id_list = os.listdir(self.static_root_dir_path)
-        # video_id_list = ["0DJ6R.mp4"]
+        # video_id_list = os.listdir(self.static_root_dir_path)
+        video_id_list = ["0DJ6R.mp4"]
         for video_id in tqdm(video_id_list):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")

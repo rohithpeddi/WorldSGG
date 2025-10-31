@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Dict, Tuple
 from typing import Optional
@@ -123,7 +124,7 @@ def predictions_to_glb(
 
     scene_3d.add_geometry(point_cloud_data)
 
-    # Prepare 4x4 matrices for camera extrinsics
+    # Prepare 4x4 matrices for camera extrinsic
     num_cameras = len(camera_poses)
 
     if show_cam:
@@ -469,6 +470,7 @@ def predictions_to_glb_with_static(
         *,
         conf_min: float = 0.5,  # 0..1 threshold on predictions["conf"]
         filter_by_frames: str = "all",  # e.g. "12:..." to use only frame index 12
+        show_cam: bool = True,
 ) -> Tuple[trimesh.Scene, np.ndarray, np.ndarray]:
     """
     Build a GLB-ready trimesh.Scene from VGGT-style predictions AND return a background
@@ -485,7 +487,6 @@ def predictions_to_glb_with_static(
       static_points : (N,3) float32 background points in ORIGINAL world frame
       static_colors : (N,3) uint8   RGB colors aligned with static_points
     """
-
     print("Estimating static scene with a confidence mask threshold of:", conf_min)
 
     static_points, static_colors, verts, colors_rgb = predictions_to_colors(
@@ -497,15 +498,28 @@ def predictions_to_glb_with_static(
     point_cloud = trimesh.points.PointCloud(vertices=verts, colors=colors_rgb)
     scene_3d.add_geometry(point_cloud)
 
+    # Prepare 4x4 matrices for camera extrinsic
+    camera_poses = predictions["camera_poses"]
+    num_cameras = len(camera_poses)
+    colormap = matplotlib.colormaps.get_cmap("gist_rainbow")
+
+    if show_cam:
+        # Add camera models to the scene
+        for i in range(num_cameras):
+            camera_to_world = camera_poses[i]
+            rgba_color = colormap(i / num_cameras)
+            current_color = tuple(int(255 * x) for x in rgba_color[:3])
+            # integrate_camera_into_scene(scene_3d, camera_to_world, current_color, scene_scale)
+            integrate_camera_into_scene(scene_3d, camera_to_world, current_color, 1.)  # fixed camera size
+
     # Nice-view rotation: R = R_y(100°) @ R_x(155°)
-    align_R = Rot.from_euler("y", 100, degrees=True).as_matrix()
-    align_R = align_R @ Rot.from_euler("x", 155, degrees=True).as_matrix()
-    T = np.eye(4, dtype=np.float64)
-    T[:3, :3] = align_R
-    scene_3d.apply_transform(T)
+    align_rotation = np.eye(4)
+    align_rotation[:3, :3] = Rotation.from_euler("y", 100, degrees=True).as_matrix()  # plane rotate
+    align_rotation[:3, :3] = align_rotation[:3, :3] @ Rotation.from_euler("x", 155, degrees=True).as_matrix()  # roll
+    scene_3d.apply_transform(align_rotation)
 
     # (Optional) If you later want to visualize camera frustums/axes, add them here
-    # using cam_poses if available. Currently `show_cam` is a no-op for signature parity.
+    # using cam_poses if available. Currently, `show_cam` is a no-op for signature parity.
     # Undo the visualization rotation for the returned static points (stay in world frame)
     # static_points = static_points @ align_R.T
     return scene_3d, static_points, static_colors
@@ -1098,3 +1112,84 @@ def _log_cameras(
                 radii=0.01,  # or np.array([0.01], dtype=np.float32)
             ),
         )
+
+
+
+
+# ------------------------------------------------------------------------------------------------------------
+# ---------------------------------- VERIFICATION UTILS ---------------------------------------
+# ------------------------------------------------------------------------------------------------------------
+from numpy.lib.format import read_magic, read_array_header_1_0, read_array_header_2_0
+from typing import Dict, Tuple
+from zipfile import ZipFile
+
+# ---------- Ultra-lightweight header reader (no full array load) ----------
+def _peek_npy_shape(fileobj) -> Tuple[int, ...]:
+    """Read only the .npy header to get the shape; avoids loading the array."""
+    major_minor = read_magic(fileobj)  # (major, minor)
+    if major_minor == (1, 0):
+        shape, _, _ = read_array_header_1_0(fileobj)
+        return shape
+    elif major_minor == (2, 0):
+        shape, _, _ = read_array_header_2_0(fileobj)
+        return shape
+    else:
+        # Rare (npy 3.0 for >4GB headers). Fallback to full np.load for this file only.
+        return None
+
+def _get_array_shape_from_npz(npz_path: str, key: str = "points") -> Tuple[int, ...]:
+    """Get array shape from an .npz by reading the embedded .npy header only."""
+    key_npy = key if key.endswith(".npy") else f"{key}.npy"
+    with ZipFile(npz_path) as zf:
+        if key_npy not in zf.namelist():
+            raise KeyError(f"Key '{key}' not found in {npz_path}")
+        with zf.open(key_npy, "r") as fobj:
+            shape = _peek_npy_shape(fobj)
+            if shape is not None:
+                return shape
+
+    # Fallback for unusual headers: load only this array
+    with np.load(npz_path, allow_pickle=True, mmap_mode=None) as npz:
+        return npz[key].shape
+
+# ---------- Worker run in a separate process ----------
+def _verify_worker(
+        video_id: str,
+        static_scene_dir_path: str,
+        dynamic_scene_dir_path: str,
+        conf_tag: int = 10,
+        key: str = "points",
+) -> Dict:
+    """
+    Verify a single video in isolation (safe for multiprocessing).
+    Returns a small dict with status and optional warning/error text.
+    """
+    try:
+        base = video_id[:-4] if len(video_id) > 4 and video_id[-4] == "." else os.path.splitext(video_id)[0]
+        static_scene_pred_path = os.path.join(static_scene_dir_path, f"{base}_{conf_tag}", "predictions.npz")
+        dynamic_scene_pred_path = os.path.join(dynamic_scene_dir_path, f"{base}_{conf_tag}", "predictions.npz")
+
+        if not os.path.exists(static_scene_pred_path) or not os.path.exists(dynamic_scene_pred_path):
+            return {
+                "video_id": video_id,
+                "ok": False,
+                "warning": f"predictions.npz not found for {video_id}",
+            }
+
+        S_dyn, H_dyn, W_dyn = _get_array_shape_from_npz(dynamic_scene_pred_path, key)[:3]
+        S_stat, H_stat, W_stat = _get_array_shape_from_npz(static_scene_pred_path, key)[:3]
+
+        if (S_dyn, H_dyn, W_dyn) != (S_stat, H_stat, W_stat):
+            warn = (
+                "--------------------------------------------------------------------------------\n"
+                f"[warn] Mismatched shapes for static and dynamic scenes in video {video_id}: "
+                f"static (S={S_stat}, H={H_stat}, W={W_stat}), "
+                f"dynamic (S={S_dyn}, H={H_dyn}, W={W_dyn}). Skipping inference.\n"
+                "--------------------------------------------------------------------------------"
+            )
+            return {"video_id": video_id, "ok": False, "warning": warn}
+
+        return {"video_id": video_id, "ok": True}
+
+    except Exception as e:
+        return {"video_id": video_id, "ok": False, "error": f"[error] Unexpected error for video {video_id}: {e}"}
