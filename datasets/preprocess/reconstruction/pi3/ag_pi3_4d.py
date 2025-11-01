@@ -291,6 +291,65 @@ class AgPi3:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    def visualize_dynamic_video(
+            self,
+            video_id: str,
+            *,
+            conf_static: float = 0.1,  # confidence for static background build
+            conf_frame: float = 0.01,  # confidence for per-frame points
+            dedup_voxel: Optional[float] = 0.02,  # meters; None to disable
+            fov_y: float = 0.96,  # radians; matches your earlier default
+            spawn: bool = True,
+            log_cameras: bool = True,
+            load_from_glb: bool = False,
+            vis: bool = True,
+    ) -> None:
+        static_scene_pred_path = os.path.join(self.static_scene_dir_path, f"{video_id[:-4]}_{10}",
+                                              "predictions.npz")
+        dynamic_scene_pred_path = os.path.join(self.dynamic_scene_dir_path, f"{video_id[:-4]}_{10}",
+                                               "predictions.npz")
+        if not os.path.exists(static_scene_pred_path) or not os.path.exists(dynamic_scene_pred_path):
+            raise FileNotFoundError(f"predictions.npz not found for {video_id}")
+
+        static_scene_arr = np.load(static_scene_pred_path, allow_pickle=True, mmap_mode=None)
+
+        print("Loading static scene from predictions...")
+        dynamic_predictions = np.load(dynamic_scene_pred_path, allow_pickle=True, mmap_mode=None)
+        dynamic_pred = {k: dynamic_predictions[k] for k in dynamic_predictions.files}
+        S, H, W = dynamic_pred["points"].shape[:3]
+        print(f"[viz] {video_id}: {S} frames | HxW={H}x{W} | conf_static={conf_static} | conf_frame={conf_frame}")
+
+        # ---- Rerun setup ----
+        rr.init(f"AG-Pi3: {video_id}", spawn=spawn)
+        rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+        rr.log("world", rr.ViewCoordinates.RDF, timeless=True)
+
+        # ---- Precompute per-frame MERGED with static ----
+        for i in tqdm(range(S), desc=f"[viz] Streaming frames for {video_id}"):
+            # Dynamic points/colors for frame i
+            dyn_P, dyn_C, _, _ = predictions_to_colors(
+                dynamic_pred, conf_min=float(conf_frame), filter_by_frames=f"{i}:"
+            )
+            dyn_P = np.asarray(dyn_P, dtype=np.float32)
+            dyn_C = np.asarray(dyn_C, dtype=np.uint8)
+
+            rr.set_time_sequence("frame", i)
+            if dyn_P.size and vis:
+                rr.log(
+                    "world/frame/points_merged",
+                    rr.Points3D(
+                        positions=dyn_P.astype(np.float32),
+                        colors=dyn_C.astype(np.uint8),
+                        radii=0.01,
+                    ),
+                )
+
+
+        # Cleanup
+        del dynamic_predictions
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def visualize_grounded_dynamic_video(
             self,
@@ -532,7 +591,7 @@ class AgPi3:
         """Process all videos in a split (optionally restricted by an allowlist)."""
         video_id_list = sorted(os.listdir(self.root_dir_path))
 
-        video_id_list = ["0DJ6R.mp4"]
+        video_id_list = ["2RU6J.mp4"]
 
         # Filter by naming convention and split
         filtered: List[str] = []
@@ -547,7 +606,7 @@ class AgPi3:
             return
 
         for video_id in tqdm(filtered, desc=f"Split {split}"):
-            self.visualize_grounded_dynamic_video(video_id, **kwargs)
+            self.visualize_dynamic_video(video_id, **kwargs)
 
 def _parse_split(s: str) -> str:
     valid = {"04", "59", "AD", "EH", "IL", "MP", "QT", "UZ"}

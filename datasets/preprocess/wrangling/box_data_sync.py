@@ -301,10 +301,10 @@ def parse_ext_list(val: Optional[str]) -> Optional[Set[str]]:
 
 def main():
     p = argparse.ArgumentParser(description="Fast parallel sync between local folder and a Box folder.")
-    p.add_argument("--local_dir", required=False, default="/data2/rohith/ag/ag4D/static_scenes/pi3/")
-    p.add_argument("--box_folder_id", required=False, default="346018144786")
+    p.add_argument("--local_dir", required=False, default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic/")
+    p.add_argument("--box_folder_id", required=False, default="349043947160")
     p.add_argument("--mode", choices=["upload", "download", "sync"], default="sync")
-    p.add_argument("--workers", type=int, default=4, help="Parallel workers for up/downloading (default: 4)")
+    p.add_argument("--workers", type=int, default=10, help="Parallel workers for up/downloading (default: 4)")
     p.add_argument("--dry-run", action="store_true", help="Plan only; do not perform writes.")
     p.add_argument("--include-ext", type=str, default=None,
                    help="Comma-separated list of file extensions to include (e.g. 'mp4,mov').")
