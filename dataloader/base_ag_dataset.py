@@ -163,7 +163,6 @@ class BaseAG(Dataset):
             "licenses": []
         }
 
-
     def _fetch_object_classes(self):
         self.object_classes = [const.BACKGROUND]
         with open(os.path.join(self._data_path, const.ANNOTATIONS, const.OBJECT_CLASSES_FILE), 'r',
