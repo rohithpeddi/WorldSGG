@@ -71,8 +71,8 @@ class AgDetection(BaseAgActor):
 
         self.load_gdino_model()
 
-        self.video_id_static_objects_from_annotations_map = {}
         self.video_id_active_objects_annotations_map = {}
+        self.video_id_active_objects_b_reasoned_map = {}
 
         self.video_id_gt_annotations_map = {}
         self.video_id_gt_bboxes_map = {}
@@ -144,11 +144,30 @@ class AgDetection(BaseAgActor):
     def fetch_stored_active_objects_in_videos(self, dataloader):
         for data in dataloader:
             video_id = data['video_id']
+            video_id_object_reasoning_path = self.active_objects_b_reasoned_path / f"{video_id[:-4]}.txt"
             video_id_object_annotations_path = self.active_objects_b_annotations_path / f"{video_id[:-4]}.txt"
             if video_id_object_annotations_path.exists():
                 with open(video_id_object_annotations_path, "r") as f:
                     annotated_objects = [line.strip() for line in f if line.strip()]
                 self.video_id_active_objects_annotations_map[video_id] = sorted(annotated_objects)
+                if video_id_object_reasoning_path.exists():
+                    with open(video_id_object_reasoning_path, "r") as f:
+                        video_reasoned_objects = [line.strip() for line in f if line.strip()]
+
+                    # Ensure presence of "person", as it's always active
+                    # If there is a television in annotated objects, add it to reasoned objects
+                    # If there is a mirror in annotated objects, add it to reasoned objects
+                    video_reasoned_objects = set(video_reasoned_objects)
+                    video_reasoned_objects.add("person")
+
+                    if "television" in annotated_objects:
+                        video_reasoned_objects.add("television")
+                    if "mirror" in annotated_objects:
+                        video_reasoned_objects.add("mirror")
+                    self.video_id_active_objects_b_reasoned_map[video_id] = sorted(list(video_reasoned_objects))
+                else:
+                    print(f"Video {video_id} has no reasoned objects. Loading annotated objects instead.")
+                    self.video_id_active_objects_b_reasoned_map[video_id] = sorted(annotated_objects)
             else:
                 print("Warning: Missing annotation file for video:", video_id)
 
@@ -264,14 +283,15 @@ class AgDetection(BaseAgActor):
         video_output_file_path = os.path.join(self.bbox_dir_path, f"{video_id}.pkl")
 
         # Loads object labels corresponding to active objects in the dataset
-        video_object_labels = self.video_id_active_objects_annotations_map[video_id]
-
-        # Remove active objects that are dynamic and are done processing.
-        # We include only static objects that do not move in the scene.
+        video_active_object_labels = self.video_id_active_objects_annotations_map[video_id]
+        video_reasoned_active_object_labels = self.video_id_active_objects_b_reasoned_map[video_id]
         non_moving_objects = ["floor", "sofa", "couch", "bed", "doorway", "table", "chair"]
-        video_object_labels = [obj for obj in non_moving_objects if obj in video_object_labels]
+        video_dynamic_object_labels = [obj for obj in video_reasoned_active_object_labels if obj not in non_moving_objects]
 
-        if len(video_object_labels) == 0:
+        # We want to look for all the objects ignored above but are part of video active object labels.
+        video_static_object_labels = [obj for obj in video_active_object_labels if obj not in video_dynamic_object_labels]
+
+        if len(video_static_object_labels) == 0:
             print(f"No static objects to detect in video {video_id}. Skipping detection...")
             return
 
@@ -294,7 +314,7 @@ class AgDetection(BaseAgActor):
             image = Image.open(frame_path).convert("RGB")
             inputs = self.gdino_processor(
                 images=image,
-                text=". ".join(video_object_labels),
+                text=". ".join(video_static_object_labels),
                 return_tensors="pt"
             ).to(self.device)
 
@@ -320,7 +340,7 @@ class AgDetection(BaseAgActor):
             )
 
             # 2) Pull GT for this frame
-            gt_boxes, gt_scores, gt_labels = self._prepare_gt_for_frame(video_id, video_frame_name, video_object_labels)
+            gt_boxes, gt_scores, gt_labels = self._prepare_gt_for_frame(video_id, video_frame_name, video_static_object_labels)
 
             # If the gt_boxes is not empty, store the frame in gt_vis directory for visualization
             if visualize and gt_boxes.numel() > 0 and len(gt_labels) > 0:
