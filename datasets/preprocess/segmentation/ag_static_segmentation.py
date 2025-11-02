@@ -57,15 +57,15 @@ class AgSegmentation(BaseAgActor):
         self.sam2_video_predictor = None
         self.sam2_image_predictor = None
 
-        self.masked_frames_im_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'image_based'
-        self.masked_frames_vid_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'video_based'
-        self.masked_frames_combined_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'combined'
-        self.masked_videos_dir_path = self.ag_root_directory / "segmentation" / "masked_videos"
+        self.masked_frames_im_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'image_based'
+        self.masked_frames_vid_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'video_based'
+        self.masked_frames_combined_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'combined'
+        self.masked_videos_dir_path = self.ag_root_directory / "segmentation_static" / "masked_videos"
 
         # Internal (per-object) mask stores
-        self.masks_im_dir_path = self.ag_root_directory / "segmentation" / "masks" / "image_based"
-        self.masks_vid_dir_path = self.ag_root_directory / "segmentation" / "masks" / "video_based"
-        self.masks_combined_dir_path = self.ag_root_directory / "segmentation" / "masks" / "combined"
+        self.masks_im_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "image_based"
+        self.masks_vid_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "video_based"
+        self.masks_combined_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "combined"
 
         for p in [
             self.masked_frames_im_dir_path,
@@ -94,7 +94,7 @@ class AgSegmentation(BaseAgActor):
 
     def segment_with_sam2(self, video_id):
         frames_dir = Path(self.ag_root_directory) / "sampled_frames" / video_id
-        pkl_path = Path(self.bbox_dir_path) / f"{video_id}.pkl"
+        pkl_path = Path(self.bbox_static_dir_path) / f"{video_id}.pkl"
         if not pkl_path.exists():
             print(f"[segment_with_sam2][{video_id}] Missing detections ({pkl_path}). Skipping.")
             return
@@ -155,17 +155,6 @@ class AgSegmentation(BaseAgActor):
             cv2.imwrite(str(out_frames_dir / fn), cv2.cvtColor(masked_np, cv2.COLOR_RGB2BGR))
 
     def segment_with_sam2_video_mode(self, video_id: str, mask_threshold: float = 0.5, min_area: int = 0) -> None:
-        """
-        Runs SAM2 in video mode and writes per-object binary masks + union-masked frames.
-        Seeds from multiple ground-truth (anchor) frames if available, otherwise falls back
-        to first-occurrence seeding.
-
-        Args:
-            video_id: ID/name of the video (directory under sampled_frames)
-            mask_threshold: probability/logit threshold used to binarize masks
-            min_area: remove connected components smaller than this (in pixels); 0 disables
-        """
-
         # -------------------------------
         # Robust binarization helper
         # -------------------------------
@@ -226,7 +215,7 @@ class AgSegmentation(BaseAgActor):
         frames_dir = Path(self.ag_root_directory) / "sampled_frames" / video_id
         video_annotated_frames_dir = Path(self.ag_root_directory) / "frames_annotated" / video_id
 
-        pkl_path = Path(self.bbox_dir_path) / f"{video_id}.pkl"
+        pkl_path = Path(self.bbox_static_dir_path) / f"{video_id}.pkl"
         if not pkl_path.exists():
             print(f"[segment_with_sam2_video_mode][{video_id}] Missing detections ({pkl_path}). Skipping.")
             return

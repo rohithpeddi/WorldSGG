@@ -32,6 +32,7 @@ class BaseAgActor:
         # temp JPG mirror for SAM2 video predictor (expects JPEG frames)
         self.sampled_frames_jpg = self.ag_root_directory / "sampled_frames_jpg"
         self.bbox_dir_path = self.ag_root_directory / "detection" / 'gdino_bboxes'
+        self.bbox_static_dir_path = self.ag_root_directory / "detection" / 'gdino_bboxes_static'
 
         self._ensure_dir(self.bbox_dir_path)
         self._ensure_dir(self.sampled_frames_jpg)

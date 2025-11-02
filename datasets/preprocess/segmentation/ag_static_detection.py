@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional
 import torch
 from PIL import Image
 from tqdm import tqdm
-from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
 from datasets.preprocess.segmentation.base_ag_actor import BaseAgActor
 
