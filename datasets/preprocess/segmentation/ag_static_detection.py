@@ -51,9 +51,9 @@ class AgDetection(BaseAgActor):
     def __init__(self, ag_root_directory, process_raw=False):
         super().__init__(ag_root_directory)
         self.caption_data = None
-        self.bbox_dir_path = self.ag_root_directory / "detection" / 'gdino_bboxes'
-        self.gdino_vis_path = self.ag_root_directory / "detection" / 'gdino_vis'
-        self.gt_vis_path = self.ag_root_directory / "detection" / 'gt_vis'
+        self.bbox_dir_path = self.ag_root_directory / "detection" / 'gdino_bboxes_static'
+        self.gdino_vis_path = self.ag_root_directory / "detection" / 'gdino_vis_static'
+        self.gt_vis_path = self.ag_root_directory / "detection" / 'gt_vis_static'
         self.active_objects_b_annotations_path = self.ag_root_directory / 'active_objects' / 'annotations'
         self.active_objects_b_reasoned_path = self.ag_root_directory / 'active_objects' / 'sampled_videos'
 
@@ -63,10 +63,7 @@ class AgDetection(BaseAgActor):
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        self.tokenizer = None
-        self.llama_model = None
         self.model_id = None
-        self.gdino_object_labels = None
         self.gdino_model = None
         self.gdino_processor = None
         self.gdino_device = None
@@ -74,14 +71,15 @@ class AgDetection(BaseAgActor):
 
         self.load_gdino_model()
 
+        self.video_id_static_objects_from_annotations_map = {}
         self.video_id_active_objects_annotations_map = {}
-        self.video_id_active_objects_b_reasoned_map = {}
+
         self.video_id_gt_annotations_map = {}
         self.video_id_gt_bboxes_map = {}
-        self.process_video_id_active_objects_map(process_raw=process_raw)
+        self.process_video_id_active_objects_map()
 
         self.create_gt_annotations_map()
-        self.gt_bbox_format = "xyxy"  # set to "xywh" if your GT is COCO-style
+        self.req_gt_bbox_format = "xyxy"  # set to "xywh" if your GT is COCO-style
 
     def create_gt_annotations_map(self):
         # Create a mapping from video_id to its ground truth annotations
@@ -143,88 +141,27 @@ class AgDetection(BaseAgActor):
                     pass
         return {}
 
-    def fetch_raw_active_objects_in_videos(self, dataloader):
-        for data in dataloader:
-            video_id = data['video_id']
-            gt_annotations = data['gt_annotations']
-            active_objects = set()
-            for frame_items in gt_annotations:
-                for item in frame_items:
-                    if 'person_bbox' in item:
-                        continue
-                    category_id = item['class']
-                    category_name = self._train_dataset.catid_to_name_map[category_id]
-                    if category_name:
-                        if category_name == "closet/cabinet":
-                            active_objects.add("closet")
-                            active_objects.add("cabinet")
-                        elif category_name == "cup/glass/bottle":
-                            active_objects.add("cup")
-                            active_objects.add("glass")
-                            active_objects.add("bottle")
-                        elif category_name == "paper/notebook":
-                            active_objects.add("paper")
-                            active_objects.add("notebook")
-                        elif category_name == "sofa/couch":
-                            active_objects.add("sofa")
-                            active_objects.add("couch")
-                        elif category_name == "phone/camera":
-                            active_objects.add("phone")
-                            active_objects.add("camera")
-                        else:
-                            active_objects.add(category_name)
-
-            active_objects.add("person")
-            self.video_id_active_objects_annotations_map[video_id] = sorted(list(active_objects))
-
     def fetch_stored_active_objects_in_videos(self, dataloader):
         for data in dataloader:
             video_id = data['video_id']
-            video_id_object_reasoning_path = self.active_objects_b_reasoned_path / f"{video_id[:-4]}.txt"
             video_id_object_annotations_path = self.active_objects_b_annotations_path / f"{video_id[:-4]}.txt"
             if video_id_object_annotations_path.exists():
                 with open(video_id_object_annotations_path, "r") as f:
                     annotated_objects = [line.strip() for line in f if line.strip()]
                 self.video_id_active_objects_annotations_map[video_id] = sorted(annotated_objects)
-                if video_id_object_reasoning_path.exists():
-                    with open(video_id_object_reasoning_path, "r") as f:
-                        video_reasoned_objects = [line.strip() for line in f if line.strip()]
-
-                    # Ensure presence of "person", as it's always active
-                    # If there is a television in annotated objects, add it to reasoned objects
-                    # If there is a mirror in annotated objects, add it to reasoned objects
-                    video_reasoned_objects = set(video_reasoned_objects)
-                    video_reasoned_objects.add("person")
-
-                    if "television" in annotated_objects:
-                        video_reasoned_objects.add("television")
-                    if "mirror" in annotated_objects:
-                        video_reasoned_objects.add("mirror")
-                    self.video_id_active_objects_b_reasoned_map[video_id] = sorted(list(video_reasoned_objects))
-                else:
-                    print(f"Video {video_id} has no reasoned objects. Loading annotated objects instead.")
-                    self.video_id_active_objects_b_reasoned_map[video_id] = sorted(annotated_objects)
             else:
                 print("Warning: Missing annotation file for video:", video_id)
 
-    def process_video_id_active_objects_map(self, process_raw=False):
+    def process_video_id_active_objects_map(self):
         print("Processing stored active objects in videos...")
         self.fetch_stored_active_objects_in_videos(self._dataloader_train)
         self.fetch_stored_active_objects_in_videos(self._dataloader_test)
 
     def load_gdino_model(self):
-        # Load GDINO model for bounding box extraction
         self.gdino_model_id = "IDEA-Research/grounding-dino-base"
         self.gdino_device = "cuda" if torch.cuda.is_available() else "cpu"
         self.gdino_processor = AutoProcessor.from_pretrained(self.gdino_model_id)
         self.gdino_model = AutoModelForZeroShotObjectDetection.from_pretrained(self.gdino_model_id).to(self.device)
-        self.gdino_object_labels = [
-            "a person", "a bag", "a blanket", "a book", "a box", "a broom", "a chair", "a clothes",
-            "a cup", "a dish", "a food", "a laptop", "a paper", "a phone", "a picture", "a pillow",
-            "a sandwich", "a shoe", "a towel", "a vacuum", "a glass", "a bottle", "a notebook", "a camera",
-            "a bed", "a closet", "a cabinet", "a door", "a doorknob", "a groceries", "a mirror", "a refrigerator",
-            "a sofa", "a couch", "a table", "a television", "a window"
-        ]
 
     # -------------------------------------- DETECTION MODULES -------------------------------------- #
 
@@ -234,10 +171,6 @@ class AgDetection(BaseAgActor):
             frame_name: str,
             video_object_labels: List[str]
     ) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
-        """
-        Returns (gt_boxes_xyxy, gt_scores, gt_labels_norm) for this frame.
-        If no GT for the frame, returns empty tensors/lists.
-        """
         frame_map = self.video_id_gt_bboxes_map.get(video_id, {})
         rec = frame_map.get(frame_name)
         if rec is None or len(rec.get("boxes", [])) == 0:
@@ -245,7 +178,7 @@ class AgDetection(BaseAgActor):
                     torch.empty((0,), dtype=torch.float32), [])
 
         gt_boxes = [torch.tensor(b, dtype=torch.float32) for b in rec["boxes"]]
-        if self.gt_bbox_format == "xywh":
+        if self.req_gt_bbox_format == "xywh":
             gt_boxes = self._xywh_to_xyxy(gt_boxes)
 
         gt_labels = [self._normalize_label(l) for l in rec["labels"]]
@@ -268,14 +201,15 @@ class AgDetection(BaseAgActor):
                     torch.empty((0,), dtype=torch.float32), [])
 
     def extract_bounding_boxes(self, video_id, visualize=True):
-        """
-        Run Grounding DINO on sampled frames, apply class-wise NMS, and (optionally) save visualizations.
-        Saves a pickle with per-frame {boxes, scores, labels} to self.bbox_dir_path.
-        """
 
         # ---------- helpers (self-contained) ----------
-        def _classwise_nms(boxes: torch.Tensor, scores: torch.Tensor, labels: list[str],
-                           iou_thr: float = 0.5, min_score: float = 0.0):
+        def _classwise_nms(
+                boxes: torch.Tensor,
+                scores: torch.Tensor,
+                labels: list[str],
+                iou_thr: float = 0.5,
+                min_score: float = 0.0
+        ):
             if boxes.numel() == 0:
                 return boxes, scores, labels
 
@@ -330,11 +264,16 @@ class AgDetection(BaseAgActor):
         video_output_file_path = os.path.join(self.bbox_dir_path, f"{video_id}.pkl")
 
         # Loads object labels corresponding to active objects in the dataset
-        video_object_labels = self.video_id_active_objects_b_reasoned_map[video_id]
+        video_object_labels = self.video_id_active_objects_annotations_map[video_id]
 
-        # Remove active objects which do not move
+        # Remove active objects that are dynamic and are done processing.
+        # We include only static objects that do not move in the scene.
         non_moving_objects = ["floor", "sofa", "couch", "bed", "doorway", "table", "chair"]
-        video_object_labels = [obj for obj in video_object_labels if obj not in non_moving_objects]
+        video_object_labels = [obj for obj in non_moving_objects if obj in video_object_labels]
+
+        if len(video_object_labels) == 0:
+            print(f"No static objects to detect in video {video_id}. Skipping detection...")
+            return
 
         if os.path.exists(video_output_file_path):
             print(f"Bounding boxes for video {video_id} already exist. Skipping detection...")
@@ -389,7 +328,7 @@ class AgDetection(BaseAgActor):
                 self._ensure_dir(vid_gt_vis_dir)
                 self.draw_and_save_bboxes(frame_path, gt_boxes, gt_labels, vid_gt_vis_dir, video_frame_name)
 
-            # 3) Concatenate predicted+GT and run final per-class NMS
+            # 3) Concatenate predicted + GT and run final per-class NMS
             if gt_boxes.numel() > 0:
                 all_boxes = torch.cat([boxes_nms, gt_boxes], dim=0) if boxes_nms.numel() else gt_boxes
                 all_scores = torch.cat([scores_nms, gt_scores], dim=0) if scores_nms.numel() else gt_scores

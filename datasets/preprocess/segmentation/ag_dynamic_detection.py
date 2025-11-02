@@ -345,13 +345,6 @@ class AgDetection(BaseAgActor):
         self.gdino_device = "cuda" if torch.cuda.is_available() else "cpu"
         self.gdino_processor = AutoProcessor.from_pretrained(self.gdino_model_id)
         self.gdino_model = AutoModelForZeroShotObjectDetection.from_pretrained(self.gdino_model_id).to(self.device)
-        self.gdino_object_labels = [
-            "a person", "a bag", "a blanket", "a book", "a box", "a broom", "a chair", "a clothes",
-            "a cup", "a dish", "a food", "a laptop", "a paper", "a phone", "a picture", "a pillow",
-            "a sandwich", "a shoe", "a towel", "a vacuum", "a glass", "a bottle", "a notebook", "a camera",
-            "a bed", "a closet", "a cabinet", "a door", "a doorknob", "a groceries", "a mirror", "a refrigerator",
-            "a sofa", "a couch", "a table", "a television", "a window"
-        ]
 
     # -------------------------------------- DETECTION MODULES -------------------------------------- #
 
