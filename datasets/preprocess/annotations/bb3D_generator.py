@@ -53,7 +53,7 @@ class BBox3DGenerator:
             ag_root_directory: Optional[str] = None,
     ) -> None:
         self.ag_root_directory = Path(ag_root_directory)
-        self.dynamic_scene_dir_path = dynamic_scene_dir_path
+        self.dynamic_scene_dir_path = Path(dynamic_scene_dir_path)
 
         self.dataset_classnames = [
             '__background__', 'person', 'bag', 'bed', 'blanket', 'book', 'box', 'broom', 'chair',
@@ -359,24 +359,6 @@ class BBox3DGenerator:
 
         return video_to_frame_to_label_mask
 
-    def generate_video_bb_annotations(self, video_id: str, video_gt_annotations, video_gdino_predictions) -> None:
-        # 3. Label wise masks for each object in specific frames.
-
-        # 4. For every ground truth bounding box detection, we need to make sure that we have corresponding gdino bounding box may be some union of boxes.
-
-        # 5. Load 3D points for specific frames.
-        # We need to match specific frames with the subsampled frames for the complete video
-
-        # 6. We need to extract the 3D points corresponding to each object in the frame using the masks.
-
-        # 7. Using the 3D points, we need to estimate the Axis Aligned Bounding Box (AABB) and Oriented Bounding Box (OBB) for each object in the frame.
-
-        # 8. We need to run a rerun visualization for all the things frame by frame.
-        # Gdino detections, Ground truth detection, Final label wise masks, 3D points, AABB and OBB boxes.
-
-        # 9. Finally, we need to save the world bounding box annotations in a pkl file.
-        pass
-
     # ------------------------------ (4) Match GDINO to GT ------------------------------ #
     def _match_gdino_to_gt(
         self,
@@ -413,43 +395,23 @@ class BBox3DGenerator:
            - 'conf'  : (S,H,W) float32 or None
            - 'frame_stems': List[str] length S (best-effort)
         """
-        cand_dirs = [
-            Path(self.dynamic_scene_dir_path) / f"{video_id}_10",
-            Path(self.dynamic_scene_dir_path) / video_id / "10",
-            Path(self.dynamic_scene_dir_path) / video_id,
-        ]
-        pred = None
-        for d in cand_dirs:
-            p = d / "predictions.npz"
-            if p.exists():
-                arr = np.load(str(p), allow_pickle=True)
-                pred = {k: arr[k] for k in arr.files}
-                break
-        if pred is None:
-            raise FileNotFoundError(f"predictions.npz not found for video {video_id} in {cand_dirs}")
+        video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id}_10" / "predictions.npz"
+        video_dynamic_predictions = np.load(video_dynamic_3d_scene_path, allow_pickle=True)
 
-        points = pred["points"].astype(np.float32)  # (S,H,W,3)
+        points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
         conf = None
-        if "conf" in pred:
-            c = pred["conf"]
+        if "conf" in video_dynamic_predictions:
+            c = video_dynamic_predictions["conf"]
             if c.ndim == 4 and c.shape[-1] == 1:
                 c = c[..., 0]
             conf = c.astype(np.float32)
 
-        # Map stems from sampled_frames dir if available
-        frames_dir = self.ag_root_directory / "sampled_frames" / video_id
-        stems = sorted(
-            {Path(fn).stem for fn in os.listdir(frames_dir) if fn.lower().endswith((".png", ".jpg", ".jpeg"))}
-        ) if frames_dir.exists() else []
+        # Dynamic Scene Predictions will be of length S where S -->
+        # Begin from first annotated frame to last annotated frame in the sampled video frames.
+        # But we need dynamic points for specific annotated frames.
+        # So, we need to sample the points accordingly.
 
-        # best-effort: if lengths match, assume aligned by sort order
-        if stems and len(stems) == points.shape[0]:
-            frame_stems = stems
-        else:
-            # fallback: sequential index strings
-            frame_stems = [f"{i:06d}" for i in range(points.shape[0])]
-
-        return {"points": points, "conf": conf, "frame_stems": frame_stems}
+        pass
 
     # ------------------------------ (6–9) Per-video BB generation ------------------------------ #
     def generate_video_bb_annotations(
@@ -743,7 +705,6 @@ def main() -> None:
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
         ag_root_directory=args.ag_root_directory,
     )
-
     train_dataset, test_dataset, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
     bbox_3d_generator.generate_gt_world_bb_annotations(dataloader=dataloader_train, split=args.split)
 
