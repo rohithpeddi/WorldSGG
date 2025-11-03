@@ -219,6 +219,65 @@ class BBox3DGenerator:
                                 colors=[rgba])
             )
 
+    def labels_for_frame(self, video_id: str, stem: str, is_static: bool) -> List[str]:
+        lbls = set()
+        if is_static:
+            image_root_dir_list = [self.static_masks_im_dir_path, self.static_masks_vid_dir_path]
+        else:
+            image_root_dir_list = [self.dynamic_masks_im_dir_path, self.dynamic_masks_vid_dir_path]
+        for root in image_root_dir_list:
+            vdir = root / video_id
+            if not vdir.exists():
+                continue
+            for fn in os.listdir(vdir):
+                if not fn.endswith(".png"):
+                    continue
+                if "__" in fn:
+                    st, lbl = fn.split("__", 1)
+                    lbl = lbl.rsplit(".png", 1)[0]
+                    if st == stem:
+                        lbls.add(lbl)
+        return sorted(lbls)
+
+    def get_union_mask(self, video_id: str, stem: str, label: str, is_static) -> Optional[np.ndarray]:
+        if is_static:
+            im_p = self.static_masks_im_dir_path / video_id / f"{stem}__{label}.png"
+            vd_p = self.static_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
+        else:
+            im_p = self.dynamic_masks_im_dir_path / video_id / f"{stem}__{label}.png"
+            vd_p = self.dynamic_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
+        m_im = cv2.imread(str(im_p), cv2.IMREAD_GRAYSCALE) if im_p.exists() else None
+        m_vd = cv2.imread(str(vd_p), cv2.IMREAD_GRAYSCALE) if vd_p.exists() else None
+        if m_im is None and m_vd is None:
+            return None
+        if m_im is None:
+            m = (m_vd > 127)
+        elif m_vd is None:
+            m = (m_im > 127)
+        else:
+            m = (m_im > 127) | (m_vd > 127)
+        return m.astype(bool)
+
+    def update_frame_map(
+            self,
+            frame_stems,
+            video_id,
+            frame_map: Dict[str, Dict[str, np.ndarray]],
+            is_static
+    ):
+        all_labels = set()
+        for stem in frame_stems:
+            lbls = self.labels_for_frame(video_id, stem, is_static)
+            if not lbls:
+                continue
+            all_labels.update(lbls)
+            frame_map[stem] = {}
+            for lbl in lbls:
+                m = self.get_union_mask(video_id, stem, lbl, is_static)
+                if m is not None:
+                    frame_map[stem][lbl] = m
+        return frame_map, all_labels
+
     def create_gt_annotations_map(self, dataloader):
         video_id_gt_annotations_map = {}
         video_id_gt_bboxes_map = {}
@@ -304,64 +363,32 @@ class BBox3DGenerator:
             self,
             video_id,
             gt_annotations
-    ) -> Dict[str, Dict[str, Dict[str, np.ndarray]]]:
+    ) -> Tuple[Dict[str, Dict[str, Dict[str, np.ndarray]]], set, set]:
         video_to_frame_to_label_mask: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
-
-        def labels_for_frame(video_id: str, stem: str, is_static: bool) -> List[str]:
-            lbls = set()
-            if is_static:
-                image_root_dir_list = [self.static_masks_im_dir_path, self.static_masks_vid_dir_path]
-            else:
-                image_root_dir_list = [self.dynamic_masks_im_dir_path, self.dynamic_masks_vid_dir_path]
-            for root in image_root_dir_list:
-                vdir = root / video_id
-                if not vdir.exists():
-                    continue
-                for fn in os.listdir(vdir):
-                    if not fn.endswith(".png"):
-                        continue
-                    if "__" in fn:
-                        st, lbl = fn.split("__", 1)
-                        lbl = lbl.rsplit(".png", 1)[0]
-                        if st == stem:
-                            lbls.add(lbl)
-            return sorted(lbls)
 
         frame_stems = []
         for frame_items in gt_annotations:
             frame_name = frame_items[0]["frame"].split("/")[-1]  # e.g., '000123.png'
             stem = Path(frame_name).stem
             frame_stems.append(stem)
+
         frame_map: Dict[str, Dict[str, np.ndarray]] = {}
-        def update_frame_map(frame_map: Dict[str, Dict[str, np.ndarray]], is_static):
-            for stem in frame_stems:
-                lbls = labels_for_frame(video_id, stem, is_static)
-                if not lbls:
-                    continue
-                frame_map[stem] = {}
-                for lbl in lbls:
-                    if is_static:
-                        im_p = self.static_masks_im_dir_path / video_id / f"{stem}__{lbl}.png"
-                        vd_p = self.static_masks_vid_dir_path / video_id / f"{stem}__{lbl}.png"
-                    else:
-                        im_p = self.dynamic_masks_im_dir_path / video_id / f"{stem}.png"
-                        vd_p = self.dynamic_masks_vid_dir_path / video_id / f"{stem}.png"
-                    m_im = cv2.imread(str(im_p), cv2.IMREAD_GRAYSCALE) if im_p.exists() else None
-                    m_vd = cv2.imread(str(vd_p), cv2.IMREAD_GRAYSCALE) if vd_p.exists() else None
-                    if m_im is None and m_vd is None:
-                        continue
-                    if m_im is None:
-                        m = (m_vd > 127)
-                    elif m_vd is None:
-                        m = (m_im > 127)
-                    else:
-                        m = (m_im > 127) | (m_vd > 127)
-                    frame_map[stem][lbl] = m.astype(bool)
-        update_frame_map(frame_map, is_static=False)
-        update_frame_map(frame_map, is_static=True)
+        frame_map, all_static_labels = self.update_frame_map(
+            frame_stems=frame_stems,
+            video_id=video_id,
+            frame_map=frame_map,
+            is_static=False
+        )
+        frame_map, all_dynamic_labels = self.update_frame_map(
+            frame_stems=frame_stems,
+            video_id=video_id,
+            frame_map=frame_map,
+            is_static=True
+        )
         if frame_map:
             video_to_frame_to_label_mask[video_id] = frame_map
-        return video_to_frame_to_label_mask
+
+        return video_to_frame_to_label_mask, all_static_labels, all_dynamic_labels
 
     # ------------------------------ (4) Match GDINO to GT ------------------------------ #
     def _match_gdino_to_gt(
@@ -373,7 +400,6 @@ class BBox3DGenerator:
         gd_scores: List[float],
         iou_thr: float = 0.3,
     ) -> List[float]:
-        """Return a chosen GDINO bbox (xyxy) for this GT object; union of candidates if multiple, else fallback to GT."""
         candidates = [
             (b, s) for b, l, s in zip(gd_boxes, gd_labels, gd_scores)
             if (l == gt_label)
@@ -403,10 +429,11 @@ class BBox3DGenerator:
         video_dynamic_predictions = np.load(video_dynamic_3d_scene_path, allow_pickle=True)
 
         points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
+        conf = None
         if "conf" in video_dynamic_predictions:
-            c = video_dynamic_predictions["conf"]
-            if c.ndim == 4 and c.shape[-1] == 1:
-                c = c[..., 0]
+            conf = video_dynamic_predictions["conf"]
+            if conf.ndim == 4 and conf.shape[-1] == 1:
+                conf = conf[..., 0]
         S, H, W, _ = points.shape
 
         # Dynamic Scene Predictions will be of length S where S -->
@@ -444,8 +471,15 @@ class BBox3DGenerator:
                 annotated_idx_in_sampled_idx.append(frame_name_sampled_idx_map[frame_name])
 
         # Return 3D points corresponding to the annotated frames only
-        points_S = points[annotated_idx_in_sampled_idx]  # (S,H,W,3)
-        return points_S
+        points_sub = points[annotated_idx_in_sampled_idx]  # (S,H,W,3)
+        conf_sub = conf[annotated_idx_in_sampled_idx] if conf is not None else None  # (S,H,W) or None
+        stems_sub = [sampled_idx_frame_name_map[idx][:-4] for idx in annotated_idx_in_sampled_idx]  # len S
+
+        return {
+            "points": points_sub,
+            "conf": conf_sub,
+            "frame_stems": stems_sub
+        }
 
     # ------------------------------ (6–9) Per-video BB generation ------------------------------ #
     def generate_video_bb_annotations(
@@ -485,33 +519,16 @@ class BBox3DGenerator:
         stems_S  = P["frame_stems"]     # len S
         S, H, W, _ = points_S.shape
 
-        # Build mapping: frame_name -> index in S
         stem_to_idx = {stems_S[i]: i for i in range(S)}
-
-        # optional Rerun init
         if visualize and rr is not None:
             rr.init(rr_app_id or f"world_bb_{video_id}", spawn=False)
 
-        # Preload label-wise mask helper that unions image & video routes on demand
-        def get_union_mask(video_id: str, stem: str, label: str) -> Optional[np.ndarray]:
-            im_p = self.masks_im_dir_path / video_id / f"{stem}__{label}.png"
-            vd_p = self.masks_vid_dir_path / video_id / f"{stem}__{label}.png"
-            m_im = cv2.imread(str(im_p), cv2.IMREAD_GRAYSCALE) if im_p.exists() else None
-            m_vd = cv2.imread(str(vd_p), cv2.IMREAD_GRAYSCALE) if vd_p.exists() else None
-            if m_im is None and m_vd is None:
-                return None
-            if m_im is None:
-                m = (m_vd > 127)
-            elif m_vd is None:
-                m = (m_im > 127)
-            else:
-                m = (m_im > 127) | (m_vd > 127)
-            return m.astype(bool)
-
-        # Output structure
         out_frames: Dict[str, Dict[str, Any]] = {}
+        video_to_frame_to_label_mask, all_static_labels, all_dynamic_labels = self.create_label_wise_masks_map(
+            video_id=video_id,
+            gt_annotations=video_gt_annotations
+        )
 
-        # Iterate frames using GT list (authoritative for which frames matter)
         for frame_items in video_gt_annotations:
             frame_name = frame_items[0]["frame"].split("/")[-1]  # '000123.png'
             stem = Path(frame_name).stem
@@ -554,12 +571,10 @@ class BBox3DGenerator:
 
             # Extract 3D for each GT object
             for (label, gt_xyxy) in gt_objects:
-                chosen_gd_xyxy = self._match_gdino_to_gt(
-                    label, gt_xyxy, gd_boxes, gd_labels, gd_scores, iou_thr=iou_thr
-                )
+                chosen_gd_xyxy = self._match_gdino_to_gt(label, gt_xyxy, gd_boxes, gd_labels, gd_scores, iou_thr=iou_thr)
 
                 # Build mask: prefer segmentation union; fallback to bbox mask (chosen GDINO > GT)
-                m = get_union_mask(video_id, stem, label)
+                m = self.get_union_mask(video_id, stem, label)
                 if m is None:
                     # mask fallback -> use chosen GDINO box, else GT
                     box = chosen_gd_xyxy if chosen_gd_xyxy is not None else gt_xyxy
@@ -654,8 +669,6 @@ class BBox3DGenerator:
                     video_id_gt_annotations_map[video_id],
                     video_id_gdino_annotations_map.get(video_id, {})
                 )
-
-
 
 def _parse_split(s: str) -> str:
     valid = {"04", "59", "AD", "EH", "IL", "MP", "QT", "UZ"}
