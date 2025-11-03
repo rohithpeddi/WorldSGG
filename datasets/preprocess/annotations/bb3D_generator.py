@@ -73,6 +73,8 @@ class BBox3DGenerator:
         # Detections paths
         self.dynamic_detections_root_path = self.ag_root_directory / "detection" / 'gdino_bboxes'
         self.static_detections_root_path = self.ag_root_directory / "detection" / 'gdino_bboxes_static'
+        self.frame_annotated_dir_path = self.ag_root_directory / "frames_annotated"
+        self.sampled_frames_idx_root_dir = self.ag_root_directory / "sampled_frames_idx"
 
         # Segmentation masks paths
         self.dynamic_masked_frames_im_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'image_based'
@@ -95,127 +97,128 @@ class BBox3DGenerator:
         self.static_masks_vid_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "video_based"
         self.static_masks_combined_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "combined"
 
-        # ------------------------------ Utilities ------------------------------ #
-        @staticmethod
-        def _xywh_to_xyxy(b):  # [x,y,w,h] -> [x1,y1,x2,y2]
-            x, y, w, h = [float(v) for v in b]
-            return [x, y, x + w, y + h]
+    # ------------------------------ Utilities ------------------------------ #
+    @staticmethod
+    def _xywh_to_xyxy(b):  # [x,y,w,h] -> [x1,y1,x2,y2]
+        x, y, w, h = [float(v) for v in b]
+        return [x, y, x + w, y + h]
 
-        @staticmethod
-        def _area_xyxy(b):
-            x1, y1, x2, y2 = b
-            return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    @staticmethod
+    def _area_xyxy(b):
+        x1, y1, x2, y2 = b
+        return max(0.0, x2 - x1) * max(0.0, y2 - y1)
 
-        @staticmethod
-        def _iou_xyxy(a, b) -> float:
-            ax1, ay1, ax2, ay2 = a
-            bx1, by1, bx2, by2 = b
-            ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-            ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-            iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-            inter = iw * ih
-            if inter <= 0:
-                return 0.0
-            ua = BBox3DGenerator._area_xyxy(a) + BBox3DGenerator._area_xyxy(b) - inter
-            return inter / max(ua, 1e-8)
+    @staticmethod
+    def _iou_xyxy(a, b) -> float:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        ua = BBox3DGenerator._area_xyxy(a) + BBox3DGenerator._area_xyxy(b) - inter
+        return inter / max(ua, 1e-8)
 
-        @staticmethod
-        def _union_boxes_xyxy(boxes: List[List[float]]) -> Optional[List[float]]:
-            if not boxes:
-                return None
-            x1 = min(b[0] for b in boxes)
-            y1 = min(b[1] for b in boxes)
-            x2 = max(b[2] for b in boxes)
-            y2 = max(b[3] for b in boxes)
-            return [x1, y1, x2, y2]
+    @staticmethod
+    def _union_boxes_xyxy(boxes: List[List[float]]) -> Optional[List[float]]:
+        if not boxes:
+            return None
+        x1 = min(b[0] for b in boxes)
+        y1 = min(b[1] for b in boxes)
+        x2 = max(b[2] for b in boxes)
+        y2 = max(b[3] for b in boxes)
+        return [x1, y1, x2, y2]
 
-        @staticmethod
-        def _mask_from_bbox(h: int, w: int, xyxy: List[float]) -> np.ndarray:
-            m = np.zeros((h, w), dtype=bool)
-            x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
-            x1, y1 = max(x1, 0), max(y1, 0)
-            x2, y2 = min(x2, w), min(y2, h)
-            if x2 > x1 and y2 > y1:
-                m[y1:y2, x1:x2] = True
-            return m
+    @staticmethod
+    def _mask_from_bbox(h: int, w: int, xyxy: List[float]) -> np.ndarray:
+        m = np.zeros((h, w), dtype=bool)
+        x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
+        x1, y1 = max(x1, 0), max(y1, 0)
+        x2, y2 = min(x2, w), min(y2, h)
+        if x2 > x1 and y2 > y1:
+            m[y1:y2, x1:x2] = True
+        return m
 
-        @staticmethod
-        def _resize_mask_to(mask: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
-            th, tw = target_hw
-            if mask.shape == (th, tw):
-                return mask.astype(bool)
-            # nearest-neighbor for binary masks
-            return cv2.resize(mask.astype(np.uint8), (tw, th), interpolation=cv2.INTER_NEAREST).astype(bool)
+    @staticmethod
+    def _resize_mask_to(mask: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
+        th, tw = target_hw
+        if mask.shape == (th, tw):
+            return mask.astype(bool)
+        # nearest-neighbor for binary masks
+        return cv2.resize(mask.astype(np.uint8), (tw, th), interpolation=cv2.INTER_NEAREST).astype(bool)
 
-        @staticmethod
-        def _finite_and_nonzero(pts: np.ndarray) -> np.ndarray:
-            good = np.isfinite(pts).all(axis=-1)
-            if pts.ndim == 2:  # (N,3)
-                nz = np.linalg.norm(pts, axis=-1) > 1e-12
-            else:  # (H,W,3)
-                nz = np.linalg.norm(pts, axis=-1) > 1e-12
-            return good & nz
+    @staticmethod
+    def _finite_and_nonzero(pts: np.ndarray) -> np.ndarray:
+        good = np.isfinite(pts).all(axis=-1)
+        if pts.ndim == 2:  # (N,3)
+            nz = np.linalg.norm(pts, axis=-1) > 1e-12
+        else:  # (H,W,3)
+            nz = np.linalg.norm(pts, axis=-1) > 1e-12
+        return good & nz
 
-        @staticmethod
-        def _aabb(pts_n3: np.ndarray) -> Dict[str, Any]:
-            mins = pts_n3.min(axis=0).tolist()
-            maxs = pts_n3.max(axis=0).tolist()
-            return {"min": mins, "max": maxs}
+    @staticmethod
+    def _aabb(pts_n3: np.ndarray) -> Dict[str, Any]:
+        mins = pts_n3.min(axis=0).tolist()
+        maxs = pts_n3.max(axis=0).tolist()
+        return {"min": mins, "max": maxs}
 
-        @staticmethod
-        def _pca_obb(pts_n3: np.ndarray) -> Dict[str, Any]:
-            # center
-            c = pts_n3.mean(axis=0)
-            X = pts_n3 - c
-            # PCA via SVD
-            U, S, Vt = np.linalg.svd(X, full_matrices=False)
-            R = Vt  # (3,3) rows are principal axes in world coords
-            # project points to PCA basis
-            Y = X @ R.T  # (N,3)
-            mins = Y.min(axis=0)
-            maxs = Y.max(axis=0)
-            extents = (maxs - mins)  # box size along each axis
-            # corners in PCA frame (8 corners)
-            corners_local = np.array([[mins[0], mins[1], mins[2]],
-                                      [mins[0], mins[1], maxs[2]],
-                                      [mins[0], maxs[1], mins[2]],
-                                      [mins[0], maxs[1], maxs[2]],
-                                      [maxs[0], mins[1], mins[2]],
-                                      [maxs[0], mins[1], maxs[2]],
-                                      [maxs[0], maxs[1], mins[2]],
-                                      [maxs[0], maxs[1], maxs[2]]], dtype=np.float32)
-            # back to world frame
-            corners_world = corners_local @ R + c
-            return {
-                "center": c.tolist(),
-                "axes": R.tolist(),  # rows are axis directions in world frame
-                "extents": extents.tolist(),  # full lengths along each axis
-                "corners": corners_world.tolist()
-            }
+    @staticmethod
+    def _pca_obb(pts_n3: np.ndarray) -> Dict[str, Any]:
+        # center
+        c = pts_n3.mean(axis=0)
+        X = pts_n3 - c
+        # PCA via SVD
+        U, S, Vt = np.linalg.svd(X, full_matrices=False)
+        R = Vt  # (3,3) rows are principal axes in world coords
+        # project points to PCA basis
+        Y = X @ R.T  # (N,3)
+        mins = Y.min(axis=0)
+        maxs = Y.max(axis=0)
+        extents = (maxs - mins)  # box size along each axis
+        # corners in PCA frame (8 corners)
+        corners_local = np.array([[mins[0], mins[1], mins[2]],
+                                  [mins[0], mins[1], maxs[2]],
+                                  [mins[0], maxs[1], mins[2]],
+                                  [mins[0], maxs[1], maxs[2]],
+                                  [maxs[0], mins[1], mins[2]],
+                                  [maxs[0], mins[1], maxs[2]],
+                                  [maxs[0], maxs[1], mins[2]],
+                                  [maxs[0], maxs[1], maxs[2]]], dtype=np.float32)
+        # back to world frame
+        corners_world = corners_local @ R + c
+        return {
+            "center": c.tolist(),
+            "axes": R.tolist(),  # rows are axis directions in world frame
+            "extents": extents.tolist(),  # full lengths along each axis
+            "corners": corners_world.tolist()
+        }
 
-        @staticmethod
-        def _box_edges_from_corners(corners: np.ndarray) -> List[np.ndarray]:
-            # 8 corners -> 12 edges as 2-point line segments
-            idx_pairs = [
-                (0, 1), (0, 2), (0, 4),
-                (7, 6), (7, 5), (7, 3),
-                (1, 3), (1, 5),
-                (2, 3), (2, 6),
-                (4, 5), (4, 6)
-            ]
-            return [np.vstack([corners[i], corners[j]]) for (i, j) in idx_pairs]
+    @staticmethod
+    def _box_edges_from_corners(corners: np.ndarray) -> List[np.ndarray]:
+        # 8 corners -> 12 edges as 2-point line segments
+        idx_pairs = [
+            (0, 1), (0, 2), (0, 4),
+            (7, 6), (7, 5), (7, 3),
+            (1, 3), (1, 5),
+            (2, 3), (2, 6),
+            (4, 5), (4, 6)
+        ]
+        return [np.vstack([corners[i], corners[j]]) for (i, j) in idx_pairs]
 
-        def _log_box_lines_rr(self, path: str, corners: np.ndarray, rgba=(255, 255, 255, 255), radius=0.002):
-            if rr is None:
-                return
-            edges = self._box_edges_from_corners(corners)
-            for k, e in enumerate(edges):
-                rr.log(
-                    f"{path}/edge_{k}",
-                    rr.LineStrips3D(positions=[e.astype(np.float32)],
-                                    radii=radius,
-                                    colors=[rgba])
-                )
+    def _log_box_lines_rr(self, path: str, corners: np.ndarray, rgba=(255, 255, 255, 255), radius=0.002):
+        if rr is None:
+            return
+        edges = self._box_edges_from_corners(corners)
+        for k, e in enumerate(edges):
+            rr.log(
+                f"{path}/edge_{k}",
+                rr.LineStrips3D(positions=[e.astype(np.float32)],
+                                radii=radius,
+                                colors=[rgba])
+            )
+
     def create_gt_annotations_map(self, dataloader):
         video_id_gt_annotations_map = {}
         video_id_gt_bboxes_map = {}
@@ -400,19 +403,49 @@ class BBox3DGenerator:
         video_dynamic_predictions = np.load(video_dynamic_3d_scene_path, allow_pickle=True)
 
         points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
-        conf = None
         if "conf" in video_dynamic_predictions:
             c = video_dynamic_predictions["conf"]
             if c.ndim == 4 and c.shape[-1] == 1:
                 c = c[..., 0]
-            conf = c.astype(np.float32)
+        S, H, W, _ = points.shape
 
         # Dynamic Scene Predictions will be of length S where S -->
         # Begin from first annotated frame to last annotated frame in the sampled video frames.
         # But we need dynamic points for specific annotated frames.
         # So, we need to sample the points accordingly.
+        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
+        annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
+        annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
+        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
+        annotated_last_frame_id = int(annotated_frame_id_list[-1][:-4])
 
-        pass
+        # Get the mapping for sampled_frame_id and the actual frame id
+        # Now start from the sampled frame which corresponds to the first annotated frame and keep the rest of the sampled frames
+        video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir, f"{video_id[:-4]}.npy")
+        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()  # Numbers only
+
+        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
+        an_last_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_last_frame_id)
+        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, an_last_id_in_vid_sam_frame_id_list + 1))
+
+        assert S == len(sample_idx)
+
+        # Indices corresponding to the annotated frames in the sampled frames
+        sampled_idx_frame_name_map = {}
+        frame_name_sampled_idx_map = {}
+        for idx_in_s, frame_idx in enumerate(sample_idx):
+            frame_name = f"{video_sampled_frame_id_list[frame_idx]:06d}.png"
+            sampled_idx_frame_name_map[idx_in_s] = frame_name
+            frame_name_sampled_idx_map[frame_name] = idx_in_s
+
+        annotated_idx_in_sampled_idx = []
+        for frame_name in annotated_frame_id_list:
+            if frame_name in frame_name_sampled_idx_map:
+                annotated_idx_in_sampled_idx.append(frame_name_sampled_idx_map[frame_name])
+
+        # Return 3D points corresponding to the annotated frames only
+        points_S = points[annotated_idx_in_sampled_idx]  # (S,H,W,3)
+        return points_S
 
     # ------------------------------ (6–9) Per-video BB generation ------------------------------ #
     def generate_video_bb_annotations(
