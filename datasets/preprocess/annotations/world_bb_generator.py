@@ -7,6 +7,8 @@ import pickle
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
+from tqdm import tqdm
+
 
 class WorldBBGenerator:
 
@@ -61,7 +63,7 @@ class WorldBBGenerator:
     def create_gt_annotations_map(self, dataloader):
         video_id_gt_annotations_map = {}
         video_id_gt_bboxes_map = {}
-        for data in dataloader:
+        for data in tqdm(dataloader):
             video_id = data['video_id']
             gt_annotations = data['gt_annotations']
             video_id_gt_annotations_map[video_id] = gt_annotations
@@ -103,7 +105,7 @@ class WorldBBGenerator:
 
     def create_gdino_annotations_map(self, dataloader):
         video_id_gdino_annotations_map = {}
-        for data in dataloader:
+        for data in tqdm(dataloader):
             video_id = data['video_id']
 
             # 1. Load dynamic gdino annotations
@@ -142,18 +144,7 @@ class WorldBBGenerator:
     def create_label_wise_masks_map(self, dataloader):
         pass
 
-    def generate_gt_world_bb_annotations(self, dataloader) -> None:
-        # For every frame in the video, (1) Person bbox is in xywh format and the object bbox is in xyxy format.
-        # For the category of the object in the frame we have to get the 3D points corresponding to that object.
-
-        # 1. Ground truth annotations for specific frames.
-        # This primarily includes bounding boxes for persons and objects in the frame.
-        video_id_gt_bboxes_map, video_id_gt_annotations_map = self.create_gt_annotations_map(dataloader)
-
-        # 2. Grounding Dino bounding boxes for specific frames.
-        # Combined detections of dynamic objects and static objects.
-        video_id_gdino_annotations_map = self.create_gdino_annotations_map(dataloader)
-
+    def generate_video_bb_annotations(self, video_id: str, video_gt_annotations, video_gdino_predictions) -> None:
         # 3. Label wise masks for each object in specific frames.
 
         # 4. For every ground truth bounding box detection, we need to make sure that we have corresponding gdino bounding box may be some union of boxes.
@@ -169,10 +160,27 @@ class WorldBBGenerator:
         # Gdino detections, Ground truth detection, Final label wise masks, 3D points, AABB and OBB boxes.
 
         # 9. Finally, we need to save the world bounding box annotations in a pkl file.
-
         pass
 
+    def generate_gt_world_bb_annotations(self, dataloader) -> None:
+        # For every frame in the video, Person bbox is in xywh format and the object bbox is in xyxy format.
+        # For the category of the object in the frame we have to get the 3D points corresponding to that object.
 
+        # 1. Ground truth annotations for specific frames.
+        # This primarily includes bounding boxes for persons and objects in the frame.
+        video_id_gt_bboxes_map, video_id_gt_annotations_map = self.create_gt_annotations_map(dataloader)
+
+        # 2. Grounding Dino bounding boxes for specific frames.
+        # Combined detections of dynamic objects and static objects.
+        video_id_gdino_annotations_map = self.create_gdino_annotations_map(dataloader)
+
+        for data in tqdm(dataloader):
+            video_id = data['video_id']
+            self.generate_video_bb_annotations(
+                video_id,
+                video_id_gt_annotations_map[video_id],
+                video_id_gdino_annotations_map.get(video_id, {})
+            )
 
 
 def _parse_split(s: str) -> str:
