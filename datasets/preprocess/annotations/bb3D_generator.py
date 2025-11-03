@@ -11,10 +11,41 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import rerun as rr
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from dataloader.standard.action_genome.ag_dataset import StandardAG
 
-class WorldBBGenerator:
+
+def get_video_belongs_to_split(video_id: str) -> Optional[str]:
+    """
+    Get the split that the video belongs to based on its ID.
+    Accepts either a bare ID (e.g., '0DJ6R') or a filename (e.g., '0DJ6R.mp4').
+    """
+    stem = Path(video_id).stem
+    if not stem:
+        return None
+    first_letter = stem[0]
+    if first_letter.isdigit() and int(first_letter) < 5:
+        return "04"
+    elif first_letter.isdigit() and int(first_letter) >= 5:
+        return "59"
+    elif first_letter in "ABCD":
+        return "AD"
+    elif first_letter in "EFGH":
+        return "EH"
+    elif first_letter in "IJKL":
+        return "IL"
+    elif first_letter in "MNOP":
+        return "MP"
+    elif first_letter in "QRST":
+        return "QT"
+    elif first_letter in "UVWXYZ":
+        return "UZ"
+    return None
+
+
+class BBox3DGenerator:
 
     def __init__(
             self,
@@ -85,7 +116,7 @@ class WorldBBGenerator:
             inter = iw * ih
             if inter <= 0:
                 return 0.0
-            ua = WorldBBGenerator._area_xyxy(a) + WorldBBGenerator._area_xyxy(b) - inter
+            ua = BBox3DGenerator._area_xyxy(a) + BBox3DGenerator._area_xyxy(b) - inter
             return inter / max(ua, 1e-8)
 
         @staticmethod
@@ -345,26 +376,6 @@ class WorldBBGenerator:
 
         # 9. Finally, we need to save the world bounding box annotations in a pkl file.
         pass
-
-    def generate_gt_world_bb_annotations(self, dataloader) -> None:
-        # For every frame in the video, Person bbox is in xywh format and the object bbox is in xyxy format.
-        # For the category of the object in the frame we have to get the 3D points corresponding to that object.
-
-        # 1. Ground truth annotations for specific frames.
-        # This primarily includes bounding boxes for persons and objects in the frame.
-        video_id_gt_bboxes_map, video_id_gt_annotations_map = self.create_gt_annotations_map(dataloader)
-
-        # 2. Grounding Dino bounding boxes for specific frames.
-        # Combined detections of dynamic objects and static objects.
-        video_id_gdino_annotations_map = self.create_gdino_annotations_map(dataloader)
-
-        for data in tqdm(dataloader):
-            video_id = data['video_id']
-            self.generate_video_bb_annotations(
-                video_id,
-                video_id_gt_annotations_map[video_id],
-                video_id_gdino_annotations_map.get(video_id, {})
-            )
 
     # ------------------------------ (4) Match GDINO to GT ------------------------------ #
     def _match_gdino_to_gt(
@@ -627,6 +638,26 @@ class WorldBBGenerator:
                 "frames": out_frames
             }, f, protocol=pickle.HIGHEST_PROTOCOL)
 
+    def generate_gt_world_bb_annotations(self, dataloader, split) -> None:
+        # For every frame in the video, Person bbox is in xywh format and the object bbox is in xyxy format.
+        # For the category of the object in the frame we have to get the 3D points corresponding to that object.
+
+        # 1. Ground truth annotations for specific frames.
+        # This primarily includes bounding boxes for persons and objects in the frame.
+        video_id_gt_bboxes_map, video_id_gt_annotations_map = self.create_gt_annotations_map(dataloader)
+
+        # 2. Grounding Dino bounding boxes for specific frames.
+        # Combined detections of dynamic objects and static objects.
+        video_id_gdino_annotations_map = self.create_gdino_annotations_map(dataloader)
+
+        for data in tqdm(dataloader):
+            video_id = data['video_id']
+            if get_video_belongs_to_split(video_id) == split:
+                self.generate_video_bb_annotations(
+                    video_id,
+                    video_id_gt_annotations_map[video_id],
+                    video_id_gdino_annotations_map.get(video_id, {})
+                )
 
 
 
@@ -639,23 +670,16 @@ def _parse_split(s: str) -> str:
         )
     return val
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Visualize static + per-frame 3D points with Rerun (AG-Pi3 unified)."
     )
     # Paths
     parser.add_argument(
-        "--frames_annotated_dir_path",
+        "--ag_root_directory",
         type=str,
-        default="/data/rohith/ag/frames_annotated",
+        default="/data/rohith/ag",
         help="Optional: directory containing annotated frames (unused here).",
-    )
-    parser.add_argument(
-        "--mask_dir_path",
-        type=str,
-        default="/data/rohith/ag/segmentation/masks/rectangular_overlayed_masks",
-        help="Path to directory containing trained model checkpoints.",
     )
     parser.add_argument(
         "--static_scene_dir_path",
@@ -668,11 +692,6 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
     )
-    parser.add_argument(
-        "--grounded_dynamic_scene_dir_path",
-        type=str,
-        default="/data2/rohith/ag/ag4D/dynamic_scenes/pi3_grounded_dynamic"
-    )
     # Selection
     parser.add_argument(
         "--split",
@@ -680,13 +699,53 @@ def parse_args() -> argparse.Namespace:
         default="04",
         help="Shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}.",
     )
-
-
     return parser.parse_args()
 
+def load_dataset(ag_root_directory: str):
+    train_dataset = StandardAG(
+        phase="train",
+        mode="sgdet",
+        datasize="large",
+        data_path=ag_root_directory,
+        filter_nonperson_box_frame=True,
+        filter_small_box=False
+    )
+
+    test_dataset = StandardAG(
+        phase="test",
+        mode="sgdet",
+        datasize="large",
+        data_path=ag_root_directory,
+        filter_nonperson_box_frame=True,
+        filter_small_box=False
+    )
+
+    dataloader_train = DataLoader(
+        train_dataset,
+        shuffle=True,
+        collate_fn=lambda b: b[0],  # you use batch_size=1; just pass the item through,
+        pin_memory=False,
+        num_workers=0
+    )
+
+    dataloader_test = DataLoader(
+        test_dataset,
+        shuffle=False,
+        collate_fn=lambda b: b[0],  # you use batch_size=1; just pass the item through,
+        pin_memory=False
+    )
+
+    return train_dataset, test_dataset, dataloader_train, dataloader_test
 
 def main() -> None:
     args = parse_args()
+    bbox_3d_generator = BBox3DGenerator(
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
+        ag_root_directory=args.ag_root_directory,
+    )
+
+    train_dataset, test_dataset, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
+    bbox_3d_generator.generate_gt_world_bb_annotations(dataloader=dataloader_train, split=args.split)
 
 
 if __name__ == "__main__":
