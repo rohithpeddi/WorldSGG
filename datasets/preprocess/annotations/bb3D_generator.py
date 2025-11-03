@@ -75,25 +75,25 @@ class BBox3DGenerator:
         self.static_detections_root_path = self.ag_root_directory / "detection" / 'gdino_bboxes_static'
 
         # Segmentation masks paths
-        self.masked_frames_im_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'image_based'
-        self.masked_frames_vid_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'video_based'
-        self.masked_frames_combined_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'combined'
-        self.masked_videos_dir_path = self.ag_root_directory / "segmentation" / "masked_videos"
+        self.dynamic_masked_frames_im_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'image_based'
+        self.dynamic_masked_frames_vid_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'video_based'
+        self.dynamic_masked_frames_combined_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'combined'
+        self.dynamic_masked_videos_dir_path = self.ag_root_directory / "segmentation" / "masked_videos"
 
         # Internal (per-object) mask stores
-        self.masks_im_dir_path = self.ag_root_directory / "segmentation" / "masks" / "image_based"
-        self.masks_vid_dir_path = self.ag_root_directory / "segmentation" / "masks" / "video_based"
-        self.masks_combined_dir_path = self.ag_root_directory / "segmentation" / "masks" / "combined"
+        self.dynamic_masks_im_dir_path = self.ag_root_directory / "segmentation" / "masks" / "image_based"
+        self.dynamic_masks_vid_dir_path = self.ag_root_directory / "segmentation" / "masks" / "video_based"
+        self.dynamic_masks_combined_dir_path = self.ag_root_directory / "segmentation" / "masks" / "combined"
 
-        self.masked_frames_im_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'image_based'
-        self.masked_frames_vid_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'video_based'
-        self.masked_frames_combined_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'combined'
-        self.masked_videos_dir_path = self.ag_root_directory / "segmentation_static" / "masked_videos"
+        self.static_masked_frames_im_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'image_based'
+        self.static_masked_frames_vid_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'video_based'
+        self.static_masked_frames_combined_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'combined'
+        self.static_masked_videos_dir_path = self.ag_root_directory / "segmentation_static" / "masked_videos"
 
         # Internal (per-object) mask stores
-        self.masks_im_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "image_based"
-        self.masks_vid_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "video_based"
-        self.masks_combined_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "combined"
+        self.static_masks_im_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "image_based"
+        self.static_masks_vid_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "video_based"
+        self.static_masks_combined_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "combined"
 
         # ------------------------------ Utilities ------------------------------ #
         @staticmethod
@@ -302,18 +302,15 @@ class BBox3DGenerator:
             video_id,
             gt_annotations
     ) -> Dict[str, Dict[str, Dict[str, np.ndarray]]]:
-        """
-        Returns:
-            video_id -> frame_stem -> label -> bool mask
-        Notes:
-            - Merges image/video masks if both exist (logical OR), thresholded at >127.
-            - Only builds entries for frames present in the dataloader's GT annotations.
-        """
         video_to_frame_to_label_mask: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
 
-        def labels_for_frame(video_id: str, stem: str) -> List[str]:
+        def labels_for_frame(video_id: str, stem: str, is_static: bool) -> List[str]:
             lbls = set()
-            for root in [self.masks_im_dir_path, self.masks_vid_dir_path]:
+            if is_static:
+                image_root_dir_list = [self.static_masks_im_dir_path, self.static_masks_vid_dir_path]
+            else:
+                image_root_dir_list = [self.dynamic_masks_im_dir_path, self.dynamic_masks_vid_dir_path]
+            for root in image_root_dir_list:
                 vdir = root / video_id
                 if not vdir.exists():
                     continue
@@ -332,31 +329,35 @@ class BBox3DGenerator:
             frame_name = frame_items[0]["frame"].split("/")[-1]  # e.g., '000123.png'
             stem = Path(frame_name).stem
             frame_stems.append(stem)
-
         frame_map: Dict[str, Dict[str, np.ndarray]] = {}
-        for stem in frame_stems:
-            lbls = labels_for_frame(video_id, stem)
-            if not lbls:
-                continue
-            frame_map[stem] = {}
-            for lbl in lbls:
-                im_p = self.masks_im_dir_path / video_id / f"{stem}__{lbl}.png"
-                vd_p = self.masks_vid_dir_path / video_id / f"{stem}__{lbl}.png"
-                m_im = cv2.imread(str(im_p), cv2.IMREAD_GRAYSCALE) if im_p.exists() else None
-                m_vd = cv2.imread(str(vd_p), cv2.IMREAD_GRAYSCALE) if vd_p.exists() else None
-                if m_im is None and m_vd is None:
+        def update_frame_map(frame_map: Dict[str, Dict[str, np.ndarray]], is_static):
+            for stem in frame_stems:
+                lbls = labels_for_frame(video_id, stem, is_static)
+                if not lbls:
                     continue
-                if m_im is None:
-                    m = (m_vd > 127)
-                elif m_vd is None:
-                    m = (m_im > 127)
-                else:
-                    m = (m_im > 127) | (m_vd > 127)
-                frame_map[stem][lbl] = m.astype(bool)
-
+                frame_map[stem] = {}
+                for lbl in lbls:
+                    if is_static:
+                        im_p = self.static_masks_im_dir_path / video_id / f"{stem}__{lbl}.png"
+                        vd_p = self.static_masks_vid_dir_path / video_id / f"{stem}__{lbl}.png"
+                    else:
+                        im_p = self.dynamic_masks_im_dir_path / video_id / f"{stem}.png"
+                        vd_p = self.dynamic_masks_vid_dir_path / video_id / f"{stem}.png"
+                    m_im = cv2.imread(str(im_p), cv2.IMREAD_GRAYSCALE) if im_p.exists() else None
+                    m_vd = cv2.imread(str(vd_p), cv2.IMREAD_GRAYSCALE) if vd_p.exists() else None
+                    if m_im is None and m_vd is None:
+                        continue
+                    if m_im is None:
+                        m = (m_vd > 127)
+                    elif m_vd is None:
+                        m = (m_im > 127)
+                    else:
+                        m = (m_im > 127) | (m_vd > 127)
+                    frame_map[stem][lbl] = m.astype(bool)
+        update_frame_map(frame_map, is_static=False)
+        update_frame_map(frame_map, is_static=True)
         if frame_map:
             video_to_frame_to_label_mask[video_id] = frame_map
-
         return video_to_frame_to_label_mask
 
     # ------------------------------ (4) Match GDINO to GT ------------------------------ #
