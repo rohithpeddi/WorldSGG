@@ -75,6 +75,8 @@ class BBox3DGenerator:
         self.static_detections_root_path = self.ag_root_directory / "detection" / 'gdino_bboxes_static'
         self.frame_annotated_dir_path = self.ag_root_directory / "frames_annotated"
         self.sampled_frames_idx_root_dir = self.ag_root_directory / "sampled_frames_idx"
+        self.bbox_3d_root_dir = self.ag_root_directory / "world_bb_annotations"
+        os.makedirs(self.bbox_3d_root_dir, exist_ok=True)
 
         # Segmentation masks paths
         self.dynamic_masked_frames_im_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'image_based'
@@ -539,6 +541,8 @@ class BBox3DGenerator:
             pts_hw3 = points_S[sidx]  # (H,W,3)
             conf_hw = conf_S[sidx] if conf_S is not None else None
 
+            frame_non_zero_pts = self._finite_and_nonzero(pts_hw3)
+
             # Build per-frame GT object list (normalize to xyxy)
             gt_objects: List[Tuple[str, List[float]]] = []
             for item in frame_items:
@@ -574,16 +578,15 @@ class BBox3DGenerator:
                 chosen_gd_xyxy = self._match_gdino_to_gt(label, gt_xyxy, gd_boxes, gd_labels, gd_scores, iou_thr=iou_thr)
 
                 # Build mask: prefer segmentation union; fallback to bbox mask (chosen GDINO > GT)
-                m = self.get_union_mask(video_id, stem, label)
-                if m is None:
+                frame_label_mask = video_to_frame_to_label_mask[stem][label]
+                if frame_label_mask is None:
                     # mask fallback -> use chosen GDINO box, else GT
                     box = chosen_gd_xyxy if chosen_gd_xyxy is not None else gt_xyxy
-                    m = self._mask_from_bbox(H, W, box)
+                    frame_label_mask = self._mask_from_bbox(H, W, box)
                 else:
-                    m = self._resize_mask_to(m, (H, W))
+                    frame_label_mask = self._resize_mask_to(frame_label_mask, (H, W))
 
-                # Select 3D points by mask + finiteness (+ optional confidence)
-                sel = m & self._finite_and_nonzero(pts_hw3)
+                sel = frame_label_mask & frame_non_zero_pts
                 if conf_hw is not None:
                     sel &= (conf_hw > 1e-6)
 
@@ -599,16 +602,16 @@ class BBox3DGenerator:
                     })
                     continue
 
-                pts_n3 = pts_hw3[sel].reshape(-1, 3).astype(np.float32)
+                label_non_zero_pts = pts_hw3[sel].reshape(-1, 3).astype(np.float32)
 
                 # AABB & OBB
-                aabb = self._aabb(pts_n3)
-                obb  = self._pca_obb(pts_n3)
+                aabb = self._aabb(label_non_zero_pts)
+                obb  = self._pca_obb(label_non_zero_pts)
 
                 # Visualization (optional)
                 if visualize and rr is not None:
                     base = f"world_bb/{video_id}/{stem}/{label}"
-                    rr.log(f"{base}/points", rr.Points3D(positions=pts_n3))
+                    rr.log(f"{base}/points", rr.Points3D(positions=label_non_zero_pts))
                     # draw OBB as line strips
                     corners = np.asarray(obb["corners"], dtype=np.float32)
                     self._log_box_lines_rr(f"{base}/obb", corners, rgba=(0, 255, 0, 255))
@@ -631,7 +634,7 @@ class BBox3DGenerator:
                     "label": label,
                     "gt_bbox_xyxy": [float(v) for v in gt_xyxy],
                     "gdino_bbox_xyxy": [float(v) for v in chosen_gd_xyxy],
-                    "num_points": int(pts_n3.shape[0]),
+                    "num_points": int(label_non_zero_pts.shape[0]),
                     "aabb": aabb,
                     "obb": obb
                 })
@@ -640,9 +643,7 @@ class BBox3DGenerator:
                 out_frames[frame_name] = frame_rec
 
         # ------------------------------ (9) Persist to disk ------------------------------ #
-        out_dir = self.ag_root_directory / "world_bb_annotations"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{video_id}.pkl"
+        out_path = self.bbox_3d_root_dir / f"{video_id}.pkl"
         with open(out_path, "wb") as f:
             pickle.dump({
                 "video_id": video_id,
