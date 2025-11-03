@@ -280,13 +280,15 @@ class BBox3DGenerator:
                     frame_map[stem][lbl] = m
         return frame_map, all_labels
 
-    def create_gt_annotations_map(self, dataloader):
+    def create_gt_annotations_map(self, dataloader, split):
         video_id_gt_annotations_map = {}
         video_id_gt_bboxes_map = {}
         for data in tqdm(dataloader):
             video_id = data['video_id']
-            gt_annotations = data['gt_annotations']
-            video_id_gt_annotations_map[video_id] = gt_annotations
+
+            if get_video_belongs_to_split(video_id) == split:
+                gt_annotations = data['gt_annotations']
+                video_id_gt_annotations_map[video_id] = gt_annotations
 
         # video_id, gt_bboxes for the gt detections
         for video_id, gt_annotations in video_id_gt_annotations_map.items():
@@ -323,41 +325,56 @@ class BBox3DGenerator:
             video_id_gt_bboxes_map[video_id] = video_gt_bboxes
         return video_id_gt_bboxes_map, video_id_gt_annotations_map
 
-    def create_gdino_annotations_map(self, dataloader):
+    def create_gdino_annotations_map(self, dataloader, split):
         video_id_gdino_annotations_map = {}
         for data in tqdm(dataloader):
             video_id = data['video_id']
 
+            if get_video_belongs_to_split(video_id) != split:
+                continue
+
             # 1. Load dynamic gdino annotations
             video_dynamic_gdino_prediction_file_path = self.dynamic_detections_root_path / f"{video_id}.pkl"
             video_dynamic_predictions = None
-            with open(video_dynamic_gdino_prediction_file_path, 'rb') as f:
-                video_dynamic_predictions = pickle.load(f)
+            if video_dynamic_gdino_prediction_file_path.exists():
+                with open(video_dynamic_gdino_prediction_file_path, 'rb') as f:
+                    video_dynamic_predictions = pickle.load(f)
 
             # 2. Load static gdino annotations
             video_static_gdino_prediction_file_path = self.static_detections_root_path / f"{video_id}.pkl"
             video_static_predictions = None
-            with open(video_static_gdino_prediction_file_path, 'rb') as f:
-                video_static_predictions = pickle.load(f)
+            if video_static_gdino_prediction_file_path.exists():
+                with open(video_static_gdino_prediction_file_path, 'rb') as f:
+                    video_static_predictions = pickle.load(f)
 
             # 3. Frame wise combined gdino annotations, use frame_id as the key for the map
-            combined_gdino_predictions = {}
-            for frame_name, dynamic_pred in video_dynamic_predictions.items():
-                static_pred = video_static_predictions.get(frame_name, None)
-                if static_pred:
-                    combined_boxes = dynamic_pred['boxes'] + static_pred['boxes']
-                    combined_labels = dynamic_pred['labels'] + static_pred['labels']
-                    combined_scores = dynamic_pred['scores'] + static_pred['scores']
-                else:
-                    combined_boxes = dynamic_pred['boxes']
-                    combined_labels = dynamic_pred['labels']
-                    combined_scores = dynamic_pred['scores']
-                combined_gdino_predictions[frame_name] = {
-                    'boxes': combined_boxes,
-                    'labels': combined_labels,
-                    'scores': combined_scores
-                }
-            video_id_gdino_annotations_map[video_id] = combined_gdino_predictions
+            if video_dynamic_predictions and video_static_predictions:
+                print(f"[{video_id}] Combining GDINO dynamic and static predictions.")
+                combined_gdino_predictions = {}
+                for frame_name, dynamic_pred in video_dynamic_predictions.items():
+                    static_pred = video_static_predictions.get(frame_name, None)
+                    if static_pred:
+                        combined_boxes = dynamic_pred['boxes'] + static_pred['boxes']
+                        combined_labels = dynamic_pred['labels'] + static_pred['labels']
+                        combined_scores = dynamic_pred['scores'] + static_pred['scores']
+                    else:
+                        combined_boxes = dynamic_pred['boxes']
+                        combined_labels = dynamic_pred['labels']
+                        combined_scores = dynamic_pred['scores']
+                    combined_gdino_predictions[frame_name] = {
+                        'boxes': combined_boxes,
+                        'labels': combined_labels,
+                        'scores': combined_scores
+                    }
+                video_id_gdino_annotations_map[video_id] = combined_gdino_predictions
+            elif video_dynamic_predictions:
+                print(f"[{video_id}] Using only GDINO dynamic predictions.")
+                video_id_gdino_annotations_map[video_id] = video_dynamic_predictions
+            elif video_static_predictions:
+                print(f"[{video_id}] Using only GDINO static predictions.")
+                video_id_gdino_annotations_map[video_id] = video_static_predictions
+            else:
+                raise ValueError(f"No GDINO predictions found for video {video_id} in both dynamic and static paths.")
 
         return video_id_gdino_annotations_map
 
@@ -656,11 +673,13 @@ class BBox3DGenerator:
 
         # 1. Ground truth annotations for specific frames.
         # This primarily includes bounding boxes for persons and objects in the frame.
-        video_id_gt_bboxes_map, video_id_gt_annotations_map = self.create_gt_annotations_map(dataloader)
+        print("Creating GT annotations map...")
+        video_id_gt_bboxes_map, video_id_gt_annotations_map = self.create_gt_annotations_map(dataloader, split)
 
         # 2. Grounding Dino bounding boxes for specific frames.
         # Combined detections of dynamic objects and static objects.
-        video_id_gdino_annotations_map = self.create_gdino_annotations_map(dataloader)
+        print("Creating GDINO annotations map...")
+        video_id_gdino_annotations_map = self.create_gdino_annotations_map(dataloader, split)
 
         for data in tqdm(dataloader):
             video_id = data['video_id']
@@ -706,7 +725,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--split",
         type=_parse_split,
-        default="04",
+        default="QT",
         help="Shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}.",
     )
     return parser.parse_args()

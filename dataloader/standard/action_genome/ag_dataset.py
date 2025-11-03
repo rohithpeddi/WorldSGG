@@ -9,7 +9,7 @@ class StandardAG(BaseAG):
 
     def __getitem__(self, index):
         frame_names = self._video_list[index]
-        video_id = frame_names[0].split("/")[-1]
+        video_id = frame_names[0].split("/")[0]
         return {
             "video_id": video_id,
             "frame_names": frame_names,
