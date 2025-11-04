@@ -518,7 +518,9 @@ class BBox3DGenerator:
         video_dynamic_predictions = np.load(video_dynamic_3d_scene_path, allow_pickle=True)
 
         points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
-        colors = video_dynamic_predictions["colors"].astype(np.uint8)  # (S,H,W,3)
+        imgs_f32 = video_dynamic_predictions["images"]  # float32 in [0, 1]
+        colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)  # (S, H, W, 3)
+
         conf = None
         if "conf" in video_dynamic_predictions:
             conf = video_dynamic_predictions["conf"]
@@ -582,8 +584,7 @@ class BBox3DGenerator:
         *,
         min_points: int = 50,
         iou_thr: float = 0.3,
-        visualize: bool = False,
-        rr_app_id: Optional[str] = None,
+        visualize: bool = False
     ) -> None:
         P = self._load_points_for_video(video_id)
         points_S = P["points"]          # (S,H,W,3)
@@ -684,11 +685,14 @@ class BBox3DGenerator:
                 aabb = self._aabb(label_non_zero_pts)
                 obb  = self._pca_obb(label_non_zero_pts)
                 if visualize:
-                    # 1) points for this label at this time
+                    # make path unique per frame + label
+                    obj_base = f"{base}/{stem}/{label}"
+
+                    # 1) points
                     rr.log(
-                        f"{base}/points",
+                        f"{obj_base}/points",
                         rr.Points3D(
-                            positions=label_non_zero_pts.astype(np.float32),
+                            positions=label_non_zero_pts,
                             colors=label_colors,
                             radii=0.01,
                         ),
@@ -696,7 +700,11 @@ class BBox3DGenerator:
 
                     # 2) OBB
                     corners = np.asarray(obb["corners"], dtype=np.float32)
-                    self._log_box_lines_rr(f"{base}/obb", corners, rgba=(0, 255, 0, 255))
+                    self._log_box_lines_rr(
+                        f"{obj_base}/obb",
+                        corners,
+                        rgba=(0, 255, 0, 255),
+                    )
 
                     # 3) AABB
                     mn = np.asarray(aabb["min"], dtype=np.float32)
@@ -711,7 +719,11 @@ class BBox3DGenerator:
                         [mx[0], mx[1], mn[2]],
                         [mx[0], mx[1], mx[2]],
                     ], dtype=np.float32)
-                    self._log_box_lines_rr(f"{base}/aabb", aabb_corners, rgba=(255, 255, 0, 255))
+                    self._log_box_lines_rr(
+                        f"{obj_base}/aabb",
+                        aabb_corners,
+                        rgba=(255, 255, 0, 255),
+                    )
 
                 frame_rec["objects"].append({
                     "label": label,
