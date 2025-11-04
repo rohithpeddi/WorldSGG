@@ -11,10 +11,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import rerun as rr
+import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataloader.standard.action_genome.ag_dataset import StandardAG
+from datasets.preprocess.human.prompt_hmr.vis.traj import align_meshes_to_ground
 
 
 def get_video_belongs_to_split(video_id: str) -> Optional[str]:
@@ -80,6 +82,34 @@ def _load_pkl_if_exists(path: Path):
         with open(path, "rb") as f:
             return pickle.load(f)
     return None
+
+
+def build_scene_floor(scene_pts_xyz: np.ndarray,
+                      floor_scale=2.0,
+                      floor_color=None,
+                      device="cpu"):
+    """
+    scene_pts_xyz: (N, 3) numpy, raw scene points in *current* frame/world
+    returns: R (3,3), offset (3,), floor_v, floor_f, floor_c
+    """
+    if scene_pts_xyz.ndim == 2:
+        scene_pts_xyz = scene_pts_xyz[None, ...]  # (1, N, 3)
+
+    verts = torch.from_numpy(scene_pts_xyz).float().to(device)  # (1, N, 3)
+
+    # re-use your helper
+    verts_world, floor_data, R, offset = align_meshes_to_ground(
+        verts, floor_scale=floor_scale, floor_color=floor_color
+    )
+    # floor_data is [gv, gf, gc]
+    floor_v, floor_f, floor_c = floor_data  # numpy-ish from your helper
+
+    # R, offset are torch -> make them numpy for logging
+    R = R.detach().cpu().numpy()  # (3,3)
+    offset = offset.detach().cpu().numpy()  # (3,)
+
+    return R, offset, floor_v, floor_f, floor_c
+
 
 
 class BBox3DGenerator:
@@ -233,6 +263,34 @@ class BBox3DGenerator:
             "extents": extents.tolist(),  # full lengths along each axis
             "corners": corners_world.tolist()
         }
+
+    @staticmethod
+    def log_floor_rr(floor_v, floor_f, floor_c):
+        v = np.asarray(floor_v, dtype=np.float32)
+        f = np.asarray(floor_f, dtype=np.uint32)
+        c = np.asarray(floor_c, dtype=np.uint8)
+
+        # try mesh first
+        rr.log(
+            "world/floor",
+            rr.Mesh3D(
+                vertex_positions=v,
+                vertex_colors=c,
+                triangle_indices=f
+            ),
+        )
+
+    @staticmethod
+    def log_floor_rr_as_points(floor_v, floor_c):
+        if rr is None:
+            return
+        v = np.asarray(floor_v, dtype=np.float32)
+        c = np.asarray(floor_c, dtype=np.uint8)
+        rr.log("world/floor", rr.Points3D(v, colors=c))
+
+    @staticmethod
+    def transform_pts_R_offset(pts: np.ndarray, R: np.ndarray, offset: np.ndarray):
+        return (R @ pts.T).T + offset[None, :]
 
     @staticmethod
     def _box_edges_from_corners(corners: np.ndarray) -> List[np.ndarray]:
@@ -598,6 +656,7 @@ class BBox3DGenerator:
         S, H, W, _ = points_S.shape
 
         stem_to_idx = {stems_S[i]: i for i in range(S)}
+        R_floor, offset_floor, floor_v, floor_f, floor_c = build_scene_floor(points_S[0])
 
         # ------------------------------------------------------------------
         # (A) init rerun
@@ -709,10 +768,12 @@ class BBox3DGenerator:
                 if visualize:
                     obj_base = f"{base}/{stem}/{label}"
 
+                    label_pts_aligned = self.transform_pts_R_offset(label_non_zero_pts, R_floor, offset_floor)
+
                     rr.log(
                         f"{obj_base}/points",
                         rr.Points3D(
-                            positions=label_non_zero_pts,
+                            positions=label_pts_aligned,
                             colors=label_colors,
                             radii=0.01,
                         ),
@@ -720,9 +781,10 @@ class BBox3DGenerator:
 
                     # transform OBB corners
                     corners = np.asarray(obb["corners"], dtype=np.float32)  # (8,3)
+                    corners_aligned = self.transform_pts_R_offset(corners, R_floor, offset_floor)
                     self._log_box_lines_rr(
                         f"{obj_base}/obb",
-                        corners,
+                        corners_aligned,
                         rgba=(0, 255, 0, 255),
                     )
 
@@ -739,9 +801,11 @@ class BBox3DGenerator:
                         [mx[0], mx[1], mn[2]],
                         [mx[0], mx[1], mx[2]],
                     ], dtype=np.float32)
+
+                    aabb_corners_aligned = self.transform_pts_R_offset(aabb_corners, R_floor, offset_floor)
                     self._log_box_lines_rr(
                         f"{obj_base}/aabb",
-                        aabb_corners,
+                        aabb_corners_aligned,
                         rgba=(255, 255, 0, 255),
                     )
 
