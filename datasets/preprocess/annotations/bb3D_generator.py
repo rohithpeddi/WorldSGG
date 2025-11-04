@@ -246,16 +246,18 @@ class BBox3DGenerator:
         ]
         return [np.vstack([corners[i], corners[j]]) for (i, j) in idx_pairs]
 
-    def _log_box_lines_rr(self, path: str, corners: np.ndarray, rgba=(255, 255, 255, 255), radius=0.002):
-        if rr is None:
-            return
+    def _log_box_lines_rr(self, path: str, corners: np.ndarray,
+                          rgba=(255, 255, 255, 255), radius=0.002):
         edges = self._box_edges_from_corners(corners)
         for k, e in enumerate(edges):
+            e = np.asarray(e, dtype=np.float32)
             rr.log(
                 f"{path}/edge_{k}",
-                rr.LineStrips3D(positions=[e.astype(np.float32)],
-                                radii=radius,
-                                colors=[rgba])
+                rr.LineStrips3D(
+                    [e],  # list of strips
+                    radii=radius,
+                    colors=[rgba],
+                ),
             )
 
     def labels_for_frame(self, video_id: str, stem: str, is_static: bool) -> List[str]:
@@ -516,6 +518,7 @@ class BBox3DGenerator:
         video_dynamic_predictions = np.load(video_dynamic_3d_scene_path, allow_pickle=True)
 
         points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
+        colors = video_dynamic_predictions["colors"].astype(np.uint8)  # (S,H,W,3)
         conf = None
         if "conf" in video_dynamic_predictions:
             conf = video_dynamic_predictions["conf"]
@@ -561,11 +564,13 @@ class BBox3DGenerator:
         points_sub = points[annotated_idx_in_sampled_idx]  # (S,H,W,3)
         conf_sub = conf[annotated_idx_in_sampled_idx] if conf is not None else None  # (S,H,W) or None
         stems_sub = [sampled_idx_frame_name_map[idx][:-4] for idx in annotated_idx_in_sampled_idx]  # len S
+        colors_sub = colors[annotated_idx_in_sampled_idx]  # (S,H,W,3) - unused currently
 
         return {
             "points": points_sub,
             "conf": conf_sub,
-            "frame_stems": stems_sub
+            "frame_stems": stems_sub,
+            "colors": colors_sub
         }
 
     # ------------------------------ (6–9) Per-video BB generation ------------------------------ #
@@ -580,35 +585,17 @@ class BBox3DGenerator:
         visualize: bool = False,
         rr_app_id: Optional[str] = None,
     ) -> None:
-        """
-        Produces world 3D BB annotations per object per frame and writes:
-            <ag_root>/world_bb_annotations/<video_id>.pkl
-        Structure:
-            {
-              'video_id': str,
-              'frames': {
-                  '<frame_name>': {
-                      'objects': [
-                           { 'label', 'gt_bbox_xyxy', 'gdino_bbox_xyxy',
-                             'num_points',
-                             'aabb': {'min','max'},
-                             'obb':  {'center','axes','extents','corners'}
-                           }, ...
-                      ]
-                  }, ...
-              }
-            }
-        """
-        # Load points
         P = self._load_points_for_video(video_id)
         points_S = P["points"]          # (S,H,W,3)
         conf_S   = P["conf"]            # (S,H,W) or None
         stems_S  = P["frame_stems"]     # len S
+        colors = P["colors"]          # (S,H,W,3)
         S, H, W, _ = points_S.shape
 
         stem_to_idx = {stems_S[i]: i for i in range(S)}
-        if visualize and rr is not None:
-            rr.init(rr_app_id or f"world_bb_{video_id}", spawn=False)
+        if visualize:
+            base = f"world_bb/{video_id}"
+            rr.init(f"world_bb", spawn=True)
 
         out_frames: Dict[str, Dict[str, Any]] = {}
         video_to_frame_to_label_mask, all_static_labels, all_dynamic_labels = self.create_label_wise_masks_map(
@@ -616,14 +603,14 @@ class BBox3DGenerator:
             gt_annotations=video_gt_annotations
         )
 
-        for frame_items in video_gt_annotations:
+        for frame_idx, frame_items in enumerate(video_gt_annotations):
             frame_name = frame_items[0]["frame"].split("/")[-1]  # '000123.png'
             stem = Path(frame_name).stem
             if stem not in stem_to_idx:
-                # frame missing in the sampled S sequence
                 continue
             sidx = stem_to_idx[stem]
             pts_hw3 = points_S[sidx]  # (H,W,3)
+            colors_hw3 = colors[sidx]
             conf_hw = conf_S[sidx] if conf_S is not None else None
 
             frame_non_zero_pts = self._finite_and_nonzero(pts_hw3)
@@ -658,6 +645,9 @@ class BBox3DGenerator:
 
             frame_rec = {"objects": []}
 
+            if visualize:
+                rr.set_time_sequence("frame", int(frame_idx))
+
             # Extract 3D for each GT object
             for (label, gt_xyxy) in gt_objects:
                 chosen_gd_xyxy = self._match_gdino_to_gt(label, gt_xyxy, gd_boxes, gd_labels, gd_scores, iou_thr=iou_thr)
@@ -688,19 +678,27 @@ class BBox3DGenerator:
                     continue
 
                 label_non_zero_pts = pts_hw3[sel].reshape(-1, 3).astype(np.float32)
+                label_colors = colors_hw3[sel].reshape(-1, 3).astype(np.uint8)
 
                 # AABB & OBB
                 aabb = self._aabb(label_non_zero_pts)
                 obb  = self._pca_obb(label_non_zero_pts)
+                if visualize:
+                    # 1) points for this label at this time
+                    rr.log(
+                        f"{base}/points",
+                        rr.Points3D(
+                            positions=label_non_zero_pts.astype(np.float32),
+                            colors=label_colors,
+                            radii=0.01,
+                        ),
+                    )
 
-                # Visualization (optional)
-                if visualize and rr is not None:
-                    base = f"world_bb/{video_id}/{stem}/{label}"
-                    rr.log(f"{base}/points", rr.Points3D(positions=label_non_zero_pts))
-                    # draw OBB as line strips
+                    # 2) OBB
                     corners = np.asarray(obb["corners"], dtype=np.float32)
                     self._log_box_lines_rr(f"{base}/obb", corners, rgba=(0, 255, 0, 255))
-                    # draw AABB as line strips
+
+                    # 3) AABB
                     mn = np.asarray(aabb["min"], dtype=np.float32)
                     mx = np.asarray(aabb["max"], dtype=np.float32)
                     aabb_corners = np.array([
@@ -755,7 +753,8 @@ class BBox3DGenerator:
                 self.generate_video_bb_annotations(
                     video_id,
                     video_id_gt_annotations_map[video_id],
-                    video_id_gdino_annotations_map.get(video_id, {})
+                    video_id_gdino_annotations_map.get(video_id, {}),
+                    visualize=True
                 )
 
 def _parse_split(s: str) -> str:
