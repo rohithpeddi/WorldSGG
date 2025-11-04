@@ -45,6 +45,43 @@ def get_video_belongs_to_split(video_id: str) -> Optional[str]:
     return None
 
 
+def _is_empty_array(x):
+    # Handles None, list, tuple, torch.Tensor, np.ndarray
+    if x is None:
+        return True
+    # list/tuple
+    if isinstance(x, (list, tuple)):
+        return len(x) == 0
+    # try tensor-like / ndarray-like
+    try:
+        return getattr(x, "numel", None) and x.numel() == 0
+    except Exception:
+        pass
+    try:
+        return hasattr(x, "size") and hasattr(x, "shape") and x.size == 0
+    except Exception:
+        pass
+    return False
+
+
+def _to_len(x):
+    if x is None:
+        return 0
+    if isinstance(x, (list, tuple)):
+        return len(x)
+    # torch / np
+    try:
+        return int(x.shape[0])
+    except Exception:
+        return 0
+
+def _load_pkl_if_exists(path: Path):
+    if path.exists():
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    return None
+
+
 class BBox3DGenerator:
 
     def __init__(
@@ -273,7 +310,8 @@ class BBox3DGenerator:
             if not lbls:
                 continue
             all_labels.update(lbls)
-            frame_map[stem] = {}
+            if stem not in frame_map:
+                frame_map[stem] = {}
             for lbl in lbls:
                 m = self.get_union_mask(video_id, stem, lbl, is_static)
                 if m is not None:
@@ -328,53 +366,83 @@ class BBox3DGenerator:
     def create_gdino_annotations_map(self, dataloader, split):
         video_id_gdino_annotations_map = {}
         for data in tqdm(dataloader):
-            video_id = data['video_id']
+            video_id = data["video_id"]
 
             if get_video_belongs_to_split(video_id) != split:
                 continue
 
             # 1. Load dynamic gdino annotations
             video_dynamic_gdino_prediction_file_path = self.dynamic_detections_root_path / f"{video_id}.pkl"
-            video_dynamic_predictions = None
-            if video_dynamic_gdino_prediction_file_path.exists():
-                with open(video_dynamic_gdino_prediction_file_path, 'rb') as f:
-                    video_dynamic_predictions = pickle.load(f)
+            video_dynamic_predictions = _load_pkl_if_exists(video_dynamic_gdino_prediction_file_path)
 
             # 2. Load static gdino annotations
             video_static_gdino_prediction_file_path = self.static_detections_root_path / f"{video_id}.pkl"
-            video_static_predictions = None
-            if video_static_gdino_prediction_file_path.exists():
-                with open(video_static_gdino_prediction_file_path, 'rb') as f:
-                    video_static_predictions = pickle.load(f)
+            video_static_predictions = _load_pkl_if_exists(video_static_gdino_prediction_file_path)
 
-            # 3. Frame wise combined gdino annotations, use frame_id as the key for the map
-            if video_dynamic_predictions and video_static_predictions:
-                print(f"[{video_id}] Combining GDINO dynamic and static predictions.")
-                combined_gdino_predictions = {}
-                for frame_name, dynamic_pred in video_dynamic_predictions.items():
-                    static_pred = video_static_predictions.get(frame_name, None)
-                    if static_pred:
-                        combined_boxes = dynamic_pred['boxes'] + static_pred['boxes']
-                        combined_labels = dynamic_pred['labels'] + static_pred['labels']
-                        combined_scores = dynamic_pred['scores'] + static_pred['scores']
-                    else:
-                        combined_boxes = dynamic_pred['boxes']
-                        combined_labels = dynamic_pred['labels']
-                        combined_scores = dynamic_pred['scores']
+            # Normalize None to empty dict to simplify logic
+            if video_dynamic_predictions is None:
+                video_dynamic_predictions = {}
+            if video_static_predictions is None:
+                video_static_predictions = {}
+
+            # If both are empty, that's an error for this video
+            if not video_dynamic_predictions and not video_static_predictions:
+                raise ValueError(
+                    f"No GDINO predictions found for video {video_id} "
+                    f"in both dynamic ({video_dynamic_gdino_prediction_file_path}) "
+                    f"and static ({video_static_gdino_prediction_file_path}) paths."
+                )
+
+            # Collect all frame names seen in either dict
+            all_frame_names = set(video_dynamic_predictions.keys()) | set(video_static_predictions.keys())
+
+            combined_gdino_predictions = {}
+            for frame_name in all_frame_names:
+                dyn_pred = video_dynamic_predictions.get(frame_name, None)
+                stat_pred = video_static_predictions.get(frame_name, None)
+                if dyn_pred is None:
+                    dyn_pred = {"boxes": [], "labels": [], "scores": []}
+                if stat_pred is None:
+                    stat_pred = {"boxes": [], "labels": [], "scores": []}
+
+                if _is_empty_array(dyn_pred["boxes"]) and _is_empty_array(stat_pred["boxes"]):
                     combined_gdino_predictions[frame_name] = {
-                        'boxes': combined_boxes,
-                        'labels': combined_labels,
-                        'scores': combined_scores
+                        "boxes": [],
+                        "labels": [],
+                        "scores": [],
                     }
-                video_id_gdino_annotations_map[video_id] = combined_gdino_predictions
-            elif video_dynamic_predictions:
-                print(f"[{video_id}] Using only GDINO dynamic predictions.")
-                video_id_gdino_annotations_map[video_id] = video_dynamic_predictions
-            elif video_static_predictions:
-                print(f"[{video_id}] Using only GDINO static predictions.")
-                video_id_gdino_annotations_map[video_id] = video_static_predictions
-            else:
-                raise ValueError(f"No GDINO predictions found for video {video_id} in both dynamic and static paths.")
+                    continue
+
+                combined_boxes = []
+                combined_labels = []
+                combined_scores = []
+
+                if not _is_empty_array(dyn_pred["boxes"]):
+                    combined_boxes += list(dyn_pred["boxes"])
+                    combined_labels += list(dyn_pred["labels"])
+                    combined_scores += list(dyn_pred["scores"])
+
+                if not _is_empty_array(stat_pred["boxes"]):
+                    combined_boxes += list(stat_pred["boxes"])
+                    combined_labels += list(stat_pred["labels"])
+                    combined_scores += list(stat_pred["scores"])
+
+                final_pred = {
+                    "boxes": combined_boxes,
+                    "labels": combined_labels,
+                    "scores": combined_scores,
+                }
+
+                combined_gdino_predictions[frame_name] = final_pred
+
+            # At this point, combined_gdino_predictions has per-frame dicts
+            # if video_dynamic_predictions and video_static_predictions:
+            #     print(f"[{video_id}] Combined GDINO dynamic and static predictions.")
+            # elif video_dynamic_predictions:
+            #     print(f"[{video_id}] Using only GDINO dynamic predictions (validated).")
+            # else:
+            #     print(f"[{video_id}] Using only GDINO static predictions (validated).")
+            video_id_gdino_annotations_map[video_id] = combined_gdino_predictions
 
         return video_id_gdino_annotations_map
 
@@ -396,13 +464,13 @@ class BBox3DGenerator:
             frame_stems=frame_stems,
             video_id=video_id,
             frame_map=frame_map,
-            is_static=False
+            is_static=True
         )
         frame_map, all_dynamic_labels = self.update_frame_map(
             frame_stems=frame_stems,
             video_id=video_id,
             frame_map=frame_map,
-            is_static=True
+            is_static=False
         )
         if frame_map:
             video_to_frame_to_label_mask[video_id] = frame_map
@@ -444,7 +512,7 @@ class BBox3DGenerator:
            - 'conf'  : (S,H,W) float32 or None
            - 'frame_stems': List[str] length S (best-effort)
         """
-        video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id}_10" / "predictions.npz"
+        video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
         video_dynamic_predictions = np.load(video_dynamic_3d_scene_path, allow_pickle=True)
 
         points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
@@ -595,7 +663,7 @@ class BBox3DGenerator:
                 chosen_gd_xyxy = self._match_gdino_to_gt(label, gt_xyxy, gd_boxes, gd_labels, gd_scores, iou_thr=iou_thr)
 
                 # Build mask: prefer segmentation union; fallback to bbox mask (chosen GDINO > GT)
-                frame_label_mask = video_to_frame_to_label_mask[stem][label]
+                frame_label_mask = video_to_frame_to_label_mask[video_id][stem][label]
                 if frame_label_mask is None:
                     # mask fallback -> use chosen GDINO box, else GT
                     box = chosen_gd_xyxy if chosen_gd_xyxy is not None else gt_xyxy
