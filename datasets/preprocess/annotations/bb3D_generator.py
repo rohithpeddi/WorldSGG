@@ -519,6 +519,7 @@ class BBox3DGenerator:
 
         points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
         imgs_f32 = video_dynamic_predictions["images"]  # float32 in [0, 1]
+        camera_poses = video_dynamic_predictions["camera_poses"]  # (S,4,4)
         colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)  # (S, H, W, 3)
 
         conf = None
@@ -566,13 +567,15 @@ class BBox3DGenerator:
         points_sub = points[annotated_idx_in_sampled_idx]  # (S,H,W,3)
         conf_sub = conf[annotated_idx_in_sampled_idx] if conf is not None else None  # (S,H,W) or None
         stems_sub = [sampled_idx_frame_name_map[idx][:-4] for idx in annotated_idx_in_sampled_idx]  # len S
-        colors_sub = colors[annotated_idx_in_sampled_idx]  # (S,H,W,3) - unused currently
+        colors_sub = colors[annotated_idx_in_sampled_idx]  # (S,H,W,3)
+        camera_poses_sub = camera_poses[annotated_idx_in_sampled_idx]  # (S,4,4)
 
         return {
             "points": points_sub,
             "conf": conf_sub,
             "frame_stems": stems_sub,
-            "colors": colors_sub
+            "colors": colors_sub,
+            "camera_poses": camera_poses_sub
         }
 
     # ------------------------------ (6–9) Per-video BB generation ------------------------------ #
@@ -591,6 +594,7 @@ class BBox3DGenerator:
         conf_S   = P["conf"]            # (S,H,W) or None
         stems_S  = P["frame_stems"]     # len S
         colors = P["colors"]          # (S,H,W,3)
+        camera_poses = P["camera_poses"]  # (S,4,4)
         S, H, W, _ = points_S.shape
 
         stem_to_idx = {stems_S[i]: i for i in range(S)}
