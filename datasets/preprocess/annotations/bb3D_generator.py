@@ -384,140 +384,123 @@ class BBox3DGenerator:
         return frame_map, all_labels
 
     def create_gt_annotations_map(self, dataloader, split):
+        video_id_gt_annotations_map = {}
+        video_id_gt_bboxes_map = {}
+        for data in tqdm(dataloader):
+            video_id = data['video_id']
 
-        if os.path.exists(self.gt_annotations_map_path):
-            with open(self.gt_annotations_map_path, "rb") as f:
-                video_id_gt_bboxes_map, video_id_gt_annotations_map = pickle.load(f)
-            return video_id_gt_bboxes_map, video_id_gt_annotations_map
-        else:
-            video_id_gt_annotations_map = {}
-            video_id_gt_bboxes_map = {}
-            for data in tqdm(dataloader):
-                video_id = data['video_id']
+            if get_video_belongs_to_split(video_id) == split:
+                gt_annotations = data['gt_annotations']
+                video_id_gt_annotations_map[video_id] = gt_annotations
 
-                if get_video_belongs_to_split(video_id) == split:
-                    gt_annotations = data['gt_annotations']
-                    video_id_gt_annotations_map[video_id] = gt_annotations
-
-            # video_id, gt_bboxes for the gt detections
-            for video_id, gt_annotations in video_id_gt_annotations_map.items():
-                video_gt_bboxes = {}
-                for frame_idx, frame_items in enumerate(gt_annotations):
-                    frame_name = frame_items[0]["frame"].split("/")[-1]
-                    boxes = []
-                    labels = []
-                    for item in frame_items:
-                        if 'person_bbox' in item:
-                            boxes.append(item['person_bbox'][0])
-                            labels.append('person')
-                            continue
-                        category_id = item['class']
-                        category_name = self.catid_to_name_map[category_id]
-                        if category_name:
-                            if category_name == "closet/cabinet":
-                                category_name = "closet"
-                            elif category_name == "cup/glass/bottle":
-                                category_name = "cup"
-                            elif category_name == "paper/notebook":
-                                category_name = "paper"
-                            elif category_name == "sofa/couch":
-                                category_name = "sofa"
-                            elif category_name == "phone/camera":
-                                category_name = "phone"
-                            boxes.append(item['bbox'])
-                            labels.append(category_name)
-                    if boxes:
-                        video_gt_bboxes[frame_name] = {
-                            'boxes': boxes,
-                            'labels': labels
-                        }
-                video_id_gt_bboxes_map[video_id] = video_gt_bboxes
-
-            with open(self.gt_annotations_map_path, "wb") as f:
-                pickle.dump((video_id_gt_bboxes_map, video_id_gt_annotations_map), f)
+        # video_id, gt_bboxes for the gt detections
+        for video_id, gt_annotations in video_id_gt_annotations_map.items():
+            video_gt_bboxes = {}
+            for frame_idx, frame_items in enumerate(gt_annotations):
+                frame_name = frame_items[0]["frame"].split("/")[-1]
+                boxes = []
+                labels = []
+                for item in frame_items:
+                    if 'person_bbox' in item:
+                        boxes.append(item['person_bbox'][0])
+                        labels.append('person')
+                        continue
+                    category_id = item['class']
+                    category_name = self.catid_to_name_map[category_id]
+                    if category_name:
+                        if category_name == "closet/cabinet":
+                            category_name = "closet"
+                        elif category_name == "cup/glass/bottle":
+                            category_name = "cup"
+                        elif category_name == "paper/notebook":
+                            category_name = "paper"
+                        elif category_name == "sofa/couch":
+                            category_name = "sofa"
+                        elif category_name == "phone/camera":
+                            category_name = "phone"
+                        boxes.append(item['bbox'])
+                        labels.append(category_name)
+                if boxes:
+                    video_gt_bboxes[frame_name] = {
+                        'boxes': boxes,
+                        'labels': labels
+                    }
+            video_id_gt_bboxes_map[video_id] = video_gt_bboxes
 
         return video_id_gt_bboxes_map, video_id_gt_annotations_map
 
     def create_gdino_annotations_map(self, dataloader, split):
-        if os.path.exists(self.gdino_annotations_map_path):
-            with open(self.gdino_annotations_map_path, "rb") as f:
-                video_id_gdino_annotations_map = pickle.load(f)
-            return video_id_gdino_annotations_map
-        else:
-            video_id_gdino_annotations_map = {}
-            for data in tqdm(dataloader):
-                video_id = data["video_id"]
+        video_id_gdino_annotations_map = {}
+        for data in tqdm(dataloader):
+            video_id = data["video_id"]
 
-                if get_video_belongs_to_split(video_id) != split:
+            if get_video_belongs_to_split(video_id) != split:
+                continue
+
+            # 1. Load dynamic gdino annotations
+            video_dynamic_gdino_prediction_file_path = self.dynamic_detections_root_path / f"{video_id}.pkl"
+            video_dynamic_predictions = _load_pkl_if_exists(video_dynamic_gdino_prediction_file_path)
+
+            # 2. Load static gdino annotations
+            video_static_gdino_prediction_file_path = self.static_detections_root_path / f"{video_id}.pkl"
+            video_static_predictions = _load_pkl_if_exists(video_static_gdino_prediction_file_path)
+
+            # Normalize None to empty dict to simplify logic
+            if video_dynamic_predictions is None:
+                video_dynamic_predictions = {}
+            if video_static_predictions is None:
+                video_static_predictions = {}
+
+            # If both are empty, that's an error for this video
+            if not video_dynamic_predictions and not video_static_predictions:
+                raise ValueError(
+                    f"No GDINO predictions found for video {video_id} "
+                    f"in both dynamic ({video_dynamic_gdino_prediction_file_path}) "
+                    f"and static ({video_static_gdino_prediction_file_path}) paths."
+                )
+
+            # Collect all frame names seen in either dict
+            all_frame_names = set(video_dynamic_predictions.keys()) | set(video_static_predictions.keys())
+
+            combined_gdino_predictions = {}
+            for frame_name in all_frame_names:
+                dyn_pred = video_dynamic_predictions.get(frame_name, None)
+                stat_pred = video_static_predictions.get(frame_name, None)
+                if dyn_pred is None:
+                    dyn_pred = {"boxes": [], "labels": [], "scores": []}
+                if stat_pred is None:
+                    stat_pred = {"boxes": [], "labels": [], "scores": []}
+
+                if _is_empty_array(dyn_pred["boxes"]) and _is_empty_array(stat_pred["boxes"]):
+                    combined_gdino_predictions[frame_name] = {
+                        "boxes": [],
+                        "labels": [],
+                        "scores": [],
+                    }
                     continue
 
-                # 1. Load dynamic gdino annotations
-                video_dynamic_gdino_prediction_file_path = self.dynamic_detections_root_path / f"{video_id}.pkl"
-                video_dynamic_predictions = _load_pkl_if_exists(video_dynamic_gdino_prediction_file_path)
+                combined_boxes = []
+                combined_labels = []
+                combined_scores = []
 
-                # 2. Load static gdino annotations
-                video_static_gdino_prediction_file_path = self.static_detections_root_path / f"{video_id}.pkl"
-                video_static_predictions = _load_pkl_if_exists(video_static_gdino_prediction_file_path)
+                if not _is_empty_array(dyn_pred["boxes"]):
+                    combined_boxes += list(dyn_pred["boxes"])
+                    combined_labels += list(dyn_pred["labels"])
+                    combined_scores += list(dyn_pred["scores"])
 
-                # Normalize None to empty dict to simplify logic
-                if video_dynamic_predictions is None:
-                    video_dynamic_predictions = {}
-                if video_static_predictions is None:
-                    video_static_predictions = {}
+                if not _is_empty_array(stat_pred["boxes"]):
+                    combined_boxes += list(stat_pred["boxes"])
+                    combined_labels += list(stat_pred["labels"])
+                    combined_scores += list(stat_pred["scores"])
 
-                # If both are empty, that's an error for this video
-                if not video_dynamic_predictions and not video_static_predictions:
-                    raise ValueError(
-                        f"No GDINO predictions found for video {video_id} "
-                        f"in both dynamic ({video_dynamic_gdino_prediction_file_path}) "
-                        f"and static ({video_static_gdino_prediction_file_path}) paths."
-                    )
+                final_pred = {
+                    "boxes": combined_boxes,
+                    "labels": combined_labels,
+                    "scores": combined_scores,
+                }
 
-                # Collect all frame names seen in either dict
-                all_frame_names = set(video_dynamic_predictions.keys()) | set(video_static_predictions.keys())
-
-                combined_gdino_predictions = {}
-                for frame_name in all_frame_names:
-                    dyn_pred = video_dynamic_predictions.get(frame_name, None)
-                    stat_pred = video_static_predictions.get(frame_name, None)
-                    if dyn_pred is None:
-                        dyn_pred = {"boxes": [], "labels": [], "scores": []}
-                    if stat_pred is None:
-                        stat_pred = {"boxes": [], "labels": [], "scores": []}
-
-                    if _is_empty_array(dyn_pred["boxes"]) and _is_empty_array(stat_pred["boxes"]):
-                        combined_gdino_predictions[frame_name] = {
-                            "boxes": [],
-                            "labels": [],
-                            "scores": [],
-                        }
-                        continue
-
-                    combined_boxes = []
-                    combined_labels = []
-                    combined_scores = []
-
-                    if not _is_empty_array(dyn_pred["boxes"]):
-                        combined_boxes += list(dyn_pred["boxes"])
-                        combined_labels += list(dyn_pred["labels"])
-                        combined_scores += list(dyn_pred["scores"])
-
-                    if not _is_empty_array(stat_pred["boxes"]):
-                        combined_boxes += list(stat_pred["boxes"])
-                        combined_labels += list(stat_pred["labels"])
-                        combined_scores += list(stat_pred["scores"])
-
-                    final_pred = {
-                        "boxes": combined_boxes,
-                        "labels": combined_labels,
-                        "scores": combined_scores,
-                    }
-
-                    combined_gdino_predictions[frame_name] = final_pred
-                video_id_gdino_annotations_map[video_id] = combined_gdino_predictions
-
-            with open(self.gdino_annotations_map_path, "wb") as f:
-                pickle.dump(video_id_gdino_annotations_map, f)
+                combined_gdino_predictions[frame_name] = final_pred
+            video_id_gdino_annotations_map[video_id] = combined_gdino_predictions
 
         return video_id_gdino_annotations_map
 
@@ -673,7 +656,6 @@ class BBox3DGenerator:
         if visualize:
             base = f"world_bb/{video_id}"
             rr.init("world_bb", spawn=True)
-            self.log_floor_rr(floor_v, floor_f, floor_c)
 
         out_frames: Dict[str, Dict[str, Any]] = {}
         video_to_frame_to_label_mask, all_static_labels, all_dynamic_labels = self.create_label_wise_masks_map(
@@ -735,18 +717,29 @@ class BBox3DGenerator:
                 rr.set_time_sequence("frame", int(frame_idx))
                 # clear everything previously logged so this frame stands alone
                 rr.log("/", rr.Clear(recursive=True))
+                self.log_floor_rr(floor_v, floor_f, floor_c)
 
-                # Also log points with colors
-                transformed_pts = self.transform_pts_R_offset(
-                    points_S[int(frame_idx)].reshape(-1, 3), R_floor, offset_floor
-                )  # (S*H*W, 3)
+                # # Also log points with colors
+                # transformed_pts = self.transform_pts_R_offset(
+                #     points_S[int(frame_idx)].reshape(-1, 3), R_floor, offset_floor
+                # )  # (S*H*W, 3)
+                # rr.log(
+                #     f"{base}/points",
+                #     rr.Points3D(
+                #         transformed_pts,
+                #         colors=colors[int(frame_idx)].reshape(-1, 3)
+                #     )
+                # )
+
+                # Log points without transformation
                 rr.log(
                     f"{base}/points",
                     rr.Points3D(
-                        transformed_pts,
+                        points_S[int(frame_idx)].reshape(-1, 3),
                         colors=colors[int(frame_idx)].reshape(-1, 3)
                     )
                 )
+
 
             # Extract 3D for each GT object
             for (label, gt_xyxy) in gt_objects:
@@ -791,13 +784,13 @@ class BBox3DGenerator:
                     obj_base = f"{base}/{stem}/{label}"
 
                     # transform OBB corners
-                    corners = np.asarray(obb["corners"], dtype=np.float32)  # (8,3)
-                    corners_aligned = self.transform_pts_R_offset(corners, R_floor, offset_floor)
-                    self._log_box_lines_rr(
-                        f"{obj_base}/obb",
-                        corners_aligned,
-                        rgba=(0, 255, 0, 255),
-                    )
+                    # corners = np.asarray(obb["corners"], dtype=np.float32)  # (8,3)
+                    # corners_aligned = self.transform_pts_R_offset(corners, R_floor, offset_floor)
+                    # self._log_box_lines_rr(
+                    #     f"{obj_base}/obb",
+                    #     corners_aligned,
+                    #     rgba=(0, 255, 0, 255),
+                    # )
 
                     # transform AABB corners
                     mn = np.asarray(aabb["min"], dtype=np.float32)
@@ -813,10 +806,10 @@ class BBox3DGenerator:
                         [mx[0], mx[1], mx[2]],
                     ], dtype=np.float32)
 
-                    aabb_corners_aligned = self.transform_pts_R_offset(aabb_corners, R_floor, offset_floor)
+                    # aabb_corners_aligned = self.transform_pts_R_offset(aabb_corners, R_floor, offset_floor)
                     self._log_box_lines_rr(
                         f"{obj_base}/aabb",
-                        aabb_corners_aligned,
+                        aabb_corners,
                         rgba=(255, 255, 0, 255),
                     )
 
