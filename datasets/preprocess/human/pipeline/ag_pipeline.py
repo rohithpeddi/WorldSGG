@@ -1,37 +1,39 @@
 import glob
 import os
-import shutil
+from pathlib import Path
+
 import cv2
 import joblib
 import numpy as np
 import torch
 from omegaconf import OmegaConf
-
 from smplx import SMPLX
+
+from .camera import run_metric_slam, calibrate_intrinsics, run_slam
 from .detector import segment
 from .detector.vitpose_estimator import load_vit_model, estimate_kp2ds_from_bbox_vitpose
 from .kp_utils import convert_kps
-from .utils import prepare_inputs, load_video_frames, interpolate_bboxes
-from .tools import detect_track, detect_segment_track_sam, est_camera, est_calib
 from .phmr_vid import PromptHMR_Video
-from .camera import run_metric_slam, calibrate_intrinsics, run_slam
-from .spec import run_cam_calib
-from .world import world_hps_estimation
 from .postprocessing import post_optimization
-from .mcs_export_cam import export_scene_with_camera
-from smplcodec import SMPLCodec
-
+from .spec import run_cam_calib
+from .spec.cam_calib import run_pi3_spec_calib
+from .tools import detect_track, detect_segment_track_sam, est_camera, est_calib
+from .world import world_hps_estimation
 # import sys
 # sys.path.append('../')
-from ..data_config import CONFIG_PATH, SMPLX_NEUTRAL_MODEL_PATH, SMPLX_NEUTRAL_F32_PATH
+from ..data_config import CONFIG_PATH, SMPLX_NEUTRAL_MODEL_PATH
 
 
 class AgPipeline:
+
     def __init__(self, static_cam=False):
         self.images = None
         self.cfg = OmegaConf.load(CONFIG_PATH)
         self.cfg.static_cam = static_cam
-        self.sampled_frames_path = "/data/rohith/ag/sampled_frames_jpg"
+
+        self.sampled_frames_path = Path("/data/rohith/ag/sampled_frames_jpg")
+        self.dynamic_scene_dir_path = Path("/data/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic")
+        self.results_output_dir_path = Path("/data/rohith/ag/ag4D/human")
 
         checkpoint_dir = os.path.join(os.path.dirname(__file__), '../data/pretrain')
         self.data_dict = {
@@ -49,10 +51,7 @@ class AgPipeline:
             num_betas=10
         )
 
-    def load_frames(
-            self,
-            video_id,
-    ):
+    def load_frames(self, video_id):
         frames_path = os.path.join(self.sampled_frames_path, video_id)
         assert os.path.exists(frames_path), f"{frames_path} does not exist"
         if os.path.isdir(frames_path):
@@ -63,6 +62,11 @@ class AgPipeline:
             frames = np.stack([cv2.imread(f)[..., ::-1] for f in imgfiles])
             return frames, seq_folder
         return None
+
+    def load_dynamic_predictions(self, video_id):
+        video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
+        video_dynamic_predictions = np.load(video_dynamic_3d_scene_path, allow_pickle=True)
+        return video_dynamic_predictions
 
     def run_detect_track(self, ):
         if self.cfg.tracker == 'bytetrack':
@@ -279,7 +283,6 @@ class AgPipeline:
             save_only_essential=False,
             max_frame=None
     ):
-
         def cvt_to_numpy(d):
             for k, v in d.items():
                 if isinstance(v, dict):
@@ -289,7 +292,16 @@ class AgPipeline:
 
         images, seq_folder = self.load_frames(video_id)
 
-        self.images = images[:max_frame]
+        video_results_output_path = self.results_output_dir_path / video_id
+        video_results_output_path.mkdir(parents=True, exist_ok=True)
+        self.cfg.output_folder = str(video_results_output_path)
+
+        video_dynamic_predictions = self.load_dynamic_predictions(video_id)
+
+        self.images = video_dynamic_predictions['images']
+        self.camera_poses = video_dynamic_predictions['camera_poses']
+        self.points = video_dynamic_predictions['points']
+
         self.seq_folder = seq_folder
         self.cfg.seq_folder = seq_folder
 
@@ -302,15 +314,21 @@ class AgPipeline:
                         'has_tracks': False, 'has_hps_cam': False, 'has_hps_world': False, 'has_slam': False,
                         'has_hands': False, 'has_2d_kpts': False, 'has_post_opt': False}
 
-        ### naive camera
-
         ### spec camera
-        # if not self.results['has_slam']:
-        #     stride = len(self.images)
-        #     spec_calib = run_cam_calib(self.images, out_folder=seq_folder + '/spec_calib',
-        #                                save_res=True, stride=stride, method='spec',
-        #                                first_frame_idx=0)
-        #     self.results['spec_calib'] = spec_calib
+        if not self.results['has_slam']:
+            spec_calib_output_dir = video_results_output_path / "spec_calib"
+            os.makedirs(spec_calib_output_dir, exist_ok=True)
+
+            spec_calib = run_pi3_spec_calib(
+                images=self.images,
+                out_folder=spec_calib_output_dir,
+                loss_type='softargmax_l2',
+                save_res=False,
+                stride=1,
+                first_frame_idx=0,
+                camera_poses=self.camera_poses)
+
+            self.results['spec_calib'] = spec_calib
 
         ### detect_segment_track
         if not self.results['has_tracks']:

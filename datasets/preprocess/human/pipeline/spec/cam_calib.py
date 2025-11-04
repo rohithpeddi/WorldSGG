@@ -620,11 +620,169 @@ def run_cam_calib(
     loss_type='softargmax_l2', save_res=False, stride=1,
     method='spec', first_frame_idx=0,
 ):
-    
     if method == 'spec':
         return run_spec_calib(images, out_folder, loss_type, save_res, stride, first_frame_idx)
     elif method == 'wildcam':
         return run_wildcam_calib(images, out_folder, save_res, stride, first_frame_idx)
+
+
+# ----------------------------------------- MODIFIED ----------------------------------------- #
+
+def pose_to_pitch_roll(T):
+    """
+    T: (4,4) or (3,4) camera->world
+    Assumes y-up world, z-forward camera.
+    Returns (pitch, roll) in radians.
+    """
+    R = T[:3, :3]
+    # camera forward in world
+    cam_fwd = R[:, 2]   # z-axis
+    cam_up = R[:, 1]    # y-axis
+    cam_right = R[:, 0]
+
+    # pitch: how much we look up/down
+    pitch = np.arctan2(-cam_fwd[1], np.sqrt(cam_fwd[0]**2 + cam_fwd[2]**2))
+    # roll: rotation around forward
+    # this is one reasonable choice; may need sign flips depending on Pi3
+    roll = np.arctan2(cam_right[1], cam_up[1])
+    return pitch, roll
+
+
+@torch.no_grad()
+def run_pi3_spec_calib(
+    images,
+    out_folder=None,
+    loss_type='softargmax_l2',
+    stride=1,
+    first_frame_idx=0,
+    camera_poses=None,
+):
+    """
+    images: list of paths or np.ndarray of images
+    camera_poses: np.ndarray or torch.Tensor of shape (N, 4, 4) or (N, 3, 4)
+                  assumed camera->world, aligned with `images`
+    """
+
+    # --- slice images the way you already do ---
+    images = images[first_frame_idx:]
+    images = images[::stride]
+
+    # also slice camera poses the same way, if given
+    if camera_poses is not None:
+        camera_poses = np.asarray(camera_poses)
+        camera_poses = camera_poses[first_frame_idx:]
+        camera_poses = camera_poses[::stride]
+
+    # figure out image size
+    if isinstance(images, np.ndarray):
+        imgsize = images[0].shape[:2]
+    elif isinstance(images[0], str):
+        imgsize = cv2.imread(images[0]).shape[:2]
+
+    val_dataset = ImageFolder(images, min_size=min(imgsize))
+
+    device = 'cuda'
+
+    model = CameraRegressorNetwork(
+        backbone='resnet50',
+        num_fc_layers=1,
+        num_fc_channels=1024,
+    ).to(device)
+
+    CKPT = '/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/human/data/pretrain/camcalib_sa_biased_l2.ckpt'
+    if os.path.exists('/.dockerenv') or 'AWS_DEFAULT_REGION' in os.environ.keys():
+        CKPT = os.path.abspath(CKPT.replace('data', '/code/data'))
+
+    ckpt = torch.load(CKPT)
+    model = load_pretrained_model(model, ckpt['state_dict'], remove_lightning=True, strict=True)
+    model.eval()
+
+    os.makedirs(out_folder, exist_ok=True)
+
+    focal_length = []
+    results = {}
+
+    for idx, batch in enumerate(val_dataset):
+        img_fname = batch['imgname']
+
+        img = batch['img'].unsqueeze(0).to(device).float()
+        preds = model(img)
+
+        batch_img = img
+        batch_img = denormalize_images(batch_img) * 255
+        batch_img = np.transpose(batch_img.cpu().numpy(), (0, 2, 3, 1))
+        img_vis = batch_img[0].copy()
+
+        extract = lambda x: x.detach().cpu().numpy().squeeze()
+
+        if loss_type in ('kl', 'ce'):
+            pred_vfov, pred_pitch, pred_roll = map(extract, preds)
+            pred_vfov, pred_pitch, pred_roll = convert_preds_to_angles(
+                pred_vfov, pred_pitch, pred_roll, loss_type=loss_type,
+                return_type='np',
+            )
+        else:
+            preds = convert_preds_to_angles(*preds, loss_type=loss_type)
+            pred_vfov = extract(preds[0])
+            pred_pitch = extract(preds[1])
+            pred_roll = extract(preds[2])
+
+        orig_img_w, orig_img_h = batch['orig_shape']
+        pred_f_pix = orig_img_h / 2. / np.tan(pred_vfov / 2.)
+
+        # ----- if we have a pose for this frame, override pitch/roll -----
+        pose_pitch = None
+        pose_roll = None
+        if camera_poses is not None and idx < len(camera_poses):
+            T = camera_poses[idx]
+            pose_pitch, pose_roll = pose_to_pitch_roll(T)
+            # overwrite
+            final_pitch = float(pose_pitch)
+            final_roll = float(pose_roll)
+        else:
+            final_pitch = float(pred_pitch)
+            final_roll = float(pred_roll)
+
+        # store in radians as before
+        entry = {'vfov': float(pred_vfov), 'f_pix': float(pred_f_pix), 'pitch': final_pitch, 'roll': final_roll,
+                 'pitch_pred': float(pred_pitch), 'roll_pred': float(pred_roll)}
+
+        # keep both for debugging
+        if pose_pitch is not None:
+            entry['pitch_pose'] = float(pose_pitch)
+            entry['roll_pose'] = float(pose_roll)
+
+        results[img_fname] = entry
+
+        # visualize first frame like before, but with final pitch/roll
+        if idx == 0:
+            img_out, _ = show_horizon_line(
+                img_vis.copy(),
+                pred_vfov,
+                final_pitch,
+                final_roll,
+                focal_length=-1,
+                debug=True,
+                color=(255, 0, 0),
+                width=3,
+                GT=False,
+            )
+            imsave(os.path.join(out_folder, '0000.jpg'), img_out)
+
+        focal_length.append(pred_f_pix)
+
+    # aggregate stats
+    focal_length = np.array(focal_length)
+    results['avg_focal_length'] = float(np.mean(focal_length))
+    results['min_focal_length'] = float(np.min(focal_length))
+    results['max_focal_length'] = float(np.max(focal_length))
+    results['std_focal_length'] = float(np.std(focal_length))
+    results['median_focal_length'] = float(np.median(focal_length))
+
+    return results
+
+
+
 
 
 if __name__ == '__main__':
