@@ -590,17 +590,21 @@ class BBox3DGenerator:
         visualize: bool = False
     ) -> None:
         P = self._load_points_for_video(video_id)
-        points_S = P["points"]          # (S,H,W,3)
-        conf_S   = P["conf"]            # (S,H,W) or None
-        stems_S  = P["frame_stems"]     # len S
-        colors = P["colors"]          # (S,H,W,3)
+        points_S = P["points"]  # (S,H,W,3)
+        conf_S = P["conf"]  # (S,H,W) or None
+        stems_S = P["frame_stems"]  # len S
+        colors = P["colors"]  # (S,H,W,3)
         camera_poses = P["camera_poses"]  # (S,4,4)
         S, H, W, _ = points_S.shape
 
         stem_to_idx = {stems_S[i]: i for i in range(S)}
+
+        # ------------------------------------------------------------------
+        # (A) init rerun
+        # ------------------------------------------------------------------
         if visualize:
             base = f"world_bb/{video_id}"
-            rr.init(f"world_bb", spawn=True)
+            rr.init("world_bb", spawn=True)
 
         out_frames: Dict[str, Dict[str, Any]] = {}
         video_to_frame_to_label_mask, all_static_labels, all_dynamic_labels = self.create_label_wise_masks_map(
@@ -631,11 +635,16 @@ class BBox3DGenerator:
                 label = self.catid_to_name_map.get(cid, None)
                 if not label:
                     continue
-                if label == "closet/cabinet": label = "closet"
-                elif label == "cup/glass/bottle": label = "cup"
-                elif label == "paper/notebook": label = "paper"
-                elif label == "sofa/couch": label = "sofa"
-                elif label == "phone/camera": label = "phone"
+                if label == "closet/cabinet":
+                    label = "closet"
+                elif label == "cup/glass/bottle":
+                    label = "cup"
+                elif label == "paper/notebook":
+                    label = "paper"
+                elif label == "sofa/couch":
+                    label = "sofa"
+                elif label == "phone/camera":
+                    label = "phone"
                 # GT is xyxy for objects
                 gt_objects.append((label, [float(v) for v in item["bbox"]]))
 
@@ -644,20 +653,29 @@ class BBox3DGenerator:
             if gd is None:
                 gd_boxes, gd_labels, gd_scores = [], [], []
             else:
-                gd_boxes  = [list(map(float, b)) for b in gd["boxes"]]
+                gd_boxes = [list(map(float, b)) for b in gd["boxes"]]
                 gd_labels = gd["labels"]
                 gd_scores = [float(s) for s in gd["scores"]]
 
             frame_rec = {"objects": []}
 
+            # ------------------------------------------------------------------
+            # (B) per-frame time + clear so previous frame disappears
+            # ------------------------------------------------------------------
             if visualize:
                 rr.set_time_sequence("frame", int(frame_idx))
+                # clear everything previously logged so this frame stands alone
+                rr.log("/", rr.Clear(recursive=True))
 
             # Extract 3D for each GT object
             for (label, gt_xyxy) in gt_objects:
-                chosen_gd_xyxy = self._match_gdino_to_gt(label, gt_xyxy, gd_boxes, gd_labels, gd_scores, iou_thr=iou_thr)
+                chosen_gd_xyxy = self._match_gdino_to_gt(
+                    label, gt_xyxy,
+                    gd_boxes, gd_labels, gd_scores,
+                    iou_thr=iou_thr
+                )
 
-                # Build mask: prefer segmentation union; fallback to bbox mask (chosen GDINO > GT)
+                # Build mask: prefer segmentation union; fallback to bbox mask
                 frame_label_mask = video_to_frame_to_label_mask[video_id][stem][label]
                 if frame_label_mask is None:
                     # mask fallback -> use chosen GDINO box, else GT
@@ -671,11 +689,10 @@ class BBox3DGenerator:
                     sel &= (conf_hw > 1e-6)
 
                 if sel.sum() < min_points:
-                    # too few points -> skip box (but still record minimal info)
                     frame_rec["objects"].append({
                         "label": label,
                         "gt_bbox_xyxy": [float(v) for v in gt_xyxy],
-                        "gdino_bbox_xyxy": [float(v) for v in chosen_gd_xyxy],
+                        "gdino_bbox_xyxy": [float(v) for v in chosen_gd_xyxy] if chosen_gd_xyxy is not None else None,
                         "num_points": int(sel.sum()),
                         "aabb": None,
                         "obb": None
@@ -685,14 +702,13 @@ class BBox3DGenerator:
                 label_non_zero_pts = pts_hw3[sel].reshape(-1, 3).astype(np.float32)
                 label_colors = colors_hw3[sel].reshape(-1, 3).astype(np.uint8)
 
-                # AABB & OBB
+                # AABB & OBB in original world coords (for saving)
                 aabb = self._aabb(label_non_zero_pts)
-                obb  = self._pca_obb(label_non_zero_pts)
+                obb = self._pca_obb(label_non_zero_pts)
+
                 if visualize:
-                    # make path unique per frame + label
                     obj_base = f"{base}/{stem}/{label}"
 
-                    # 1) points
                     rr.log(
                         f"{obj_base}/points",
                         rr.Points3D(
@@ -702,15 +718,15 @@ class BBox3DGenerator:
                         ),
                     )
 
-                    # 2) OBB
-                    corners = np.asarray(obb["corners"], dtype=np.float32)
+                    # transform OBB corners
+                    corners = np.asarray(obb["corners"], dtype=np.float32)  # (8,3)
                     self._log_box_lines_rr(
                         f"{obj_base}/obb",
                         corners,
                         rgba=(0, 255, 0, 255),
                     )
 
-                    # 3) AABB
+                    # transform AABB corners
                     mn = np.asarray(aabb["min"], dtype=np.float32)
                     mx = np.asarray(aabb["max"], dtype=np.float32)
                     aabb_corners = np.array([
@@ -732,7 +748,7 @@ class BBox3DGenerator:
                 frame_rec["objects"].append({
                     "label": label,
                     "gt_bbox_xyxy": [float(v) for v in gt_xyxy],
-                    "gdino_bbox_xyxy": [float(v) for v in chosen_gd_xyxy],
+                    "gdino_bbox_xyxy": [float(v) for v in chosen_gd_xyxy] if chosen_gd_xyxy is not None else None,
                     "num_points": int(label_non_zero_pts.shape[0]),
                     "aabb": aabb,
                     "obb": obb
@@ -741,7 +757,7 @@ class BBox3DGenerator:
             if frame_rec["objects"]:
                 out_frames[frame_name] = frame_rec
 
-        # ------------------------------ (9) Persist to disk ------------------------------ #
+        # ------------------------------ Persist to disk ------------------------------ #
         out_path = self.bbox_3d_root_dir / f"{video_id}.pkl"
         with open(out_path, "wb") as f:
             pickle.dump({
