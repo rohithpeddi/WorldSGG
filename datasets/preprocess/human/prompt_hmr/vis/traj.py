@@ -10,7 +10,7 @@ from datasets.preprocess.human.prompt_hmr.utils.rotation_conversions import quat
 
 
 def traj_filter(pred_vert_w, pred_j3d_w, sigma=3):
-    """ Smooth the root trajetory (xyz) """
+    """ Smooth the root trajectory (xyz) """
     root = pred_j3d_w[:, 0]
     root_smooth = torch.from_numpy(gaussian_filter(root, sigma=sigma, axes=0))
 
@@ -20,7 +20,7 @@ def traj_filter(pred_vert_w, pred_j3d_w, sigma=3):
 
 
 def cam_filter(cam_r, cam_t, r_sigma=3, t_sigma=15):
-    """ Smooth camera trajetory (SO3) """
+    """ Smooth camera trajectory (SO3) """
     cam_q = matrix_to_quaternion(cam_r)
     r_smooth = torch.from_numpy(gaussian_filter(cam_q, sigma=r_sigma, axes=0))
     t_smooth = torch.from_numpy(gaussian_filter(cam_t, sigma=t_sigma, axes=0))
@@ -257,5 +257,3 @@ def vis_traj(traj_1, traj_2, savefolder, grid=5):
         ax.xaxis.set_major_locator(ticker.MultipleLocator(grid)) 
         fig.savefig(f'{savefolder}/{seq}.png', dpi=200, bbox_inches='tight')
         plt.close(fig)
-
-

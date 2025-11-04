@@ -298,22 +298,11 @@ class AgPipeline:
             self.results = joblib.load(f'{seq_folder}/results.pkl')
             return self.results
 
-        self.results = {
-            'camera': {},
-            'people': {},
-            'timings': {},
-            'masks': None,
-            'has_tracks': False,
-            'has_hps_cam': False,
-            'has_hps_world': False,
-            'has_slam': False,
-            'has_hands': False,
-            'has_2d_kpts': False,
-            'has_post_opt': False,
-        }
+        self.results = {'camera': est_camera(images[0]), 'people': {}, 'timings': {}, 'masks': None,
+                        'has_tracks': False, 'has_hps_cam': False, 'has_hps_world': False, 'has_slam': False,
+                        'has_hands': False, 'has_2d_kpts': False, 'has_post_opt': False}
 
         ### naive camera
-        self.results['camera'] = est_camera(images[0])
 
         ### spec camera
         # if not self.results['has_slam']:

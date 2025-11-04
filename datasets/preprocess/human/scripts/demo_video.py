@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import time
@@ -6,9 +7,6 @@ from typing import Optional
 
 import joblib
 import torch
-import tyro
-import argparse
-
 from tqdm import tqdm
 
 from datasets.preprocess.human.pipeline.ag_pipeline import AgPipeline
@@ -27,6 +25,7 @@ def main_og(input_video='data/examples/boxing_short.mp4',
             run_rerun=True,
             viser_total=1500,
             viser_subsample=1):
+
     smplx = SMPLX_Layer(SMPLX_PATH).cuda()
 
     output_folder = 'results/' + os.path.basename(input_video).split('.')[0]
@@ -59,7 +58,6 @@ def main_og(input_video='data/examples/boxing_short.mp4',
     all_verts = torch.cat(all_verts)
     [gv, gf, gc] = get_floor_mesh(all_verts, scale=2)
 
-    # Viser
     if run_viser:
         server, gui = viser_vis_world4d(images,
                                         world4d,
@@ -79,7 +77,6 @@ def main_og(input_video='data/examples/boxing_short.mp4',
 
             time.sleep(1.0 / gui_framerate.value)
 
-    # Rerun
     if run_rerun:
         from datasets.preprocess.human.prompt_hmr.vis import rerun_vis as rrvis
 
@@ -152,13 +149,11 @@ class AgPromptHMR:
     ):
         self.pipeline = AgPipeline(static_cam=False)
         self.smplx = SMPLX_Layer(SMPLX_PATH).cuda()
-
         self.output_root = output_root
         os.makedirs(self.output_root, exist_ok=True)
-
         self.root_dir_path = root_dir_path
 
-    def process_video(self, video_id):
+    def process_video_intermediate_steps(self, video_id):
         print(f"[{video_id}] Starting processing...")
         video_output_folder = os.path.join(self.output_root, video_id)
         os.makedirs(video_output_folder, exist_ok=True)
@@ -177,7 +172,7 @@ class AgPromptHMR:
                 print(f"Skipping video {video_id} not in split {split}")
                 continue
             try:
-                self.process_video(video_id)
+                self.process_video_intermediate_steps(video_id)
             except Exception as e:
                 print(f"[ERROR] Error processing video {video_id}: {e}")
 
