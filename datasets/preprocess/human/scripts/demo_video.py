@@ -165,8 +165,54 @@ class AgPromptHMR:
         joblib.dump(results, output_pkl_file)
         print(f"Processed video {video_id} and saved results to {output_pkl_file}")
 
+    def process_video(self, video_id):
+        smplx = SMPLX_Layer(SMPLX_PATH).cuda()
+
+        results = self.pipeline.__call__(video_id, save_only_essential=False)
+
+        # Downsample for viser visualization
+        images = self.pipeline.images
+        world4d = self.pipeline.create_world4d()
+        world4d = {i: world4d[k] for i, k in enumerate(world4d)}
+
+        # Get vertices
+        all_verts = []
+        for k in world4d:
+            world3d = world4d[k]
+            if len(world3d['track_id']) == 0:  # no people
+                continue
+            rotmat = axis_angle_to_matrix(world3d['pose'].reshape(-1, 55, 3))
+            verts = smplx(global_orient=rotmat[:, :1].cuda(),
+                          body_pose=rotmat[:, 1:22].cuda(),
+                          betas=world3d['shape'].cuda(),
+                          transl=world3d['trans'].cuda()).vertices.cpu().numpy()
+
+            world3d['vertices'] = verts
+            all_verts.append(torch.tensor(verts, dtype=torch.bfloat16))
+
+        all_verts = torch.cat(all_verts)
+        [gv, gf, gc] = get_floor_mesh(all_verts, scale=2)
+
+        # Rerun
+        from datasets.preprocess.human.prompt_hmr.vis import rerun_vis as rrvis
+
+        rrvis.rerun_vis_world4d(
+            images,
+            world4d,
+            smplx.faces,
+            floor=(gv, gf),
+            init_fps=10,
+            img_maxsize=480,
+        )
+
+        print('Rerun visualization running. Please open the Rerun app to view the results.')
+        print('Press Ctrl+C to terminate.')
+        while True:
+            time.sleep(1)
+
     def infer_all_videos(self, split):
         video_id_list = os.listdir(self.root_dir_path)
+        video_id_list = ["0DJ6R.mp4"]
         for video_id in tqdm(video_id_list, desc=f"Processing videos in split {split}", unit="video"):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
@@ -181,16 +227,12 @@ def _parse_split(s: str) -> str:
     valid = {"04", "59", "AD", "EH", "IL", "MP", "QT", "UZ"}
     val = s.strip().upper()
     if val not in valid:
-        raise argparse.ArgumentTypeError(
-            f"Invalid split '{s}'. Choose one of: {sorted(valid)}"
-        )
+        raise argparse.ArgumentTypeError(f"Invalid split '{s}'. Choose one of: {sorted(valid)}")
     return val
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Sample frames from videos based on homography-overlap filtering."
-    )
+    parser = argparse.ArgumentParser(description="Sample frames from videos based on homography-overlap filtering.")
     parser.add_argument(
         "--output_dir_path", type=str, default="/data/rohith/ag/ag4D/human/",
         help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"

@@ -100,7 +100,6 @@ class AgPipeline:
         self.results = phmr.run(self.images, self.results, mask_prompt)
         self.results['contact_joint_ids'] = [7, 10, 8, 11, 20, 21]
         self.results['has_hps_cam'] = True
-
         return
 
     def camera_motion_estimation(self, static_cam=False, camera_poses=None):
@@ -340,7 +339,6 @@ class AgPipeline:
     def __call__(
             self,
             video_id,
-            output_folder,
             static_cam=False,
             save_only_essential=False,
             max_frame=None
@@ -354,8 +352,10 @@ class AgPipeline:
 
         video_results_output_path = self.results_output_dir_path / video_id
         video_results_output_path.mkdir(parents=True, exist_ok=True)
+
         self.cfg.output_folder = str(video_results_output_path)
         self.cfg.sequence_folder = video_results_output_path
+        self.seq_folder = video_results_output_path
 
         video_dynamic_predictions = self.load_dynamic_predictions(video_id)
 
