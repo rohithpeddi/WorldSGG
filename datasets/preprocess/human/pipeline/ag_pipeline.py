@@ -317,7 +317,7 @@ class AgPipeline:
 
         final_sampled_images = [video_sampled_frame_id_list[i] for i in sample_idx]
 
-        self.fps = 10
+
         video_frames_dir_path = self.sampled_frames_path / video_id
         for sampled_frame_id in final_sampled_images:
             assert os.path.exists(
@@ -350,6 +350,7 @@ class AgPipeline:
                 elif isinstance(v, torch.Tensor):
                     d[k] = v.detach().cpu().numpy()
 
+        self.fps = 10
         video_results_output_path = self.results_output_dir_path / video_id
         video_results_output_path.mkdir(parents=True, exist_ok=True)
 
@@ -375,6 +376,7 @@ class AgPipeline:
 
         ### Spec Camera
         if not self.results['has_slam']:
+            print(f"[{video_id}] Running spectral camera calibration...")
             spec_calib_output_dir = video_results_output_path / "spec_calib"
             os.makedirs(spec_calib_output_dir, exist_ok=True)
 
@@ -382,37 +384,42 @@ class AgPipeline:
                 images=self.images,
                 out_folder=spec_calib_output_dir,
                 loss_type='softargmax_l2',
-                save_res=False,
                 stride=1,
                 first_frame_idx=0,
                 camera_poses=self.camera_poses)
 
             self.results['spec_calib'] = spec_calib
+            print("---------------------------------------------------------------------------")
 
         ### detect_segment_track
         if not self.results['has_tracks']:
-            print("Running detect, segment, and track pipeline...")
+            print(f"[{video_id}] Running detect, segment, and track pipeline...")
             self.run_detect_track()
+            print("---------------------------------------------------------------------------")
 
         ### slam
         if not self.results['has_slam']:
             print("Running camera motion estimation...")
             self.camera_motion_estimation(static_cam)
+            print("---------------------------------------------------------------------------")
 
         ### keypoints detection
         if not self.results['has_2d_kpts']:
             print("Estimating 2D keypoints...")
             self.estimate_2d_keypoints()
+            print("---------------------------------------------------------------------------")
 
         ### hps
         if not self.results['has_hps_cam']:
             print("Running human mesh estimation...")
             self.hps_estimation()
+            print("---------------------------------------------------------------------------")
 
         ### convert hps to world coordinate
         if not self.results['has_hps_world']:
             print("Running world coordinates estimation...")
             self.world_hps_estimation()
+            print("---------------------------------------------------------------------------")
 
         cvt_to_numpy(self.results)
 
@@ -420,6 +427,7 @@ class AgPipeline:
         if self.cfg.run_post_opt and not self.results['has_post_opt']:
             print("Running post optimization...")
             self.post_optimization()
+            print("---------------------------------------------------------------------------")
 
         if save_only_essential:
             _ = self.results.pop('masks', None)
@@ -436,12 +444,12 @@ class AgPipeline:
         smpl_paths = []
         per_body_frame_presence = []
         for k, v in self.results['people'].items():
-            out_smpl_f = f'{os.path.abspath(self.cfg.seq_folder)}/subject-{k}.smpl'
+            out_smpl_f = f'{os.path.abspath(self.seq_folder)}/subject-{k}.smpl'
             SMPLCodec(
                 shape_parameters=v['smplx_world']['shape'].mean(0),
                 body_pose=v['smplx_world']['pose'][:, :22 * 3].reshape(-1, 22, 3),
                 body_translation=v['smplx_world']['trans'],
-                frame_count=v['frames'].shape[0], frame_rate=float(self.cfg.fps)
+                frame_count=v['frames'].shape[0], frame_rate=float(self.fps)
             ).write(out_smpl_f)
             smpl_paths.append(out_smpl_f)
             per_body_frame_presence.append([int(v['frames'][0]), int(v['frames'][-1]) + 1])
@@ -458,9 +466,5 @@ class AgPipeline:
             frame_rate=float(self.cfg.fps),
             smplx_path=SMPLX_NEUTRAL_F32_PATH,
         )
-
-        print("Usage:")
-        print(f'\tYou can drag and drop the "world4d.mcs" file to https://me.meshcapade.com/editor to view the result')
-        print(f'\tYou can import the "world4d.glb" file on Blender to view the result')
 
         return self.results

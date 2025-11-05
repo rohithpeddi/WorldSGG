@@ -590,7 +590,7 @@ def visualize_camera_poses_mismatch(
 
 def rerun_vis_world4d(
     images: List[Optional[np.ndarray]],
-    world4d: List[Dict],
+    world4d,
     results: dict,
     pipeline: AgPipeline,
     faces: np.ndarray,
@@ -663,8 +663,7 @@ def rerun_vis_world4d(
     def _frustum_path(i: int) -> str:
         return f"{BASE}/frustum" if reuse_paths else f"{BASE}/frames/t{i}/frustum"
 
-    video_save_dir = os.path.join("/data2/rohith/ag/ag4D/static_scenes/pi3", f"0DJ6R_10")
-    static_mesh_path = os.path.join(video_save_dir, "0DJ6R.glb")
+    video_save_dir = os.path.join("/data/rohith/ag/ag4D/static_scenes/pi3_static", f"0DJ6R_10")
     prediction_save_path = os.path.join(video_save_dir, "predictions.npz")
     if os.path.exists(prediction_save_path):
         predictions = np.load(prediction_save_path, allow_pickle=True)

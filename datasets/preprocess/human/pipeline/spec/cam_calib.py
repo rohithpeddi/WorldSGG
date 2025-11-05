@@ -626,11 +626,6 @@ def run_cam_calib(
 # ----------------------------------------- MODIFIED ----------------------------------------- #
 
 def pose_to_pitch_roll(T):
-    """
-    T: (4,4) or (3,4) camera->world
-    Assumes y-up world, z-forward camera.
-    Returns (pitch, roll) in radians.
-    """
     R = T[:3, :3]
     # camera forward in world
     cam_fwd = R[:, 2]   # z-axis
@@ -654,12 +649,6 @@ def run_pi3_spec_calib(
     first_frame_idx=0,
     camera_poses=None,
 ):
-    """
-    images: list of paths or np.ndarray of images
-    camera_poses: np.ndarray or torch.Tensor of shape (N, 4, 4) or (N, 3, 4)
-                  assumed camera->world, aligned with `images`
-    """
-
     # --- slice images the way you already do ---
     images = images[first_frame_idx:]
     images = images[::stride]
@@ -753,6 +742,13 @@ def run_pi3_spec_calib(
 
         # visualize first frame like before, but with final pitch/roll
         if idx == 0:
+            results['first_frame'] = {
+                'vfov': pred_vfov.item(),
+                'f_pix': pred_f_pix,
+                'pitch': pred_pitch.item(),
+                'roll': pred_roll.item(),
+            }
+
             img_out, _ = show_horizon_line(
                 img_vis.copy(),
                 pred_vfov,
@@ -764,7 +760,7 @@ def run_pi3_spec_calib(
                 width=3,
                 GT=False,
             )
-            imsave(os.path.join(out_folder, '0000.jpg'), img_out)
+            imsave(os.path.join(out_folder, '000000.jpg'), img_out)
 
         focal_length.append(pred_f_pix)
 
