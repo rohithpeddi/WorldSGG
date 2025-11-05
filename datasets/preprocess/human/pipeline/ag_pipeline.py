@@ -158,6 +158,7 @@ class AgPipeline:
         # 2) Use Pi3 camera_poses if provided (Pi3 is c2w)
         # ----------------------------------------------------
         if camera_poses is not None:
+            print("Using Pi3 provided camera poses for camera motion estimation...")
             # Pi3: camera_poses.shape = (N, 4, 4), each is camera -> world
             camera_poses = np.asarray(camera_poses)
             assert camera_poses.shape[0] == len(self.images), (
@@ -186,6 +187,7 @@ class AgPipeline:
             # ------------------------------------------------
             # 3) Fallback: original SLAM / static path
             # ------------------------------------------------
+            print("Estimating camera motion via Droid SLAM...bypassed Pi3 camera poses")
             if static_cam:
                 cam_R = torch.eye(3)[None].repeat_interleave(len(masks), 0)
                 cam_T = torch.zeros((len(masks), 3))
@@ -400,7 +402,7 @@ class AgPipeline:
         ### slam
         if not self.results['has_slam']:
             print("Running camera motion estimation...")
-            self.camera_motion_estimation(static_cam)
+            self.camera_motion_estimation(static_cam, camera_poses=self.camera_poses)
             print("---------------------------------------------------------------------------")
 
         ### keypoints detection

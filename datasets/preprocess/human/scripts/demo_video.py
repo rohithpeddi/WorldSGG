@@ -105,6 +105,7 @@ class AgPromptHMR:
         [gv, gf, gc] = get_floor_mesh(all_verts, scale=2)
 
         rrvis.rerun_vis_world4d(
+            video_id=video_id,
             images=images,
             world4d=world4d,
             results=results,
@@ -122,7 +123,7 @@ class AgPromptHMR:
 
     def infer_all_videos(self, split):
         video_id_list = os.listdir(self.root_dir_path)
-        video_id_list = ["0DJ6R.mp4"]
+        video_id_list = ["00T1E.mp4"]
         for video_id in tqdm(video_id_list, desc=f"Processing videos in split {split}", unit="video"):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
