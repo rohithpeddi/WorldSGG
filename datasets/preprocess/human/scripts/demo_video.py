@@ -72,13 +72,8 @@ class AgPromptHMR:
                                          video_output_folder,
                                          save_only_essential=True)
 
-        output_pkl_file = os.path.join(video_output_folder, 'results.pkl')
-        joblib.dump(results, output_pkl_file)
-        print(f"Processed video {video_id} and saved results to {output_pkl_file}")
-
     def process_video(self, video_id):
         smplx = SMPLX_Layer(SMPLX_PATH).cuda()
-
         results = self.pipeline.__call__(video_id, save_only_essential=False)
 
         # Downsample for viser visualization
@@ -123,16 +118,16 @@ class AgPromptHMR:
 
     def infer_all_videos(self, split):
         video_id_list = os.listdir(self.root_dir_path)
-        video_id_list = ["00T1E.mp4"]
+        # video_id_list = ["0DJ6R.mp4"]
         for video_id in tqdm(video_id_list, desc=f"Processing videos in split {split}", unit="video"):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
                 continue
-            self.process_video(video_id)
-            # try:
-            #     self.process_video_intermediate_steps(video_id)
-            # except Exception as e:
-            #     print(f"[ERROR] Error processing video {video_id}: {e}")
+            # self.process_video(video_id)
+            try:
+                self.process_video_intermediate_steps(video_id)
+            except Exception as e:
+                print(f"[ERROR] Error processing video {video_id}: {e}")
 
 
 def _parse_split(s: str) -> str:

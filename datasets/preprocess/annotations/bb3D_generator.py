@@ -717,7 +717,7 @@ class BBox3DGenerator:
                 rr.set_time_sequence("frame", int(frame_idx))
                 # clear everything previously logged so this frame stands alone
                 rr.log("/", rr.Clear(recursive=True))
-                self.log_floor_rr(floor_v, floor_f, floor_c)
+                # self.log_floor_rr(floor_v, floor_f, floor_c)
 
                 # # Also log points with colors
                 # transformed_pts = self.transform_pts_R_offset(

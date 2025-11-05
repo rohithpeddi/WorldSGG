@@ -684,7 +684,7 @@ def rerun_vis_world4d(
     # # Pre-extract static points from all humans across time.
     # scene_3d, static_points, static_colors = predictions_to_glb_with_static(predictions, conf_min=0.1)
 
-    video_dynamic_prediction_path = os.path.join("/data/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic", f"{video_id[:-4]}_10",
+    video_dynamic_prediction_path = os.path.join("/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic", f"{video_id[:-4]}_10",
                                                  "predictions.npz")
     video_dynamic_predictions = np.load(video_dynamic_prediction_path, allow_pickle=True)
     video_dynamic_predictions = {k: video_dynamic_predictions[k] for k in video_dynamic_predictions.files}

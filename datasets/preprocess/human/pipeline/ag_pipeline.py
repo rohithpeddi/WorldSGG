@@ -33,8 +33,10 @@ class AgPipeline:
         self.cfg.static_cam = static_cam
 
         self.sampled_frames_path = Path("/data/rohith/ag/sampled_frames_jpg")
-        self.dynamic_scene_dir_path = Path("/data/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic")
-        self.results_output_dir_path = Path("/data/rohith/ag/ag4D/human")
+        self.dynamic_scene_dir_path = Path("/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic")
+        self.results_output_dir_path = Path("/data2/rohith/ag/ag4D/human")
+        os.makedirs(self.results_output_dir_path, exist_ok=True)
+
         self.frame_annotated_dir_path = Path("/data/rohith/ag/frames_annotated")
         self.sampled_frames_idx_root_dir_path = Path("/data/rohith/ag/sampled_frames_idx")
 
