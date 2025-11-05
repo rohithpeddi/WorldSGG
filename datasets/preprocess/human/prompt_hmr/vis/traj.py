@@ -147,23 +147,36 @@ def get_floor_mesh(pred_vert_gr, z_start=0, z_end=-1, scale=1.5, floor_color=Non
     return [v, f, vc]
 
 
+
 def fit_floor_height(points, method='ransac', axis='y'):
     """
     Find height offset.
-    :param points (*, N, 3)
-    returns (*, 3) plane parameters (returns in normal * offset format)
+    :param points: shape (..., N, 3)
+    :returns: torch tensor (3,) with only the chosen axis set to the floor offset
     """
-    axis = {'x':0, 'y':1, 'z':2}[axis]
+    axis_idx = {'x': 0, 'y': 1, 'z': 2}[axis]
+
+    # remember if input was torch
+    is_torch = torch.is_tensor(points)
+    if is_torch:
+        device = points.device
+        points_np = points.detach().cpu().numpy()
+    else:
+        device = None
+        points_np = np.asarray(points)
 
     if method == 'lowest':
-        offset = points[..., axis].min()
-      
+        # points_np[..., axis] -> (..., N)
+        offset = points_np[..., axis_idx].min()
+
     elif method == 'average':
-        z, _ = points[..., axis].min(dim=1)
+        # min over N (axis=1 if shape is (B, N, 3))
+        z = points_np[..., axis_idx].min(axis=1)
         offset = z.mean()
-      
+
     elif method == 'ransac':
-        zs, _ = points[..., axis].min(dim=1)
+        # take per-batch min first
+        zs = points_np[..., axis_idx].min(axis=1)
         zs = np.sort(zs)
 
         alpha = 1.0
@@ -171,23 +184,31 @@ def fit_floor_height(points, method='ransac', axis='y'):
         max_z = np.max(zs)
         zs = zs[zs <= min_z + (max_z - min_z) * alpha]
 
-        inlier_thresh = 0.05 # 5cm
+        inlier_thresh = 0.05  # 5cm
         best_inliers = 0
         best_z = 0.0
-        for i in range(10_000):
+        for _ in range(10_000):
             z = np.random.choice(zs)
             inliers = np.abs(zs - z) < inlier_thresh
-            inliers = np.sum(inliers)
-            if inliers > best_inliers:
+            inliers_count = np.sum(inliers)
+            if inliers_count > best_inliers:
                 best_z = z
-                best_inliers = inliers
+                best_inliers = inliers_count
 
         offset = np.median(zs[np.abs(zs - best_z) < inlier_thresh])
 
-    height_offset = torch.zeros([3])
-    height_offset[axis] = offset.item()
+    else:
+        raise ValueError(f"Unknown method: {method}")
 
-    return height_offset
+    # build 3D offset
+    height_offset = np.zeros(3, dtype=np.float32)
+    height_offset[axis_idx] = float(offset)
+
+    # return as torch tensor on original device if input was torch
+    if is_torch:
+        return torch.from_numpy(height_offset).to(device)
+    else:
+        return height_offset
 
 
 def fit_plane(points, idx=-1):

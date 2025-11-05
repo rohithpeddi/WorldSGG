@@ -48,13 +48,14 @@ class AgPipeline:
             'yolo': os.path.join(checkpoint_dir, 'yolo11x.pt'),
             'vitpose': os.path.join(checkpoint_dir, 'vitpose-h-coco_25.pth'),
         }
-
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.smplx = SMPLX(
             SMPLX_NEUTRAL_MODEL_PATH,
             use_pca=False,
             flat_hand_mean=True,
             num_betas=10
         )
+        self.smplx.to(self.device)
 
     def run_detect_track(self, ):
         if self.cfg.tracker == 'bytetrack':
@@ -233,7 +234,7 @@ class AgPipeline:
         return
 
     def world_hps_estimation(self, ):
-        self.results = world_hps_estimation(self.cfg, self.results, self.smplx)
+        self.results = world_hps_estimation(self.cfg, self.results, self.smplx, self.device)
         self.results['has_hps_world'] = True
         return
 
