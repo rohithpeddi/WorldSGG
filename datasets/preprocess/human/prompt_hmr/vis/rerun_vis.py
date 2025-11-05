@@ -35,8 +35,8 @@ def _pinhole_from_fov(W: int, H: int, fov_y_rad: float) -> Tuple[float, float, f
 def predictions_to_glb_with_static(
         predictions: dict,
         *,
-        conf_min: float = 0.5,           # 0..1 threshold on predictions["conf"]
-        filter_by_frames: str = "all",   # e.g. "12:..." to use only frame index 12
+        conf_min: float = 0.5,  # 0..1 threshold on predictions["conf"]
+        filter_by_frames: str = "all",  # e.g. "12:..." to use only frame index 12
 ) -> tuple[trimesh.Scene, np.ndarray, np.ndarray]:
     """
     Build a GLB-ready trimesh.Scene from VGGT-style predictions AND return a background
@@ -144,6 +144,7 @@ def umeyama_sim3(A, B, allow_reflection=False):
     t = muB - s * (R @ muA)
     return float(s), R.astype(np.float64), t.astype(np.float64)
 
+
 # ---------- Camera center helpers ----------
 def centers_from_extrinsics_wc(Rwc, Twc):
     """
@@ -152,6 +153,7 @@ def centers_from_extrinsics_wc(Rwc, Twc):
     """
     C = Twc.reshape(-1, 3).copy()
     return C
+
 
 def centers_from_extrinsics_cw(Rcw, Tcw):
     """
@@ -163,11 +165,13 @@ def centers_from_extrinsics_cw(Rcw, Tcw):
     C = -(np.transpose(Rcw, (0, 2, 1)) @ Tcw[..., None])[..., 0]
     return C
 
+
 def _split_R_t_from_3x4(E):
     """E: (S,3,4) -> R( S,3,3 ), t( S,3 )"""
     R = E[..., :3]
     t = E[..., 3]
     return R, t
+
 
 def _coerce_R_t_stack(cam_poses):
     """
@@ -193,8 +197,8 @@ def _coerce_R_t_stack(cam_poses):
     if E.ndim == 3 and E.shape[1:] == (3, 4):
         R, t = _split_R_t_from_3x4(E)
         # Treat as BOTH possibilities; we'll choose by residuals
-        C_wc = centers_from_extrinsics_wc(R, t)   # assume camera→world
-        C_cw = centers_from_extrinsics_cw(R, t)   # assume world→camera
+        C_wc = centers_from_extrinsics_wc(R, t)  # assume camera→world
+        C_cw = centers_from_extrinsics_cw(R, t)  # assume world→camera
         candidates.extend([(C_wc, 'wc'), (C_cw, 'cw')])
     elif E.ndim == 3 and E.shape[1:] == (4, 4):
         R = E[:, :3, :3]
@@ -206,6 +210,7 @@ def _coerce_R_t_stack(cam_poses):
         raise ValueError(f"Unsupported camera_poses shape: {E.shape}")
 
     return candidates
+
 
 def _select_frames_with_baseline(C, min_pair_dist=0.05, max_frames=200):
     """
@@ -223,9 +228,10 @@ def _select_frames_with_baseline(C, min_pair_dist=0.05, max_frames=200):
             last = i
         if len(keep) >= max_frames:
             break
-    if len(keep) < max(4, min(10, len(C)//10)):  # fall back if too few
+    if len(keep) < max(4, min(10, len(C) // 10)):  # fall back if too few
         return np.arange(min(len(C), max_frames))
     return np.asarray(keep)
+
 
 # ---------- Build Sim(3) from cameras ----------
 def sim3_from_cameras(predictions, results, frame_map=None, min_pair_dist=0.05):
@@ -284,6 +290,7 @@ def sim3_from_cameras(predictions, results, frame_map=None, min_pair_dist=0.05):
 
     return best['s'], best['R'], best['t'], best['tag']
 
+
 # ---------- Apply Sim(3) to the human pipeline ----------
 def apply_sim3_to_results(results, s, R, t, rotate_global_orient=True):
     """
@@ -322,6 +329,7 @@ def apply_sim3_to_results(results, s, R, t, rotate_global_orient=True):
 
     return results
 
+
 def fuse_humans_into_static_frame(predictions, results, frame_map=None, min_pair_dist=0.05):
     """
     Compute Sim(3) from cameras and apply it so that human pipeline lives in the static scene frame.
@@ -358,14 +366,15 @@ def fuse_humans_into_static_frame(predictions, results, frame_map=None, min_pair
 import numpy as np
 from scipy.spatial.transform import Rotation as SciRot
 
+
 # Helper to build a wireframe frustum in the *camera's local frame* (RUB; camera looks along -Z).
 def _make_frustum_lines(W, H, fx, fy, cx, cy, near=0.12, far=0.45):
     def rect_at(depth):
         z = -float(depth)  # forward along -Z in R-U-B
-        x0 = (0   - cx) * (z / fx)
-        x1 = (W-1 - cx) * (z / fx)
-        y0 = (0   - cy) * (z / fy)
-        y1 = (H-1 - cy) * (z / fy)
+        x0 = (0 - cx) * (z / fx)
+        x1 = (W - 1 - cx) * (z / fx)
+        y0 = (0 - cy) * (z / fy)
+        y1 = (H - 1 - cy) * (z / fy)
         return np.array([[x0, y0, z],
                          [x1, y0, z],
                          [x1, y1, z],
@@ -374,9 +383,9 @@ def _make_frustum_lines(W, H, fx, fy, cx, cy, near=0.12, far=0.45):
     n = rect_at(near)
     f = rect_at(far)
     strips = [
-        np.vstack([n, n[0]]),           # near loop
-        np.vstack([f, f[0]]),           # far loop
-        np.vstack([n[0], f[0]]),        # connect near/far
+        np.vstack([n, n[0]]),  # near loop
+        np.vstack([f, f[0]]),  # far loop
+        np.vstack([n[0], f[0]]),  # connect near/far
         np.vstack([n[1], f[1]]),
         np.vstack([n[2], f[2]]),
         np.vstack([n[3], f[3]]),
@@ -386,7 +395,6 @@ def _make_frustum_lines(W, H, fx, fy, cx, cy, near=0.12, far=0.45):
         np.vstack([np.zeros(3, np.float32), n[3]]),
     ]
     return strips
-
 
 
 def visualize_camera_poses_mismatch(
@@ -589,24 +597,24 @@ def visualize_camera_poses_mismatch(
 
 
 def rerun_vis_world4d(
-    images: List[Optional[np.ndarray]],
-    world4d,
-    results: dict,
-    pipeline: AgPipeline,
-    faces: np.ndarray,
-    init_fps: float = 25.0,
-    floor: Optional[Tuple[np.ndarray, np.ndarray]] = None,
-    img_maxsize: int = 320,
-    app_id: str = "World4D",
-    *,
-    # NEW: control how the image for a given timestep i is chosen.
-    # Option A: map timeline index -> source image index (e.g., {10: 0} uses images[0] at t=10)
-    image_frame_map: Optional[Dict[int, int]] = None,
-    # Option B: a callback to transform/replace the image for display at time i.
-    # Signature: fn(i, base_image) -> np.ndarray | None
-    image_fn: Optional[Callable[[int, Optional[np.ndarray]], Optional[np.ndarray]]] = None,
-    # NEW: reuse stable entity paths so old frames don't linger on screen.
-    reuse_paths: bool = True,
+        images: List[Optional[np.ndarray]],
+        world4d,
+        results: dict,
+        pipeline: AgPipeline,
+        faces: np.ndarray,
+        init_fps: float = 25.0,
+        floor: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        img_maxsize: int = 320,
+        app_id: str = "World4D",
+        *,
+        # NEW: control how the image for a given timestep i is chosen.
+        # Option A: map timeline index -> source image index (e.g., {10: 0} uses images[0] at t=10)
+        image_frame_map: Optional[Dict[int, int]] = None,
+        # Option B: a callback to transform/replace the image for display at time i.
+        # Signature: fn(i, base_image) -> np.ndarray | None
+        image_fn: Optional[Callable[[int, Optional[np.ndarray]], Optional[np.ndarray]]] = None,
+        # NEW: reuse stable entity paths so old frames don't linger on screen.
+        reuse_paths: bool = True,
 ):
     faces_u32 = _faces_u32(faces)
     # Start a fresh recording & spawn the viewer.
@@ -663,55 +671,55 @@ def rerun_vis_world4d(
     def _frustum_path(i: int) -> str:
         return f"{BASE}/frustum" if reuse_paths else f"{BASE}/frames/t{i}/frustum"
 
-    video_save_dir = os.path.join("/data/rohith/ag/ag4D/static_scenes/pi3_static", f"0DJ6R_10")
-    prediction_save_path = os.path.join(video_save_dir, "predictions.npz")
-    if os.path.exists(prediction_save_path):
-        predictions = np.load(prediction_save_path, allow_pickle=True)
-        predictions = {k: predictions[k] for k in predictions.files}
-        print(f"Loaded existing predictions for video from {prediction_save_path}")
-    else:
-        raise NotImplementedError("Prediction generation not implemented in this snippet.")
-
-    # Pre-extract static points from all humans across time.
-    scene_3d, static_points, static_colors = predictions_to_glb_with_static(predictions, conf_min=0.1)
-
-    # results, (s, R, t), tag, diags = fuse_humans_into_static_frame(predictions, results)
+    # video_save_dir = os.path.join("/data/rohith/ag/ag4D/static_scenes/pi3_static", f"0DJ6R_10")
+    # prediction_save_path = os.path.join(video_save_dir, "predictions.npz")
+    # if os.path.exists(prediction_save_path):
+    #     predictions = np.load(prediction_save_path, allow_pickle=True)
+    #     predictions = {k: predictions[k] for k in predictions.files}
+    #     print(f"Loaded existing predictions for video from {prediction_save_path}")
+    # else:
+    #     raise NotImplementedError("Prediction generation not implemented in this snippet.")
     #
-    # print("Chosen static convention:", tag)  # 'wc' or 'cw'
-    # print("Global Sim(3): scale", s, "\nR=\n", R, "\nt=", t)
-    # print("Camera-center RMSE (all):", diags['rmse_all'])
-    #
-    # world4d = pipeline.create_world4d(results=results, step=1, total=1500)  # or your instance method call
+    # # Pre-extract static points from all humans across time.
+    # scene_3d, static_points, static_colors = predictions_to_glb_with_static(predictions, conf_min=0.1)
+
+    video_dynamic_prediction_path = os.path.join("/data/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic", f"0DJ6R_10",
+                                                 "predictions.npz")
+    video_dynamic_predictions = np.load(video_dynamic_prediction_path, allow_pickle=True)
+    video_dynamic_predictions = {k: video_dynamic_predictions[k] for k in video_dynamic_predictions.files}
+    print(f"Loaded existing predictions for video from {video_dynamic_prediction_path}")
+
+    # Log the dynamic predicted points for this frame
+    points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
+    imgs_f32 = video_dynamic_predictions["images"]  # float32 in [0, 1]
+    camera_poses = video_dynamic_predictions["camera_poses"]  # (S,4,4)
+    colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)  # (S, H, W, 3)
+
+    R = Rotation.from_euler("y", 100, degrees=True).as_matrix()
+    R = R @ Rotation.from_euler("x", 155, degrees=True).as_matrix()
+    points = points @ R.T  # undo rotation
+
 
     BASE = "world"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
 
-    # fix floor (and move it under the same space)
-    if floor is not None:
-        fv, ff = floor
-        fv = np.asarray(fv, dtype=np.float32)
-        ff = _faces_u32(np.asarray(ff))
-        rr.log(
-            f"{BASE}/floor",
-            rr.Mesh3D(vertex_positions=fv, triangle_indices=ff),  # drop the ellipsis
-        )
+    # if static_points.size > 0:
+    #     rr.log(
+    #         f"{BASE}/static",
+    #         rr.Points3D(
+    #             positions=static_points.astype(np.float32),
+    #             colors=static_colors.astype(np.uint8),
+    #             radii=0.01,  # <-- small but visible point size (tweak if needed)
+    #         ),
+    #     )
+    #
+    #     print("[static] count:", len(static_points), "finite:", np.isfinite(static_points).all(),
+    #           "min:", np.nanmin(static_points, axis=0), "max:", np.nanmax(static_points, axis=0))
 
-    if static_points.size > 0:
-        rr.log(
-            f"{BASE}/static",
-            rr.Points3D(
-                positions=static_points.astype(np.float32),
-                colors=static_colors.astype(np.uint8),
-                radii=0.01,  # <-- small but visible point size (tweak if needed)
-            ),
-        )
 
-        print("[static] count:", len(static_points), "finite:", np.isfinite(static_points).all(),
-              "min:", np.nanmin(static_points, axis=0), "max:", np.nanmax(static_points, axis=0))
-
-    # Sequence logging.
     for i in range(num_frames):
         rr.set_time_sequence("frame", i)
+        rr.log("/", rr.Clear(recursive=True))
 
         # Per-frame human meshes (if any).
         track_ids = world4d[i].get("track_id", [])
@@ -728,10 +736,27 @@ def rerun_vis_world4d(
                     ),
                 )
 
+        if floor is not None:
+            fv, ff = floor
+            fv = np.asarray(fv, dtype=np.float32)
+            ff = _faces_u32(np.asarray(ff))
+            rr.log(
+                f"{BASE}/floor",
+                rr.Mesh3D(vertex_positions=fv, triangle_indices=ff),  # drop the ellipsis
+            )
+
+        rr.log(
+            f"{BASE}/points",
+            rr.Points3D(
+                points[i].reshape(-1, 3),
+                colors=colors[i].reshape(-1, 3)
+            )
+        )
+
         # Camera frustum + image.
         cam_3x4 = np.asarray(world4d[i]["camera"], dtype=np.float32)
-        R_wc = cam_3x4[:3, :3]        # (3,3)
-        t_wc = cam_3x4[:3, 3]         # (3,)
+        R_wc = cam_3x4[:3, :3]  # (3,3)
+        t_wc = cam_3x4[:3, 3]  # (3,)
 
         image = _get_image_for_time(i)
         if image is not None:
