@@ -246,6 +246,7 @@ def convert_preds_to_angles(pred_vfov, pred_pitch, pred_roll, loss_type='kl', re
 
 
 class ImageFolder(Dataset):
+
     def __init__(
             self,
             image_list,
@@ -272,7 +273,6 @@ class ImageFolder(Dataset):
             imgname = self.images[index]
             img = Image.open(imgname).convert('RGB')
             orig_img_shape = np.array(img).shape[:2]
-
         elif isinstance(self.images, np.ndarray):
             img = self.images[index]
             orig_img_shape = img.shape[:2]
@@ -280,12 +280,9 @@ class ImageFolder(Dataset):
             imgname = index
 
         norm_img = self.data_transform(img)
-
         item['img'] = norm_img
         item['imgname'] = imgname
-
         item['orig_shape'] = orig_img_shape
-
         return item
     
 

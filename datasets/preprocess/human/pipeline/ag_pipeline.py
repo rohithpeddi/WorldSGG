@@ -53,44 +53,6 @@ class AgPipeline:
             num_betas=10
         )
 
-    def load_frames(self, video_id, H, W):
-        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
-
-        annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
-        annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
-        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
-        annotated_last_frame_id = int(annotated_frame_id_list[-1][:-4])
-
-        # Get the mapping for sampled_frame_id and the actual frame id
-        # Now start from the sampled frame which corresponds to the first annotated frame and keep the rest of the sampled frames
-        video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir_path, f"{video_id[:-4]}.npy")
-        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()  # Numbers only
-
-        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
-        an_last_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_last_frame_id)
-        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, an_last_id_in_vid_sam_frame_id_list + 1))
-
-        final_sampled_images = [video_sampled_frame_id_list[i] for i in sample_idx]
-
-        self.fps = 10
-        video_frames_dir_path = self.sampled_frames_path / video_id
-        for sampled_frame_id in final_sampled_images:
-            assert os.path.exists(
-                os.path.join(self.sampled_frames_path, video_id, f"{video_sampled_frame_id_list[sampled_frame_id]:06d}.jpg")), \
-                f"Frame {video_sampled_frame_id_list[sampled_frame_id]:06d}.jpg does not exist in {os.path.join(self.sampled_frames_path, video_id)}"
-
-            # Load each image from the sampled frames path - Convert to 000006 format
-            frame_path = video_frames_dir_path / f"{sampled_frame_id:06d}.png"
-            img = cv2.imread(str(frame_path))[:, :, ::-1]
-            img = cv2.resize(img, (W, H))
-
-            self.images.append(img)
-
-    def load_dynamic_predictions(self, video_id):
-        video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
-        video_dynamic_predictions = np.load(video_dynamic_3d_scene_path, allow_pickle=True)
-        return video_dynamic_predictions
-
     def run_detect_track(self, ):
         if self.cfg.tracker == 'bytetrack':
             tracks = detect_track(self.images, bbox_interp=self.cfg.bbox_interp)
@@ -296,6 +258,45 @@ class AgPipeline:
 
         return world4d
 
+    def load_frames(self, video_id, H, W):
+        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
+
+        annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
+        annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
+        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
+        annotated_last_frame_id = int(annotated_frame_id_list[-1][:-4])
+
+        # Get the mapping for sampled_frame_id and the actual frame id
+        # Now start from the sampled frame which corresponds to the first annotated frame and keep the rest of the sampled frames
+        video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir_path, f"{video_id[:-4]}.npy")
+        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()  # Numbers only
+
+        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
+        an_last_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_last_frame_id)
+        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, an_last_id_in_vid_sam_frame_id_list + 1))
+
+        final_sampled_images = [video_sampled_frame_id_list[i] for i in sample_idx]
+
+        self.fps = 10
+        video_frames_dir_path = self.sampled_frames_path / video_id
+        for sampled_frame_id in final_sampled_images:
+            assert os.path.exists(
+                os.path.join(self.sampled_frames_path, video_id,
+                             f"{video_sampled_frame_id_list[sampled_frame_id]:06d}.jpg")), \
+                f"Frame {video_sampled_frame_id_list[sampled_frame_id]:06d}.jpg does not exist in {os.path.join(self.sampled_frames_path, video_id)}"
+
+            # Load each image from the sampled frames path - Convert to 000006 format
+            frame_path = video_frames_dir_path / f"{sampled_frame_id:06d}.png"
+            img = cv2.imread(str(frame_path))[:, :, ::-1]
+            img = cv2.resize(img, (W, H))
+
+            self.images.append(img)
+
+    def load_dynamic_predictions(self, video_id):
+        video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
+        video_dynamic_predictions = np.load(video_dynamic_3d_scene_path, allow_pickle=True)
+        return video_dynamic_predictions
+
     def __call__(
             self,
             video_id,
@@ -316,25 +317,22 @@ class AgPipeline:
         self.cfg.output_folder = str(video_results_output_path)
 
         video_dynamic_predictions = self.load_dynamic_predictions(video_id)
-        images, seq_folder = self.load_frames(video_id)
 
-        self.images = video_dynamic_predictions['images']
+        imgs_f32 = video_dynamic_predictions['images']
+        self.images = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)  # (S, H, W, 3)
         self.camera_poses = video_dynamic_predictions['camera_poses']
         self.points = video_dynamic_predictions['points']
 
-        self.seq_folder = seq_folder
-        self.cfg.seq_folder = seq_folder
-
-        if os.path.isfile(f'{seq_folder}/results.pkl'):
+        if os.path.isfile(f'{video_results_output_path}/results.pkl'):
             print('Loading available results...')
-            self.results = joblib.load(f'{seq_folder}/results.pkl')
+            self.results = joblib.load(f'{video_results_output_path}/results.pkl')
             return self.results
 
-        self.results = {'camera': est_camera(images[0]), 'people': {}, 'timings': {}, 'masks': None,
+        self.results = {'camera': est_camera(self.images[0]), 'people': {}, 'timings': {}, 'masks': None,
                         'has_tracks': False, 'has_hps_cam': False, 'has_hps_world': False, 'has_slam': False,
                         'has_hands': False, 'has_2d_kpts': False, 'has_post_opt': False}
 
-        ### spec camera
+        ### Spec Camera
         if not self.results['has_slam']:
             spec_calib_output_dir = video_results_output_path / "spec_calib"
             os.makedirs(spec_calib_output_dir, exist_ok=True)
