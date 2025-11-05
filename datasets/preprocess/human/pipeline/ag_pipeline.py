@@ -7,21 +7,22 @@ import joblib
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+from smplcodec import SMPLCodec
 from smplx import SMPLX
 
 from .camera import run_metric_slam, calibrate_intrinsics, run_slam
 from .detector import segment
 from .detector.vitpose_estimator import load_vit_model, estimate_kp2ds_from_bbox_vitpose
 from .kp_utils import convert_kps
+from .mcs_export_cam import export_scene_with_camera
 from .phmr_vid import PromptHMR_Video
 from .postprocessing import post_optimization
-from .spec import run_cam_calib
 from .spec.cam_calib import run_pi3_spec_calib
 from .tools import detect_track, detect_segment_track_sam, est_camera, est_calib
 from .world import world_hps_estimation
 # import sys
 # sys.path.append('../')
-from ..data_config import CONFIG_PATH, SMPLX_NEUTRAL_MODEL_PATH
+from ..data_config import CONFIG_PATH, SMPLX_NEUTRAL_MODEL_PATH, SMPLX_NEUTRAL_F32_PATH
 
 
 class AgPipeline:
@@ -354,6 +355,7 @@ class AgPipeline:
         video_results_output_path = self.results_output_dir_path / video_id
         video_results_output_path.mkdir(parents=True, exist_ok=True)
         self.cfg.output_folder = str(video_results_output_path)
+        self.cfg.sequence_folder = video_results_output_path
 
         video_dynamic_predictions = self.load_dynamic_predictions(video_id)
 
@@ -402,63 +404,63 @@ class AgPipeline:
             print("Estimating 2D keypoints...")
             self.estimate_2d_keypoints()
 
-        # ### hps
-        # if not self.results['has_hps_cam']:
-        #     print("Running human mesh estimation...")
-        #     self.hps_estimation()
-        #
-        # ### convert hps to world coordinate
-        # if not self.results['has_hps_world']:
-        #     print("Running world coordinates estimation...")
-        #     self.world_hps_estimation()
-        #
-        # cvt_to_numpy(self.results)
-        #
-        # # ### post optimization
-        # if self.cfg.run_post_opt and not self.results['has_post_opt']:
-        #     print("Running post optimization...")
-        #     self.post_optimization()
-        #
-        # if save_only_essential:
-        #     _ = self.results.pop('masks', None)
-        #     for tid, track in self.results['people'].items():
-        #         _ = track.pop('masks', None)
-        #         _ = track.pop('keypoints_2d', None)
-        #         _ = track.pop('vitpose', None)
-        #         _ = track.pop('prhmr_img_feats', None)
-        #
-        # joblib.dump(self.results, f'{seq_folder}/results.pkl')
-        #
-        # NUM_FRAMES = len(self.images)
-        # MCS_OUTPUT_PATH = f'{seq_folder}/world4d.mcs'
-        # smpl_paths = []
-        # per_body_frame_presence = []
-        # for k, v in self.results['people'].items():
-        #     out_smpl_f = f'{os.path.abspath(self.cfg.seq_folder)}/subject-{k}.smpl'
-        #     SMPLCodec(
-        #         shape_parameters=v['smplx_world']['shape'].mean(0),
-        #         body_pose=v['smplx_world']['pose'][:, :22 * 3].reshape(-1, 22, 3),
-        #         body_translation=v['smplx_world']['trans'],
-        #         frame_count=v['frames'].shape[0], frame_rate=float(self.cfg.fps)
-        #     ).write(out_smpl_f)
-        #     smpl_paths.append(out_smpl_f)
-        #     per_body_frame_presence.append([int(v['frames'][0]), int(v['frames'][-1]) + 1])
-        #
-        # export_scene_with_camera(
-        #     smpl_buffers=[open(path, 'rb').read() for path in smpl_paths],
-        #     frame_presences=per_body_frame_presence,
-        #     num_frames=NUM_FRAMES,
-        #     output_path=MCS_OUTPUT_PATH,
-        #     rotation_matrices=self.results['camera_world']['Rcw'],
-        #     translations=self.results['camera_world']['Tcw'],
-        #     focal_length=self.results['camera_world']['img_focal'],
-        #     principal_point=self.results['camera_world']['img_center'],
-        #     frame_rate=float(self.cfg.fps),
-        #     smplx_path=SMPLX_NEUTRAL_F32_PATH,
-        # )
-        #
-        # print("Usage:")
-        # print(f'\tYou can drag and drop the "world4d.mcs" file to https://me.meshcapade.com/editor to view the result')
-        # print(f'\tYou can import the "world4d.glb" file on Blender to view the result')
+        ### hps
+        if not self.results['has_hps_cam']:
+            print("Running human mesh estimation...")
+            self.hps_estimation()
+
+        ### convert hps to world coordinate
+        if not self.results['has_hps_world']:
+            print("Running world coordinates estimation...")
+            self.world_hps_estimation()
+
+        cvt_to_numpy(self.results)
+
+        # ### post optimization
+        if self.cfg.run_post_opt and not self.results['has_post_opt']:
+            print("Running post optimization...")
+            self.post_optimization()
+
+        if save_only_essential:
+            _ = self.results.pop('masks', None)
+            for tid, track in self.results['people'].items():
+                _ = track.pop('masks', None)
+                _ = track.pop('keypoints_2d', None)
+                _ = track.pop('vitpose', None)
+                _ = track.pop('prhmr_img_feats', None)
+
+        joblib.dump(self.results, f'{video_results_output_path}/results.pkl')
+
+        NUM_FRAMES = len(self.images)
+        MCS_OUTPUT_PATH = f'{video_results_output_path}/world4d.mcs'
+        smpl_paths = []
+        per_body_frame_presence = []
+        for k, v in self.results['people'].items():
+            out_smpl_f = f'{os.path.abspath(self.cfg.seq_folder)}/subject-{k}.smpl'
+            SMPLCodec(
+                shape_parameters=v['smplx_world']['shape'].mean(0),
+                body_pose=v['smplx_world']['pose'][:, :22 * 3].reshape(-1, 22, 3),
+                body_translation=v['smplx_world']['trans'],
+                frame_count=v['frames'].shape[0], frame_rate=float(self.cfg.fps)
+            ).write(out_smpl_f)
+            smpl_paths.append(out_smpl_f)
+            per_body_frame_presence.append([int(v['frames'][0]), int(v['frames'][-1]) + 1])
+
+        export_scene_with_camera(
+            smpl_buffers=[open(path, 'rb').read() for path in smpl_paths],
+            frame_presences=per_body_frame_presence,
+            num_frames=NUM_FRAMES,
+            output_path=MCS_OUTPUT_PATH,
+            rotation_matrices=self.results['camera_world']['Rcw'],
+            translations=self.results['camera_world']['Tcw'],
+            focal_length=self.results['camera_world']['img_focal'],
+            principal_point=self.results['camera_world']['img_center'],
+            frame_rate=float(self.cfg.fps),
+            smplx_path=SMPLX_NEUTRAL_F32_PATH,
+        )
+
+        print("Usage:")
+        print(f'\tYou can drag and drop the "world4d.mcs" file to https://me.meshcapade.com/editor to view the result')
+        print(f'\tYou can import the "world4d.glb" file on Blender to view the result')
 
         return self.results
