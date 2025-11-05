@@ -102,16 +102,20 @@ class AgPipeline:
 
         return
 
-    def camera_motion_estimation(self, static_cam=False):
-        ##### Run Masked DROID-SLAM #####
+    def camera_motion_estimation(self, static_cam=False, camera_poses=None):
         masks = self.results['masks']
         masks = torch.from_numpy(masks)
 
-        assert masks.shape[0] == len(
-            self.images), f"Masks and images should be same length {masks.shape[0]} != {len(self.images)}"
+        assert masks.shape[0] == len(self.images), (
+            f"Masks and images should be same length {masks.shape[0]} != {len(self.images)}"
+        )
 
+        # ----------------------------------------------------
+        # 1) Intrinsics logic (Pi3 doesn't give intrinsics)
+        # ----------------------------------------------------
         opt_intr = False if self.cfg.use_depth else True
         keyframes = None
+
         if self.cfg.static_cam or static_cam:
             print("Using static camera assumption")
             static_cam = True
@@ -120,14 +124,15 @@ class AgPipeline:
             else:
                 cam_int = np.loadtxt(self.cfg.calib)
                 opt_intr = False
-
         else:
             if self.cfg.calib is None:
-                if self.cfg.focal is None and opt_intr == False:
+                if self.cfg.focal is None and opt_intr is False:
                     try:
                         if self.cfg.calib_method == 'ba':
                             _, _, cam_int, keyframes = run_slam(
-                                self.images, masks=masks, opt_intr=True,
+                                self.images,
+                                masks=masks,
+                                opt_intr=True,
                                 stride=self.cfg.calib_stride,
                             )
                         elif self.cfg.calib_method == 'iterative':
@@ -149,39 +154,74 @@ class AgPipeline:
                 cam_int = np.loadtxt(self.cfg.calib)
                 opt_intr = False
 
-        if static_cam:
-            cam_R = torch.eye(3)[None].repeat_interleave(len(masks), 0)
-            cam_T = torch.zeros((len(masks), 3))
-            print("Warning: probably there is not much camera motion in the video!!")
-            print("Setting camera motion to zero")
-        else:
-            try:
-                cam_R, cam_T, cam_int = run_metric_slam(
-                    self.images,
-                    masks=masks,
-                    calib=cam_int,
-                    monodepth_method=self.cfg.depth_method,
-                    use_depth_inp=self.cfg.use_depth,
-                    stride=self.cfg.stride,
-                    opt_intr=opt_intr,
-                    save_depth=self.cfg.save_depth,
-                    keyframes=keyframes,
-                )
-            except ValueError as e:
-                if str(e).startswith("not enough values to unpack"):
-                    cam_R = torch.eye(3)[None].repeat_interleave(len(masks), 0)
-                    cam_T = torch.zeros((len(masks), 3))
-                    print("Warning: probably there is not much camera motion in the video!!")
-                    print("Setting camera motion to zero")
-                else:
-                    raise e
+        # ----------------------------------------------------
+        # 2) Use Pi3 camera_poses if provided (Pi3 is c2w)
+        # ----------------------------------------------------
+        if camera_poses is not None:
+            # Pi3: camera_poses.shape = (N, 4, 4), each is camera -> world
+            camera_poses = np.asarray(camera_poses)
+            assert camera_poses.shape[0] == len(self.images), (
+                f"Pi3 camera_poses ({camera_poses.shape[0]}) must match num images ({len(self.images)})"
+            )
 
+            # make first frame the world: T_rel_i = T0^{-1} @ Ti
+            T0 = camera_poses[0]  # c0 -> W
+            T0_inv = np.linalg.inv(T0)  # W -> c0
+
+            R_list = []
+            t_list = []
+            for Ti in camera_poses:  # Ti: ci -> W
+                T_rel = T0_inv @ Ti  # ci -> c0  (now world = c0)
+                R_rel = T_rel[:3, :3]
+                t_rel = T_rel[:3, 3]
+                R_list.append(R_rel)
+                t_list.append(t_rel)
+
+            cam_R = torch.from_numpy(np.stack(R_list, axis=0)).float()
+            cam_T = torch.from_numpy(np.stack(t_list, axis=0)).float()
+
+            static_cam = False  # we do have motion now
+
+        else:
+            # ------------------------------------------------
+            # 3) Fallback: original SLAM / static path
+            # ------------------------------------------------
+            if static_cam:
+                cam_R = torch.eye(3)[None].repeat_interleave(len(masks), 0)
+                cam_T = torch.zeros((len(masks), 3))
+                print("Warning: probably there is not much camera motion in the video!!")
+                print("Setting camera motion to zero")
+            else:
+                try:
+                    cam_R, cam_T, cam_int = run_metric_slam(
+                        self.images,
+                        masks=masks,
+                        calib=cam_int,
+                        monodepth_method=self.cfg.depth_method,
+                        use_depth_inp=self.cfg.use_depth,
+                        stride=self.cfg.stride,
+                        opt_intr=opt_intr,
+                        save_depth=self.cfg.save_depth,
+                        keyframes=keyframes,
+                    )
+                except ValueError as e:
+                    if str(e).startswith("not enough values to unpack"):
+                        cam_R = torch.eye(3)[None].repeat_interleave(len(masks), 0)
+                        cam_T = torch.zeros((len(masks), 3))
+                        print("Warning: probably there is not much camera motion in the video!!")
+                        print("Setting camera motion to zero")
+                    else:
+                        raise e
+
+        # ----------------------------------------------------
+        # 4) Pack results
+        # ----------------------------------------------------
         print("Camera intrinsics:", cam_int)
         camera = {
             'pred_cam_R': cam_R.numpy(),
             'pred_cam_T': cam_T.numpy(),
             'img_focal': cam_int[0],
-            'img_center': cam_int[2:]
+            'img_center': cam_int[2:],
         }
         print("cam focal length: ", cam_int[0])
         self.results['camera'] = camera
@@ -289,7 +329,6 @@ class AgPipeline:
             frame_path = video_frames_dir_path / f"{sampled_frame_id:06d}.png"
             img = cv2.imread(str(frame_path))[:, :, ::-1]
             img = cv2.resize(img, (W, H))
-
             self.images.append(img)
 
     def load_dynamic_predictions(self, video_id):
@@ -354,9 +393,9 @@ class AgPipeline:
             self.run_detect_track()
 
         ### slam
-        # if not self.results['has_slam']:
-        #     print("Running camera motion estimation...")
-        #     self.camera_motion_estimation(static_cam)
+        if not self.results['has_slam']:
+            print("Running camera motion estimation...")
+            self.camera_motion_estimation(static_cam)
 
         ### keypoints detection
         if not self.results['has_2d_kpts']:
