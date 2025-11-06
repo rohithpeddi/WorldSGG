@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import time
@@ -9,6 +10,7 @@ import numpy as np
 import rerun as rr
 
 import torch
+from tqdm import tqdm
 
 from datasets.preprocess.human.pipeline.ag_pipeline import AgPipeline
 
@@ -72,6 +74,7 @@ class AlignHMRPi3:
 
         self.frame_annotated_dir_path = self.ag_root_directory / "frames_annotated"
         self.sampled_frames_idx_root_dir = self.ag_root_directory / "sampled_frames_idx"
+        self.videos_directory = self.ag_root_directory / "videos"
 
         # Segmentation masks paths
         self.dynamic_masked_frames_im_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'image_based'
@@ -196,3 +199,53 @@ class AlignHMRPi3:
         print('Press Ctrl+C to terminate.')
         while True:
             time.sleep(1)
+
+    def infer_all_videos(self, split):
+        video_id_list = os.listdir(self.videos_directory)
+        # video_id_list = ["0DJ6R.mp4"]
+        for video_id in tqdm(video_id_list, desc=f"Processing videos in split {split}", unit="video"):
+            if get_video_belongs_to_split(video_id) != split:
+                print(f"Skipping video {video_id} not in split {split}")
+                continue
+            # self.process_video(video_id)
+            self.process_video(video_id)
+            # try:
+            #     self.process_video_intermediate_steps(video_id)
+            # except Exception as e:
+            #     print(f"[ERROR] Error processing video {video_id}: {e}")
+
+
+def _parse_split(s: str) -> str:
+    valid = {"04", "59", "AD", "EH", "IL", "MP", "QT", "UZ"}
+    val = s.strip().upper()
+    if val not in valid:
+        raise argparse.ArgumentTypeError(f"Invalid split '{s}'. Choose one of: {sorted(valid)}")
+    return val
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Sample frames from videos based on homography-overlap filtering.")
+    parser.add_argument(
+        "--output_dir_path", type=str, default="/data/rohith/ag/ag4D/human/",
+        help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
+    )
+    parser.add_argument(
+        "--ag_root_directory", type=str, default="/data/rohith/ag/",
+        help="Path to directory containing input videos."
+    )
+    parser.add_argument(
+        "--split", default="04",
+        help="Optional shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}."
+             "If omitted, processes all videos."
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    processor = AlignHMRPi3(output_root=args.output_dir_path, ag_root_directory=args.ag_root_directory)
+    processor.infer_all_videos(split=args.split)
+
+
+if __name__ == '__main__':
+    main()
