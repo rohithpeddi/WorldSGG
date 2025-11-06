@@ -7,8 +7,6 @@ from typing import Optional, Dict, List
 
 import cv2
 import numpy as np
-import rerun as rr
-
 import torch
 from tqdm import tqdm
 
@@ -160,7 +158,6 @@ class AlignHMRPi3:
     def process_video(self, video_id):
         results = self.pipeline.__call__(video_id, save_only_essential=False)
 
-        # Downsample for viser visualization
         images = self.pipeline.images
         world4d = self.pipeline.create_world4d()
         world4d = {i: world4d[k] for i, k in enumerate(world4d)}
@@ -194,6 +191,10 @@ class AlignHMRPi3:
             init_fps=10,
             img_maxsize=480,
         )
+
+        # 1. Get correspondences.
+
+        # 2. Get similarity alignment.
 
         print('Rerun visualization running. Please open the Rerun app to view the results.')
         print('Press Ctrl+C to terminate.')
