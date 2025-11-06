@@ -124,11 +124,11 @@ class AgPromptHMR:
                 print(f"Skipping video {video_id} not in split {split}")
                 continue
             # self.process_video(video_id)
-            self.process_video_intermediate_steps(video_id)
-            # try:
-            #     self.process_video_intermediate_steps(video_id)
-            # except Exception as e:
-            #     print(f"[ERROR] Error processing video {video_id}: {e}")
+            # self.process_video_intermediate_steps(video_id)
+            try:
+                self.process_video_intermediate_steps(video_id)
+            except Exception as e:
+                print(f"[ERROR] Error processing video {video_id}: {e}")
 
 
 def _parse_split(s: str) -> str:
