@@ -27,18 +27,27 @@ from ..data_config import CONFIG_PATH, SMPLX_NEUTRAL_MODEL_PATH, SMPLX_NEUTRAL_F
 
 class AgPipeline:
 
-    def __init__(self, static_cam=False):
+    def __init__(
+            self,
+            static_cam=False,
+            ag_root_directory="/data/rohith/ag",
+            sampled_frames_path="/data/rohith/ag/sampled_frames_jpg",
+            dynamic_scene_dir_path="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
+            results_output_dir_path="/data2/rohith/ag/ag4D/human",
+    ):
         self.images = None
         self.cfg = OmegaConf.load(CONFIG_PATH)
         self.cfg.static_cam = static_cam
 
-        self.sampled_frames_path = Path("/data/rohith/ag/sampled_frames_jpg")
-        self.dynamic_scene_dir_path = Path("/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic")
-        self.results_output_dir_path = Path("/data2/rohith/ag/ag4D/human")
+        self.ag_root_directory = Path(ag_root_directory)
+
+        self.sampled_frames_path = Path(sampled_frames_path)
+        self.dynamic_scene_dir_path = Path(dynamic_scene_dir_path)
+        self.results_output_dir_path = Path(results_output_dir_path)
         os.makedirs(self.results_output_dir_path, exist_ok=True)
 
-        self.frame_annotated_dir_path = Path("/data/rohith/ag/frames_annotated")
-        self.sampled_frames_idx_root_dir_path = Path("/data/rohith/ag/sampled_frames_idx")
+        self.frame_annotated_dir_path = self.ag_root_directory / "frames_annotated"
+        self.sampled_frames_idx_root_dir_path = self.ag_root_directory / "sampled_frames_idx"
 
         checkpoint_dir = os.path.join(os.path.dirname(__file__), '../data/pretrain')
         self.data_dict = {
@@ -91,7 +100,7 @@ class AgPipeline:
             self.results['people'][k]['vitpose'] = coco_kp2d
         self.results['has_2d_kpts'] = True
         del model
-        return
+        return self.results
 
     def hps_estimation(self, ):
         if self.cfg.tracker == 'sam2':

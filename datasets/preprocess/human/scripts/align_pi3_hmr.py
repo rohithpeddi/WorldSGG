@@ -60,11 +60,10 @@ class AlignHMRPi3:
             ag_root_directory,
             dynamic_scene_dir_path,
     ):
-        self.pipeline = AgPipeline(static_cam=False)
-        self.smplx = SMPLX_Layer(SMPLX_PATH).cuda()
         self.output_root = output_root
         os.makedirs(self.output_root, exist_ok=True)
-        self.ag_root_directory = ag_root_directory
+
+        self.ag_root_directory = Path(ag_root_directory)
 
         self.dynamic_scene_dir_path = Path(dynamic_scene_dir_path)
         self.dynamic_detections_root_path = self.ag_root_directory / "detection" / 'gdino_bboxes'
@@ -94,6 +93,9 @@ class AlignHMRPi3:
         self.static_masks_im_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "image_based"
         self.static_masks_vid_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "video_based"
         self.static_masks_combined_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "combined"
+
+        self.pipeline = AgPipeline(static_cam=False, dynamic_scene_dir_path=self.dynamic_scene_dir_path,)
+        self.smplx = SMPLX_Layer(SMPLX_PATH).cuda()
 
     def labels_for_frame(self, video_id: str, stem: str, is_static: bool) -> List[str]:
         lbls = set()
@@ -156,7 +158,8 @@ class AlignHMRPi3:
         return frame_map, all_labels
 
     def process_video(self, video_id):
-        results = self.pipeline.__call__(video_id, save_only_essential=False)
+        self.pipeline.__call__(video_id, save_only_essential=False)
+        results = self.pipeline.estimate_2d_keypoints()
 
         images = self.pipeline.images
         world4d = self.pipeline.create_world4d()
@@ -202,8 +205,8 @@ class AlignHMRPi3:
             time.sleep(1)
 
     def infer_all_videos(self, split):
-        video_id_list = os.listdir(self.videos_directory)
-        # video_id_list = ["0DJ6R.mp4"]
+        # video_id_list = os.listdir(self.videos_directory)
+        video_id_list = ["0DJ6R.mp4"]
         for video_id in tqdm(video_id_list, desc=f"Processing videos in split {split}", unit="video"):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
@@ -235,6 +238,11 @@ def parse_args():
         help="Path to directory containing input videos."
     )
     parser.add_argument(
+        "--dynamic_scene_dir_path",
+        type=str,
+        default="/data2/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
+    )
+    parser.add_argument(
         "--split", default="04",
         help="Optional shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}."
              "If omitted, processes all videos."
@@ -244,7 +252,11 @@ def parse_args():
 
 def main():
     args = parse_args()
-    processor = AlignHMRPi3(output_root=args.output_dir_path, ag_root_directory=args.ag_root_directory)
+    processor = AlignHMRPi3(
+        output_root=args.output_dir_path,
+        ag_root_directory=args.ag_root_directory,
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path
+    )
     processor.infer_all_videos(split=args.split)
 
 
