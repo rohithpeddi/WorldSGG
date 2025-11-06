@@ -43,7 +43,7 @@ class AgPi3:
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-        self.load_model()
+        # self.load_model()
 
     def load_model(self):
         self.model = Pi3.from_pretrained("yyfz233/Pi3").to(self.device).eval()
@@ -134,6 +134,42 @@ class AgPi3:
         )
 
         return imgs
+
+    # -------------------------------- VERIFICATION UTILITIES --------------------------------
+
+    def check_sorted(self, video_id):
+        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
+
+        annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
+        annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
+        unsorted_annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
+        unsorted_annotated_last_frame_id = int(annotated_frame_id_list[-1][:-4])
+
+        # Sorted list for annotation frame ids of the format {frame_id}:06d.png
+        sorted_annotated_frame_id_list = sorted(annotated_frame_id_list, key=lambda x: int(x[:-4]))
+        sorted_annotated_first_frame_id = int(sorted_annotated_frame_id_list[0][:-4])
+        sorted_annotated_last_frame_id = int(sorted_annotated_frame_id_list[-1][:-4])
+
+        if (unsorted_annotated_first_frame_id != sorted_annotated_first_frame_id) or \
+           (unsorted_annotated_last_frame_id != sorted_annotated_last_frame_id):
+            return False
+        return True
+
+    def check_sorted_all_videos(self, split):
+        video_id_list = os.listdir(self.static_root_dir_path)
+        yes_counter = 0
+        no_counter = 0
+        for video_id in tqdm(video_id_list):
+            is_sorted = self.check_sorted(video_id)
+            if is_sorted:
+                yes_counter += 1
+                print(f"[YES] Video {video_id} annotated frames are sorted.")
+            else:
+                no_counter += 1
+                print(f"[NO] Video {video_id} annotated frames are NOT sorted.")
+        print(f"Total YES: {yes_counter}, Total NO: {no_counter}")
+
+    # ------------------------------------------------------------------------------------------
 
     def infer_video(self, video_id, conf_thres=10.0, conf_static=0.1, dedup_voxel=0.02, conf_min=0.01):
         video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
@@ -323,8 +359,8 @@ def main():
         grounded_dynamic_output_dir_path=args.grounded_dynamic_output_dir_path,
         frame_annotated_dir_path=args.frames_annotated_dir_path,
     )
-    ag_pi3.infer_all_videos(args.split)
-
+    # ag_pi3.infer_all_videos(args.split)
+    ag_pi3.check_sorted_all_videos(args.split)
 
 if __name__ == "__main__":
     main()
