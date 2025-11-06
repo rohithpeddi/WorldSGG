@@ -121,11 +121,12 @@ class AlignHMRPi3:
         t = mu_dst - s * (R @ mu_src)
         return s, R, t
 
-    def _get_partial_pointcloud(self, video_id: str, frame_idx: int, frame_idx_frame_path_map, label: str = "person") -> np.ndarray:
+    def _get_partial_pointcloud(self, video_id: str, frame_idx: int, frame_idx_frame_path_map,
+                                label: str = "person") -> np.ndarray:
         """
         Pulls the point cloud for this frame from the pipeline and masks it
         using your stored masks (if present). Falls back to 'all points' for
-        that frame if mask is missing.
+        that frame if the mask is missing.
         """
         # pipeline already loaded npz with per-frame points: (S, H, W, 3)
         pts_hw3 = self.pipeline.points[frame_idx]  # (H, W, 3)
@@ -228,26 +229,6 @@ class AlignHMRPi3:
 
         return s_global, R_global, t_global
 
-    def labels_for_frame(self, video_id: str, stem: str, is_static: bool) -> List[str]:
-        lbls = set()
-        if is_static:
-            image_root_dir_list = [self.static_masks_im_dir_path, self.static_masks_vid_dir_path]
-        else:
-            image_root_dir_list = [self.dynamic_masks_im_dir_path, self.dynamic_masks_vid_dir_path]
-        for root in image_root_dir_list:
-            vdir = root / video_id
-            if not vdir.exists():
-                continue
-            for fn in os.listdir(vdir):
-                if not fn.endswith(".png"):
-                    continue
-                if "__" in fn:
-                    st, lbl = fn.split("__", 1)
-                    lbl = lbl.rsplit(".png", 1)[0]
-                    if st == stem:
-                        lbls.add(lbl)
-        return sorted(lbls)
-
     def get_union_mask(self, video_id: str, stem: str, label: str, is_static) -> Optional[np.ndarray]:
         if is_static:
             im_p = self.static_masks_im_dir_path / video_id / f"{stem}__{label}.png"
@@ -293,7 +274,7 @@ class AlignHMRPi3:
         return frame_idx_frame_path_map
 
     def process_video(self, video_id):
-        self.pipeline.__call__(video_id, save_only_essential=False)
+        self.pipeline.__call__(video_id)
         results = self.pipeline.estimate_2d_keypoints()
         images = self.pipeline.images
         world4d = self.pipeline.create_world4d()
@@ -305,6 +286,7 @@ class AlignHMRPi3:
         frame_idx_frame_path_map = self.idx_to_frame_idx_path(video_id)
 
         # --------- (a) COLLECT raw SMPL + scene per frame ----------
+        print("Collecting per-frame SMPL and scene point clouds...")
         for frame_idx, frame_data in world4d.items():
             if len(frame_data['track_id']) == 0:
                 per_frame_smpl.append(None)
@@ -330,12 +312,14 @@ class AlignHMRPi3:
             per_frame_scene.append(scene_pts)
 
         # --------- (b) GLOBAL constrained similarity ---------------
+        print("Estimating global similarity transform via ICP...")
         s_g, R_g, t_g = self._global_similarity_icp(per_frame_smpl, per_frame_scene,
                                                     iters=5,
                                                     max_smpl_per_frame=2500,
                                                     max_scene_per_frame=15000)
 
         # --------- (c) APPLY to all frames’ SMPL -------------------
+        print("Applying global similarity to all SMPL vertices...")
         all_verts_for_floor = []
         for frame_idx, frame_data in world4d.items():
             smpl_f = per_frame_smpl[frame_idx]
