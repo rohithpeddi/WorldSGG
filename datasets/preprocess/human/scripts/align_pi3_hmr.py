@@ -2,7 +2,11 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List
+
+import cv2
+import numpy as np
+import rerun as rr
 
 import torch
 
@@ -53,13 +57,102 @@ class AlignHMRPi3:
     def __init__(
             self,
             output_root,
-            root_dir_path
+            ag_root_directory,
+            dynamic_scene_dir_path,
     ):
         self.pipeline = AgPipeline(static_cam=False)
         self.smplx = SMPLX_Layer(SMPLX_PATH).cuda()
         self.output_root = output_root
         os.makedirs(self.output_root, exist_ok=True)
-        self.root_dir_path = root_dir_path
+        self.ag_root_directory = ag_root_directory
+
+        self.dynamic_scene_dir_path = Path(dynamic_scene_dir_path)
+        self.dynamic_detections_root_path = self.ag_root_directory / "detection" / 'gdino_bboxes'
+        self.static_detections_root_path = self.ag_root_directory / "detection" / 'gdino_bboxes_static'
+
+        self.frame_annotated_dir_path = self.ag_root_directory / "frames_annotated"
+        self.sampled_frames_idx_root_dir = self.ag_root_directory / "sampled_frames_idx"
+
+        # Segmentation masks paths
+        self.dynamic_masked_frames_im_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'image_based'
+        self.dynamic_masked_frames_vid_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'video_based'
+        self.dynamic_masked_frames_combined_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'combined'
+        self.dynamic_masked_videos_dir_path = self.ag_root_directory / "segmentation" / "masked_videos"
+
+        # Internal (per-object) mask stores
+        self.dynamic_masks_im_dir_path = self.ag_root_directory / "segmentation" / "masks" / "image_based"
+        self.dynamic_masks_vid_dir_path = self.ag_root_directory / "segmentation" / "masks" / "video_based"
+        self.dynamic_masks_combined_dir_path = self.ag_root_directory / "segmentation" / "masks" / "combined"
+
+        self.static_masked_frames_im_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'image_based'
+        self.static_masked_frames_vid_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'video_based'
+        self.static_masked_frames_combined_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'combined'
+        self.static_masked_videos_dir_path = self.ag_root_directory / "segmentation_static" / "masked_videos"
+
+        # Internal (per-object) mask stores
+        self.static_masks_im_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "image_based"
+        self.static_masks_vid_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "video_based"
+        self.static_masks_combined_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "combined"
+
+    def labels_for_frame(self, video_id: str, stem: str, is_static: bool) -> List[str]:
+        lbls = set()
+        if is_static:
+            image_root_dir_list = [self.static_masks_im_dir_path, self.static_masks_vid_dir_path]
+        else:
+            image_root_dir_list = [self.dynamic_masks_im_dir_path, self.dynamic_masks_vid_dir_path]
+        for root in image_root_dir_list:
+            vdir = root / video_id
+            if not vdir.exists():
+                continue
+            for fn in os.listdir(vdir):
+                if not fn.endswith(".png"):
+                    continue
+                if "__" in fn:
+                    st, lbl = fn.split("__", 1)
+                    lbl = lbl.rsplit(".png", 1)[0]
+                    if st == stem:
+                        lbls.add(lbl)
+        return sorted(lbls)
+
+    def get_union_mask(self, video_id: str, stem: str, label: str, is_static) -> Optional[np.ndarray]:
+        if is_static:
+            im_p = self.static_masks_im_dir_path / video_id / f"{stem}__{label}.png"
+            vd_p = self.static_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
+        else:
+            im_p = self.dynamic_masks_im_dir_path / video_id / f"{stem}__{label}.png"
+            vd_p = self.dynamic_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
+        m_im = cv2.imread(str(im_p), cv2.IMREAD_GRAYSCALE) if im_p.exists() else None
+        m_vd = cv2.imread(str(vd_p), cv2.IMREAD_GRAYSCALE) if vd_p.exists() else None
+        if m_im is None and m_vd is None:
+            return None
+        if m_im is None:
+            m = (m_vd > 127)
+        elif m_vd is None:
+            m = (m_im > 127)
+        else:
+            m = (m_im > 127) | (m_vd > 127)
+        return m.astype(bool)
+
+    def update_frame_map(
+            self,
+            frame_stems,
+            video_id,
+            frame_map: Dict[str, Dict[str, np.ndarray]],
+            is_static
+    ):
+        all_labels = set()
+        for stem in frame_stems:
+            lbls = self.labels_for_frame(video_id, stem, is_static)
+            if not lbls:
+                continue
+            all_labels.update(lbls)
+            if stem not in frame_map:
+                frame_map[stem] = {}
+            for lbl in lbls:
+                m = self.get_union_mask(video_id, stem, lbl, is_static)
+                if m is not None:
+                    frame_map[stem][lbl] = m
+        return frame_map, all_labels
 
     def process_video(self, video_id):
         results = self.pipeline.__call__(video_id, save_only_essential=False)

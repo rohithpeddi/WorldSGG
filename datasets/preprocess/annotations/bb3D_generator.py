@@ -77,6 +77,7 @@ def _to_len(x):
     except Exception:
         return 0
 
+
 def _load_pkl_if_exists(path: Path):
     if path.exists():
         with open(path, "rb") as f:
@@ -109,7 +110,6 @@ def build_scene_floor(scene_pts_xyz: np.ndarray,
     offset = offset.detach().cpu().numpy()  # (3,)
 
     return R, offset, floor_v, floor_f, floor_c
-
 
 
 class BBox3DGenerator:
@@ -537,13 +537,13 @@ class BBox3DGenerator:
 
     # ------------------------------ (4) Match GDINO to GT ------------------------------ #
     def _match_gdino_to_gt(
-        self,
-        gt_label: str,
-        gt_xyxy: List[float],
-        gd_boxes: List[List[float]],
-        gd_labels: List[str],
-        gd_scores: List[float],
-        iou_thr: float = 0.3,
+            self,
+            gt_label: str,
+            gt_xyxy: List[float],
+            gd_boxes: List[List[float]],
+            gd_labels: List[str],
+            gd_scores: List[float],
+            iou_thr: float = 0.3,
     ) -> List[float]:
         candidates = [
             (b, s) for b, l, s in zip(gd_boxes, gd_labels, gd_scores)
@@ -630,14 +630,14 @@ class BBox3DGenerator:
 
     # ------------------------------ (6–9) Per-video BB generation ------------------------------ #
     def generate_video_bb_annotations(
-        self,
-        video_id: str,
-        video_gt_annotations: List[Any],
-        video_gdino_predictions: Dict[str, Any],
-        *,
-        min_points: int = 50,
-        iou_thr: float = 0.3,
-        visualize: bool = False
+            self,
+            video_id: str,
+            video_gt_annotations: List[Any],
+            video_gdino_predictions: Dict[str, Any],
+            *,
+            min_points: int = 50,
+            iou_thr: float = 0.3,
+            visualize: bool = False
     ) -> None:
         P = self._load_points_for_video(video_id)
         points_S = P["points"]  # (S,H,W,3)
@@ -739,7 +739,6 @@ class BBox3DGenerator:
                         colors=colors[int(frame_idx)].reshape(-1, 3)
                     )
                 )
-
 
             # Extract 3D for each GT object
             for (label, gt_xyxy) in gt_objects:
@@ -857,6 +856,7 @@ class BBox3DGenerator:
                     visualize=True
                 )
 
+
 def _parse_split(s: str) -> str:
     valid = {"04", "59", "AD", "EH", "IL", "MP", "QT", "UZ"}
     val = s.strip().upper()
@@ -865,6 +865,7 @@ def _parse_split(s: str) -> str:
             f"Invalid split '{s}'. Choose one of: {sorted(valid)}"
         )
     return val
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -896,6 +897,7 @@ def parse_args() -> argparse.Namespace:
         help="Shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}.",
     )
     return parser.parse_args()
+
 
 def load_dataset(ag_root_directory: str):
     train_dataset = StandardAG(
@@ -932,6 +934,7 @@ def load_dataset(ag_root_directory: str):
     )
 
     return train_dataset, test_dataset, dataloader_train, dataloader_test
+
 
 def main() -> None:
     args = parse_args()
