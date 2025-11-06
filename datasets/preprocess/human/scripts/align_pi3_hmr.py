@@ -73,33 +73,19 @@ class AlignHMRPi3:
         self.sampled_frames_idx_root_dir = self.ag_root_directory / "sampled_frames_idx"
         self.videos_directory = self.ag_root_directory / "videos"
 
-        # Segmentation masks paths
-        self.dynamic_masked_frames_im_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'image_based'
-        self.dynamic_masked_frames_vid_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'video_based'
-        self.dynamic_masked_frames_combined_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'combined'
-        self.dynamic_masked_videos_dir_path = self.ag_root_directory / "segmentation" / "masked_videos"
-
         # Internal (per-object) mask stores
         self.dynamic_masks_im_dir_path = self.ag_root_directory / "segmentation" / "masks" / "image_based"
         self.dynamic_masks_vid_dir_path = self.ag_root_directory / "segmentation" / "masks" / "video_based"
         self.dynamic_masks_combined_dir_path = self.ag_root_directory / "segmentation" / "masks" / "combined"
-
-        self.static_masked_frames_im_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'image_based'
-        self.static_masked_frames_vid_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'video_based'
-        self.static_masked_frames_combined_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'combined'
-        self.static_masked_videos_dir_path = self.ag_root_directory / "segmentation_static" / "masked_videos"
 
         # Internal (per-object) mask stores
         self.static_masks_im_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "image_based"
         self.static_masks_vid_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "video_based"
         self.static_masks_combined_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "combined"
 
-        self.pipeline = AgPipeline(static_cam=False, dynamic_scene_dir_path=self.dynamic_scene_dir_path,)
+        self.pipeline = AgPipeline(static_cam=False, dynamic_scene_dir_path=self.dynamic_scene_dir_path, )
         self.smplx = SMPLX_Layer(SMPLX_PATH).cuda()
 
-    # ------------------------------------------------------------------
-    # NEW: basic Umeyama similarity (scale + rot + trans)
-    # ------------------------------------------------------------------
     def _umeyama_similarity(self, src: np.ndarray, dst: np.ndarray):
         """
         src: (N,3) SMPL points
@@ -135,10 +121,7 @@ class AlignHMRPi3:
         t = mu_dst - s * (R @ mu_src)
         return s, R, t
 
-    # ------------------------------------------------------------------
-    # NEW: one-liner to get partial human cloud for a frame
-    # ------------------------------------------------------------------
-    def _get_partial_pointcloud(self, video_id: str, frame_idx: int, label: str = "person") -> np.ndarray:
+    def _get_partial_pointcloud(self, video_id: str, frame_idx: int, frame_idx_frame_path_map, label: str = "person") -> np.ndarray:
         """
         Pulls the point cloud for this frame from the pipeline and masks it
         using your stored masks (if present). Falls back to 'all points' for
@@ -148,7 +131,7 @@ class AlignHMRPi3:
         pts_hw3 = self.pipeline.points[frame_idx]  # (H, W, 3)
         H, W, _ = pts_hw3.shape
 
-        stem = f"{frame_idx:06d}"
+        stem = frame_idx_frame_path_map[frame_idx][:-4]
         mask = self.get_union_mask(video_id, stem, label, is_static=False)
 
         if mask is not None:
@@ -176,7 +159,7 @@ class AlignHMRPi3:
                                max_smpl_per_frame: int = 2500,
                                max_scene_per_frame: int = 15000):
         """
-        per_frame_smpl: list of (V,3) or list of list-of-people [(P,V,3)]? we’ll flatten per frame
+        per_frame_smpl: list of (V,3) or list of list-of-people [(P, V,3)]? we’ll flatten per frame
         per_frame_scene: list of (Nf,3) partial clouds
         returns single s, R, t that best fits ALL frames together
         """
@@ -284,29 +267,32 @@ class AlignHMRPi3:
             m = (m_im > 127) | (m_vd > 127)
         return m.astype(bool)
 
-    def update_frame_map(
-            self,
-            frame_stems,
-            video_id,
-            frame_map: Dict[str, Dict[str, np.ndarray]],
-            is_static
-    ):
-        all_labels = set()
-        for stem in frame_stems:
-            lbls = self.labels_for_frame(video_id, stem, is_static)
-            if not lbls:
-                continue
-            all_labels.update(lbls)
-            if stem not in frame_map:
-                frame_map[stem] = {}
-            for lbl in lbls:
-                m = self.get_union_mask(video_id, stem, lbl, is_static)
-                if m is not None:
-                    frame_map[stem][lbl] = m
-        return frame_map, all_labels
+    def idx_to_frame_idx_path(self, video_id: str):
+        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
+
+        annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
+        annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
+
+        # Sort the list where the frame ids are of the format '000123.png'
+        annotated_frame_id_list.sort(key=lambda x: int(x[:-4]))
+
+        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
+        annotated_last_frame_id = int(annotated_frame_id_list[-1][:-4])
+
+        # Get the mapping for sampled_frame_id and the actual frame id
+        # Now start from the sampled frame which corresponds to the first annotated frame and keep the rest of the sampled frames
+        video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir, f"{video_id[:-4]}.npy")
+        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()  # Numbers only
+
+        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
+        an_last_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_last_frame_id)
+        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, an_last_id_in_vid_sam_frame_id_list + 1))
+
+        chosen_frames = [video_sampled_frame_id_list[i] for i in sample_idx]
+        frame_idx_frame_path_map = {i: f"{frame_id:06d}.png" for i, frame_id in enumerate(chosen_frames)}
+        return frame_idx_frame_path_map
 
     def process_video(self, video_id):
-        # run underlying pipeline
         self.pipeline.__call__(video_id, save_only_essential=False)
         results = self.pipeline.estimate_2d_keypoints()
         images = self.pipeline.images
@@ -315,6 +301,8 @@ class AlignHMRPi3:
 
         per_frame_smpl = []
         per_frame_scene = []
+
+        frame_idx_frame_path_map = self.idx_to_frame_idx_path(video_id)
 
         # --------- (a) COLLECT raw SMPL + scene per frame ----------
         for frame_idx, frame_data in world4d.items():
@@ -331,7 +319,12 @@ class AlignHMRPi3:
                 transl=frame_data['trans'].cuda()
             ).vertices.cpu().numpy()  # (P, V, 3)
 
-            scene_pts = self._get_partial_pointcloud(video_id, frame_idx, label="person")
+            scene_pts = self._get_partial_pointcloud(
+                video_id=video_id,
+                frame_idx=frame_idx,
+                frame_idx_frame_path_map=frame_idx_frame_path_map,
+                label="person"
+            )
 
             per_frame_smpl.append(verts)
             per_frame_scene.append(scene_pts)
