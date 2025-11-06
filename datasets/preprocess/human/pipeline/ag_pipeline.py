@@ -66,6 +66,9 @@ class AgPipeline:
         )
         self.smplx.to(self.device)
 
+        self.points = None
+        self.camera_poses = None
+
     def run_detect_track(self, ):
         if self.cfg.tracker == 'bytetrack':
             tracks = detect_track(self.images, bbox_interp=self.cfg.bbox_interp)
@@ -349,6 +352,24 @@ class AgPipeline:
         video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
         video_dynamic_predictions = np.load(video_dynamic_3d_scene_path, allow_pickle=True)
         return video_dynamic_predictions
+
+    # ------------------------------------------------------------
+    # NEW: expose per-frame dynamic point cloud
+    # ------------------------------------------------------------
+    def get_frame_pointcloud(self, frame_idx: int) -> np.ndarray:
+        """
+        Returns (H, W, 3) point cloud for frame_idx from the dynamic scene.
+        """
+        return self.points[frame_idx]
+
+    # ------------------------------------------------------------
+    # NEW: expose per-frame camera pose (Pi3 gives c2w)
+    # ------------------------------------------------------------
+    def get_frame_camera_pose(self, frame_idx: int) -> np.ndarray:
+        """
+        Returns (4,4) camera->world for this frame.
+        """
+        return self.camera_poses[frame_idx]
 
     def __call__(
             self,

@@ -97,6 +97,130 @@ class AlignHMRPi3:
         self.pipeline = AgPipeline(static_cam=False, dynamic_scene_dir_path=self.dynamic_scene_dir_path,)
         self.smplx = SMPLX_Layer(SMPLX_PATH).cuda()
 
+    # ------------------------------------------------------------------
+    # NEW: basic Umeyama similarity (scale + rot + trans)
+    # ------------------------------------------------------------------
+    def _umeyama_similarity(self, src: np.ndarray, dst: np.ndarray):
+        """
+        src: (N,3) SMPL points
+        dst: (N,3) scene points (already masked to human)
+        return s, R, t  such that  dst ≈ s * R @ src + t
+        """
+        src = np.asarray(src, dtype=np.float64)
+        dst = np.asarray(dst, dtype=np.float64)
+        assert src.shape == dst.shape
+
+        n = src.shape[0]
+        mu_src = src.mean(axis=0)
+        mu_dst = dst.mean(axis=0)
+
+        src_c = src - mu_src
+        dst_c = dst - mu_dst
+
+        cov = (dst_c.T @ src_c) / n
+        U, S, Vt = np.linalg.svd(cov)
+        R = U @ Vt
+        if np.linalg.det(R) < 0:
+            Vt[-1, :] *= -1
+            R = U @ Vt
+
+        var_src = (src_c ** 2).sum() / n
+        # diag term to handle reflection fix
+        D = np.eye(3)
+        D[2, 2] = np.linalg.det(U @ Vt)
+        s = (S @ np.diag(D)) / var_src
+        # S is 1D; simpler to just do trace:
+        s = (S * np.diag(D)).sum() / var_src
+
+        t = mu_dst - s * (R @ mu_src)
+        return s, R, t
+
+    # ------------------------------------------------------------------
+    # NEW: one-liner to get partial human cloud for a frame
+    # ------------------------------------------------------------------
+    def _get_partial_pointcloud(self, video_id: str, frame_idx: int, label: str = "person") -> np.ndarray:
+        """
+        Pulls the point cloud for this frame from the pipeline and masks it
+        using your stored masks (if present). Falls back to 'all points' for
+        that frame if mask is missing.
+        """
+        # pipeline already loaded npz with per-frame points: (S, H, W, 3)
+        pts_hw3 = self.pipeline.points[frame_idx]  # (H, W, 3)
+        H, W, _ = pts_hw3.shape
+
+        stem = f"{frame_idx:06d}"
+        mask = self.get_union_mask(video_id, stem, label, is_static=False)
+
+        if mask is not None:
+            # mask is H x W, boolean
+            mask = mask.astype(bool)
+            # safety in case mask shape != points shape
+            if mask.shape[0] != H or mask.shape[1] != W:
+                mask = cv2.resize(mask.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
+            pts = pts_hw3[mask]
+        else:
+            pts = pts_hw3.reshape(-1, 3)
+
+        # filter out NaNs / zeros
+        pts = pts[np.isfinite(pts).all(axis=1)]
+        # keep only where not all zeros
+        nonzero = ~(np.abs(pts).sum(axis=1) < 1e-6)
+        pts = pts[nonzero]
+
+        return pts
+
+    # ------------------------------------------------------------------
+    # NEW: tiny similarity-ICP (few iters, NN via brute force)
+    # ------------------------------------------------------------------
+    def _similarity_icp(self, src: np.ndarray, dst: np.ndarray,
+                        iters: int = 5,
+                        max_src: int = 5000,
+                        max_dst: int = 20000):
+        """
+        src: (Ns,3) SMPL vertices
+        dst: (Nd,3) scene partial cloud
+        returns cumulative s, R, t
+        """
+        src_curr = src.copy()
+        # cumulative
+        s_total = 1.0
+        R_total = np.eye(3)
+        t_total = np.zeros(3)
+
+        # maybe subsample dst once
+        if dst.shape[0] > max_dst:
+            idx = np.random.choice(dst.shape[0], max_dst, replace=False)
+            dst_used = dst[idx]
+        else:
+            dst_used = dst
+
+        for _ in range(iters):
+            # subsample src
+            if src_curr.shape[0] > max_src:
+                idx_src = np.random.choice(src_curr.shape[0], max_src, replace=False)
+                src_used = src_curr[idx_src]
+            else:
+                src_used = src_curr
+
+            # NN: brute force
+            # dst_used: (Nd,3), src_used: (Ns,3)
+            dists = np.linalg.norm(src_used[:, None, :] - dst_used[None, :, :], axis=2)  # (Ns, Nd)
+            nn_idx = dists.argmin(axis=1)
+            matched_dst = dst_used[nn_idx]
+
+            s, R, t = self._umeyama_similarity(src_used, matched_dst)
+
+            # apply to ALL current src
+            src_curr = (s * (R @ src_curr.T).T) + t
+
+            # update cumulative (compose similarity)
+            # new = s * R * old + t
+            s_total = s_total * s
+            R_total = R @ R_total
+            t_total = R @ t_total + t
+
+        return s_total, R_total, t_total, src_curr
+
     def labels_for_frame(self, video_id: str, stem: str, is_static: bool) -> List[str]:
         lbls = set()
         if is_static:
@@ -165,23 +289,43 @@ class AlignHMRPi3:
         world4d = self.pipeline.create_world4d()
         world4d = {i: world4d[k] for i, k in enumerate(world4d)}
 
-        # Get vertices
+        # Get vertices (now: already aligned to the scene partial cloud)
         all_verts = []
-        for k in world4d:
-            world3d = world4d[k]
-            if len(world3d['track_id']) == 0:  # no people
+        for frame_idx, frame_data in world4d.items():
+            if len(frame_data['track_id']) == 0:  # no people
                 continue
-            rotmat = axis_angle_to_matrix(world3d['pose'].reshape(-1, 55, 3))
-            verts = self.smplx(global_orient=rotmat[:, :1].cuda(),
-                               body_pose=rotmat[:, 1:22].cuda(),
-                               betas=world3d['shape'].cuda(),
-                               transl=world3d['trans'].cuda()).vertices.cpu().numpy()
 
-            world3d['vertices'] = verts
-            all_verts.append(torch.tensor(verts, dtype=torch.bfloat16))
+            rotmat = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
+            verts = self.smplx(
+                global_orient=rotmat[:, :1].cuda(),
+                body_pose=rotmat[:, 1:22].cuda(),
+                betas=frame_data['shape'].cuda(),
+                transl=frame_data['trans'].cuda()
+            ).vertices.cpu().numpy()  # (N_people, V, 3) in current pipeline world
 
-        all_verts = torch.cat(all_verts)
-        [gv, gf, gc] = get_floor_mesh(all_verts, scale=2)
+            # NEW: get partial human cloud for this frame and align
+            scene_pts = self._get_partial_pointcloud(video_id, frame_idx, label="person")
+            aligned_verts_per_person = []
+            for pi in range(verts.shape[0]):
+                smpl_pi = verts[pi]  # (V,3)
+                if scene_pts.shape[0] < 50:
+                    # not enough scene points, keep as-is
+                    aligned_verts_per_person.append(smpl_pi)
+                    continue
+
+                s, R, t, smpl_aligned = self._similarity_icp(smpl_pi, scene_pts, iters=4)
+                aligned_verts_per_person.append(smpl_aligned)
+
+            aligned_verts_per_person = np.stack(aligned_verts_per_person, axis=0)
+            # overwrite in world4d so visualizer uses aligned mesh
+            frame_data['vertices'] = aligned_verts_per_person
+            all_verts.append(torch.tensor(aligned_verts_per_person, dtype=torch.bfloat16))
+
+        if len(all_verts) > 0:
+            all_verts = torch.cat(all_verts)
+            [gv, gf, gc] = get_floor_mesh(all_verts, scale=2)
+        else:
+            gv, gf = None, None
 
         rrvis.rerun_vis_world4d(
             video_id=video_id,
@@ -190,14 +334,10 @@ class AlignHMRPi3:
             results=results,
             pipeline=self.pipeline,
             faces=self.smplx.faces,
-            floor=(gv, gf),
+            floor=(gv, gf) if gv is not None else None,
             init_fps=10,
             img_maxsize=480,
         )
-
-        # 1. Get correspondences.
-
-        # 2. Get similarity alignment.
 
         print('Rerun visualization running. Please open the Rerun app to view the results.')
         print('Press Ctrl+C to terminate.')
