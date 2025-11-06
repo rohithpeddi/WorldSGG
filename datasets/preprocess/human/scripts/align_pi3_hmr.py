@@ -169,57 +169,81 @@ class AlignHMRPi3:
 
         return pts
 
-    # ------------------------------------------------------------------
-    # NEW: tiny similarity-ICP (few iters, NN via brute force)
-    # ------------------------------------------------------------------
-    def _similarity_icp(self, src: np.ndarray, dst: np.ndarray,
-                        iters: int = 5,
-                        max_src: int = 5000,
-                        max_dst: int = 20000):
+    def _global_similarity_icp(self,
+                               per_frame_smpl: list,
+                               per_frame_scene: list,
+                               iters: int = 5,
+                               max_smpl_per_frame: int = 2500,
+                               max_scene_per_frame: int = 15000):
         """
-        src: (Ns,3) SMPL vertices
-        dst: (Nd,3) scene partial cloud
-        returns cumulative s, R, t
+        per_frame_smpl: list of (V,3) or list of list-of-people [(P,V,3)]? we’ll flatten per frame
+        per_frame_scene: list of (Nf,3) partial clouds
+        returns single s, R, t that best fits ALL frames together
         """
-        src_curr = src.copy()
-        # cumulative
-        s_total = 1.0
-        R_total = np.eye(3)
-        t_total = np.zeros(3)
+        s_global = 1.0
+        R_global = np.eye(3)
+        t_global = np.zeros(3)
 
-        # maybe subsample dst once
-        if dst.shape[0] > max_dst:
-            idx = np.random.choice(dst.shape[0], max_dst, replace=False)
-            dst_used = dst[idx]
-        else:
-            dst_used = dst
+        num_frames = len(per_frame_smpl)
 
         for _ in range(iters):
-            # subsample src
-            if src_curr.shape[0] > max_src:
-                idx_src = np.random.choice(src_curr.shape[0], max_src, replace=False)
-                src_used = src_curr[idx_src]
-            else:
-                src_used = src_curr
+            all_src_orig = []
+            all_dst_match = []
 
-            # NN: brute force
-            # dst_used: (Nd,3), src_used: (Ns,3)
-            dists = np.linalg.norm(src_used[:, None, :] - dst_used[None, :, :], axis=2)  # (Ns, Nd)
-            nn_idx = dists.argmin(axis=1)
-            matched_dst = dst_used[nn_idx]
+            for f in range(num_frames):
+                smpl_f = per_frame_smpl[f]
+                scene_f = per_frame_scene[f]
+                if smpl_f is None or scene_f is None:
+                    continue
+                if scene_f.shape[0] == 0:
+                    continue
 
-            s, R, t = self._umeyama_similarity(src_used, matched_dst)
+                # flatten people if needed
+                if smpl_f.ndim == 3:
+                    # (P,V,3) -> (P*V, 3)
+                    smpl_flat = smpl_f.reshape(-1, 3)
+                else:
+                    smpl_flat = smpl_f  # (V,3)
 
-            # apply to ALL current src
-            src_curr = (s * (R @ src_curr.T).T) + t
+                # optional subsample SMPL for speed
+                if smpl_flat.shape[0] > max_smpl_per_frame:
+                    idx_smpl = np.random.choice(smpl_flat.shape[0], max_smpl_per_frame, replace=False)
+                    smpl_flat = smpl_flat[idx_smpl]
 
-            # update cumulative (compose similarity)
-            # new = s * R * old + t
-            s_total = s_total * s
-            R_total = R @ R_total
-            t_total = R @ t_total + t
+                # transform with current global estimate
+                smpl_tf = (s_global * (R_global @ smpl_flat.T).T) + t_global  # (Ns,3)
 
-        return s_total, R_total, t_total, src_curr
+                # subsample scene cloud once per frame
+                if scene_f.shape[0] > max_scene_per_frame:
+                    idx_scene = np.random.choice(scene_f.shape[0], max_scene_per_frame, replace=False)
+                    scene_used = scene_f[idx_scene]
+                else:
+                    scene_used = scene_f
+
+                # brute-force NN
+                dists = np.linalg.norm(smpl_tf[:, None, :] - scene_used[None, :, :], axis=2)  # (Ns, Nd)
+                nn_idx = dists.argmin(axis=1)
+                matched_scene = scene_used[nn_idx]
+
+                # store PAIRS: (original smpl BEFORE transform, matched scene)
+                all_src_orig.append(smpl_flat)
+                all_dst_match.append(matched_scene)
+
+            if len(all_src_orig) == 0:
+                break
+
+            src_cat = np.concatenate(all_src_orig, axis=0)
+            dst_cat = np.concatenate(all_dst_match, axis=0)
+
+            # run one Umeyama on ALL pairs → gives a delta similarity
+            s_delta, R_delta, t_delta = self._umeyama_similarity(src_cat, dst_cat)
+
+            # compose: new = s_d * R_d * old + t_d
+            s_global = s_delta * s_global
+            R_global = R_delta @ R_global
+            t_global = R_delta @ t_global + t_delta
+
+        return s_global, R_global, t_global
 
     def labels_for_frame(self, video_id: str, stem: str, is_static: bool) -> List[str]:
         lbls = set()
@@ -282,17 +306,21 @@ class AlignHMRPi3:
         return frame_map, all_labels
 
     def process_video(self, video_id):
+        # run underlying pipeline
         self.pipeline.__call__(video_id, save_only_essential=False)
         results = self.pipeline.estimate_2d_keypoints()
-
         images = self.pipeline.images
         world4d = self.pipeline.create_world4d()
         world4d = {i: world4d[k] for i, k in enumerate(world4d)}
 
-        # Get vertices (now: already aligned to the scene partial cloud)
-        all_verts = []
+        per_frame_smpl = []
+        per_frame_scene = []
+
+        # --------- (a) COLLECT raw SMPL + scene per frame ----------
         for frame_idx, frame_data in world4d.items():
-            if len(frame_data['track_id']) == 0:  # no people
+            if len(frame_data['track_id']) == 0:
+                per_frame_smpl.append(None)
+                per_frame_scene.append(None)
                 continue
 
             rotmat = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
@@ -301,29 +329,37 @@ class AlignHMRPi3:
                 body_pose=rotmat[:, 1:22].cuda(),
                 betas=frame_data['shape'].cuda(),
                 transl=frame_data['trans'].cuda()
-            ).vertices.cpu().numpy()  # (N_people, V, 3) in current pipeline world
+            ).vertices.cpu().numpy()  # (P, V, 3)
 
-            # NEW: get partial human cloud for this frame and align
             scene_pts = self._get_partial_pointcloud(video_id, frame_idx, label="person")
-            aligned_verts_per_person = []
-            for pi in range(verts.shape[0]):
-                smpl_pi = verts[pi]  # (V,3)
-                if scene_pts.shape[0] < 50:
-                    # not enough scene points, keep as-is
-                    aligned_verts_per_person.append(smpl_pi)
-                    continue
 
-                s, R, t, smpl_aligned = self._similarity_icp(smpl_pi, scene_pts, iters=4)
-                aligned_verts_per_person.append(smpl_aligned)
+            per_frame_smpl.append(verts)
+            per_frame_scene.append(scene_pts)
 
-            aligned_verts_per_person = np.stack(aligned_verts_per_person, axis=0)
-            # overwrite in world4d so visualizer uses aligned mesh
-            frame_data['vertices'] = aligned_verts_per_person
-            all_verts.append(torch.tensor(aligned_verts_per_person, dtype=torch.bfloat16))
+        # --------- (b) GLOBAL constrained similarity ---------------
+        s_g, R_g, t_g = self._global_similarity_icp(per_frame_smpl, per_frame_scene,
+                                                    iters=5,
+                                                    max_smpl_per_frame=2500,
+                                                    max_scene_per_frame=15000)
 
-        if len(all_verts) > 0:
-            all_verts = torch.cat(all_verts)
-            [gv, gf, gc] = get_floor_mesh(all_verts, scale=2)
+        # --------- (c) APPLY to all frames’ SMPL -------------------
+        all_verts_for_floor = []
+        for frame_idx, frame_data in world4d.items():
+            smpl_f = per_frame_smpl[frame_idx]
+            if smpl_f is None:
+                continue
+
+            # apply global transform
+            smpl_f_tf = (s_g * (R_g @ smpl_f.reshape(-1, 3).T).T) + t_g
+            smpl_f_tf = smpl_f_tf.reshape(smpl_f.shape)  # back to (P,V,3)
+
+            frame_data['vertices'] = smpl_f_tf
+            all_verts_for_floor.append(torch.tensor(smpl_f_tf, dtype=torch.bfloat16))
+
+        # floor as before
+        if len(all_verts_for_floor) > 0:
+            all_verts_for_floor = torch.cat(all_verts_for_floor)
+            [gv, gf, gc] = get_floor_mesh(all_verts_for_floor, scale=2)
         else:
             gv, gf = None, None
 
@@ -339,8 +375,7 @@ class AlignHMRPi3:
             img_maxsize=480,
         )
 
-        print('Rerun visualization running. Please open the Rerun app to view the results.')
-        print('Press Ctrl+C to terminate.')
+        print('Rerun visualization running. Press Ctrl+C to terminate.')
         while True:
             time.sleep(1)
 
