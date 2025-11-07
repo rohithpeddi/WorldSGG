@@ -149,6 +149,16 @@ def rerun_vis_world4d(
                         ),
                     )
 
+        # floor
+        # if floor is not None:
+        #     fv, ff = floor
+        #     fv = np.asarray(fv, dtype=np.float32)
+        #     ff = _faces_u32(np.asarray(ff))
+        #     rr.log(
+        #         f"{BASE}/floor",
+        #         rr.Mesh3D(vertex_positions=fv, triangle_indices=ff),
+        #     )
+
         # dynamic points
         rr.log(
             f"{BASE}/points",
@@ -298,25 +308,94 @@ class AlignHMRPi3:
         self.smplx = SMPLX_Layer(SMPLX_PATH).cuda()
 
     # --------------------------------------------------------
-    # so3 helper
+    # similarity estimators
     # --------------------------------------------------------
-    @staticmethod
-    def _rvec_to_rot(rvec: torch.Tensor) -> torch.Tensor:
+    def _similarity_umeyama(self, src: np.ndarray, dst: np.ndarray):
         """
-        rvec: (3,) axis-angle
-        returns: (3,3) rotation matrix
+        Standard Umeyama for similarity. Assumes src, dst: (N, 3)
         """
-        theta = torch.norm(rvec) + 1e-8
-        axis = rvec / theta
-        x, y, z = axis
-        K = torch.tensor([
-            [0, -z, y],
-            [z, 0, -x],
-            [-y, x, 0]
-        ], device=rvec.device, dtype=rvec.dtype)
-        I = torch.eye(3, device=rvec.device, dtype=rvec.dtype)
-        R = I + torch.sin(theta) * K + (1 - torch.cos(theta)) * (K @ K)
-        return R
+        src = np.asarray(src, dtype=np.float64)
+        dst = np.asarray(dst, dtype=np.float64)
+        assert src.shape == dst.shape
+        n = src.shape[0]
+
+        mu_src = src.mean(axis=0)
+        mu_dst = dst.mean(axis=0)
+
+        src_c = src - mu_src
+        dst_c = dst - mu_dst
+
+        cov = (dst_c.T @ src_c) / n
+        U, S, Vt = np.linalg.svd(cov)
+        R = U @ Vt
+        if np.linalg.det(R) < 0:
+            Vt[-1, :] *= -1
+            R = U @ Vt
+
+        var_src = (src_c ** 2).sum() / n
+        s = (S * np.array([1, 1, np.linalg.det(U @ Vt)])).sum() / var_src
+        t = mu_dst - s * (R @ mu_src)
+        return s, R, t
+
+    def _robust_similarity_ransac(
+            self,
+            src: np.ndarray,
+            dst: np.ndarray,
+            *,
+            max_iters: int = 800,
+            inlier_thresh: float = 0.03,
+            min_inliers: int = 4,
+            scale_bounds: Tuple[float, float] = (0.4, 3.0),
+    ):
+        """
+        Robust similarity using RANSAC over Umeyama.
+        src, dst: (N, 3)
+        Returns: s, R, t
+        """
+        src = np.asarray(src, dtype=np.float64)
+        dst = np.asarray(dst, dtype=np.float64)
+        assert src.shape == dst.shape
+        N = src.shape[0]
+
+        if N < 3:
+            # not enough to RANSAC, fallback
+            return self._similarity_umeyama(src, dst)
+
+        best_inliers = None
+        best_num = -1
+        best_model = None
+
+        # adaptive max iters based on N just to be safe
+        iters = min(max_iters, 100 + 30 * N)
+
+        for _ in range(iters):
+            # sample minimal 3 non-collinear points
+            idx = np.random.choice(N, 3, replace=False)
+            s_cand, R_cand, t_cand = self._similarity_umeyama(src[idx], dst[idx])
+
+            # clamp scale to avoid crazy solutions
+            s_cand = float(np.clip(s_cand, scale_bounds[0], scale_bounds[1]))
+
+            # apply
+            src_tf = s_cand * (src @ R_cand.T) + t_cand
+            err = np.linalg.norm(dst - src_tf, axis=1)
+
+            inliers = err < inlier_thresh
+            num_inl = int(inliers.sum())
+
+            if num_inl > best_num and num_inl >= min_inliers:
+                # refine on inliers
+                s_ref, R_ref, t_ref = self._similarity_umeyama(src[inliers], dst[inliers])
+                s_ref = float(np.clip(s_ref, scale_bounds[0], scale_bounds[1]))
+                best_inliers = inliers
+                best_num = num_inl
+                best_model = (s_ref, R_ref, t_ref)
+
+        if best_model is None:
+            # complete failure -> fallback
+            return self._similarity_umeyama(src, dst)
+
+        return best_model
 
     # --------------------------------------------------------
     # lifting, masks, etc.
@@ -414,14 +493,10 @@ class AlignHMRPi3:
         return frame_idx_frame_path_map
 
     def _collect_kp_corr_for_frame(self, frame_idx: int, frame_data: dict, frame_to_kps: dict):
-        """
-        Returns (smpl_pts, scene_pts, weights) or (None, None, None)
-        We assign higher weight to feet/ankles/toes.
-        """
         if frame_idx not in frame_to_kps:
-            return None, None, None
+            return None, None
         if len(frame_data['track_id']) == 0:
-            return None, None, None
+            return None, None
 
         rotmat = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
         smpl_out = self.smplx(
@@ -437,7 +512,6 @@ class AlignHMRPi3:
 
         smpl_list = []
         scene_list = []
-        weight_list = []
 
         kps_per_person = frame_to_kps[frame_idx]
 
@@ -463,8 +537,6 @@ class AlignHMRPi3:
             "OP LBigToe": "leftToeBase",
             "OP RBigToe": "rightToeBase",
         }
-
-        foot_like = {"leftFoot", "rightFoot", "leftToeBase", "rightToeBase"}
 
         for person_idx, kps_2d in enumerate(kps_per_person):
             if person_idx >= joints.shape[0]:
@@ -497,19 +569,10 @@ class AlignHMRPi3:
                 smpl_list.append(smpl_name_to_pt[smpl_name])
                 scene_list.append(scene_p)
 
-                if smpl_name in foot_like:
-                    weight_list.append(5.0)
-                else:
-                    weight_list.append(1.0)
-
         if len(smpl_list) == 0:
-            return None, None, None
+            return None, None
 
-        return (
-            np.stack(smpl_list, axis=0),
-            np.stack(scene_list, axis=0),
-            np.asarray(weight_list, dtype=np.float32),
-        )
+        return np.stack(smpl_list, axis=0), np.stack(scene_list, axis=0)
 
     def _collect_dense_corr_for_frame(
             self,
@@ -520,12 +583,8 @@ class AlignHMRPi3:
             num_smpl_samples_per_person: int = 400,
             num_scene_subsample: int = 800,
     ):
-        """
-        Returns (smpl_pts, scene_pts, weights) or (None, None, None)
-        Dense correspondences get a lower weight (e.g. 0.25)
-        """
         if len(frame_data['track_id']) == 0:
-            return None, None, None
+            return None, None
 
         rotmat = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
         smpl_out = self.smplx(
@@ -543,7 +602,7 @@ class AlignHMRPi3:
             label="person",
         )
         if scene_pts.shape[0] == 0:
-            return None, None, None
+            return None, None
 
         if scene_pts.shape[0] > num_scene_subsample:
             choice = np.random.choice(scene_pts.shape[0], num_scene_subsample, replace=False)
@@ -571,75 +630,40 @@ class AlignHMRPi3:
             scene_all.append(matched_scene)
 
         if len(smpl_all) == 0:
-            return None, None, None
+            return None, None
 
-        smpl_all = np.concatenate(smpl_all, axis=0)
-        scene_all = np.concatenate(scene_all, axis=0)
-        weights = np.full((smpl_all.shape[0],), 0.25, dtype=np.float32)  # downweight dense
-        return smpl_all, scene_all, weights
+        return np.concatenate(smpl_all, axis=0), np.concatenate(scene_all, axis=0)
 
-    # --------------------------------------------------------
-    # global optimization over all frames
-    # --------------------------------------------------------
-    def _optimize_global_similarity(self,
-                                    src_all: np.ndarray,
-                                    dst_all: np.ndarray,
-                                    w_all: np.ndarray,
-                                    iters: int = 1200,
-                                    lr: float = 5e-2):
-        """
-        src_all, dst_all: (N,3)
-        w_all: (N,)
-        Solve: min_{s,R,t} sum_i w_i || s R src_i + t - dst_i ||^2
-        """
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    def _average_similarities(self, sims: List[dict]):
+        if len(sims) == 0:
+            return 1.0, np.eye(3), np.zeros(3)
 
-        src_t = torch.from_numpy(src_all).to(device=device, dtype=torch.float32)
-        dst_t = torch.from_numpy(dst_all).to(device=device, dtype=torch.float32)
-        w_t = torch.from_numpy(w_all).to(device=device, dtype=torch.float32).unsqueeze(1)
+        total_w = sum(s["w"] for s in sims)
+        if total_w <= 0:
+            total_w = 1.0
 
-        # parameters
-        log_s = torch.nn.Parameter(torch.zeros(1, device=device))
-        rvec = torch.nn.Parameter(torch.zeros(3, device=device))
-        t = torch.nn.Parameter(dst_t.mean(dim=0))
+        s_acc = 0.0
+        t_acc = np.zeros(3, dtype=np.float64)
+        R_acc = np.zeros((3, 3), dtype=np.float64)
 
-        optimizer = torch.optim.Adam([log_s, rvec, t], lr=lr)
+        for s in sims:
+            w = s["w"]
+            s_acc += w * s["s"]
+            t_acc += w * s["t"]
+            R_acc += w * s["R"]
 
-        for i in range(iters):
-            optimizer.zero_grad()
+        s_g = s_acc / total_w
+        t_g = t_acc / total_w
 
-            R = self._rvec_to_rot(rvec)
-            s = torch.exp(log_s)
+        U, _, Vt = np.linalg.svd(R_acc)
+        R_g = U @ Vt
+        if np.linalg.det(R_g) < 0:
+            Vt[-1, :] *= -1
+            R_g = U @ Vt
 
-            src_tf = s * (src_t @ R.T) + t  # (N,3)
-            err = src_tf - dst_t
-            # weighted L2
-            loss_data = (w_t * (err ** 2).sum(dim=1, keepdim=True)).mean()
+        s_g = float(np.clip(s_g, 0.2, 2.5))
+        return s_g, R_g, t_g
 
-            # small regularization to keep params sane
-            loss_reg = 1e-4 * (rvec ** 2).sum() + 1e-4 * (t ** 2).sum()
-            loss = loss_data + loss_reg
-
-            loss.backward()
-            optimizer.step()
-
-            # optional: small lr drop
-            if i == int(iters * 0.6):
-                for g in optimizer.param_groups:
-                    g['lr'] *= 0.25
-
-        with torch.no_grad():
-            R_final = self._rvec_to_rot(rvec).cpu().numpy()
-            s_final = float(torch.exp(log_s).cpu().item())
-            t_final = t.cpu().numpy()
-
-        # clamp scale to a reasonable range
-        s_final = float(np.clip(s_final, 0.2, 3.0))
-        return s_final, R_final, t_final
-
-    # --------------------------------------------------------
-    # main per-video entry
-    # --------------------------------------------------------
     def process_video(self, video_id: str, include_dense: bool = False):
         # run pipeline
         self.pipeline.__call__(video_id, save_only_essential=False)
@@ -653,47 +677,63 @@ class AlignHMRPi3:
         frame_idx_frame_path_map = self.idx_to_frame_idx_path(video_id)
         frame_to_kps = self._build_frame_to_kps_map(results)
 
+        per_frame_sims = []
         max_frames = 60
 
         frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
-        # global collections
-        global_smpl = []
-        global_scene = []
-        global_w = []
-
-        # ---------- collect correspondences from all frames ----------
+        # ---------- 1) per-frame robust sim from sparse (and optionally dense) ----------
         for frame_idx, frame_data in list(world4d.items())[:max_frames]:
-            smpl_s, scene_s, w_s = self._collect_kp_corr_for_frame(frame_idx, frame_data, frame_to_kps)
-            if smpl_s is not None and scene_s is not None:
-                # store for viz
+            smpl_s, scene_s = self._collect_kp_corr_for_frame(frame_idx, frame_data, frame_to_kps)
+
+            if smpl_s is not None and scene_s is not None and smpl_s.shape[0] > 0:
                 frame_kp_corr[frame_idx] = (smpl_s, scene_s)
 
-                global_smpl.append(smpl_s)
-                global_scene.append(scene_s)
-                global_w.append(w_s)
+            smpl_all = []
+            scene_all = []
+            if smpl_s is not None:
+                smpl_all.append(smpl_s)
+                scene_all.append(scene_s)
 
+            # add dense corr if requested to stabilize scale
             if include_dense:
-                smpl_d, scene_d, w_d = self._collect_dense_corr_for_frame(
+                smpl_d, scene_d = self._collect_dense_corr_for_frame(
                     video_id, frame_idx, frame_data, frame_idx_frame_path_map
                 )
                 if smpl_d is not None and scene_d is not None:
-                    global_smpl.append(smpl_d)
-                    global_scene.append(scene_d)
-                    global_w.append(w_d)
+                    smpl_all.append(smpl_d)
+                    scene_all.append(scene_d)
 
-        if len(global_smpl) == 0:
-            print("[warn] No correspondences collected. Using identity.")
+            if len(smpl_all) == 0:
+                continue
+
+            smpl_all = np.concatenate(smpl_all, axis=0)
+            scene_all = np.concatenate(scene_all, axis=0)
+
+            if smpl_all.shape[0] < 3:
+                continue
+
+            # robust similarity instead of plain Umeyama
+            s_f, R_f, t_f = self._robust_similarity_ransac(
+                smpl_all,
+                scene_all,
+                max_iters=800,
+                inlier_thresh=0.03,   # ~3 cm
+                min_inliers=4,
+                scale_bounds=(0.4, 3.0),
+            )
+
+            per_frame_sims.append({
+                "s": float(s_f),
+                "R": R_f,
+                "t": t_f,
+                "w": float(smpl_all.shape[0]),
+            })
+
+        if len(per_frame_sims) == 0:
             s_g, R_g, t_g = 1.0, np.eye(3), np.zeros(3)
         else:
-            src_all = np.concatenate(global_smpl, axis=0)
-            dst_all = np.concatenate(global_scene, axis=0)
-            w_all = np.concatenate(global_w, axis=0)
-
-            print(f"[opt] optimizing over {src_all.shape[0]} total correspondences...")
-            s_g, R_g, t_g = self._optimize_global_similarity(src_all, dst_all, w_all)
-            print(f"[opt] global scale={s_g:.4f}")
-            print(f"[opt] global t={t_g}")
+            s_g, R_g, t_g = self._average_similarities(per_frame_sims)
 
         # ---------- 2) apply GLOBAL sim to all frames ----------
         for frame_idx, frame_data in world4d.items():
