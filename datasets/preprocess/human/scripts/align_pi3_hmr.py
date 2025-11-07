@@ -87,11 +87,6 @@ class AlignHMRPi3:
         self.smplx = SMPLX_Layer(SMPLX_PATH).cuda()
 
     def _umeyama_similarity(self, src: np.ndarray, dst: np.ndarray):
-        """
-        src: (N,3) SMPL points
-        dst: (N,3) scene points (already masked to human)
-        return s, R, t  such that  dst ≈ s * R @ src + t
-        """
         src = np.asarray(src, dtype=np.float64)
         dst = np.asarray(dst, dtype=np.float64)
         assert src.shape == dst.shape
@@ -111,15 +106,107 @@ class AlignHMRPi3:
             R = U @ Vt
 
         var_src = (src_c ** 2).sum() / n
-        # diag term to handle reflection fix
-        D = np.eye(3)
-        D[2, 2] = np.linalg.det(U @ Vt)
-        s = (S @ np.diag(D)) / var_src
-        # S is 1D; simpler to just do trace:
-        s = (S * np.diag(D)).sum() / var_src
+        # trace-style scale
+        s = (S * np.array([1, 1, np.linalg.det(U @ Vt)])).sum() / var_src
 
         t = mu_dst - s * (R @ mu_src)
         return s, R, t
+
+    # ------------------------------------------------------------
+    # Lift a single 2D keypoint (u,v) to 3D from per-frame (H,W,3) points
+    # ------------------------------------------------------------
+    def _lift_2d_to_3d(self, frame_points_hw3: np.ndarray, u: float, v: float):
+        H, W, _ = frame_points_hw3.shape
+        ui = int(round(u))
+        vi = int(round(v))
+        if ui < 0 or ui >= W or vi < 0 or vi >= H:
+            return None
+        p3d = frame_points_hw3[vi, ui]  # (3,)
+        if not np.isfinite(p3d).all() or np.abs(p3d).sum() < 1e-6:
+            return None
+        return p3d
+
+    # ------------------------------------------------------------
+    # Collect all (SMPL_joint, scene_keypoint_3d) pairs over the video
+    # ------------------------------------------------------------
+    def _collect_kp_correspondences(self, video_id: str, world4d: dict, results: dict):
+        """
+        Returns:
+            smpl_pts_all: (N,3)
+            scene_pts_all: (N,3)
+        Uses:
+            - SMPLX forward per frame to get joints
+            - results[...] keypoints_2d to know where the person was in 2D
+            - pipeline.points[frame_idx] to lift to 3D
+        """
+        smpl_pts_all = []
+        scene_pts_all = []
+
+        # results['people'][person_id]['keypoints_2d'] is assumed from your previous code
+        people_results = results.get("people", {})
+
+        # Build a per-frame map: frame_idx -> list of (person_id, keypoints_2d_for_that_frame)
+        # Your structure may differ slightly, but we'll assume each person stores per-frame keypoints.
+        frame_to_kps = {}
+        for pid, pdata in people_results.items():
+            kps_2d = pdata.get("keypoints_2d", None)
+            frames = pdata.get("frames", None)
+            if kps_2d is None or frames is None:
+                continue
+
+            # kps_2d: (num_frames_for_person, K, 3) or (num_frames_for_person, K, 2)
+            for i, fidx in enumerate(frames):
+                if fidx not in frame_to_kps:
+                    frame_to_kps[fidx] = []
+                frame_to_kps[fidx].append(kps_2d[i])
+
+        for frame_idx, frame_data in world4d.items():
+            # 1) run SMPLX to get per-person meshes AND joints for this frame
+            if len(frame_data['track_id']) == 0:
+                continue
+
+            rotmat = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
+            smpl_out = self.smplx(
+                global_orient=rotmat[:, :1].cuda(),
+                body_pose=rotmat[:, 1:22].cuda(),
+                betas=frame_data['shape'].cuda(),
+                transl=frame_data['trans'].cuda()
+            )
+            verts = smpl_out.vertices.cpu().numpy()         # (P, V, 3)
+            joints = smpl_out.joints.cpu().numpy()          # (P, J, 3)  <-- we will match to 2D kps
+
+            # 2) get scene points for this frame
+            frame_points_hw3 = self.pipeline.points[frame_idx]  # (H, W, 3)
+
+            # 3) get 2D keypoints for this frame (could be multiple people)
+            if frame_idx not in frame_to_kps:
+                continue
+
+            kps_2d_list = frame_to_kps[frame_idx]  # list of (K,2 or 3)
+
+            # We'll match by index: kp j <-> joint j (best effort)
+            for person_idx, kps_2d in enumerate(kps_2d_list):
+                if person_idx >= joints.shape[0]:
+                    break  # more 2D people than SMPL people
+
+                smpl_joints_person = joints[person_idx]  # (J, 3)
+                # kps_2d might be (K,3) with scores; take first 2
+                for j in range(min(len(kps_2d), smpl_joints_person.shape[0])):
+                    u = float(kps_2d[j][0])
+                    v = float(kps_2d[j][1])
+                    scene_p = self._lift_2d_to_3d(frame_points_hw3, u, v)
+                    if scene_p is None:
+                        continue
+                    smpl_p = smpl_joints_person[j]
+                    smpl_pts_all.append(smpl_p)
+                    scene_pts_all.append(scene_p)
+
+        if len(smpl_pts_all) == 0:
+            return None, None
+
+        smpl_pts_all = np.stack(smpl_pts_all, axis=0)
+        scene_pts_all = np.stack(scene_pts_all, axis=0)
+        return smpl_pts_all, scene_pts_all
 
     def _get_partial_pointcloud(self, video_id: str, frame_idx: int, frame_idx_frame_path_map,
                                 label: str = "person") -> np.ndarray:
@@ -274,66 +361,46 @@ class AlignHMRPi3:
         return frame_idx_frame_path_map
 
     def process_video(self, video_id):
-        self.pipeline.__call__(video_id)
+        # run pipeline as before
+        self.pipeline.__call__(video_id, save_only_essential=False)
         results = self.pipeline.estimate_2d_keypoints()
+
         images = self.pipeline.images
         world4d = self.pipeline.create_world4d()
         world4d = {i: world4d[k] for i, k in enumerate(world4d)}
 
-        per_frame_smpl = []
-        per_frame_scene = []
+        # 1) collect correspondences using keypoints (this is fast)
+        smpl_kps, scene_kps = self._collect_kp_correspondences(video_id, world4d, results)
 
-        frame_idx_frame_path_map = self.idx_to_frame_idx_path(video_id)
+        if smpl_kps is not None and scene_kps is not None and smpl_kps.shape[0] >= 4:
+            s_g, R_g, t_g = self._umeyama_similarity(smpl_kps, scene_kps)
+        else:
+            # fallback: no alignment
+            s_g, R_g, t_g = 1.0, np.eye(3), np.zeros(3)
 
-        # --------- (a) COLLECT raw SMPL + scene per frame ----------
-        print("Collecting per-frame SMPL and scene point clouds...")
+        # 2) now run through frames again, generate verts, apply SAME transform
+        all_verts_for_floor = []
         for frame_idx, frame_data in world4d.items():
             if len(frame_data['track_id']) == 0:
-                per_frame_smpl.append(None)
-                per_frame_scene.append(None)
                 continue
 
             rotmat = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
-            verts = self.smplx(
+            smpl_out = self.smplx(
                 global_orient=rotmat[:, :1].cuda(),
                 body_pose=rotmat[:, 1:22].cuda(),
                 betas=frame_data['shape'].cuda(),
                 transl=frame_data['trans'].cuda()
-            ).vertices.cpu().numpy()  # (P, V, 3)
-
-            scene_pts = self._get_partial_pointcloud(
-                video_id=video_id,
-                frame_idx=frame_idx,
-                frame_idx_frame_path_map=frame_idx_frame_path_map,
-                label="person"
             )
-
-            per_frame_smpl.append(verts)
-            per_frame_scene.append(scene_pts)
-
-        # --------- (b) GLOBAL constrained similarity ---------------
-        print("Estimating global similarity transform via ICP...")
-        s_g, R_g, t_g = self._global_similarity_icp(per_frame_smpl, per_frame_scene,
-                                                    iters=5,
-                                                    max_smpl_per_frame=2500,
-                                                    max_scene_per_frame=15000)
-
-        # --------- (c) APPLY to all frames’ SMPL -------------------
-        print("Applying global similarity to all SMPL vertices...")
-        all_verts_for_floor = []
-        for frame_idx, frame_data in world4d.items():
-            smpl_f = per_frame_smpl[frame_idx]
-            if smpl_f is None:
-                continue
+            verts = smpl_out.vertices.cpu().numpy()  # (P, V, 3)
 
             # apply global transform
-            smpl_f_tf = (s_g * (R_g @ smpl_f.reshape(-1, 3).T).T) + t_g
-            smpl_f_tf = smpl_f_tf.reshape(smpl_f.shape)  # back to (P,V,3)
+            verts_tf = (s_g * (R_g @ verts.reshape(-1, 3).T).T) + t_g
+            verts_tf = verts_tf.reshape(verts.shape)
 
-            frame_data['vertices'] = smpl_f_tf
-            all_verts_for_floor.append(torch.tensor(smpl_f_tf, dtype=torch.bfloat16))
+            frame_data['vertices'] = verts_tf
+            all_verts_for_floor.append(torch.tensor(verts_tf, dtype=torch.bfloat16))
 
-        # floor as before
+        # floor (unchanged)
         if len(all_verts_for_floor) > 0:
             all_verts_for_floor = torch.cat(all_verts_for_floor)
             [gv, gf, gc] = get_floor_mesh(all_verts_for_floor, scale=2)
