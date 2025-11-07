@@ -41,17 +41,12 @@ def _pinhole_from_fov(w: int, h: int, fov_y: float):
     return fx, fy, cx, cy
 
 
-def _color_from_id(idx: int) -> Tuple[int, int, int]:
-    base = np.array([123, 200, 124], dtype=np.uint8)
-    rand = np.array(
-        [((idx * 37) % 255), ((idx * 57) % 255), ((idx * 97) % 255)],
-        dtype=np.uint8,
-    )
-    return tuple(((base + rand) % 255).tolist())
-
-
 # ------------------------------------------------------------
-# updated visualization: now also logs per-frame correspondences
+# updated visualization: now shows
+# - dynamic points
+# - transformed mesh (green)
+# - original/non-transformed mesh (red)
+# - per-frame correspondences
 # ------------------------------------------------------------
 def rerun_vis_world4d(
         video_id: str,
@@ -132,8 +127,12 @@ def rerun_vis_world4d(
             img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         return img
 
-    def _human_path(tid: int, i: int) -> str:
-        return f"{BASE}/humans/h{tid}" if reuse_paths else f"{BASE}/frames/t{i}/human_{tid}"
+    def _human_path(tid: int, i: int, kind: str) -> str:
+        # kind: "orig" or "xform"
+        base = f"{BASE}/humans_{kind}/h{tid}"
+        if reuse_paths:
+            return base
+        return f"{BASE}/frames/t{i}/{kind}_human_{tid}"
 
     def _frustum_path(i: int) -> str:
         return f"{BASE}/frustum" if reuse_paths else f"{BASE}/frames/t{i}/frustum"
@@ -142,22 +141,38 @@ def rerun_vis_world4d(
         rr.set_time_sequence("frame", i)
         rr.log("/", rr.Clear(recursive=True))
 
-        # humans (already globally aligned & stored in world4d[i]['vertices'])
+        # humans (we now expect two lists: vertices_orig and vertices)
         track_ids = world4d[i].get("track_id", [])
-        verts_list = world4d[i].get("vertices", [])
-        if len(track_ids) > 0 and len(verts_list) == len(track_ids):
-            for tid, verts in zip(track_ids, verts_list):
-                verts = np.asarray(verts, dtype=np.float32)
-                # rotate into the same display frame as the point cloud
-                verts = verts @ scene_R.T
-                rr.log(
-                    _human_path(int(tid), i),
-                    rr.Mesh3D(
-                        vertex_positions=verts,
-                        triangle_indices=faces_u32,
-                        albedo_factor=_color_from_id(int(tid)),
-                    ),
-                )
+        verts_list_xform = world4d[i].get("vertices", [])  # transformed
+        verts_list_orig = world4d[i].get("vertices_orig", [])  # original, non-transformed
+
+        # we log original in RED, transformed in GREEN
+        if len(track_ids) > 0:
+            for idx, tid in enumerate(track_ids):
+                # original
+                if idx < len(verts_list_orig):
+                    verts_orig = np.asarray(verts_list_orig[idx], dtype=np.float32)
+                    verts_orig = verts_orig @ scene_R.T
+                    rr.log(
+                        _human_path(int(tid), i, "orig"),
+                        rr.Mesh3D(
+                            vertex_positions=verts_orig,
+                            triangle_indices=faces_u32,
+                            albedo_factor=[255, 0, 0],
+                        ),
+                    )
+                # transformed
+                if idx < len(verts_list_xform):
+                    verts_x = np.asarray(verts_list_xform[idx], dtype=np.float32)
+                    verts_x = verts_x @ scene_R.T
+                    rr.log(
+                        _human_path(int(tid), i, "xform"),
+                        rr.Mesh3D(
+                            vertex_positions=verts_x,
+                            triangle_indices=faces_u32,
+                            albedo_factor=[0, 255, 0],
+                        ),
+                    )
 
         # per-frame floor (if you want it every frame)
         if floor is not None:
@@ -179,13 +194,12 @@ def rerun_vis_world4d(
             ),
         )
 
-        # --- NEW: per-frame correspondences (SMPL kps vs scene kps) ---
+        # --- per-frame correspondences (SMPL kps vs scene kps) ---
         if frame_kp_corr is not None and i in frame_kp_corr:
             smpl_pts, scene_pts = frame_kp_corr[i]
             smpl_pts = np.asarray(smpl_pts, dtype=np.float32)
             scene_pts = np.asarray(scene_pts, dtype=np.float32)
 
-            # rotate them to match display frame
             smpl_pts_disp = smpl_pts @ scene_R.T
             scene_pts_disp = scene_pts @ scene_R.T
 
@@ -206,7 +220,6 @@ def rerun_vis_world4d(
                 ),
             )
 
-            # arrows from SMPL -> scene
             if smpl_pts_disp.shape[0] == scene_pts_disp.shape[0]:
                 rr.log(
                     f"{BASE}/corr/frame_{i}/arrows",
@@ -262,11 +275,11 @@ def rerun_vis_world4d(
             ),
         )
 
-    print("Rerun visualization started. Scrub the 'frame' timeline to see per-frame correspondences.")
+    print("Rerun visualization started. Scrub the 'frame' timeline to compare original (red) vs transformed (green).")
 
 
 # ------------------------------------------------------------
-# your original split logic
+# split logic
 # ------------------------------------------------------------
 def get_video_belongs_to_split(video_id: str) -> Optional[str]:
     stem = Path(video_id).stem
@@ -309,21 +322,17 @@ class AlignHMRPi3:
         self.ag_root_directory = Path(ag_root_directory)
 
         self.dynamic_scene_dir_path = Path(dynamic_scene_dir_path)
-        self.dynamic_detections_root_path = self.ag_root_directory / "detection" / 'gdino_bboxes'
-        self.static_detections_root_path = self.ag_root_directory / "detection" / 'gdino_bboxes_static'
 
         self.frame_annotated_dir_path = self.ag_root_directory / "frames_annotated"
         self.sampled_frames_idx_root_dir = self.ag_root_directory / "sampled_frames_idx"
         self.videos_directory = self.ag_root_directory / "videos"
 
-        # dynamic / static masks
+        # segmentation dirs
         self.dynamic_masks_im_dir_path = self.ag_root_directory / "segmentation" / "masks" / "image_based"
         self.dynamic_masks_vid_dir_path = self.ag_root_directory / "segmentation" / "masks" / "video_based"
-        self.dynamic_masks_combined_dir_path = self.ag_root_directory / "segmentation" / "masks" / "combined"
 
         self.static_masks_im_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "image_based"
         self.static_masks_vid_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "video_based"
-        self.static_masks_combined_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "combined"
 
         self.pipeline = AgPipeline(static_cam=False, dynamic_scene_dir_path=self.dynamic_scene_dir_path)
         self.smplx = SMPLX_Layer(SMPLX_PATH).cuda()
@@ -399,12 +408,11 @@ class AlignHMRPi3:
 
     def get_union_mask(self, video_id: str, stem: str, label: str, is_static: bool):
         if is_static:
-            im_p = self.static_masks_im_dir_path / video_id / f"{stem}__{label}.png"
-            vd_p = self.static_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
+            # not used in this file for now
+            return None
         else:
             im_p = self.dynamic_masks_im_dir_path / video_id / f"{stem}__{label}.png"
             vd_p = self.dynamic_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
-
         m_im = cv2.imread(str(im_p), cv2.IMREAD_GRAYSCALE) if im_p.exists() else None
         m_vd = cv2.imread(str(vd_p), cv2.IMREAD_GRAYSCALE) if vd_p.exists() else None
         if m_im is None and m_vd is None:
@@ -438,7 +446,6 @@ class AlignHMRPi3:
         frame_idx_frame_path_map = {i: f"{frame_id:06d}.png" for i, frame_id in enumerate(chosen_frames)}
         return frame_idx_frame_path_map
 
-    # ---- per-frame sparse correspondences ----
     def _collect_kp_corr_for_frame(self, frame_idx: int, frame_data: dict, frame_to_kps: dict):
         if frame_idx not in frame_to_kps:
             return None, None
@@ -478,7 +485,6 @@ class AlignHMRPi3:
 
         return np.stack(smpl_list, axis=0), np.stack(scene_list, axis=0)
 
-    # ---- per-frame dense correspondences ----
     def _collect_dense_corr_for_frame(
             self,
             video_id: str,
@@ -539,7 +545,6 @@ class AlignHMRPi3:
 
         return np.concatenate(smpl_all, axis=0), np.concatenate(scene_all, axis=0)
 
-    # ---- average many similarities into one global ----
     def _average_similarities(self, sims: List[dict]):
         if len(sims) == 0:
             return 1.0, np.eye(3), np.zeros(3)
@@ -570,7 +575,6 @@ class AlignHMRPi3:
         s_g = float(np.clip(s_g, 0.5, 2.5))
         return s_g, R_g, t_g
 
-    # ---- main per-video pipeline ----
     def process_video(self, video_id: str):
         # run pipeline
         self.pipeline.__call__(video_id, save_only_essential=False)
@@ -587,7 +591,7 @@ class AlignHMRPi3:
         per_frame_sims = []
         max_frames = 60
 
-        # NEW: store per-frame sparse correspondences for visualization
+        # store per-frame sparse correspondences for viz
         frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
         for frame_idx, frame_data in list(world4d.items())[:max_frames]:
@@ -603,7 +607,7 @@ class AlignHMRPi3:
                 num_scene_subsample=800,
             )
 
-            # record per-frame sparse for viz (even if dense is None)
+            # record per-frame sparse for visualization
             if smpl_s is not None and scene_s is not None and smpl_s.shape[0] > 0:
                 frame_kp_corr[frame_idx] = (smpl_s, scene_s)
 
@@ -638,7 +642,7 @@ class AlignHMRPi3:
         else:
             s_g, R_g, t_g = self._average_similarities(per_frame_sims)
 
-        # apply global transform to all SMPL verts
+        # apply global transform to all SMPL verts, but ALSO store originals
         all_verts_for_floor = []
         for frame_idx, frame_data in world4d.items():
             if len(frame_data['track_id']) == 0:
@@ -653,6 +657,10 @@ class AlignHMRPi3:
             )
             verts = smpl_out.vertices.cpu().numpy()  # (P, V, 3)
 
+            # keep original
+            frame_data['vertices_orig'] = verts.copy()
+
+            # transformed
             verts_flat = verts.reshape(-1, 3)
             verts_tf = s_g * (verts_flat @ R_g.T) + t_g
             verts_tf = verts_tf.reshape(verts.shape)
@@ -677,7 +685,7 @@ class AlignHMRPi3:
             init_fps=10,
             img_maxsize=480,
             dynamic_prediction_path=str(self.dynamic_scene_dir_path),
-            frame_kp_corr=frame_kp_corr,  # <-- NEW
+            frame_kp_corr=frame_kp_corr,
         )
 
         print('Rerun visualization running. Press Ctrl+C to terminate.')
@@ -696,14 +704,6 @@ class AlignHMRPi3:
 # ------------------------------------------------------------
 # CLI
 # ------------------------------------------------------------
-def _parse_split(s: str) -> str:
-    valid = {"04", "59", "AD", "EH", "IL", "MP", "QT", "UZ"}
-    val = s.strip().upper()
-    if val not in valid:
-        raise argparse.ArgumentTypeError(f"Invalid split '{s}'. Choose one of: {sorted(valid)}")
-    return val
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Align SMPL to PI3 dynamic scene and visualize with rerun.")
     parser.add_argument(

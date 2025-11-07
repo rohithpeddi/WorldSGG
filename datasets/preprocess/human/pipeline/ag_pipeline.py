@@ -9,6 +9,7 @@ import torch
 from omegaconf import OmegaConf
 from smplcodec import SMPLCodec
 from smplx import SMPLX
+from scipy.spatial.transform import Rotation
 
 from .camera import run_metric_slam, calibrate_intrinsics, run_slam
 from .detector import segment
@@ -399,6 +400,10 @@ class AgPipeline:
         self.images = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)  # (S, H, W, 3)
         self.camera_poses = video_dynamic_predictions['camera_poses']
         self.points = video_dynamic_predictions['points']
+
+        # R = Rotation.from_euler("y", 100, degrees=True).as_matrix()
+        # R = R @ Rotation.from_euler("x", 155, degrees=True).as_matrix()
+        # self.points = self.points @ R.T
 
         if os.path.isfile(f'{video_results_output_path}/results.pkl'):
             print('Loading available results...')
