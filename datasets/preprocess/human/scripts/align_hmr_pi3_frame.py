@@ -46,11 +46,7 @@ def _pinhole_from_fov(w: int, h: int, fov_y: float):
 
 
 # ------------------------------------------------------------
-# updated visualization: now shows
-# - dynamic points
-# - transformed mesh (green)
-# - original/non-transformed mesh (red)
-# - per-frame correspondences
+# updated visualization
 # ------------------------------------------------------------
 def rerun_vis_world4d(
         video_id: str,
@@ -91,27 +87,8 @@ def rerun_vis_world4d(
     imgs_f32 = video_dynamic_predictions["images"]  # float32 [0,1]
     colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
 
-    # your viewer-space rotation
-    scene_R = Rotation.from_euler("y", 100, degrees=True).as_matrix()
-    scene_R = scene_R @ Rotation.from_euler("x", 155, degrees=True).as_matrix()
-    points = points @ scene_R.T
-
     BASE = "world"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
-
-    # (optional) static floor logged once - rotate too
-    # if floor is not None:
-    #     fv, ff = floor
-    #     fv = np.asarray(fv, dtype=np.float32)
-    #     ff = _faces_u32(np.asarray(ff))
-    #     fv = fv @ scene_R.T
-    #     rr.log(
-    #         "floor",
-    #         rr.Mesh3D(
-    #             vertex_positions=fv,
-    #             triangle_indices=ff,
-    #         ),
-    #     )
 
     def _get_image_for_time(i: int) -> Optional[np.ndarray]:
         src_idx = i
@@ -132,7 +109,6 @@ def rerun_vis_world4d(
         return img
 
     def _human_path(tid: int, i: int, kind: str) -> str:
-        # kind: "orig" or "xform"
         base = f"{BASE}/humans_{kind}/h{tid}"
         if reuse_paths:
             return base
@@ -145,18 +121,15 @@ def rerun_vis_world4d(
         rr.set_time_sequence("frame", i)
         rr.log("/", rr.Clear(recursive=True))
 
-        # humans (we now expect two lists: vertices_orig and vertices)
+        # humans (original + transformed)
         track_ids = world4d[i].get("track_id", [])
         verts_list_xform = world4d[i].get("vertices", [])  # transformed
-        verts_list_orig = world4d[i].get("vertices_orig", [])  # original, non-transformed
+        verts_list_orig = world4d[i].get("vertices_orig", [])  # original
 
-        # we log original in RED, transformed in GREEN
         if len(track_ids) > 0:
             for idx, tid in enumerate(track_ids):
-                # original
                 if idx < len(verts_list_orig):
                     verts_orig = np.asarray(verts_list_orig[idx], dtype=np.float32)
-                    verts_orig = verts_orig @ scene_R.T
                     rr.log(
                         _human_path(int(tid), i, "orig"),
                         rr.Mesh3D(
@@ -165,10 +138,8 @@ def rerun_vis_world4d(
                             albedo_factor=[255, 0, 0],
                         ),
                     )
-                # transformed
                 if idx < len(verts_list_xform):
                     verts_x = np.asarray(verts_list_xform[idx], dtype=np.float32)
-                    verts_x = verts_x @ scene_R.T
                     rr.log(
                         _human_path(int(tid), i, "xform"),
                         rr.Mesh3D(
@@ -178,12 +149,11 @@ def rerun_vis_world4d(
                         ),
                     )
 
-        # # per-frame floor (if you want it every frame)
+        # floor
         # if floor is not None:
         #     fv, ff = floor
         #     fv = np.asarray(fv, dtype=np.float32)
         #     ff = _faces_u32(np.asarray(ff))
-        #     fv = fv @ scene_R.T
         #     rr.log(
         #         f"{BASE}/floor",
         #         rr.Mesh3D(vertex_positions=fv, triangle_indices=ff),
@@ -198,39 +168,36 @@ def rerun_vis_world4d(
             ),
         )
 
-        # --- per-frame correspondences (SMPL kps vs scene kps) ---
+        # sparse correspondences
         if frame_kp_corr is not None and i in frame_kp_corr:
             smpl_pts, scene_pts = frame_kp_corr[i]
             smpl_pts = np.asarray(smpl_pts, dtype=np.float32)
             scene_pts = np.asarray(scene_pts, dtype=np.float32)
 
-            smpl_pts_disp = smpl_pts @ scene_R.T
-            scene_pts_disp = scene_pts @ scene_R.T
-
             rr.log(
                 f"{BASE}/corr/frame_{i}/smpl_kps",
                 rr.Points3D(
-                    positions=smpl_pts_disp,
-                    colors=np.full((smpl_pts_disp.shape[0], 3), [255, 0, 0], dtype=np.uint8),
+                    positions=smpl_pts,
+                    colors=np.full((smpl_pts.shape[0], 3), [255, 0, 0], dtype=np.uint8),
                     radii=0.015,
                 ),
             )
             rr.log(
                 f"{BASE}/corr/frame_{i}/scene_kps",
                 rr.Points3D(
-                    positions=scene_pts_disp,
-                    colors=np.full((scene_pts_disp.shape[0], 3), [0, 255, 0], dtype=np.uint8),
+                    positions=scene_pts,
+                    colors=np.full((scene_pts.shape[0], 3), [0, 255, 0], dtype=np.uint8),
                     radii=0.017,
                 ),
             )
 
-            if smpl_pts_disp.shape[0] == scene_pts_disp.shape[0]:
+            if smpl_pts.shape[0] == scene_pts.shape[0]:
                 rr.log(
                     f"{BASE}/corr/frame_{i}/arrows",
                     rr.Arrows3D(
-                        origins=smpl_pts_disp,
-                        vectors=(scene_pts_disp - smpl_pts_disp),
-                        colors=np.full((smpl_pts_disp.shape[0], 3), [0, 0, 255], dtype=np.uint8),
+                        origins=smpl_pts,
+                        vectors=(scene_pts - smpl_pts),
+                        colors=np.full((smpl_pts.shape[0], 3), [0, 0, 255], dtype=np.uint8),
                     ),
                 )
 
@@ -324,7 +291,6 @@ class AlignHMRPi3:
         os.makedirs(self.output_root, exist_ok=True)
 
         self.ag_root_directory = Path(ag_root_directory)
-
         self.dynamic_scene_dir_path = Path(dynamic_scene_dir_path)
 
         self.frame_annotated_dir_path = self.ag_root_directory / "frames_annotated"
@@ -341,13 +307,18 @@ class AlignHMRPi3:
         self.pipeline = AgPipeline(static_cam=False, dynamic_scene_dir_path=self.dynamic_scene_dir_path)
         self.smplx = SMPLX_Layer(SMPLX_PATH).cuda()
 
-    # --- alignment math ---
-    def _umeyama_similarity(self, src: np.ndarray, dst: np.ndarray):
+    # --------------------------------------------------------
+    # similarity estimators
+    # --------------------------------------------------------
+    def _similarity_umeyama(self, src: np.ndarray, dst: np.ndarray):
+        """
+        Standard Umeyama for similarity. Assumes src, dst: (N, 3)
+        """
         src = np.asarray(src, dtype=np.float64)
         dst = np.asarray(dst, dtype=np.float64)
         assert src.shape == dst.shape
-
         n = src.shape[0]
+
         mu_src = src.mean(axis=0)
         mu_dst = dst.mean(axis=0)
 
@@ -366,6 +337,69 @@ class AlignHMRPi3:
         t = mu_dst - s * (R @ mu_src)
         return s, R, t
 
+    def _robust_similarity_ransac(
+            self,
+            src: np.ndarray,
+            dst: np.ndarray,
+            *,
+            max_iters: int = 800,
+            inlier_thresh: float = 0.03,
+            min_inliers: int = 4,
+            scale_bounds: Tuple[float, float] = (0.4, 3.0),
+    ):
+        """
+        Robust similarity using RANSAC over Umeyama.
+        src, dst: (N, 3)
+        Returns: s, R, t
+        """
+        src = np.asarray(src, dtype=np.float64)
+        dst = np.asarray(dst, dtype=np.float64)
+        assert src.shape == dst.shape
+        N = src.shape[0]
+
+        if N < 3:
+            # not enough to RANSAC, fallback
+            return self._similarity_umeyama(src, dst)
+
+        best_inliers = None
+        best_num = -1
+        best_model = None
+
+        # adaptive max iters based on N just to be safe
+        iters = min(max_iters, 100 + 30 * N)
+
+        for _ in range(iters):
+            # sample minimal 3 non-collinear points
+            idx = np.random.choice(N, 3, replace=False)
+            s_cand, R_cand, t_cand = self._similarity_umeyama(src[idx], dst[idx])
+
+            # clamp scale to avoid crazy solutions
+            s_cand = float(np.clip(s_cand, scale_bounds[0], scale_bounds[1]))
+
+            # apply
+            src_tf = s_cand * (src @ R_cand.T) + t_cand
+            err = np.linalg.norm(dst - src_tf, axis=1)
+
+            inliers = err < inlier_thresh
+            num_inl = int(inliers.sum())
+
+            if num_inl > best_num and num_inl >= min_inliers:
+                # refine on inliers
+                s_ref, R_ref, t_ref = self._similarity_umeyama(src[inliers], dst[inliers])
+                s_ref = float(np.clip(s_ref, scale_bounds[0], scale_bounds[1]))
+                best_inliers = inliers
+                best_num = num_inl
+                best_model = (s_ref, R_ref, t_ref)
+
+        if best_model is None:
+            # complete failure -> fallback
+            return self._similarity_umeyama(src, dst)
+
+        return best_model
+
+    # --------------------------------------------------------
+    # lifting, masks, etc.
+    # --------------------------------------------------------
     def _lift_2d_to_3d(self, frame_points_hw3: np.ndarray, u: float, v: float):
         H, W, _ = frame_points_hw3.shape
         ui = int(round(u))
@@ -378,12 +412,6 @@ class AlignHMRPi3:
         return p3d
 
     def _build_frame_to_kps_map(self, results: dict):
-        """
-        Build: frame_idx -> [kp_person_0, kp_person_1, ...]
-        Each item is either:
-          - dict joint_name -> [x, y, score] (preferred, from keypoints_2d_map)
-          - or np.ndarray (K, 3) (fallback, old behavior)
-        """
         frame_to_kps = {}
         people_results = results.get("people", {})
 
@@ -392,7 +420,6 @@ class AlignHMRPi3:
             if frames is None:
                 continue
 
-            # new dict-based sequence
             kp_maps = pdata.get("keypoints_2d_map", None)
 
             for i, fidx in enumerate(frames):
@@ -428,7 +455,6 @@ class AlignHMRPi3:
 
     def get_union_mask(self, video_id: str, stem: str, label: str, is_static: bool):
         if is_static:
-            # not used in this file for now
             return None
         else:
             im_p = self.dynamic_masks_im_dir_path / video_id / f"{stem}__{label}.png"
@@ -467,18 +493,11 @@ class AlignHMRPi3:
         return frame_idx_frame_path_map
 
     def _collect_kp_corr_for_frame(self, frame_idx: int, frame_data: dict, frame_to_kps: dict):
-        """
-        Collect sparse SMPL <-> scene correspondences for one frame.
-
-        Uses the actual OpenPose names you provided (e.g. "OP Neck", "OP RWrist")
-        and maps them to the SMPL joint names you provided.
-        """
         if frame_idx not in frame_to_kps:
             return None, None
         if len(frame_data['track_id']) == 0:
             return None, None
 
-        # 1) run SMPL for this frame to get 3D joints
         rotmat = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
         smpl_out = self.smplx(
             global_orient=rotmat[:, :1].cuda(),
@@ -487,60 +506,44 @@ class AlignHMRPi3:
             transl=frame_data['trans'].cuda()
         )
         joints = smpl_out.joints.cpu().numpy()  # (P, J, 3)
-        joints = joints[:, :24, :]  # keep only the 24 you have names for
+        joints = joints[:, :24, :]
 
         frame_points_hw3 = self.pipeline.points[frame_idx]
 
         smpl_list = []
         scene_list = []
 
-        # 2) per-person 2D keypoints for this frame
         kps_per_person = frame_to_kps[frame_idx]
 
-        # 3) get both name lists (so we can verify target names exist)
         smpl_joint_names = get_smpl_joint_names()
         openpose_joint_names = get_openpose_joint_names()
 
-        # 4) OpenPose (yours) -> SMPL (yours)
-        # only mapping joints that actually exist in your SMPL list
         OPENPOSE_TO_SMPL = {
-            "OP Nose": "head",  # 15
-            "OP Neck": "neck",  # 12
-            "OP MidHip": "hips",  # 0
-
-            "OP LHip": "leftUpLeg",  # 1
-            "OP RHip": "rightUpLeg",  # 2
-
-            "OP LKnee": "leftLeg",  # 4
-            "OP RKnee": "rightLeg",  # 5
-
-            "OP LAnkle": "leftFoot",  # 7
-            "OP RAnkle": "rightFoot",  # 8
-
-            "OP LShoulder": "leftShoulder",  # 13
-            "OP RShoulder": "rightShoulder",  # 14
-
-            # elbows -> forearms (closest available in your SMPL list)
-            "OP LElbow": "leftForeArm",  # 18
-            "OP RElbow": "rightForeArm",  # 19
-
-            # wrists -> hands
-            "OP LWrist": "leftHand",  # 20
-            "OP RWrist": "rightHand",  # 21
-
-            # toes (you have bases)
-            "OP LBigToe": "leftToeBase",  # 10
-            "OP RBigToe": "rightToeBase",  # 11
+            "OP Nose": "head",
+            "OP Neck": "neck",
+            "OP MidHip": "hips",
+            "OP LHip": "leftUpLeg",
+            "OP RHip": "rightUpLeg",
+            "OP LKnee": "leftLeg",
+            "OP RKnee": "rightLeg",
+            "OP LAnkle": "leftFoot",
+            "OP RAnkle": "rightFoot",
+            "OP LShoulder": "leftShoulder",
+            "OP RShoulder": "rightShoulder",
+            "OP LElbow": "leftForeArm",
+            "OP RElbow": "rightForeArm",
+            "OP LWrist": "leftHand",
+            "OP RWrist": "rightHand",
+            "OP LBigToe": "leftToeBase",
+            "OP RBigToe": "rightToeBase",
         }
-        # everything else (eyes, ears, small toes, heels) will be skipped
 
         for person_idx, kps_2d in enumerate(kps_per_person):
             if person_idx >= joints.shape[0]:
                 break
 
-            smpl_joints_person = joints[person_idx]  # (J, 3)
+            smpl_joints_person = joints[person_idx]
 
-            # build SMPL name -> 3D point for THIS person
             if smpl_joint_names and len(smpl_joint_names) >= smpl_joints_person.shape[0]:
                 smpl_name_to_pt = {
                     smpl_joint_names[j]: smpl_joints_person[j]
@@ -552,10 +555,10 @@ class AlignHMRPi3:
             for op_name, kp in kps_2d.items():
                 smpl_name = OPENPOSE_TO_SMPL.get(op_name, None)
                 if smpl_name is None:
-                    continue  # no mapping for this OP joint
+                    continue
 
                 if smpl_name not in smpl_name_to_pt:
-                    continue  # SMPL side doesn't have this joint (shouldn't happen for the ones above)
+                    continue
 
                 u = float(kp[0])
                 v = float(kp[1])
@@ -658,14 +661,14 @@ class AlignHMRPi3:
             Vt[-1, :] *= -1
             R_g = U @ Vt
 
-        s_g = float(np.clip(s_g, 0.5, 2.5))
+        s_g = float(np.clip(s_g, 0.2, 2.5))
         return s_g, R_g, t_g
 
-    def process_video(self, video_id: str, include_dense: bool = True):
+    def process_video(self, video_id: str, include_dense: bool = False):
         # run pipeline
         self.pipeline.__call__(video_id, save_only_essential=False)
         self.pipeline.estimate_2d_keypoints()
-        results = self.pipeline.results  # pipeline stores into self.results
+        results = self.pipeline.results
 
         images = self.pipeline.images
         world4d = self.pipeline.create_world4d()
@@ -677,10 +680,9 @@ class AlignHMRPi3:
         per_frame_sims = []
         max_frames = 60
 
-        # store per-frame sparse correspondences for viz
         frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
-        # ---------- 1) get global sim from keypoint correspondences ----------
+        # ---------- 1) per-frame robust sim from sparse (and optionally dense) ----------
         for frame_idx, frame_data in list(world4d.items())[:max_frames]:
             smpl_s, scene_s = self._collect_kp_corr_for_frame(frame_idx, frame_data, frame_to_kps)
 
@@ -693,6 +695,15 @@ class AlignHMRPi3:
                 smpl_all.append(smpl_s)
                 scene_all.append(scene_s)
 
+            # add dense corr if requested to stabilize scale
+            if include_dense:
+                smpl_d, scene_d = self._collect_dense_corr_for_frame(
+                    video_id, frame_idx, frame_data, frame_idx_frame_path_map
+                )
+                if smpl_d is not None and scene_d is not None:
+                    smpl_all.append(smpl_d)
+                    scene_all.append(scene_d)
+
             if len(smpl_all) == 0:
                 continue
 
@@ -702,7 +713,16 @@ class AlignHMRPi3:
             if smpl_all.shape[0] < 3:
                 continue
 
-            s_f, R_f, t_f = self._umeyama_similarity(smpl_all, scene_all)
+            # robust similarity instead of plain Umeyama
+            s_f, R_f, t_f = self._robust_similarity_ransac(
+                smpl_all,
+                scene_all,
+                max_iters=800,
+                inlier_thresh=0.03,   # ~3 cm
+                min_inliers=4,
+                scale_bounds=(0.4, 3.0),
+            )
+
             per_frame_sims.append({
                 "s": float(s_f),
                 "R": R_f,
@@ -736,7 +756,7 @@ class AlignHMRPi3:
             verts_tf = verts_tf.reshape(verts.shape)
             frame_data['vertices'] = verts_tf
 
-        # ---------- 4) floor mesh from FINAL verts ----------
+        # ---------- 3) floor mesh from FINAL verts ----------
         all_verts_for_floor = []
         for frame_idx, frame_data in world4d.items():
             if len(frame_data['track_id']) == 0:
