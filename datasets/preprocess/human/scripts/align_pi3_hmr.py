@@ -272,7 +272,7 @@ class AlignHMRPi3:
         return frame_idx_frame_path_map
 
     # ------------------------------------------------------------
-    # NEW: collect dense-ish SMPL�masked-human correspondences
+    # NEW: collect dense-ish SMPL masked-human correspondences
     # ------------------------------------------------------------
     def _collect_mesh_mask_correspondences(
             self,
@@ -453,7 +453,7 @@ class AlignHMRPi3:
             # guard against pathological tiny scales
             s_g = float(np.clip(s_g, 0.2, 2.5))
 
-        # 4) now run through frames again, generate verts, apply SAME transform
+        # 4) now run through frames again, generate verts, apply the SAME transform
         all_verts_for_floor = []
         for frame_idx, frame_data in world4d.items():
             if len(frame_data['track_id']) == 0:
@@ -469,8 +469,11 @@ class AlignHMRPi3:
             verts = smpl_out.vertices.cpu().numpy()  # (P, V, 3)
 
             # Just do scaling and translation (no rotation)
-            verts_tf = s_g * verts.reshape(-1, 3)
+            verts_tf = verts.reshape(-1, 3) @ R_g.T + t_g[None, :]
             verts_tf = verts_tf.reshape(verts.shape)
+
+            # verts_tf = s_g * verts.reshape(-1, 3)
+            # verts_tf = verts_tf.reshape(verts.shape)
 
             frame_data['vertices'] = verts_tf
             all_verts_for_floor.append(torch.tensor(verts_tf, dtype=torch.bfloat16))

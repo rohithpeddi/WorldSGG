@@ -100,18 +100,18 @@ def rerun_vis_world4d(
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
 
     # (optional) static floor logged once - rotate too
-    if floor is not None:
-        fv, ff = floor
-        fv = np.asarray(fv, dtype=np.float32)
-        ff = _faces_u32(np.asarray(ff))
-        fv = fv @ scene_R.T
-        rr.log(
-            "floor",
-            rr.Mesh3D(
-                vertex_positions=fv,
-                triangle_indices=ff,
-            ),
-        )
+    # if floor is not None:
+    #     fv, ff = floor
+    #     fv = np.asarray(fv, dtype=np.float32)
+    #     ff = _faces_u32(np.asarray(ff))
+    #     fv = fv @ scene_R.T
+    #     rr.log(
+    #         "floor",
+    #         rr.Mesh3D(
+    #             vertex_positions=fv,
+    #             triangle_indices=ff,
+    #         ),
+    #     )
 
     def _get_image_for_time(i: int) -> Optional[np.ndarray]:
         src_idx = i
@@ -178,16 +178,16 @@ def rerun_vis_world4d(
                         ),
                     )
 
-        # per-frame floor (if you want it every frame)
-        if floor is not None:
-            fv, ff = floor
-            fv = np.asarray(fv, dtype=np.float32)
-            ff = _faces_u32(np.asarray(ff))
-            fv = fv @ scene_R.T
-            rr.log(
-                f"{BASE}/floor",
-                rr.Mesh3D(vertex_positions=fv, triangle_indices=ff),
-            )
+        # # per-frame floor (if you want it every frame)
+        # if floor is not None:
+        #     fv, ff = floor
+        #     fv = np.asarray(fv, dtype=np.float32)
+        #     ff = _faces_u32(np.asarray(ff))
+        #     fv = fv @ scene_R.T
+        #     rr.log(
+        #         f"{BASE}/floor",
+        #         rr.Mesh3D(vertex_positions=fv, triangle_indices=ff),
+        #     )
 
         # dynamic points
         rr.log(
@@ -661,7 +661,7 @@ class AlignHMRPi3:
         s_g = float(np.clip(s_g, 0.5, 2.5))
         return s_g, R_g, t_g
 
-    def process_video(self, video_id: str):
+    def process_video(self, video_id: str, include_dense: bool = True):
         # run pipeline
         self.pipeline.__call__(video_id, save_only_essential=False)
         self.pipeline.estimate_2d_keypoints()
@@ -680,18 +680,10 @@ class AlignHMRPi3:
         # store per-frame sparse correspondences for viz
         frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
+        # ---------- 1) get global sim from keypoint correspondences ----------
         for frame_idx, frame_data in list(world4d.items())[:max_frames]:
             # sparse
             smpl_s, scene_s = self._collect_kp_corr_for_frame(frame_idx, frame_data, frame_to_kps)
-            # dense
-            smpl_d, scene_d = self._collect_dense_corr_for_frame(
-                video_id,
-                frame_idx,
-                frame_data,
-                frame_idx_frame_path_map,
-                num_smpl_samples_per_person=400,
-                num_scene_subsample=800,
-            )
 
             # record per-frame sparse for visualization
             if smpl_s is not None and scene_s is not None and smpl_s.shape[0] > 0:
@@ -702,9 +694,6 @@ class AlignHMRPi3:
             if smpl_s is not None:
                 smpl_all.append(smpl_s)
                 scene_all.append(scene_s)
-            if smpl_d is not None:
-                smpl_all.append(smpl_d)
-                scene_all.append(scene_d)
 
             if len(smpl_all) == 0:
                 continue
@@ -728,8 +717,7 @@ class AlignHMRPi3:
         else:
             s_g, R_g, t_g = self._average_similarities(per_frame_sims)
 
-        # apply global transform to all SMPL verts, but ALSO store originals
-        all_verts_for_floor = []
+        # ---------- 2) apply GLOBAL sim to all frames ----------
         for frame_idx, frame_data in world4d.items():
             if len(frame_data['track_id']) == 0:
                 continue
@@ -746,13 +734,72 @@ class AlignHMRPi3:
             # keep original
             frame_data['vertices_orig'] = verts.copy()
 
-            # transformed
+            # transformed with global
             verts_flat = verts.reshape(-1, 3)
             verts_tf = s_g * (verts_flat @ R_g.T) + t_g
             verts_tf = verts_tf.reshape(verts.shape)
-
             frame_data['vertices'] = verts_tf
-            all_verts_for_floor.append(torch.tensor(verts_tf, dtype=torch.bfloat16))
+
+        # ---------- 3) OPTIONAL: per-frame DENSE refinement ----------
+        # sample SMPL points and align to masked scene points
+        if include_dense:
+            for frame_idx, frame_data in world4d.items():
+                if len(frame_data['track_id']) == 0:
+                    continue
+
+                # scene person point cloud for this frame
+                scene_pts = self._get_partial_pointcloud(
+                    video_id,
+                    frame_idx,
+                    frame_idx_frame_path_map,
+                    label="person",
+                )
+                if scene_pts is None or scene_pts.shape[0] < 20:
+                    continue
+
+                # current (globally) transformed SMPL verts
+                verts_tf = frame_data['vertices']  # (P, V, 3)
+                smpl_pts = verts_tf.reshape(-1, 3)
+
+                # sample smpl points
+                max_smpl = min(800, smpl_pts.shape[0])
+                smpl_idx = np.random.choice(smpl_pts.shape[0], max_smpl, replace=False)
+                smpl_sampled = smpl_pts[smpl_idx]
+
+                # sample scene points
+                max_scene = min(2000, scene_pts.shape[0])
+                if scene_pts.shape[0] > max_scene:
+                    scene_idx = np.random.choice(scene_pts.shape[0], max_scene, replace=False)
+                    scene_sampled = scene_pts[scene_idx]
+                else:
+                    scene_sampled = scene_pts
+
+                # NN match: SMPL -> scene
+                # smpl_sampled: (Ns, 3), scene_sampled: (Nt, 3)
+                diff = scene_sampled[None, :, :] - smpl_sampled[:, None, :]
+                dists = np.sum(diff * diff, axis=2)  # (Ns, Nt)
+                nn_idx = np.argmin(dists, axis=1)
+                scene_matched = scene_sampled[nn_idx]
+
+                # if we got too few, skip
+                if smpl_sampled.shape[0] < 6:
+                    continue
+
+                # per-frame dense similarity (refinement)
+                s_d, R_d, t_d = self._umeyama_similarity(smpl_sampled, scene_matched)
+
+                # apply refinement on top of current (already-global) verts
+                verts_ref = frame_data['vertices'].reshape(-1, 3)
+                verts_ref = s_d * (verts_ref @ R_d.T) + t_d
+                verts_ref = verts_ref.reshape(frame_data['vertices'].shape)
+                frame_data['vertices'] = verts_ref
+
+        # ---------- 4) floor mesh from FINAL verts ----------
+        all_verts_for_floor = []
+        for frame_idx, frame_data in world4d.items():
+            if len(frame_data['track_id']) == 0:
+                continue
+            all_verts_for_floor.append(torch.tensor(frame_data['vertices'], dtype=torch.bfloat16))
 
         if len(all_verts_for_floor) > 0:
             all_verts_for_floor = torch.cat(all_verts_for_floor)
