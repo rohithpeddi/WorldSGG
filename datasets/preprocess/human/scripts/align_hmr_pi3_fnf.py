@@ -11,7 +11,6 @@ import torch
 from tqdm import tqdm
 import rerun as rr
 from scipy.spatial.transform import Rotation as SciRot
-from scipy.spatial.transform import Rotation
 
 # make local imports work like in your original file
 sys.path.insert(0, os.path.dirname(__file__) + '/..')
@@ -65,7 +64,15 @@ def rerun_vis_world4d(
         reuse_paths: bool = True,
         dynamic_prediction_path: Optional[str] = None,
         frame_kp_corr: Optional[Dict[int, Tuple[np.ndarray, np.ndarray]]] = None,
+        per_frame_sims: Optional[Dict[int, Dict[str, Any]]] = None,
 ):
+    """
+    Visualization now supports per-frame similarity transforms.
+    For each frame:
+      - take world4d[i]['vertices_orig'] (list per person)
+      - if per_frame_sims[i] exists -> apply that (s,R,t) and show in green
+      - always show original in red
+    """
     faces_u32 = _faces_u32(faces)
 
     rr.init(app_id, spawn=True)
@@ -123,33 +130,48 @@ def rerun_vis_world4d(
 
         # humans (original + transformed)
         track_ids = world4d[i].get("track_id", [])
-        verts_list_xform = world4d[i].get("vertices", [])  # transformed
-        verts_list_orig = world4d[i].get("vertices_orig", [])  # original
+        verts_list_orig = world4d[i].get("vertices_orig", [])
 
-        if len(track_ids) > 0:
+        # if we have per-frame s,R,t for this frame, use it
+        sft = None
+        if per_frame_sims is not None and i in per_frame_sims:
+            sft = per_frame_sims[i]
+            s_i = float(sft["s"])
+            R_i = np.asarray(sft["R"], dtype=np.float32)
+            t_i = np.asarray(sft["t"], dtype=np.float32)
+        else:
+            s_i, R_i, t_i = None, None, None
+
+        if len(track_ids) > 0 and len(verts_list_orig) > 0:
             for idx, tid in enumerate(track_ids):
+                # original in red
                 if idx < len(verts_list_orig):
                     verts_orig = np.asarray(verts_list_orig[idx], dtype=np.float32)
-                    rr.log(
-                        _human_path(int(tid), i, "orig"),
-                        rr.Mesh3D(
-                            vertex_positions=verts_orig,
-                            triangle_indices=faces_u32,
-                            albedo_factor=[255, 0, 0],
-                        ),
-                    )
-                if idx < len(verts_list_xform):
-                    verts_x = np.asarray(verts_list_xform[idx], dtype=np.float32)
-                    rr.log(
-                        _human_path(int(tid), i, "xform"),
-                        rr.Mesh3D(
-                            vertex_positions=verts_x,
-                            triangle_indices=faces_u32,
-                            albedo_factor=[0, 255, 0],
-                        ),
-                    )
+                    # rr.log(
+                    #     _human_path(int(tid), i, "orig"),
+                    #     rr.Mesh3D(
+                    #         vertex_positions=verts_orig,
+                    #         triangle_indices=faces_u32,
+                    #         albedo_factor=[255, 0, 0],
+                    #     ),
+                    # )
 
-        # floor
+                    # transformed in green (apply per-frame sim)
+                    if s_i is not None:
+                        verts_flat = verts_orig.reshape(-1, 3)
+                        verts_tf = s_i * (verts_flat @ R_i.T) + t_i
+                        verts_tf = verts_tf.reshape(verts_orig.shape)
+                        rr.log(
+                            _human_path(int(tid), i, "xform"),
+                            rr.Mesh3D(
+                                vertex_positions=verts_tf.astype(np.float32),
+                                triangle_indices=faces_u32,
+                                albedo_factor=[0, 255, 0],
+                            ),
+                        )
+                # else: nothing to render for that idx
+
+        # # floor
         # if floor is not None:
         #     fv, ff = floor
         #     fv = np.asarray(fv, dtype=np.float32)
@@ -168,38 +190,38 @@ def rerun_vis_world4d(
             ),
         )
 
-        # sparse correspondences
-        if frame_kp_corr is not None and i in frame_kp_corr:
-            smpl_pts, scene_pts = frame_kp_corr[i]
-            smpl_pts = np.asarray(smpl_pts, dtype=np.float32)
-            scene_pts = np.asarray(scene_pts, dtype=np.float32)
-
-            rr.log(
-                f"{BASE}/corr/frame_{i}/smpl_kps",
-                rr.Points3D(
-                    positions=smpl_pts,
-                    colors=np.full((smpl_pts.shape[0], 3), [255, 0, 0], dtype=np.uint8),
-                    radii=0.015,
-                ),
-            )
-            rr.log(
-                f"{BASE}/corr/frame_{i}/scene_kps",
-                rr.Points3D(
-                    positions=scene_pts,
-                    colors=np.full((scene_pts.shape[0], 3), [0, 255, 0], dtype=np.uint8),
-                    radii=0.017,
-                ),
-            )
-
-            if smpl_pts.shape[0] == scene_pts.shape[0]:
-                rr.log(
-                    f"{BASE}/corr/frame_{i}/arrows",
-                    rr.Arrows3D(
-                        origins=smpl_pts,
-                        vectors=(scene_pts - smpl_pts),
-                        colors=np.full((smpl_pts.shape[0], 3), [0, 0, 255], dtype=np.uint8),
-                    ),
-                )
+        # # sparse correspondences
+        # if frame_kp_corr is not None and i in frame_kp_corr:
+        #     smpl_pts, scene_pts = frame_kp_corr[i]
+        #     smpl_pts = np.asarray(smpl_pts, dtype=np.float32)
+        #     scene_pts = np.asarray(scene_pts, dtype=np.float32)
+        #
+        #     rr.log(
+        #         f"{BASE}/corr/frame_{i}/smpl_kps",
+        #         rr.Points3D(
+        #             positions=smpl_pts,
+        #             colors=np.full((smpl_pts.shape[0], 3), [255, 0, 0], dtype=np.uint8),
+        #             radii=0.015,
+        #         ),
+        #     )
+        #     rr.log(
+        #         f"{BASE}/corr/frame_{i}/scene_kps",
+        #         rr.Points3D(
+        #             positions=scene_pts,
+        #             colors=np.full((scene_pts.shape[0], 3), [0, 255, 0], dtype=np.uint8),
+        #             radii=0.017,
+        #         ),
+        #     )
+        #
+        #     if smpl_pts.shape[0] == scene_pts.shape[0]:
+        #         rr.log(
+        #             f"{BASE}/corr/frame_{i}/arrows",
+        #             rr.Arrows3D(
+        #                 origins=smpl_pts,
+        #                 vectors=(scene_pts - smpl_pts),
+        #                 colors=np.full((smpl_pts.shape[0], 3), [0, 0, 255], dtype=np.uint8),
+        #             ),
+        #         )
 
         # camera
         cam_3x4 = np.asarray(world4d[i]["camera"], dtype=np.float32)
@@ -246,7 +268,7 @@ def rerun_vis_world4d(
             ),
         )
 
-    print("Rerun visualization started. Scrub the 'frame' timeline to compare original (red) vs transformed (green).")
+    print("Rerun visualization started. Scrub the 'frame' timeline to compare original (red) vs per-frame transformed (green).")
 
 
 # ------------------------------------------------------------
@@ -361,22 +383,18 @@ class AlignHMRPi3:
             # not enough to RANSAC, fallback
             return self._similarity_umeyama(src, dst)
 
-        best_inliers = None
         best_num = -1
         best_model = None
 
-        # adaptive max iters based on N just to be safe
+        # adaptive max iters based on N
         iters = min(max_iters, 100 + 30 * N)
 
         for _ in range(iters):
-            # sample minimal 3 non-collinear points
             idx = np.random.choice(N, 3, replace=False)
             s_cand, R_cand, t_cand = self._similarity_umeyama(src[idx], dst[idx])
 
-            # clamp scale to avoid crazy solutions
             s_cand = float(np.clip(s_cand, scale_bounds[0], scale_bounds[1]))
 
-            # apply
             src_tf = s_cand * (src @ R_cand.T) + t_cand
             err = np.linalg.norm(dst - src_tf, axis=1)
 
@@ -384,15 +402,12 @@ class AlignHMRPi3:
             num_inl = int(inliers.sum())
 
             if num_inl > best_num and num_inl >= min_inliers:
-                # refine on inliers
                 s_ref, R_ref, t_ref = self._similarity_umeyama(src[inliers], dst[inliers])
                 s_ref = float(np.clip(s_ref, scale_bounds[0], scale_bounds[1]))
-                best_inliers = inliers
                 best_num = num_inl
                 best_model = (s_ref, R_ref, t_ref)
 
         if best_model is None:
-            # complete failure -> fallback
             return self._similarity_umeyama(src, dst)
 
         return best_model
@@ -634,41 +649,11 @@ class AlignHMRPi3:
 
         return np.concatenate(smpl_all, axis=0), np.concatenate(scene_all, axis=0)
 
-    def _average_similarities(self, sims: List[dict]):
-        if len(sims) == 0:
-            return 1.0, np.eye(3), np.zeros(3)
-
-        total_w = sum(s["w"] for s in sims)
-        if total_w <= 0:
-            total_w = 1.0
-
-        s_acc = 0.0
-        t_acc = np.zeros(3, dtype=np.float64)
-        R_acc = np.zeros((3, 3), dtype=np.float64)
-
-        for s in sims:
-            w = s["w"]
-            s_acc += w * s["s"]
-            t_acc += w * s["t"]
-            R_acc += w * s["R"]
-
-        s_g = s_acc / total_w
-        t_g = t_acc / total_w
-
-        U, _, Vt = np.linalg.svd(R_acc)
-        R_g = U @ Vt
-        if np.linalg.det(R_g) < 0:
-            Vt[-1, :] *= -1
-            R_g = U @ Vt
-
-        s_g = float(np.clip(s_g, 0.2, 2.5))
-        return s_g, R_g, t_g
-
     def process_video(self, video_id: str, include_dense: bool = False):
         # run pipeline
         self.pipeline.__call__(video_id, save_only_essential=False)
         self.pipeline.estimate_2d_keypoints()
-        results = self.pipeline.results
+        results = self.pipeline.results  # pipeline stores into self.results
 
         images = self.pipeline.images
         world4d = self.pipeline.create_world4d()
@@ -677,12 +662,12 @@ class AlignHMRPi3:
         frame_idx_frame_path_map = self.idx_to_frame_idx_path(video_id)
         frame_to_kps = self._build_frame_to_kps_map(results)
 
-        per_frame_sims = []
         max_frames = 60
 
         frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+        per_frame_sims: Dict[int, Dict[str, Any]] = {}
 
-        # ---------- 1) per-frame robust sim from sparse (and optionally dense) ----------
+        # ---------- 1) per-frame robust sim (NO averaging) ----------
         for frame_idx, frame_data in list(world4d.items())[:max_frames]:
             smpl_s, scene_s = self._collect_kp_corr_for_frame(frame_idx, frame_data, frame_to_kps)
 
@@ -695,7 +680,6 @@ class AlignHMRPi3:
                 smpl_all.append(smpl_s)
                 scene_all.append(scene_s)
 
-            # add dense corr if requested to stabilize scale
             if include_dense:
                 smpl_d, scene_d = self._collect_dense_corr_for_frame(
                     video_id, frame_idx, frame_data, frame_idx_frame_path_map
@@ -709,33 +693,27 @@ class AlignHMRPi3:
 
             smpl_all = np.concatenate(smpl_all, axis=0)
             scene_all = np.concatenate(scene_all, axis=0)
-
             if smpl_all.shape[0] < 3:
                 continue
 
-            # robust similarity instead of plain Umeyama
             s_f, R_f, t_f = self._robust_similarity_ransac(
                 smpl_all,
                 scene_all,
                 max_iters=800,
-                inlier_thresh=0.03,   # ~3 cm
+                inlier_thresh=0.03,
                 min_inliers=4,
                 scale_bounds=(0.4, 3.0),
             )
 
-            per_frame_sims.append({
+            per_frame_sims[frame_idx] = {
                 "s": float(s_f),
                 "R": R_f,
                 "t": t_f,
                 "w": float(smpl_all.shape[0]),
-            })
+            }
 
-        if len(per_frame_sims) == 0:
-            s_g, R_g, t_g = 1.0, np.eye(3), np.zeros(3)
-        else:
-            s_g, R_g, t_g = self._average_similarities(per_frame_sims)
-
-        # ---------- 2) apply GLOBAL sim to all frames ----------
+        # ---------- 2) build final verts per frame using per-frame sim ----------
+        all_verts_for_floor = []
         for frame_idx, frame_data in world4d.items():
             if len(frame_data['track_id']) == 0:
                 continue
@@ -748,20 +726,23 @@ class AlignHMRPi3:
                 transl=frame_data['trans'].cuda()
             )
             verts = smpl_out.vertices.cpu().numpy()  # (P, V, 3)
-
-            # keep original
             frame_data['vertices_orig'] = verts.copy()
-            verts_flat = verts.reshape(-1, 3)
-            verts_tf = s_g * (verts_flat @ R_g.T) + t_g
-            verts_tf = verts_tf.reshape(verts.shape)
+
+            # if we have per-frame sim, apply it now to collect for floor
+            if frame_idx in per_frame_sims:
+                s_f = per_frame_sims[frame_idx]["s"]
+                R_f = per_frame_sims[frame_idx]["R"]
+                t_f = per_frame_sims[frame_idx]["t"]
+                verts_flat = verts.reshape(-1, 3)
+                verts_tf = s_f * (verts_flat @ R_f.T) + t_f
+                verts_tf = verts_tf.reshape(verts.shape)
+            else:
+                verts_tf = verts
+
+            # store transformed too (not strictly needed by vis now, but handy)
             frame_data['vertices'] = verts_tf
 
-        # ---------- 3) floor mesh from FINAL verts ----------
-        all_verts_for_floor = []
-        for frame_idx, frame_data in world4d.items():
-            if len(frame_data['track_id']) == 0:
-                continue
-            all_verts_for_floor.append(torch.tensor(frame_data['vertices'], dtype=torch.bfloat16))
+            all_verts_for_floor.append(torch.tensor(verts_tf, dtype=torch.bfloat16))
 
         if len(all_verts_for_floor) > 0:
             all_verts_for_floor = torch.cat(all_verts_for_floor)
@@ -769,6 +750,7 @@ class AlignHMRPi3:
         else:
             gv, gf = None, None
 
+        # ---------- 3) visualize (now with per-frame sims) ----------
         rerun_vis_world4d(
             video_id=video_id,
             images=images,
@@ -781,6 +763,7 @@ class AlignHMRPi3:
             img_maxsize=480,
             dynamic_prediction_path=str(self.dynamic_scene_dir_path),
             frame_kp_corr=frame_kp_corr,
+            per_frame_sims=per_frame_sims,
         )
 
         print('Rerun visualization running. Press Ctrl+C to terminate.')
@@ -800,7 +783,7 @@ class AlignHMRPi3:
 # CLI
 # ------------------------------------------------------------
 def parse_args():
-    parser = argparse.ArgumentParser(description="Align SMPL to PI3 dynamic scene and visualize with rerun.")
+    parser = argparse.ArgumentParser(description="Align SMPL to PI3 dynamic scene and visualize with rerun (per-frame sim).")
     parser.add_argument(
         "--output_dir_path", type=str, default="/data/rohith/ag/ag4D/human/",
         help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
@@ -817,6 +800,10 @@ def parse_args():
     parser.add_argument(
         "--split", default="04",
         help="Optional shard to process: one of {04, 59, AD, EH, IL, MP, QT, UZ}."
+    )
+    parser.add_argument(
+        "--include_dense", action="store_true",
+        help="Whether to add dense point correspondences per frame for more stable per-frame similarity."
     )
     return parser.parse_args()
 
