@@ -169,8 +169,8 @@ class AlignHMRPi3:
                 betas=frame_data['shape'].cuda(),
                 transl=frame_data['trans'].cuda()
             )
-            verts = smpl_out.vertices.cpu().numpy()         # (P, V, 3)
-            joints = smpl_out.joints.cpu().numpy()          # (P, J, 3)
+            verts = smpl_out.vertices.cpu().numpy()  # (P, V, 3)
+            joints = smpl_out.joints.cpu().numpy()  # (P, J, 3)
 
             # 2) get scene points for this frame
             frame_points_hw3 = self.pipeline.points[frame_idx]  # (H, W, 3)
@@ -272,16 +272,16 @@ class AlignHMRPi3:
         return frame_idx_frame_path_map
 
     # ------------------------------------------------------------
-    # NEW: collect dense-ish SMPL↔masked-human correspondences
+    # NEW: collect dense-ish SMPL�masked-human correspondences
     # ------------------------------------------------------------
     def _collect_mesh_mask_correspondences(
-        self,
-        video_id: str,
-        world4d: dict,
-        frame_idx_frame_path_map: Dict[int, str],
-        num_smpl_samples_per_person: int = 400,
-        num_scene_subsample: int = 800,
-        max_frames: int = 60,
+            self,
+            video_id: str,
+            world4d: dict,
+            frame_idx_frame_path_map: Dict[int, str],
+            num_smpl_samples_per_person: int = 400,
+            num_scene_subsample: int = 800,
+            max_frames: int = 60,
     ):
         """
         Build extra (smpl_point, scene_point) pairs by:
@@ -305,7 +305,7 @@ class AlignHMRPi3:
                 betas=frame_data['shape'].cuda(),
                 transl=frame_data['trans'].cuda()
             )
-            verts = smpl_out.vertices.cpu().numpy()   # (P, V, 3)
+            verts = smpl_out.vertices.cpu().numpy()  # (P, V, 3)
 
             scene_pts = self._get_partial_pointcloud(
                 video_id,
@@ -406,7 +406,12 @@ class AlignHMRPi3:
             )
             verts = smpl_out.vertices.cpu().numpy()  # (P, V, 3)
 
-            verts_tf = (s_g * (R_g @ verts.reshape(-1, 3).T).T) + t_g
+            # verts_tf = (s_g * (R_g @ verts.reshape(-1, 3).T).T) + t_g
+            # verts_tf = verts_tf.reshape(verts.shape)
+
+            # Just do scaling and translation (no rotation)
+            verts_tf = verts.reshape(-1, 3) + t_g
+            verts_tf = s_g * verts_tf
             verts_tf = verts_tf.reshape(verts.shape)
 
             frame_data['vertices'] = verts_tf
