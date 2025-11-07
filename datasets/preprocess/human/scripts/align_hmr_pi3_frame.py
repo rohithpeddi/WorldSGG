@@ -24,7 +24,7 @@ from datasets.preprocess.human.prompt_hmr.vis.traj import get_floor_mesh
 
 
 # ------------------------------------------------------------
-# helper funcs for visualization (pulled from your rerun_vis style)
+# helper funcs for visualization
 # ------------------------------------------------------------
 def _faces_u32(faces: np.ndarray) -> np.ndarray:
     faces = np.asarray(faces)
@@ -42,7 +42,6 @@ def _pinhole_from_fov(w: int, h: int, fov_y: float):
 
 
 def _color_from_id(idx: int) -> Tuple[int, int, int]:
-    # simple deterministic color
     base = np.array([123, 200, 124], dtype=np.uint8)
     rand = np.array(
         [((idx * 37) % 255), ((idx * 57) % 255), ((idx * 97) % 255)],
@@ -52,7 +51,7 @@ def _color_from_id(idx: int) -> Tuple[int, int, int]:
 
 
 # ------------------------------------------------------------
-# updated visualization that rotates meshes the same as points
+# updated visualization: now also logs per-frame correspondences
 # ------------------------------------------------------------
 def rerun_vis_world4d(
         video_id: str,
@@ -70,6 +69,7 @@ def rerun_vis_world4d(
         image_fn: Optional[Callable[[int, Optional[np.ndarray]], Optional[np.ndarray]]] = None,
         reuse_paths: bool = True,
         dynamic_prediction_path: Optional[str] = None,
+        frame_kp_corr: Optional[Dict[int, Tuple[np.ndarray, np.ndarray]]] = None,
 ):
     faces_u32 = _faces_u32(faces)
 
@@ -179,6 +179,44 @@ def rerun_vis_world4d(
             ),
         )
 
+        # --- NEW: per-frame correspondences (SMPL kps vs scene kps) ---
+        if frame_kp_corr is not None and i in frame_kp_corr:
+            smpl_pts, scene_pts = frame_kp_corr[i]
+            smpl_pts = np.asarray(smpl_pts, dtype=np.float32)
+            scene_pts = np.asarray(scene_pts, dtype=np.float32)
+
+            # rotate them to match display frame
+            smpl_pts_disp = smpl_pts @ scene_R.T
+            scene_pts_disp = scene_pts @ scene_R.T
+
+            rr.log(
+                f"{BASE}/corr/frame_{i}/smpl_kps",
+                rr.Points3D(
+                    positions=smpl_pts_disp,
+                    colors=np.full((smpl_pts_disp.shape[0], 3), [255, 0, 0], dtype=np.uint8),
+                    radii=0.015,
+                ),
+            )
+            rr.log(
+                f"{BASE}/corr/frame_{i}/scene_kps",
+                rr.Points3D(
+                    positions=scene_pts_disp,
+                    colors=np.full((scene_pts_disp.shape[0], 3), [0, 255, 0], dtype=np.uint8),
+                    radii=0.017,
+                ),
+            )
+
+            # arrows from SMPL -> scene
+            if smpl_pts_disp.shape[0] == scene_pts_disp.shape[0]:
+                rr.log(
+                    f"{BASE}/corr/frame_{i}/arrows",
+                    rr.Arrows3D(
+                        origins=smpl_pts_disp,
+                        vectors=(scene_pts_disp - smpl_pts_disp),
+                        colors=np.full((smpl_pts_disp.shape[0], 3), [0, 0, 255], dtype=np.uint8),
+                    ),
+                )
+
         # camera
         cam_3x4 = np.asarray(world4d[i]["camera"], dtype=np.float32)
         R_wc = cam_3x4[:3, :3]
@@ -224,7 +262,7 @@ def rerun_vis_world4d(
             ),
         )
 
-    print("Rerun visualization started. Scrub the 'frame' timeline.")
+    print("Rerun visualization started. Scrub the 'frame' timeline to see per-frame correspondences.")
 
 
 # ------------------------------------------------------------
@@ -257,7 +295,7 @@ def get_video_belongs_to_split(video_id: str) -> Optional[str]:
 # ------------------------------------------------------------
 # main alignment class
 # ------------------------------------------------------------
-class AlignHMRPi3Frame:
+class AlignHMRPi3:
 
     def __init__(
             self,
@@ -440,7 +478,7 @@ class AlignHMRPi3Frame:
 
         return np.stack(smpl_list, axis=0), np.stack(scene_list, axis=0)
 
-    # ---- per-frame dense correspondences (SMPL verts to masked scene pts) ----
+    # ---- per-frame dense correspondences ----
     def _collect_dense_corr_for_frame(
             self,
             video_id: str,
@@ -532,55 +570,15 @@ class AlignHMRPi3Frame:
         s_g = float(np.clip(s_g, 0.5, 2.5))
         return s_g, R_g, t_g
 
-    # optional: visualize sparse correspondences for a single frame
-    def _vis_sparse_correspondences_rerun(self, video_id: str,
-                                          smpl_pts: np.ndarray,
-                                          scene_pts: np.ndarray,
-                                          frame_idx: int):
-        rr.init(f"KP-Corr-{video_id}-{frame_idx}", spawn=True)
-        try:
-            rr.log("/", rr.ViewCoordinates.RUB)
-        except Exception:
-            pass
-        rr.set_time_sequence("step", 0)
-
-        rr.log(
-            "smpl_kps",
-            rr.Points3D(
-                positions=smpl_pts.astype(np.float32),
-                colors=np.full((smpl_pts.shape[0], 3), [255, 0, 0], dtype=np.uint8),
-                radii=0.01,
-            ),
-        )
-        rr.log(
-            "scene_kps",
-            rr.Points3D(
-                positions=scene_pts.astype(np.float32),
-                colors=np.full((scene_pts.shape[0], 3), [0, 255, 0], dtype=np.uint8),
-                radii=0.012,
-            ),
-        )
-        if smpl_pts.shape[0] == scene_pts.shape[0]:
-            rr.log(
-                "corr",
-                rr.Arrows3D(
-                    origins=smpl_pts.astype(np.float32),
-                    vectors=(scene_pts - smpl_pts).astype(np.float32),
-                    colors=np.full((smpl_pts.shape[0], 3), [0, 0, 255], dtype=np.uint8),
-                ),
-            )
-        print(f"[debug] rerun corr vis for frame {frame_idx}")
-
     # ---- main per-video pipeline ----
     def process_video(self, video_id: str):
         # run pipeline
         self.pipeline.__call__(video_id, save_only_essential=False)
         self.pipeline.estimate_2d_keypoints()
-        results = self.pipeline.results  # fix: actually read results from pipeline
+        results = self.pipeline.results  # pipeline stores into self.results
 
         images = self.pipeline.images
         world4d = self.pipeline.create_world4d()
-        # turn into {0: ..., 1: ...}
         world4d = {i: world4d[k] for i, k in enumerate(world4d)}
 
         frame_idx_frame_path_map = self.idx_to_frame_idx_path(video_id)
@@ -588,6 +586,9 @@ class AlignHMRPi3Frame:
 
         per_frame_sims = []
         max_frames = 60
+
+        # NEW: store per-frame sparse correspondences for visualization
+        frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
         for frame_idx, frame_data in list(world4d.items())[:max_frames]:
             # sparse
@@ -602,14 +603,15 @@ class AlignHMRPi3Frame:
                 num_scene_subsample=800,
             )
 
+            # record per-frame sparse for viz (even if dense is None)
+            if smpl_s is not None and scene_s is not None and smpl_s.shape[0] > 0:
+                frame_kp_corr[frame_idx] = (smpl_s, scene_s)
+
             smpl_all = []
             scene_all = []
             if smpl_s is not None:
                 smpl_all.append(smpl_s)
                 scene_all.append(scene_s)
-                # visualize only for first frame that has sparse corr
-                if frame_idx == 0:
-                    self._vis_sparse_correspondences_rerun(video_id, smpl_s, scene_s, frame_idx)
             if smpl_d is not None:
                 smpl_all.append(smpl_d)
                 scene_all.append(scene_d)
@@ -675,6 +677,7 @@ class AlignHMRPi3Frame:
             init_fps=10,
             img_maxsize=480,
             dynamic_prediction_path=str(self.dynamic_scene_dir_path),
+            frame_kp_corr=frame_kp_corr,  # <-- NEW
         )
 
         print('Rerun visualization running. Press Ctrl+C to terminate.')
@@ -682,7 +685,6 @@ class AlignHMRPi3Frame:
             time.sleep(1)
 
     def infer_all_videos(self, split: str):
-        # You can switch back to os.listdir if you want
         video_id_list = ["0DJ6R.mp4"]
         for video_id in tqdm(video_id_list, desc=f"Processing videos in split {split}", unit="video"):
             if get_video_belongs_to_split(video_id) != split:
@@ -726,7 +728,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    processor = AlignHMRPi3Frame(
+    processor = AlignHMRPi3(
         output_root=args.output_dir_path,
         ag_root_directory=args.ag_root_directory,
         dynamic_scene_dir_path=args.dynamic_scene_dir_path
