@@ -142,11 +142,9 @@ class AlignHMRPi3:
         smpl_pts_all = []
         scene_pts_all = []
 
-        # results['people'][person_id]['keypoints_2d'] is assumed from your previous code
         people_results = results.get("people", {})
 
         # Build a per-frame map: frame_idx -> list of (person_id, keypoints_2d_for_that_frame)
-        # Your structure may differ slightly, but we'll assume each person stores per-frame keypoints.
         frame_to_kps = {}
         for pid, pdata in people_results.items():
             kps_2d = pdata.get("keypoints_2d", None)
@@ -154,7 +152,6 @@ class AlignHMRPi3:
             if kps_2d is None or frames is None:
                 continue
 
-            # kps_2d: (num_frames_for_person, K, 3) or (num_frames_for_person, K, 2)
             for i, fidx in enumerate(frames):
                 if fidx not in frame_to_kps:
                     frame_to_kps[fidx] = []
@@ -173,7 +170,7 @@ class AlignHMRPi3:
                 transl=frame_data['trans'].cuda()
             )
             verts = smpl_out.vertices.cpu().numpy()         # (P, V, 3)
-            joints = smpl_out.joints.cpu().numpy()          # (P, J, 3)  <-- we will match to 2D kps
+            joints = smpl_out.joints.cpu().numpy()          # (P, J, 3)
 
             # 2) get scene points for this frame
             frame_points_hw3 = self.pipeline.points[frame_idx]  # (H, W, 3)
@@ -182,15 +179,13 @@ class AlignHMRPi3:
             if frame_idx not in frame_to_kps:
                 continue
 
-            kps_2d_list = frame_to_kps[frame_idx]  # list of (K,2 or 3)
+            kps_2d_list = frame_to_kps[frame_idx]
 
-            # We'll match by index: kp j <-> joint j (best effort)
             for person_idx, kps_2d in enumerate(kps_2d_list):
                 if person_idx >= joints.shape[0]:
                     break  # more 2D people than SMPL people
 
                 smpl_joints_person = joints[person_idx]  # (J, 3)
-                # kps_2d might be (K,3) with scores; take first 2
                 for j in range(min(len(kps_2d), smpl_joints_person.shape[0])):
                     u = float(kps_2d[j][0])
                     v = float(kps_2d[j][1])
@@ -215,7 +210,6 @@ class AlignHMRPi3:
         using your stored masks (if present). Falls back to 'all points' for
         that frame if the mask is missing.
         """
-        # pipeline already loaded npz with per-frame points: (S, H, W, 3)
         pts_hw3 = self.pipeline.points[frame_idx]  # (H, W, 3)
         H, W, _ = pts_hw3.shape
 
@@ -223,98 +217,18 @@ class AlignHMRPi3:
         mask = self.get_union_mask(video_id, stem, label, is_static=False)
 
         if mask is not None:
-            # mask is H x W, boolean
             mask = mask.astype(bool)
-            # safety in case mask shape != points shape
             if mask.shape[0] != H or mask.shape[1] != W:
                 mask = cv2.resize(mask.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
             pts = pts_hw3[mask]
         else:
             pts = pts_hw3.reshape(-1, 3)
 
-        # filter out NaNs / zeros
         pts = pts[np.isfinite(pts).all(axis=1)]
-        # keep only where not all zeros
         nonzero = ~(np.abs(pts).sum(axis=1) < 1e-6)
         pts = pts[nonzero]
 
         return pts
-
-    def _global_similarity_icp(self,
-                               per_frame_smpl: list,
-                               per_frame_scene: list,
-                               iters: int = 5,
-                               max_smpl_per_frame: int = 2500,
-                               max_scene_per_frame: int = 15000):
-        """
-        per_frame_smpl: list of (V,3) or list of list-of-people [(P, V,3)]? we’ll flatten per frame
-        per_frame_scene: list of (Nf,3) partial clouds
-        returns single s, R, t that best fits ALL frames together
-        """
-        s_global = 1.0
-        R_global = np.eye(3)
-        t_global = np.zeros(3)
-
-        num_frames = len(per_frame_smpl)
-
-        for _ in range(iters):
-            all_src_orig = []
-            all_dst_match = []
-
-            for f in range(num_frames):
-                smpl_f = per_frame_smpl[f]
-                scene_f = per_frame_scene[f]
-                if smpl_f is None or scene_f is None:
-                    continue
-                if scene_f.shape[0] == 0:
-                    continue
-
-                # flatten people if needed
-                if smpl_f.ndim == 3:
-                    # (P,V,3) -> (P*V, 3)
-                    smpl_flat = smpl_f.reshape(-1, 3)
-                else:
-                    smpl_flat = smpl_f  # (V,3)
-
-                # optional subsample SMPL for speed
-                if smpl_flat.shape[0] > max_smpl_per_frame:
-                    idx_smpl = np.random.choice(smpl_flat.shape[0], max_smpl_per_frame, replace=False)
-                    smpl_flat = smpl_flat[idx_smpl]
-
-                # transform with current global estimate
-                smpl_tf = (s_global * (R_global @ smpl_flat.T).T) + t_global  # (Ns,3)
-
-                # subsample scene cloud once per frame
-                if scene_f.shape[0] > max_scene_per_frame:
-                    idx_scene = np.random.choice(scene_f.shape[0], max_scene_per_frame, replace=False)
-                    scene_used = scene_f[idx_scene]
-                else:
-                    scene_used = scene_f
-
-                # brute-force NN
-                dists = np.linalg.norm(smpl_tf[:, None, :] - scene_used[None, :, :], axis=2)  # (Ns, Nd)
-                nn_idx = dists.argmin(axis=1)
-                matched_scene = scene_used[nn_idx]
-
-                # store PAIRS: (original smpl BEFORE transform, matched scene)
-                all_src_orig.append(smpl_flat)
-                all_dst_match.append(matched_scene)
-
-            if len(all_src_orig) == 0:
-                break
-
-            src_cat = np.concatenate(all_src_orig, axis=0)
-            dst_cat = np.concatenate(all_dst_match, axis=0)
-
-            # run one Umeyama on ALL pairs → gives a delta similarity
-            s_delta, R_delta, t_delta = self._umeyama_similarity(src_cat, dst_cat)
-
-            # compose: new = s_d * R_d * old + t_d
-            s_global = s_delta * s_global
-            R_global = R_delta @ R_global
-            t_global = R_delta @ t_global + t_delta
-
-        return s_global, R_global, t_global
 
     def get_union_mask(self, video_id: str, stem: str, label: str, is_static) -> Optional[np.ndarray]:
         if is_static:
@@ -341,14 +255,11 @@ class AlignHMRPi3:
         annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
         annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
 
-        # Sort the list where the frame ids are of the format '000123.png'
         annotated_frame_id_list.sort(key=lambda x: int(x[:-4]))
 
         annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
         annotated_last_frame_id = int(annotated_frame_id_list[-1][:-4])
 
-        # Get the mapping for sampled_frame_id and the actual frame id
-        # Now start from the sampled frame which corresponds to the first annotated frame and keep the rest of the sampled frames
         video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir, f"{video_id[:-4]}.npy")
         video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()  # Numbers only
 
@@ -360,6 +271,81 @@ class AlignHMRPi3:
         frame_idx_frame_path_map = {i: f"{frame_id:06d}.png" for i, frame_id in enumerate(chosen_frames)}
         return frame_idx_frame_path_map
 
+    # ------------------------------------------------------------
+    # NEW: collect dense-ish SMPL↔masked-human correspondences
+    # ------------------------------------------------------------
+    def _collect_mesh_mask_correspondences(
+        self,
+        video_id: str,
+        world4d: dict,
+        frame_idx_frame_path_map: Dict[int, str],
+        num_smpl_samples_per_person: int = 400,
+        num_scene_subsample: int = 800,
+        max_frames: int = 60,
+    ):
+        """
+        Build extra (smpl_point, scene_point) pairs by:
+        - running SMPLX for the frame
+        - getting the masked human point cloud for that frame
+        - for a subset of SMPL vertices, find nearest scene point in the mask
+
+        This gives us many more (noisy-but-useful) correspondences than 2D joints.
+        """
+        smpl_pts_all = []
+        scene_pts_all = []
+
+        for frame_idx, frame_data in list(world4d.items())[:max_frames]:
+            if len(frame_data['track_id']) == 0:
+                continue
+
+            rotmat = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
+            smpl_out = self.smplx(
+                global_orient=rotmat[:, :1].cuda(),
+                body_pose=rotmat[:, 1:22].cuda(),
+                betas=frame_data['shape'].cuda(),
+                transl=frame_data['trans'].cuda()
+            )
+            verts = smpl_out.vertices.cpu().numpy()   # (P, V, 3)
+
+            scene_pts = self._get_partial_pointcloud(
+                video_id,
+                frame_idx,
+                frame_idx_frame_path_map,
+                label="person"
+            )
+            if scene_pts.shape[0] == 0:
+                continue
+
+            if scene_pts.shape[0] > num_scene_subsample:
+                choice = np.random.choice(scene_pts.shape[0], num_scene_subsample, replace=False)
+                scene_pts = scene_pts[choice]
+
+            for p in range(verts.shape[0]):
+                smpl_verts = verts[p]  # (V,3)
+
+                if smpl_verts.shape[0] > num_smpl_samples_per_person:
+                    idx = np.random.choice(smpl_verts.shape[0], num_smpl_samples_per_person, replace=False)
+                    smpl_sampled = smpl_verts[idx]
+                else:
+                    smpl_sampled = smpl_verts
+
+                matched_scene = []
+                for sp in smpl_sampled:
+                    dists = np.sum((scene_pts - sp[None, :]) ** 2, axis=1)
+                    nn_idx = np.argmin(dists)
+                    matched_scene.append(scene_pts[nn_idx])
+                matched_scene = np.asarray(matched_scene, dtype=np.float64)
+
+                smpl_pts_all.append(smpl_sampled)
+                scene_pts_all.append(matched_scene)
+
+        if len(smpl_pts_all) == 0:
+            return None, None
+
+        smpl_pts_all = np.concatenate(smpl_pts_all, axis=0)
+        scene_pts_all = np.concatenate(scene_pts_all, axis=0)
+        return smpl_pts_all, scene_pts_all
+
     def process_video(self, video_id):
         # run pipeline as before
         self.pipeline.__call__(video_id, save_only_essential=False)
@@ -369,16 +355,43 @@ class AlignHMRPi3:
         world4d = self.pipeline.create_world4d()
         world4d = {i: world4d[k] for i, k in enumerate(world4d)}
 
-        # 1) collect correspondences using keypoints (this is fast)
+        # mapping for masks/frames
+        frame_idx_frame_path_map = self.idx_to_frame_idx_path(video_id)
+
+        # 1) sparse: 2D kps -> 3D
         smpl_kps, scene_kps = self._collect_kp_correspondences(video_id, world4d, results)
 
-        if smpl_kps is not None and scene_kps is not None and smpl_kps.shape[0] >= 4:
-            s_g, R_g, t_g = self._umeyama_similarity(smpl_kps, scene_kps)
-        else:
-            # fallback: no alignment
-            s_g, R_g, t_g = 1.0, np.eye(3), np.zeros(3)
+        # 2) dense-ish: SMPL verts <-> masked human points
+        smpl_dense, scene_dense = self._collect_mesh_mask_correspondences(
+            video_id,
+            world4d,
+            frame_idx_frame_path_map,
+            num_smpl_samples_per_person=400,
+            num_scene_subsample=800,
+            max_frames=60,
+        )
 
-        # 2) now run through frames again, generate verts, apply SAME transform
+        # 3) merge
+        smpl_all = []
+        scene_all = []
+        if smpl_kps is not None and scene_kps is not None and smpl_kps.shape[0] > 0:
+            smpl_all.append(smpl_kps)
+            scene_all.append(scene_kps)
+        if smpl_dense is not None and scene_dense is not None and smpl_dense.shape[0] > 0:
+            smpl_all.append(smpl_dense)
+            scene_all.append(scene_dense)
+
+        if len(smpl_all) == 0:
+            # fallback: no alignment signal at all
+            s_g, R_g, t_g = 1.0, np.eye(3), np.zeros(3)
+        else:
+            smpl_all = np.concatenate(smpl_all, axis=0)
+            scene_all = np.concatenate(scene_all, axis=0)
+            s_g, R_g, t_g = self._umeyama_similarity(smpl_all, scene_all)
+            # guard against pathological tiny scales
+            s_g = float(np.clip(s_g, 0.5, 2.5))
+
+        # 4) now run through frames again, generate verts, apply SAME transform
         all_verts_for_floor = []
         for frame_idx, frame_data in world4d.items():
             if len(frame_data['track_id']) == 0:
@@ -393,7 +406,6 @@ class AlignHMRPi3:
             )
             verts = smpl_out.vertices.cpu().numpy()  # (P, V, 3)
 
-            # apply global transform
             verts_tf = (s_g * (R_g @ verts.reshape(-1, 3).T).T) + t_g
             verts_tf = verts_tf.reshape(verts.shape)
 
@@ -417,6 +429,7 @@ class AlignHMRPi3:
             floor=(gv, gf) if gv is not None else None,
             init_fps=10,
             img_maxsize=480,
+            dynamic_prediction_path="/data2/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic"
         )
 
         print('Rerun visualization running. Press Ctrl+C to terminate.')
@@ -430,12 +443,7 @@ class AlignHMRPi3:
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
                 continue
-            # self.process_video(video_id)
             self.process_video(video_id)
-            # try:
-            #     self.process_video_intermediate_steps(video_id)
-            # except Exception as e:
-            #     print(f"[ERROR] Error processing video {video_id}: {e}")
 
 
 def _parse_split(s: str) -> str:

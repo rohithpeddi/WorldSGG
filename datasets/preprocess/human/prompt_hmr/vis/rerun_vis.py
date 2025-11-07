@@ -616,6 +616,7 @@ def rerun_vis_world4d(
         image_fn: Optional[Callable[[int, Optional[np.ndarray]], Optional[np.ndarray]]] = None,
         # NEW: reuse stable entity paths so old frames don't linger on screen.
         reuse_paths: bool = True,
+        dynamic_prediction_path: Optional[str] = None
 ):
     faces_u32 = _faces_u32(faces)
     # Start a fresh recording & spawn the viewer.
@@ -684,8 +685,7 @@ def rerun_vis_world4d(
     # # Pre-extract static points from all humans across time.
     # scene_3d, static_points, static_colors = predictions_to_glb_with_static(predictions, conf_min=0.1)
 
-    video_dynamic_prediction_path = os.path.join("/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic", f"{video_id[:-4]}_10",
-                                                 "predictions.npz")
+    video_dynamic_prediction_path = os.path.join(dynamic_prediction_path, f"{video_id[:-4]}_10", "predictions.npz")
     video_dynamic_predictions = np.load(video_dynamic_prediction_path, allow_pickle=True)
     video_dynamic_predictions = {k: video_dynamic_predictions[k] for k in video_dynamic_predictions.files}
     print(f"Loaded existing predictions for video from {video_dynamic_prediction_path}")
@@ -696,9 +696,9 @@ def rerun_vis_world4d(
     camera_poses = video_dynamic_predictions["camera_poses"]  # (S,4,4)
     colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)  # (S, H, W, 3)
 
-    R = Rotation.from_euler("y", 100, degrees=True).as_matrix()
-    R = R @ Rotation.from_euler("x", 155, degrees=True).as_matrix()
-    points = points @ R.T  # undo rotation
+    # R = Rotation.from_euler("y", 100, degrees=True).as_matrix()
+    # R = R @ Rotation.from_euler("x", 155, degrees=True).as_matrix()
+    # points = points @ R.T  # undo rotation
 
 
     BASE = "world"
