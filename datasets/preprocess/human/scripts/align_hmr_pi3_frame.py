@@ -374,15 +374,35 @@ class AlignHMRPi3:
         return p3d
 
     def _build_frame_to_kps_map(self, results: dict):
+        """
+        Build: frame_idx -> [kp_person_0, kp_person_1, ...]
+        Each item is either:
+          - dict joint_name -> [x, y, score]   (preferred, from keypoints_2d_map)
+          - or np.ndarray (K, 3)               (fallback, old behavior)
+        """
         frame_to_kps = {}
         people_results = results.get("people", {})
+
         for _, pdata in people_results.items():
-            kps_2d = pdata.get("keypoints_2d", None)
             frames = pdata.get("frames", None)
-            if kps_2d is None or frames is None:
+            if frames is None:
                 continue
+
+            # new dict-based sequence
+            kp_maps = pdata.get("keypoints_2d_map", None)
+            # old array-based sequence
+            kp_arrs = pdata.get("keypoints_2d", None)
+
             for i, fidx in enumerate(frames):
-                frame_to_kps.setdefault(fidx, []).append(kps_2d[i])
+                if kp_maps is not None:
+                    kp_this = kp_maps[i]
+                elif kp_arrs is not None:
+                    kp_this = kp_arrs[i]
+                else:
+                    continue
+
+                frame_to_kps.setdefault(fidx, []).append(kp_this)
+
         return frame_to_kps
 
     def _get_partial_pointcloud(self, video_id: str, frame_idx: int, frame_idx_frame_path_map,
@@ -447,11 +467,22 @@ class AlignHMRPi3:
         return frame_idx_frame_path_map
 
     def _collect_kp_corr_for_frame(self, frame_idx: int, frame_data: dict, frame_to_kps: dict):
+        """
+        Collect sparse SMPL <-> scene correspondences for one frame.
+
+        Now we:
+        1. run SMPL to get 3D joints
+        2. build a {smpl_joint_name: joint_3d} map
+        3. for each 2D keypoint (which is in openpose naming), map its name to the
+           corresponding SMPL name and lift that 2D point to 3D
+        """
+
         if frame_idx not in frame_to_kps:
             return None, None
         if len(frame_data['track_id']) == 0:
             return None, None
 
+        # run SMPL for this frame
         rotmat = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
         smpl_out = self.smplx(
             global_orient=rotmat[:, :1].cuda(),
@@ -466,19 +497,77 @@ class AlignHMRPi3:
         smpl_list = []
         scene_list = []
 
-        kps_2d_list = frame_to_kps[frame_idx]
-        for person_idx, kps_2d in enumerate(kps_2d_list):
+        # per-frame keypoints: list, one entry per person (dict or array)
+        kps_per_person = frame_to_kps[frame_idx]
+
+        # openpose -> smpl name aliases
+        # tweak these if your SMPLX layer exposes slightly different names
+        OPENPOSE_TO_SMPL = {
+            "nose": "head",  # sometimes "head" or "head_top"; change if needed
+            "neck": "neck",
+            "mid_hip": "pelvis",
+            "r_shoulder": "right_shoulder",
+            "l_shoulder": "left_shoulder",
+            "r_elbow": "right_elbow",
+            "l_elbow": "left_elbow",
+            "r_wrist": "right_wrist",
+            "l_wrist": "left_wrist",
+            "r_hip": "right_hip",
+            "l_hip": "left_hip",
+            "r_knee": "right_knee",
+            "l_knee": "left_knee",
+            "r_ankle": "right_ankle",
+            "l_ankle": "left_ankle",
+            # eyes / ears / toes likely won’t exist on SMPLX’s core 55 joints
+        }
+
+        # if your SMPLX layer already exposes names, we can cache once
+        smpl_joint_names = getattr(self, "_smpl_joint_names_cache", None)
+        if smpl_joint_names is None:
+            # try to import from your kp utils, otherwise fall back to indices
+            try:
+                from datasets.preprocess.human.prompt_hmr.utils.kp_utils import get_smpl_joint_names
+                smpl_joint_names = get_smpl_joint_names()
+            except Exception:
+                smpl_joint_names = None
+            self._smpl_joint_names_cache = smpl_joint_names
+
+        for person_idx, kps_2d in enumerate(kps_per_person):
             if person_idx >= joints.shape[0]:
                 break
-            smpl_joints_person = joints[person_idx]
-            for j in range(min(len(kps_2d), smpl_joints_person.shape[0])):
-                u = float(kps_2d[j][0])
-                v = float(kps_2d[j][1])
-                scene_p = self._lift_2d_to_3d(frame_points_hw3, u, v)
-                if scene_p is None:
-                    continue
-                smpl_list.append(smpl_joints_person[j])
-                scene_list.append(scene_p)
+
+            smpl_joints_person = joints[person_idx]  # (J, 3)
+
+            # 1) build smpl name -> point map for this person
+            if smpl_joint_names is not None and len(smpl_joint_names) >= smpl_joints_person.shape[0]:
+                smpl_name_to_pt = {
+                    smpl_joint_names[j]: smpl_joints_person[j]
+                    for j in range(smpl_joints_person.shape[0])
+                }
+            else:
+                # fallback: index-based name
+                smpl_name_to_pt = {
+                    f"joint_{j}": smpl_joints_person[j]
+                    for j in range(smpl_joints_person.shape[0])
+                }
+
+            # 2) now match with 2D keypoints
+            # case A: dict-based (preferred)
+            if isinstance(kps_2d, dict):
+                for kp_name, kp in kps_2d.items():
+                    # normalize name
+                    smpl_name = OPENPOSE_TO_SMPL.get(kp_name, kp_name)
+                    if smpl_name not in smpl_name_to_pt:
+                        continue
+
+                    u = float(kp[0])
+                    v = float(kp[1])
+                    scene_p = self._lift_2d_to_3d(frame_points_hw3, u, v)
+                    if scene_p is None:
+                        continue
+
+                    smpl_list.append(smpl_name_to_pt[smpl_name])
+                    scene_list.append(scene_p)
 
         if len(smpl_list) == 0:
             return None, None

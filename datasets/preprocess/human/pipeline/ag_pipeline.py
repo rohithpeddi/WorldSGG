@@ -14,7 +14,7 @@ from scipy.spatial.transform import Rotation
 from .camera import run_metric_slam, calibrate_intrinsics, run_slam
 from .detector import segment
 from .detector.vitpose_estimator import load_vit_model, estimate_kp2ds_from_bbox_vitpose
-from .kp_utils import convert_kps
+from .kp_utils import convert_kps, get_openpose_joint_names
 from .mcs_export_cam import export_scene_with_camera
 from .phmr_vid import PromptHMR_Video
 from .postprocessing import post_optimization
@@ -93,15 +93,57 @@ class AgPipeline:
         self.results['people'] = tracks
         self.results['has_tracks'] = True
 
-    def estimate_2d_keypoints(self, ):
+    # def estimate_2d_keypoints(self, ):
+    #     model_path = os.path.join(os.path.dirname(__file__), '../data/pretrain/vitpose-h-coco_25.pth')
+    #     model = load_vit_model(model_path=model_path)
+    #     for k, v in self.results['people'].items():
+    #         kpts_2d = estimate_kp2ds_from_bbox_vitpose(model, self.images, v['bboxes'], k, v['frames'])
+    #         kpts_2d = convert_kps(kpts_2d, 'vitpose25', 'openpose')
+    #         self.results['people'][k]['keypoints_2d'] = kpts_2d
+    #         coco_kp2d = convert_kps(kpts_2d, 'ophandface', 'cocoophf')
+    #         self.results['people'][k]['vitpose'] = coco_kp2d
+    #     self.results['has_2d_kpts'] = True
+    #     del model
+    #     return self.results
+
+    def estimate_2d_keypoints(self):
         model_path = os.path.join(os.path.dirname(__file__), '../data/pretrain/vitpose-h-coco_25.pth')
         model = load_vit_model(model_path=model_path)
-        for k, v in self.results['people'].items():
-            kpts_2d = estimate_kp2ds_from_bbox_vitpose(model, self.images, v['bboxes'], k, v['frames'])
-            kpts_2d = convert_kps(kpts_2d, 'vitpose25', 'openpose')
-            self.results['people'][k]['keypoints_2d'] = kpts_2d
-            coco_kp2d = convert_kps(kpts_2d, 'ophandface', 'cocoophf')
-            self.results['people'][k]['vitpose'] = coco_kp2d
+
+        # we’ll use these names to build the dicts
+        openpose_joint_names = get_openpose_joint_names()  # returns list of joint names
+
+        for pid, person in self.results['people'].items():
+            # 1) run ViTPose per person
+            kpts_2d = estimate_kp2ds_from_bbox_vitpose(
+                model,
+                self.images,
+                person['bboxes'],
+                pid,
+                person['frames'],
+            )  # (T, K_src, 3)
+
+            # 2) convert to openpose (this is how your original code did it)
+            kpts_2d_openpose = convert_kps(kpts_2d, 'vitpose25', 'openpose')  # (T, K_dst, 3)
+            self.results['people'][pid]['keypoints_2d'] = kpts_2d_openpose
+
+            # 3) your existing extra conversion
+            coco_kp2d = convert_kps(kpts_2d_openpose, 'ophandface', 'cocoophf')
+            self.results['people'][pid]['vitpose'] = coco_kp2d
+
+            # 4) build a per-frame map
+            T, K = kpts_2d_openpose.shape[0], kpts_2d_openpose.shape[1]
+            names = openpose_joint_names[:K]  # guard in case K < len(names)
+
+            keypoints_2d_map = []
+            for t in range(T):
+                frame_map = {}
+                for j, jname in enumerate(names):
+                    frame_map[jname] = kpts_2d_openpose[t, j].tolist()  # [x, y, score]
+                keypoints_2d_map.append(frame_map)
+
+            self.results['people'][pid]['keypoints_2d_map'] = keypoints_2d_map
+
         self.results['has_2d_kpts'] = True
         del model
         return self.results
