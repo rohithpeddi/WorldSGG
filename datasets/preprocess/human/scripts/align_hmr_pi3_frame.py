@@ -21,6 +21,10 @@ from datasets.preprocess.human.data_config import SMPLX_PATH
 from datasets.preprocess.human.prompt_hmr.smpl_family import SMPLX as SMPLX_Layer
 from datasets.preprocess.human.prompt_hmr.utils.rotation_conversions import axis_angle_to_matrix
 from datasets.preprocess.human.prompt_hmr.vis.traj import get_floor_mesh
+from datasets.preprocess.human.pipeline.kp_utils import (
+    get_openpose_joint_names,
+    get_smpl_joint_names,
+)
 
 
 # ------------------------------------------------------------
@@ -377,8 +381,8 @@ class AlignHMRPi3:
         """
         Build: frame_idx -> [kp_person_0, kp_person_1, ...]
         Each item is either:
-          - dict joint_name -> [x, y, score]   (preferred, from keypoints_2d_map)
-          - or np.ndarray (K, 3)               (fallback, old behavior)
+          - dict joint_name -> [x, y, score] (preferred, from keypoints_2d_map)
+          - or np.ndarray (K, 3) (fallback, old behavior)
         """
         frame_to_kps = {}
         people_results = results.get("people", {})
@@ -390,14 +394,10 @@ class AlignHMRPi3:
 
             # new dict-based sequence
             kp_maps = pdata.get("keypoints_2d_map", None)
-            # old array-based sequence
-            kp_arrs = pdata.get("keypoints_2d", None)
 
             for i, fidx in enumerate(frames):
                 if kp_maps is not None:
                     kp_this = kp_maps[i]
-                elif kp_arrs is not None:
-                    kp_this = kp_arrs[i]
                 else:
                     continue
 
@@ -470,19 +470,15 @@ class AlignHMRPi3:
         """
         Collect sparse SMPL <-> scene correspondences for one frame.
 
-        Now we:
-        1. run SMPL to get 3D joints
-        2. build a {smpl_joint_name: joint_3d} map
-        3. for each 2D keypoint (which is in openpose naming), map its name to the
-           corresponding SMPL name and lift that 2D point to 3D
+        Uses the actual OpenPose names you provided (e.g. "OP Neck", "OP RWrist")
+        and maps them to the SMPL joint names you provided.
         """
-
         if frame_idx not in frame_to_kps:
             return None, None
         if len(frame_data['track_id']) == 0:
             return None, None
 
-        # run SMPL for this frame
+        # 1) run SMPL for this frame to get 3D joints
         rotmat = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
         smpl_out = self.smplx(
             global_orient=rotmat[:, :1].cuda(),
@@ -491,46 +487,52 @@ class AlignHMRPi3:
             transl=frame_data['trans'].cuda()
         )
         joints = smpl_out.joints.cpu().numpy()  # (P, J, 3)
+        joints = joints[:, :24, :]  # keep only the 24 you have names for
 
         frame_points_hw3 = self.pipeline.points[frame_idx]
 
         smpl_list = []
         scene_list = []
 
-        # per-frame keypoints: list, one entry per person (dict or array)
+        # 2) per-person 2D keypoints for this frame
         kps_per_person = frame_to_kps[frame_idx]
 
-        # openpose -> smpl name aliases
-        # tweak these if your SMPLX layer exposes slightly different names
-        OPENPOSE_TO_SMPL = {
-            "nose": "head",  # sometimes "head" or "head_top"; change if needed
-            "neck": "neck",
-            "mid_hip": "pelvis",
-            "r_shoulder": "right_shoulder",
-            "l_shoulder": "left_shoulder",
-            "r_elbow": "right_elbow",
-            "l_elbow": "left_elbow",
-            "r_wrist": "right_wrist",
-            "l_wrist": "left_wrist",
-            "r_hip": "right_hip",
-            "l_hip": "left_hip",
-            "r_knee": "right_knee",
-            "l_knee": "left_knee",
-            "r_ankle": "right_ankle",
-            "l_ankle": "left_ankle",
-            # eyes / ears / toes likely won’t exist on SMPLX’s core 55 joints
-        }
+        # 3) get both name lists (so we can verify target names exist)
+        smpl_joint_names = get_smpl_joint_names()
+        openpose_joint_names = get_openpose_joint_names()
 
-        # if your SMPLX layer already exposes names, we can cache once
-        smpl_joint_names = getattr(self, "_smpl_joint_names_cache", None)
-        if smpl_joint_names is None:
-            # try to import from your kp utils, otherwise fall back to indices
-            try:
-                from datasets.preprocess.human.prompt_hmr.utils.kp_utils import get_smpl_joint_names
-                smpl_joint_names = get_smpl_joint_names()
-            except Exception:
-                smpl_joint_names = None
-            self._smpl_joint_names_cache = smpl_joint_names
+        # 4) OpenPose (yours) -> SMPL (yours)
+        # only mapping joints that actually exist in your SMPL list
+        OPENPOSE_TO_SMPL = {
+            "OP Nose": "head",  # 15
+            "OP Neck": "neck",  # 12
+            "OP MidHip": "hips",  # 0
+
+            "OP LHip": "leftUpLeg",  # 1
+            "OP RHip": "rightUpLeg",  # 2
+
+            "OP LKnee": "leftLeg",  # 4
+            "OP RKnee": "rightLeg",  # 5
+
+            "OP LAnkle": "leftFoot",  # 7
+            "OP RAnkle": "rightFoot",  # 8
+
+            "OP LShoulder": "leftShoulder",  # 13
+            "OP RShoulder": "rightShoulder",  # 14
+
+            # elbows -> forearms (closest available in your SMPL list)
+            "OP LElbow": "leftForeArm",  # 18
+            "OP RElbow": "rightForeArm",  # 19
+
+            # wrists -> hands
+            "OP LWrist": "leftHand",  # 20
+            "OP RWrist": "rightHand",  # 21
+
+            # toes (you have bases)
+            "OP LBigToe": "leftToeBase",  # 10
+            "OP RBigToe": "rightToeBase",  # 11
+        }
+        # everything else (eyes, ears, small toes, heels) will be skipped
 
         for person_idx, kps_2d in enumerate(kps_per_person):
             if person_idx >= joints.shape[0]:
@@ -538,36 +540,31 @@ class AlignHMRPi3:
 
             smpl_joints_person = joints[person_idx]  # (J, 3)
 
-            # 1) build smpl name -> point map for this person
-            if smpl_joint_names is not None and len(smpl_joint_names) >= smpl_joints_person.shape[0]:
+            # build SMPL name -> 3D point for THIS person
+            if smpl_joint_names and len(smpl_joint_names) >= smpl_joints_person.shape[0]:
                 smpl_name_to_pt = {
                     smpl_joint_names[j]: smpl_joints_person[j]
                     for j in range(smpl_joints_person.shape[0])
                 }
             else:
-                # fallback: index-based name
-                smpl_name_to_pt = {
-                    f"joint_{j}": smpl_joints_person[j]
-                    for j in range(smpl_joints_person.shape[0])
-                }
+                raise ValueError("SMPL joint names list is missing or too short.")
 
-            # 2) now match with 2D keypoints
-            # case A: dict-based (preferred)
-            if isinstance(kps_2d, dict):
-                for kp_name, kp in kps_2d.items():
-                    # normalize name
-                    smpl_name = OPENPOSE_TO_SMPL.get(kp_name, kp_name)
-                    if smpl_name not in smpl_name_to_pt:
-                        continue
+            for op_name, kp in kps_2d.items():
+                smpl_name = OPENPOSE_TO_SMPL.get(op_name, None)
+                if smpl_name is None:
+                    continue  # no mapping for this OP joint
 
-                    u = float(kp[0])
-                    v = float(kp[1])
-                    scene_p = self._lift_2d_to_3d(frame_points_hw3, u, v)
-                    if scene_p is None:
-                        continue
+                if smpl_name not in smpl_name_to_pt:
+                    continue  # SMPL side doesn't have this joint (shouldn't happen for the ones above)
 
-                    smpl_list.append(smpl_name_to_pt[smpl_name])
-                    scene_list.append(scene_p)
+                u = float(kp[0])
+                v = float(kp[1])
+                scene_p = self._lift_2d_to_3d(frame_points_hw3, u, v)
+                if scene_p is None:
+                    continue
+
+                smpl_list.append(smpl_name_to_pt[smpl_name])
+                scene_list.append(scene_p)
 
         if len(smpl_list) == 0:
             return None, None
