@@ -696,10 +696,9 @@ def rerun_vis_world4d(
     camera_poses = video_dynamic_predictions["camera_poses"]  # (S,4,4)
     colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)  # (S, H, W, 3)
 
-    R = Rotation.from_euler("y", 100, degrees=True).as_matrix()
-    R = R @ Rotation.from_euler("x", 155, degrees=True).as_matrix()
-    points = points @ R.T  # undo rotation
-
+    # R = Rotation.from_euler("y", 100, degrees=True).as_matrix()
+    # R = R @ Rotation.from_euler("x", 155, degrees=True).as_matrix()
+    # points = points @ R.T  # undo rotation
 
     BASE = "world"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
@@ -716,7 +715,6 @@ def rerun_vis_world4d(
     #
     #     print("[static] count:", len(static_points), "finite:", np.isfinite(static_points).all(),
     #           "min:", np.nanmin(static_points, axis=0), "max:", np.nanmax(static_points, axis=0))
-
 
     for i in range(num_frames):
         rr.set_time_sequence("frame", i)

@@ -346,8 +346,61 @@ class AlignHMRPi3:
         scene_pts_all = np.concatenate(scene_pts_all, axis=0)
         return smpl_pts_all, scene_pts_all
 
+    def _vis_sparse_correspondences_rerun(self, video_id: str,
+                                          smpl_pts: np.ndarray,
+                                          scene_pts: np.ndarray,
+                                          app_id: str = "KP-Corr"):
+        """
+        Visualize SMPL keypoints vs scene keypoints in rerun, with arrows from SMPL->scene.
+        This is just a debug viewer to see how far apart they are before similarity.
+        """
+        import rerun as rr
+        rr.init(f"{app_id}-{video_id}", spawn=True)
+
+        # keep a sensible axis convention
+        try:
+            rr.log("/", rr.ViewCoordinates.RUB)
+        except Exception:
+            pass
+
+        rr.set_time_sequence("step", 0)
+
+        smpl_pts = np.asarray(smpl_pts, dtype=np.float32)
+        scene_pts = np.asarray(scene_pts, dtype=np.float32)
+
+        # log the two point sets
+        rr.log(
+            "smpl_kps",
+            rr.Points3D(
+                positions=smpl_pts,
+                colors=np.full((smpl_pts.shape[0], 3), [255, 0, 0], dtype=np.uint8),  # red
+                radii=0.01,
+            ),
+        )
+        rr.log(
+            "scene_kps",
+            rr.Points3D(
+                positions=scene_pts,
+                colors=np.full((scene_pts.shape[0], 3), [0, 255, 0], dtype=np.uint8),  # green
+                radii=0.012,
+            ),
+        )
+
+        # if same length, draw arrows from smpl -> scene so we can see offsets
+        if smpl_pts.shape[0] == scene_pts.shape[0]:
+            rr.log(
+                "correspondences",
+                rr.Arrows3D(
+                    origins=smpl_pts,
+                    vectors=(scene_pts - smpl_pts),
+                    colors=np.full((smpl_pts.shape[0], 3), [0, 0, 255], dtype=np.uint8),  # blue arrows
+                ),
+            )
+
+        print("Opened rerun for sparse SMPL<->scene correspondences.")
+
     def process_video(self, video_id):
-        # run pipeline as before
+        # run the pipeline as before
         self.pipeline.__call__(video_id, save_only_essential=False)
         results = self.pipeline.estimate_2d_keypoints()
 
@@ -360,7 +413,16 @@ class AlignHMRPi3:
 
         # 1) sparse: 2D kps -> 3D
         smpl_kps, scene_kps = self._collect_kp_correspondences(video_id, world4d, results)
+        # DEBUG VIS: see raw correspondences before estimating similarity
+        if smpl_kps is not None and scene_kps is not None and smpl_kps.shape[0] > 0:
+            self._vis_sparse_correspondences_rerun(video_id, smpl_kps, scene_kps)
 
+        # Rerun visualization for the smpl_kps, scene_kps correspondences
+        print(
+            f"[{video_id}] Collected {smpl_kps.shape[0] if smpl_kps is not None else 0} sparse keypoint correspondences.")
+        print(f"[{video_id}] Collected {scene_kps.shape[0] if scene_kps is not None else 0} sparse scene keypoints.")
+
+        print(f"[{video_id}] Collecting dense-ish mesh-mask correspondences...")
         # 2) dense-ish: SMPL verts <-> masked human points
         smpl_dense, scene_dense = self._collect_mesh_mask_correspondences(
             video_id,
@@ -389,7 +451,7 @@ class AlignHMRPi3:
             scene_all = np.concatenate(scene_all, axis=0)
             s_g, R_g, t_g = self._umeyama_similarity(smpl_all, scene_all)
             # guard against pathological tiny scales
-            s_g = float(np.clip(s_g, 0.5, 2.5))
+            s_g = float(np.clip(s_g, 0.2, 2.5))
 
         # 4) now run through frames again, generate verts, apply SAME transform
         all_verts_for_floor = []
@@ -406,12 +468,8 @@ class AlignHMRPi3:
             )
             verts = smpl_out.vertices.cpu().numpy()  # (P, V, 3)
 
-            # verts_tf = (s_g * (R_g @ verts.reshape(-1, 3).T).T) + t_g
-            # verts_tf = verts_tf.reshape(verts.shape)
-
             # Just do scaling and translation (no rotation)
-            verts_tf = verts.reshape(-1, 3) + t_g
-            verts_tf = s_g * verts_tf
+            verts_tf = s_g * verts.reshape(-1, 3)
             verts_tf = verts_tf.reshape(verts.shape)
 
             frame_data['vertices'] = verts_tf
