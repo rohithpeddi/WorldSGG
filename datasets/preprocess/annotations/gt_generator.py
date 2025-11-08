@@ -4,7 +4,6 @@ import argparse
 import numpy as np
 import torch
 
-# import your dataset + constants
 from dataloader.base_ag_dataset import BaseAG
 from constants import Constants as const
 
@@ -57,61 +56,22 @@ def clean_frame_items(frame_items):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Export per-video GT annotations from Action Genome-style BaseAG dataset to .npy"
-    )
-    parser.add_argument(
-        "--data_path",
-        required=True,
-        help="Root AG data directory (the one that has 'annotations', 'frames_annotated', etc.)",
-    )
-    parser.add_argument(
-        "--phase",
-        default="train",
-        choices=["train", "test"],
-        help="Which split to load from the PKLs",
-    )
-    parser.add_argument(
-        "--datasize",
-        default="full",
-        choices=[const.FULL, const.MINI] if hasattr(const, "FULL") else ["full", "mini"],
-        help="Dataset size flag used by your BaseAG",
-    )
-    parser.add_argument(
-        "--output_dir",
-        default="gt_output",
-        help="Directory where per-video .npy files will be written",
-    )
-    parser.add_argument(
-        "--filter_nonperson_box_frame",
-        action="store_true",
-        help="Use the same filtering as the original training loader"
-    )
-    parser.add_argument(
-        "--enable_coco_gt",
-        action="store_true",
-        help="If you also want BaseAG to build internal COCO-format GT"
-    )
-    args = parser.parse_args()
-
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    # instantiate your dataset
+    ag_root_directory = "/data/rohith/ag/"
     ds = BaseAG(
-        phase=args.phase,
-        mode="",
-        datasize=args.datasize,
-        data_path=args.data_path,
-        filter_nonperson_box_frame=args.filter_nonperson_box_frame,
+        phase="train",
+        mode="sgdet",
+        datasize="large",
+        data_path=ag_root_directory,
+        filter_nonperson_box_frame=True,
         filter_small_box=False,
-        enable_coco_gt=args.enable_coco_gt,
+        enable_coco_gt=True,
     )
 
     print(f"Loaded dataset with {len(ds)} videos")
 
     for vid_idx in range(len(ds)):
-        # list of frame relpaths for this video: ["video_0001/000001.jpg", ...]
-        frame_names = ds._video_list[vid_idx]
+        # list of frame reloads for this video: ["video_0001/000001.jpg", ...]
+        frame_names = ds.video_list[vid_idx]
         # GT annotations for this video: list (per-frame) of list(dict)
         video_gt = ds.gt_annotations[vid_idx]
 

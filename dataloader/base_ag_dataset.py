@@ -24,6 +24,19 @@ class BaseAG(Dataset):
             enable_coco_gt=False
     ):
 
+        self.invalid_video_names = None
+        self.object_classes = None
+        self.valid_video_names = None
+        self.video_list = None
+        self.video_size = None  # (w,h)
+        self.gt_annotations = None
+        self.non_gt_human_nums = None
+        self.non_heatmap_nums = None
+        self.non_person_video = None
+        self.one_frame_video = None
+        self.valid_nums = None
+        self.invalid_videos = None
+        self.relationship_classes = None
         root_path = data_path
         self._phase = phase
         self._mode = mode
@@ -32,10 +45,10 @@ class BaseAG(Dataset):
         self._frames_path = os.path.join(root_path, const.FRAMES)
 
         # collect the object classes
-        self._fetch_object_classes()
+        self.fetch_object_classes()
 
         # collect relationship classes
-        self._fetch_relationship_classes()
+        self.fetch_relationship_classes()
 
         # Fetch object and person bounding boxes
         person_bbox, object_bbox = self._fetch_object_person_bboxes(self._datasize, filter_small_box)
@@ -45,7 +58,7 @@ class BaseAG(Dataset):
         all_video_names = np.unique(q)
 
         # Build dataset
-        self._build_dataset(video_dict, person_bbox, object_bbox, all_video_names, filter_nonperson_box_frame)
+        self.build_dataset(video_dict, person_bbox, object_bbox, all_video_names, filter_nonperson_box_frame)
 
         self.gt_coco_dict = None
         self.dataset_classnames = [
@@ -69,9 +82,9 @@ class BaseAG(Dataset):
         self._gt_coco_annotations_json: List[Dict[str, Any]] = []
 
         if enable_coco_gt:
-            self._build_gt_coco_annotations()
+            self.build_gt_coco_annotations()
 
-    def _parse_gt_for_frame(
+    def parse_gt_for_frame(
             self,
             gt_video_annotations: List[List[Dict[str, Any]]],
             frame_relpath: str
@@ -115,12 +128,15 @@ class BaseAG(Dataset):
                     cat_ids.append(self.name_to_catid[class_name])
         return boxes_xyxy, cat_ids
 
-    def _build_coco_gt_for_video(
+    def extract_coco_gt_for_video(
             self,
             gt_video_annotations: List[List[Dict[str, Any]]],
             frame_names: List[str],
             video_id: str
     ):
+        # Extract COCO-format GT annotations for a video
+        images_json = []
+        annotations_json = []
         for frame_rel in frame_names:
             video_id2, frame_file = frame_rel.split('/')
             assert video_id2 == video_id
@@ -130,15 +146,16 @@ class BaseAG(Dataset):
 
             if frame_rel not in self._image_id_lookup:
                 self._image_id_lookup[frame_rel] = len(self._image_id_lookup) + 1
-                self._images_json.append({"id": self._image_id_lookup[frame_rel], "file_name": frame_rel})
+                # self._images_json.append({"id": self._image_id_lookup[frame_rel], "file_name": frame_rel})
+                images_json.append({"id": self._image_id_lookup[frame_rel], "file_name": frame_rel})
             image_id = self._image_id_lookup[frame_rel]
 
-            gt_boxes_xyxy, gt_cat_ids = self._parse_gt_for_frame(gt_video_annotations, frame_rel)
+            gt_boxes_xyxy, gt_cat_ids = self.parse_gt_for_frame(gt_video_annotations, frame_rel)
             for b, cid in zip(gt_boxes_xyxy, gt_cat_ids):
                 area = float(max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1]))
                 if area < self._min_box_area:
                     continue
-                self._gt_coco_annotations_json.append({
+                annotations_json.append({
                     "id": self._ann_id_counter,
                     "image_id": image_id,
                     "category_id": cid,
@@ -148,12 +165,52 @@ class BaseAG(Dataset):
                 })
                 self._ann_id_counter += 1
 
-    def _build_gt_coco_annotations(self):
-        for idx in range(len(self._video_list)):
-            frame_names = self._video_list[idx]
-            gt_video_annotations = self._gt_annotations[idx]
+        return images_json, annotations_json
+
+    # def _build_coco_gt_for_video(
+    #         self,
+    #         gt_video_annotations: List[List[Dict[str, Any]]],
+    #         frame_names: List[str],
+    #         video_id: str
+    # ):
+    #     for frame_rel in frame_names:
+    #         video_id2, frame_file = frame_rel.split('/')
+    #         assert video_id2 == video_id
+    #         frame_abs = os.path.join(self._data_path, "frames_annotated", video_id, frame_file)
+    #         if not os.path.exists(frame_abs):
+    #             continue
+    #
+    #         if frame_rel not in self._image_id_lookup:
+    #             self._image_id_lookup[frame_rel] = len(self._image_id_lookup) + 1
+    #             self._images_json.append({"id": self._image_id_lookup[frame_rel], "file_name": frame_rel})
+    #         image_id = self._image_id_lookup[frame_rel]
+    #
+    #         gt_boxes_xyxy, gt_cat_ids = self._parse_gt_for_frame(gt_video_annotations, frame_rel)
+    #         for b, cid in zip(gt_boxes_xyxy, gt_cat_ids):
+    #             area = float(max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1]))
+    #             if area < self._min_box_area:
+    #                 continue
+    #             self._gt_coco_annotations_json.append({
+    #                 "id": self._ann_id_counter,
+    #                 "image_id": image_id,
+    #                 "category_id": cid,
+    #                 "bbox": [float(b[0]), float(b[1]), float(b[2] - b[0]), float(b[3] - b[1])],
+    #                 "area": area,
+    #                 "iscrowd": 0,
+    #             })
+    #             self._ann_id_counter += 1
+
+    def aggregate_gt_coco_annotations(self, images_json, annotations_json):
+        self._images_json.extend(images_json)
+        self._gt_coco_annotations_json.extend(annotations_json)
+
+    def build_gt_coco_annotations(self):
+        for idx in range(len(self.video_list)):
+            frame_names = self.video_list[idx]
+            gt_video_annotations = self.gt_annotations[idx]
             video_id = frame_names[0].split('/')[0]
-            self._build_coco_gt_for_video(gt_video_annotations, frame_names, video_id)
+            images_json, annotations_json = self.extract_coco_gt_for_video(gt_video_annotations, frame_names, video_id)
+            self.aggregate_gt_coco_annotations(images_json, annotations_json)
 
         self.gt_coco_dict = {
             "images": self._images_json,
@@ -163,7 +220,7 @@ class BaseAG(Dataset):
             "licenses": []
         }
 
-    def _fetch_object_classes(self):
+    def fetch_object_classes(self):
         self.object_classes = [const.BACKGROUND]
         with open(os.path.join(self._data_path, const.ANNOTATIONS, const.OBJECT_CLASSES_FILE), 'r',
                   encoding='utf-8') as f:
@@ -177,7 +234,7 @@ class BaseAG(Dataset):
         self.object_classes[24] = 'phone/camera'
         self.object_classes[31] = 'sofa/couch'
 
-    def _fetch_relationship_classes(self):
+    def fetch_relationship_classes(self):
         self.relationship_classes = []
         with open(os.path.join(self._data_path, const.ANNOTATIONS, const.RELATIONSHIP_CLASSES_FILE), 'r') as f:
             for line in f.readlines():
@@ -250,7 +307,7 @@ class BaseAG(Dataset):
         return video_dict, q
 
     def fetch_video_data(self, index):
-        frame_names = self._video_list[index]
+        frame_names = self.video_list[index]
         processed_ims = []
         im_scales = []
         for idx, name in enumerate(frame_names):
@@ -271,17 +328,17 @@ class BaseAG(Dataset):
 
         return img_tensor, im_info, gt_boxes, num_boxes, index
 
-    def _build_dataset(self, video_dict, person_bbox, object_bbox, all_video_names, filter_nonperson_box_frame=True):
-        self._valid_video_names = []
-        self._video_list = []
-        self._video_size = []  # (w,h)
-        self._gt_annotations = []
-        self._non_gt_human_nums = 0
-        self._non_heatmap_nums = 0
-        self._non_person_video = 0
-        self._one_frame_video = 0
-        self._valid_nums = 0
-        self._invalid_videos = []
+    def build_dataset(self, video_dict, person_bbox, object_bbox, all_video_names, filter_nonperson_box_frame=True):
+        self.valid_video_names = []
+        self.video_list = []
+        self.video_size = []  # (w,h)
+        self.gt_annotations = []
+        self.non_gt_human_nums = 0
+        self.non_heatmap_nums = 0
+        self.non_person_video = 0
+        self.one_frame_video = 0
+        self.valid_nums = 0
+        self.invalid_videos = []
 
         '''
         filter_nonperson_box_frame = True (default): according to the stanford method, remove the frames without person box both for training and testing
@@ -293,11 +350,11 @@ class BaseAG(Dataset):
             for j in video_dict[i]:
                 if filter_nonperson_box_frame:
                     if person_bbox[j][const.BOUNDING_BOX].shape[0] == 0:
-                        self._non_gt_human_nums += 1
+                        self.non_gt_human_nums += 1
                         continue
                     else:
                         video.append(j)
-                        self._valid_nums += 1
+                        self.valid_nums += 1
 
                 gt_annotation_frame = [
                     {
@@ -331,36 +388,28 @@ class BaseAG(Dataset):
                 gt_annotation_video.append(gt_annotation_frame)
 
             if len(video) > 2:
-                self._video_list.append(video)
-                self._video_size.append(person_bbox[j][const.BOUNDING_BOX_SIZE])
-                self._gt_annotations.append(gt_annotation_video)
+                self.video_list.append(video)
+                self.video_size.append(person_bbox[j][const.BOUNDING_BOX_SIZE])
+                self.gt_annotations.append(gt_annotation_video)
             elif len(video) == 1:
-                self._one_frame_video += 1
+                self.one_frame_video += 1
             else:
-                self._non_person_video += 1
+                self.non_person_video += 1
 
         print('x' * 60)
         if filter_nonperson_box_frame:
-            print('There are {} videos and {} valid frames'.format(len(self._video_list), self._valid_nums))
-            print('{} videos are invalid (no person), remove them'.format(self._non_person_video))
-            print('{} videos are invalid (only one frame), remove them'.format(self._one_frame_video))
-            print('{} frames have no human bbox in GT, remove them!'.format(self._non_gt_human_nums))
+            print('There are {} videos and {} valid frames'.format(len(self.video_list), self.valid_nums))
+            print('{} videos are invalid (no person), remove them'.format(self.non_person_video))
+            print('{} videos are invalid (only one frame), remove them'.format(self.one_frame_video))
+            print('{} frames have no human bbox in GT, remove them!'.format(self.non_gt_human_nums))
         else:
-            print('There are {} videos and {} valid frames'.format(len(self._video_list), self._valid_nums))
-            print('{} frames have no human bbox in GT'.format(self._non_gt_human_nums))
+            print('There are {} videos and {} valid frames'.format(len(self.video_list), self.valid_nums))
+            print('{} frames have no human bbox in GT'.format(self.non_gt_human_nums))
             print('Removed {} of them without joint heatmaps which means FasterRCNN also cannot find the human'.format(
-                self._non_heatmap_nums))
+                self.non_heatmap_nums))
         print('x' * 60)
 
-        self.invalid_video_names = np.setdiff1d(all_video_names, self._valid_video_names, assume_unique=False)
+        self.invalid_video_names = np.setdiff1d(all_video_names, self.valid_video_names, assume_unique=False)
 
     def __len__(self):
-        return len(self._video_list)
-
-    @property
-    def gt_annotations(self):
-        return self._gt_annotations
-
-    @property
-    def gt_annotations_mask(self):
-        return self._gt_annotations_mask
+        return len(self.video_list)

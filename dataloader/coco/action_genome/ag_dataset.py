@@ -42,7 +42,7 @@ class StandardAGCoCoDataset(BaseAG):
         self._annotations_json: List[Dict[str, Any]] = []
 
         if enable_coco_gt:
-            self._build_gt_coco_annotations()
+            self.build_gt_coco_annotations()
 
     # ------------------------------ GT parsing ------------------------------
     def parse_gt_for_frame(
@@ -128,9 +128,9 @@ class StandardAGCoCoDataset(BaseAG):
                 self._ann_id_counter += 1
 
     def build_gt_coco_annotations(self):
-        for idx in range(len(self._video_list)):
-            frame_names = self._video_list[idx]
-            gt_video_annotations = self._gt_annotations[idx]
+        for idx in range(len(self.video_list)):
+            frame_names = self.video_list[idx]
+            gt_video_annotations = self.gt_annotations[idx]
             video_id = frame_names[0].split('/')[0]
             self.build_coco_gt_for_video(gt_video_annotations, frame_names, video_id)
 
@@ -143,8 +143,8 @@ class StandardAGCoCoDataset(BaseAG):
         }
 
     def __getitem__(self, index):
-        frame_names = self._video_list[index]  # list of "video_id/frame.png" for one video
-        gt_annotations = self._gt_annotations[index]  # dataset-provided annotations for that video
+        frame_names = self.video_list[index]  # list of "video_id/frame.png" for one video
+        gt_annotations = self.gt_annotations[index]  # dataset-provided annotations for that video
         video_id = frame_names[0].split('/')[0]
 
         return {

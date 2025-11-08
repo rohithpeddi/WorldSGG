@@ -27,9 +27,9 @@ class ActionGenomeEvaluationDataset(BaseAG):
         super().__init__(phase, mode, datasize, data_path, filter_nonperson_box_frame, filter_small_box)
         
     def __getitem__(self, index):
-        frame_names = self._video_list[index]
-        gt_annotations = self._gt_annotations[index]
-        video_size = self._video_size[index]
+        frame_names = self.video_list[index]
+        gt_annotations = self.gt_annotations[index]
+        video_size = self.video_size[index]
         
         return {
             'frame_names': frame_names,
