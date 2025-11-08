@@ -1,63 +1,50 @@
 #!/usr/bin/env python3
+import json
 import os
-import argparse
+
 import numpy as np
 import torch
 
 from dataloader.base_ag_dataset import BaseAG
-from constants import Constants as const
 
 
-def to_serializable(obj):
+def to_jsonable(v):
+    """Convert tensors / numpy to plain python so json.dump doesn't choke."""
+    if isinstance(v, torch.Tensor):
+        v = v.cpu().numpy()
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    if isinstance(v, (str, int, float)) or v is None:
+        return v
+    return v
+
+
+def clean_gt_frame_items(frame_items):
     """
-    Convert anything that np.save doesn't like into something JSON/NPY friendly.
-    We keep numpy arrays as-is, convert torch tensors to numpy, and leave scalars/strings.
-    """
-    if isinstance(obj, torch.Tensor):
-        return obj.cpu().numpy()
-    elif isinstance(obj, np.ndarray):
-        return obj
-    elif isinstance(obj, (int, float, str)) or obj is None:
-        return obj
-    # for small containers (dict/list) we just return them and handle below
-    return obj
-
-
-def clean_frame_items(frame_items):
-    """
-    frame_items is the list you built in _build_dataset:
-        [
-          {PERSON_BOUNDING_BOX: ..., FRAME: ...},
-          {<object1 stuff>},
-          {<object2 stuff>},
-          ...
-        ]
-    We want the same structure, but with tensors turned into numpy or lists.
+    frame_items: list[dict] for ONE FRAME like the dataset builds.
+    We convert every tensor/ndarray to a JSON-able list.
     """
     cleaned = []
     for item in frame_items:
         new_item = {}
         for k, v in item.items():
-            v = to_serializable(v)
-            # if it's still a numpy array of objects, keep it;
-            # if it's a numpy array of numbers/tensors it's fine.
-            if isinstance(v, np.ndarray):
-                new_item[k] = v
+            if isinstance(v, (torch.Tensor, np.ndarray)):
+                new_item[k] = to_jsonable(v)
+            elif isinstance(v, (list, tuple)):
+                # may contain tensors inside
+                new_item[k] = [to_jsonable(x) for x in v]
             else:
-                # torch tensors were turned into numpy already,
-                # but some of your fields are torch tensors of ints,
-                # so we convert those to list to be safe
-                if isinstance(v, (list, tuple)):
-                    new_item[k] = v
-                else:
-                    new_item[k] = v
+                new_item[k] = v
         cleaned.append(new_item)
     return cleaned
 
 
 def main():
     ag_root_directory = "/data/rohith/ag/"
-    ds = BaseAG(
+    output_directory = "/data/rohith/ag/ag4D/gt_annotations/"
+    os.makedirs(output_directory, exist_ok=True)
+
+    dataset = BaseAG(
         phase="train",
         mode="sgdet",
         datasize="large",
@@ -67,28 +54,61 @@ def main():
         enable_coco_gt=True,
     )
 
-    print(f"Loaded dataset with {len(ds)} videos")
+    print(f"Dataset loaded with {len(dataset)} videos")
 
-    for vid_idx in range(len(ds)):
-        # list of frame reloads for this video: ["video_0001/000001.jpg", ...]
-        frame_names = ds.video_list[vid_idx]
-        # GT annotations for this video: list (per-frame) of list(dict)
-        video_gt = ds.gt_annotations[vid_idx]
+    for vid_idx in range(len(dataset)):
+        frame_names = dataset.video_list[vid_idx]
+        gt_video_annotations = dataset.gt_annotations[vid_idx]
 
-        # derive video_id from first frame
-        first_frame = frame_names[0]
-        video_id = first_frame.split("/")[0]
+        video_id = frame_names[0].split("/")[0]
+        video_dir = os.path.join(output_directory, video_id)
+        os.makedirs(video_dir, exist_ok=True)
 
-        # clean tensors inside
-        cleaned_video_gt = []
-        for frame_items in video_gt:
-            cleaned_video_gt.append(clean_frame_items(frame_items))
+        images_json = []
+        annotations_json = []
+        ann_id = 1
 
-        # we can store as an object array so structure is preserved
-        out_path = os.path.join(args.output_dir, f"{video_id}.npy")
-        np.save(out_path, np.array(cleaned_video_gt, dtype=object), allow_pickle=True)
+        # We'll reuse the dataset's parsing logic to get per-frame boxes + cat_ids
+        for frame_rel in frame_names:
+            # create image entry
+            image_id = len(images_json) + 1
+            images_json.append({
+                "id": image_id,
+                "file_name": frame_rel,
+            })
 
-        print(f"[{vid_idx+1}/{len(ds)}] saved {out_path}")
+            # ds._parse_gt_for_frame(gt_video_annotations, frame_rel) returns (boxes_xyxy, cat_ids)
+            boxes_xyxy, cat_ids = dataset.parse_gt_for_frame(gt_video_annotations, frame_rel)
+
+            for b, cid in zip(boxes_xyxy, cat_ids):
+                x1, y1, x2, y2 = b
+                w = float(x2 - x1)
+                h = float(y2 - y1)
+                area = max(0.0, w) * max(0.0, h)
+                annotations_json.append({
+                    "id": ann_id,
+                    "image_id": image_id,
+                    "category_id": int(cid),
+                    "bbox": [float(x1), float(y1), float(w), float(h)],
+                    "area": float(area),
+                    "iscrowd": 0,
+                })
+                ann_id += 1
+
+        # clean the raw gt_annotations for this video
+        cleaned_gt_ann = [clean_gt_frame_items(fitems) for fitems in gt_video_annotations]
+
+        # write files
+        with open(os.path.join(video_dir, "images.json"), "w") as f:
+            json.dump(images_json, f, indent=2)
+
+        with open(os.path.join(video_dir, "annotations.json"), "w") as f:
+            json.dump(annotations_json, f, indent=2)
+
+        with open(os.path.join(video_dir, "gt_annotations.json"), "w") as f:
+            json.dump(cleaned_gt_ann, f, indent=2)
+
+        print(f"[{vid_idx+1}/{len(dataset)}] wrote {video_dir}")
 
     print("Done.")
 

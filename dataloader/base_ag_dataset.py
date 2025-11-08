@@ -24,6 +24,9 @@ class BaseAG(Dataset):
             enable_coco_gt=False
     ):
 
+        self.attention_relationships = None
+        self.spatial_relationships = None
+        self.contacting_relationships = None
         self.invalid_video_names = None
         self.object_classes = None
         self.valid_video_names = None
@@ -166,39 +169,6 @@ class BaseAG(Dataset):
                 self._ann_id_counter += 1
 
         return images_json, annotations_json
-
-    # def _build_coco_gt_for_video(
-    #         self,
-    #         gt_video_annotations: List[List[Dict[str, Any]]],
-    #         frame_names: List[str],
-    #         video_id: str
-    # ):
-    #     for frame_rel in frame_names:
-    #         video_id2, frame_file = frame_rel.split('/')
-    #         assert video_id2 == video_id
-    #         frame_abs = os.path.join(self._data_path, "frames_annotated", video_id, frame_file)
-    #         if not os.path.exists(frame_abs):
-    #             continue
-    #
-    #         if frame_rel not in self._image_id_lookup:
-    #             self._image_id_lookup[frame_rel] = len(self._image_id_lookup) + 1
-    #             self._images_json.append({"id": self._image_id_lookup[frame_rel], "file_name": frame_rel})
-    #         image_id = self._image_id_lookup[frame_rel]
-    #
-    #         gt_boxes_xyxy, gt_cat_ids = self._parse_gt_for_frame(gt_video_annotations, frame_rel)
-    #         for b, cid in zip(gt_boxes_xyxy, gt_cat_ids):
-    #             area = float(max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1]))
-    #             if area < self._min_box_area:
-    #                 continue
-    #             self._gt_coco_annotations_json.append({
-    #                 "id": self._ann_id_counter,
-    #                 "image_id": image_id,
-    #                 "category_id": cid,
-    #                 "bbox": [float(b[0]), float(b[1]), float(b[2] - b[0]), float(b[3] - b[1])],
-    #                 "area": area,
-    #                 "iscrowd": 0,
-    #             })
-    #             self._ann_id_counter += 1
 
     def aggregate_gt_coco_annotations(self, images_json, annotations_json):
         self._images_json.extend(images_json)
