@@ -70,7 +70,7 @@ def rerun_vis_world4d(
     """
     Visualize:
       - dynamic point cloud from PI3
-      - per-frame transformed SMPL (green)
+      - per-frame transformed SMPL (green) for a single actor
       - fixed floor mesh transformed by an averaged similarity
       - camera frustum + image
 
@@ -176,26 +176,28 @@ def rerun_vis_world4d(
         else:
             s_i, R_i, t_i = None, None, None
 
-        # humans
+        # humans (now only 1 actor per frame)
         track_ids = world4d[i].get("track_id", [])
         verts_list_orig = world4d[i].get("vertices_orig", [])
         if len(track_ids) > 0 and len(verts_list_orig) > 0:
-            for idx, tid in enumerate(track_ids):
-                if idx < len(verts_list_orig):
-                    verts_orig = np.asarray(verts_list_orig[idx], dtype=np.float32)
-                    # transformed in green
-                    if s_i is not None:
-                        verts_flat = verts_orig.reshape(-1, 3)
-                        verts_tf = s_i * (verts_flat @ R_i.T) + t_i
-                        verts_tf = verts_tf.reshape(verts_orig.shape)
-                        rr.log(
-                            _human_path(int(tid), i, "xform"),
-                            rr.Mesh3D(
-                                vertex_positions=verts_tf.astype(np.float32),
-                                triangle_indices=faces_u32,
-                                albedo_factor=[0, 255, 0],
-                            ),
-                        )
+            # there should be exactly 1 now
+            tid = int(track_ids[0])
+            verts_orig = np.asarray(verts_list_orig[0], dtype=np.float32)
+            if s_i is not None:
+                verts_flat = verts_orig.reshape(-1, 3)
+                verts_tf = s_i * (verts_flat @ R_i.T) + t_i
+                verts_tf = verts_tf.reshape(verts_orig.shape)
+                rr.log(
+                    _human_path(tid, i, "xform"),
+                    rr.Mesh3D(
+                        vertex_positions=verts_tf.astype(np.float32),
+                        triangle_indices=faces_u32,
+                        albedo_factor=[0, 255, 0],
+                    ),
+                )
+        else:
+            print(f"[{video_id}] Track id not found for frame {i}, skipping human visualization.")
+
 
         # dynamic points
         rr.log(
@@ -311,6 +313,57 @@ class AlignHMRPi3:
 
         self.pipeline = AgPipeline(static_cam=False, dynamic_scene_dir_path=self.dynamic_scene_dir_path)
         self.smplx = SMPLX_Layer(SMPLX_PATH).cuda()
+
+    # --------------------------------------------------------
+    # utility for single actor
+    # --------------------------------------------------------
+    def _choose_primary_actor(self, results: dict, world4d: Dict[int, dict]) -> Optional[str]:
+        """
+        Try to pick one stable actor:
+          1. prefer the person in results['people'] with the most frames
+          2. otherwise fall back to the first track_id found in world4d
+        Returns actor id as string (since results keys are often strings).
+        """
+        people = results.get("people", {})
+        if people:
+            counts = {}
+            for pid, pdata in people.items():
+                frames = pdata.get("frames", [])
+                counts[pid] = len(frames)
+            primary = max(counts.items(), key=lambda x: x[1])[0]
+            return primary
+
+        # fallback
+        for _, frame_data in world4d.items():
+            tids = frame_data.get("track_id", [])
+            if tids:
+                return str(tids[0])
+        return None
+
+    def _find_actor_index_in_frame(self, frame_data: dict, primary_actor_id: Optional[str]) -> Optional[int]:
+        """
+        Given frame_data and the chosen actor id, return the index into
+        frame_data['pose']/['shape']/['trans'] for that actor.
+        """
+        track_ids = frame_data.get("track_id", [])
+        if len(track_ids) == 0:
+            print("No track ids in frame data.")
+            return None
+
+        if primary_actor_id is None:
+            print(f"No primary actor id specified, defaulting to first person.")
+            return 0  # fallback: first person
+
+        # normalize to string for comparison
+        # Here track_ids is a tensor
+        for idx, tid in enumerate(track_ids):
+            tid_str = str(tid.item()) if isinstance(tid, torch.Tensor) else str(tid)
+            if tid_str == str(primary_actor_id):
+                return idx
+
+        # actor not present in this frame
+        print("Primary actor id not present in this frame.")
+        return None
 
     # --------------------------------------------------------
     # similarity estimators
@@ -451,24 +504,32 @@ class AlignHMRPi3:
             return None
         return p3d
 
-    def _build_frame_to_kps_map(self, results: dict):
+    def _build_frame_to_kps_map(self, results: dict, primary_actor_id: Optional[str]):
+        """
+        Build {frame_idx -> keypoints_dict} but ONLY for the chosen actor.
+        Assumes results['people'][actor]['keypoints_2d_map'] exists.
+        """
         frame_to_kps = {}
         people_results = results.get("people", {})
+        if not people_results:
+            return frame_to_kps
 
-        for _, pdata in people_results.items():
-            frames = pdata.get("frames", None)
-            if frames is None:
-                continue
+        if primary_actor_id is None:
+            # fallback to any person
+            primary_actor_id = list(people_results.keys())[0]
 
-            kp_maps = pdata.get("keypoints_2d_map", None)
+        pdata = people_results.get(primary_actor_id, None)
+        if pdata is None:
+            return frame_to_kps
 
-            for i, fidx in enumerate(frames):
-                if kp_maps is not None:
-                    kp_this = kp_maps[i]
-                else:
-                    continue
+        frames = pdata.get("frames", None)
+        kp_maps = pdata.get("keypoints_2d_map", None)
 
-                frame_to_kps.setdefault(fidx, []).append(kp_this)
+        if frames is None or kp_maps is None:
+            return frame_to_kps
+
+        for i, fidx in enumerate(frames):
+            frame_to_kps[fidx] = kp_maps[i]
 
         return frame_to_kps
 
@@ -478,6 +539,7 @@ class AlignHMRPi3:
         H, W, _ = pts_hw3.shape
 
         stem = frame_idx_frame_path_map[frame_idx][:-4]
+        # we still use union person mask; per-track instance mask is not available here
         mask = self.get_union_mask(video_id, stem, label, is_static=False)
 
         if mask is not None:
@@ -532,28 +594,40 @@ class AlignHMRPi3:
         frame_idx_frame_path_map = {i: f"{frame_id:06d}.png" for i, frame_id in enumerate(chosen_frames)}
         return frame_idx_frame_path_map
 
-    def _collect_kp_corr_for_frame(self, frame_idx: int, frame_data: dict, frame_to_kps: dict):
+    def _collect_kp_corr_for_frame(self, frame_idx: int, frame_data: dict, frame_to_kps: dict,
+                                   primary_actor_id: Optional[str]):
+        """
+        Collect sparse 2D->3D correspondences for ONLY the chosen actor.
+        """
         if frame_idx not in frame_to_kps:
-            return None, None
-        if len(frame_data['track_id']) == 0:
+            print(f"[Frame {frame_idx}] No 2D keypoints for primary actor {primary_actor_id}")
             return None, None
 
-        rotmat = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
+        actor_idx = self._find_actor_index_in_frame(frame_data, primary_actor_id)
+        if actor_idx is None:
+            print(f"[Frame {frame_idx}] Primary actor {primary_actor_id} not present in frame.")
+            return None, None
+
+        kps_2d = frame_to_kps[frame_idx]
+
+        # build smpl joints for that actor only
+        rotmat_all = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
+        rotmat_actor = rotmat_all[actor_idx:actor_idx + 1]
+
         smpl_out = self.smplx(
-            global_orient=rotmat[:, :1].cuda(),
-            body_pose=rotmat[:, 1:22].cuda(),
-            betas=frame_data['shape'].cuda(),
-            transl=frame_data['trans'].cuda()
+            global_orient=rotmat_actor[:, :1].cuda(),
+            body_pose=rotmat_actor[:, 1:22].cuda(),
+            betas=frame_data['shape'][actor_idx:actor_idx + 1].cuda(),
+            transl=frame_data['trans'][actor_idx:actor_idx + 1].cuda()
         )
-        joints = smpl_out.joints.cpu().numpy()  # (P, J, 3)
+        joints = smpl_out.joints.cpu().numpy()  # (1, J, 3)
         joints = joints[:, :24, :]
+        smpl_joints_actor = joints[0]
 
         frame_points_hw3 = self.pipeline.points[frame_idx]
 
         smpl_list = []
         scene_list = []
-
-        kps_per_person = frame_to_kps[frame_idx]
 
         smpl_joint_names = get_smpl_joint_names()
         openpose_joint_names = get_openpose_joint_names()
@@ -578,36 +652,31 @@ class AlignHMRPi3:
             "OP RBigToe": "rightToeBase",
         }
 
-        for person_idx, kps_2d in enumerate(kps_per_person):
-            if person_idx >= joints.shape[0]:
-                break
+        if smpl_joint_names and len(smpl_joint_names) >= smpl_joints_actor.shape[0]:
+            smpl_name_to_pt = {
+                smpl_joint_names[j]: smpl_joints_actor[j]
+                for j in range(smpl_joints_actor.shape[0])
+            }
+        else:
+            raise ValueError("SMPL joint names list is missing or too short.")
 
-            smpl_joints_person = joints[person_idx]
+        # kps_2d is assumed to be a dict: {op_name: (u,v,...) }
+        for op_name, kp in kps_2d.items():
+            smpl_name = OPENPOSE_TO_SMPL.get(op_name, None)
+            if smpl_name is None:
+                continue
 
-            if smpl_joint_names and len(smpl_joint_names) >= smpl_joints_person.shape[0]:
-                smpl_name_to_pt = {
-                    smpl_joint_names[j]: smpl_joints_person[j]
-                    for j in range(smpl_joints_person.shape[0])
-                }
-            else:
-                raise ValueError("SMPL joint names list is missing or too short.")
+            if smpl_name not in smpl_name_to_pt:
+                continue
 
-            for op_name, kp in kps_2d.items():
-                smpl_name = OPENPOSE_TO_SMPL.get(op_name, None)
-                if smpl_name is None:
-                    continue
+            u = float(kp[0])
+            v = float(kp[1])
+            scene_p = self._lift_2d_to_3d(frame_points_hw3, u, v)
+            if scene_p is None:
+                continue
 
-                if smpl_name not in smpl_name_to_pt:
-                    continue
-
-                u = float(kp[0])
-                v = float(kp[1])
-                scene_p = self._lift_2d_to_3d(frame_points_hw3, u, v)
-                if scene_p is None:
-                    continue
-
-                smpl_list.append(smpl_name_to_pt[smpl_name])
-                scene_list.append(scene_p)
+            smpl_list.append(smpl_name_to_pt[smpl_name])
+            scene_list.append(scene_p)
 
         if len(smpl_list) == 0:
             return None, None
@@ -620,20 +689,28 @@ class AlignHMRPi3:
             frame_idx: int,
             frame_data: dict,
             frame_idx_frame_path_map: dict,
+            primary_actor_id: Optional[str],
             num_smpl_samples_per_person: int = 400,
             num_scene_subsample: int = 800,
     ):
-        if len(frame_data['track_id']) == 0:
+        """
+        Dense-ish correspondences but for a single actor.
+        """
+        actor_idx = self._find_actor_index_in_frame(frame_data, primary_actor_id)
+        if actor_idx is None:
             return None, None
 
-        rotmat = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
+        rotmat_all = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
+        rotmat_actor = rotmat_all[actor_idx:actor_idx + 1]
+
         smpl_out = self.smplx(
-            global_orient=rotmat[:, :1].cuda(),
-            body_pose=rotmat[:, 1:22].cuda(),
-            betas=frame_data['shape'].cuda(),
-            transl=frame_data['trans'].cuda()
+            global_orient=rotmat_actor[:, :1].cuda(),
+            body_pose=rotmat_actor[:, 1:22].cuda(),
+            betas=frame_data['shape'][actor_idx:actor_idx + 1].cuda(),
+            transl=frame_data['trans'][actor_idx:actor_idx + 1].cuda()
         )
-        verts = smpl_out.vertices.cpu().numpy()  # (P,V,3)
+        verts = smpl_out.vertices.cpu().numpy()  # (1,V,3)
+        smpl_verts = verts[0]
 
         scene_pts = self._get_partial_pointcloud(
             video_id,
@@ -648,31 +725,21 @@ class AlignHMRPi3:
             choice = np.random.choice(scene_pts.shape[0], num_scene_subsample, replace=False)
             scene_pts = scene_pts[choice]
 
-        smpl_all = []
-        scene_all = []
+        # subsample smpl verts
+        if smpl_verts.shape[0] > num_smpl_samples_per_person:
+            idx = np.random.choice(smpl_verts.shape[0], num_smpl_samples_per_person, replace=False)
+            smpl_sampled = smpl_verts[idx]
+        else:
+            smpl_sampled = smpl_verts
 
-        for p in range(verts.shape[0]):
-            smpl_verts = verts[p]
-            if smpl_verts.shape[0] > num_smpl_samples_per_person:
-                idx = np.random.choice(smpl_verts.shape[0], num_smpl_samples_per_person, replace=False)
-                smpl_sampled = smpl_verts[idx]
-            else:
-                smpl_sampled = smpl_verts
+        matched_scene = []
+        for sp in smpl_sampled:
+            dists = np.sum((scene_pts - sp[None, :]) ** 2, axis=1)
+            nn_idx = np.argmin(dists)
+            matched_scene.append(scene_pts[nn_idx])
+        matched_scene = np.asarray(matched_scene, dtype=np.float64)
 
-            matched_scene = []
-            for sp in smpl_sampled:
-                dists = np.sum((scene_pts - sp[None, :]) ** 2, axis=1)
-                nn_idx = np.argmin(dists)
-                matched_scene.append(scene_pts[nn_idx])
-            matched_scene = np.asarray(matched_scene, dtype=np.float64)
-
-            smpl_all.append(smpl_sampled)
-            scene_all.append(matched_scene)
-
-        if len(smpl_all) == 0:
-            return None, None
-
-        return np.concatenate(smpl_all, axis=0), np.concatenate(scene_all, axis=0)
+        return smpl_sampled, matched_scene
 
     def process_video(self, video_id: str, include_dense: bool = False):
         # run pipeline
@@ -684,20 +751,26 @@ class AlignHMRPi3:
         world4d = self.pipeline.create_world4d()
         world4d = {i: world4d[k] for i, k in enumerate(world4d)}
 
-        frame_idx_frame_path_map = self.idx_to_frame_idx_path(video_id)
-        frame_to_kps = self._build_frame_to_kps_map(results)
+        # pick one actor for the whole video
+        primary_actor_id = self._choose_primary_actor(results, world4d)
+        print(f"[align] Using primary actor: {primary_actor_id}")
 
-        max_frames = 60
+        frame_idx_frame_path_map = self.idx_to_frame_idx_path(video_id)
+        frame_to_kps = self._build_frame_to_kps_map(results, primary_actor_id)
 
         frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
         per_frame_sims: Dict[int, Dict[str, Any]] = {}
 
         # ---------- 1) per-frame robust sim ----------
-        for frame_idx, frame_data in list(world4d.items())[:max_frames]:
-            smpl_s, scene_s = self._collect_kp_corr_for_frame(frame_idx, frame_data, frame_to_kps)
+        for frame_idx, frame_data in list(world4d.items()):
+            smpl_s, scene_s = self._collect_kp_corr_for_frame(
+                frame_idx, frame_data, frame_to_kps, primary_actor_id
+            )
 
             if smpl_s is not None and scene_s is not None and smpl_s.shape[0] > 0:
                 frame_kp_corr[frame_idx] = (smpl_s, scene_s)
+            else:
+                print(f"[{video_id}][align] Skipping frame {frame_idx} as no sparse kp corr found.")
 
             smpl_all = []
             scene_all = []
@@ -707,7 +780,7 @@ class AlignHMRPi3:
 
             if include_dense:
                 smpl_d, scene_d = self._collect_dense_corr_for_frame(
-                    video_id, frame_idx, frame_data, frame_idx_frame_path_map
+                    video_id, frame_idx, frame_data, frame_idx_frame_path_map, primary_actor_id
                 )
                 if smpl_d is not None and scene_d is not None:
                     smpl_all.append(smpl_d)
@@ -719,6 +792,7 @@ class AlignHMRPi3:
             smpl_all = np.concatenate(smpl_all, axis=0)
             scene_all = np.concatenate(scene_all, axis=0)
             if smpl_all.shape[0] < 3:
+                print(f"[{video_id}][align] Skipping frame {frame_idx} as insufficient total corr ({smpl_all.shape[0]} pts).")
                 continue
 
             s_f, R_f, t_f = self._robust_similarity_ransac(
@@ -740,19 +814,27 @@ class AlignHMRPi3:
         # ---------- 2) build verts per frame + collect untransformed verts for floor ----------
         all_verts_for_floor = []
         for frame_idx, frame_data in world4d.items():
-            if len(frame_data['track_id']) == 0:
+            actor_idx = self._find_actor_index_in_frame(frame_data, primary_actor_id)
+            if actor_idx is None:
+                # ensure it's empty so visualization won't try to draw random actors
+                frame_data['track_id'] = []
+                print("[align] Primary actor not present in frame", frame_idx)
                 continue
 
-            rotmat = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
-            smpl_out = self.smplx(
-                global_orient=rotmat[:, :1].cuda(),
-                body_pose=rotmat[:, 1:22].cuda(),
-                betas=frame_data['shape'].cuda(),
-                transl=frame_data['trans'].cuda()
-            )
-            verts = smpl_out.vertices.cpu().numpy()  # (P, V, 3)
+            rotmat_all = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
+            rotmat_actor = rotmat_all[actor_idx:actor_idx + 1]
 
-            frame_data['vertices_orig'] = verts.copy()
+            smpl_out = self.smplx(
+                global_orient=rotmat_actor[:, :1].cuda(),
+                body_pose=rotmat_actor[:, 1:22].cuda(),
+                betas=frame_data['shape'][actor_idx:actor_idx + 1].cuda(),
+                transl=frame_data['trans'][actor_idx:actor_idx + 1].cuda()
+            )
+            verts = smpl_out.vertices.cpu().numpy()  # (1, V, 3)
+
+            # force only this actor's track_id for this frame
+            frame_data['track_id'] = [primary_actor_id]
+            frame_data['vertices_orig'] = [verts[0].copy()]
 
             # store UNTRANSFORMED verts to derive canonical floor
             all_verts_for_floor.append(torch.tensor(verts, dtype=torch.bfloat16))
@@ -768,7 +850,7 @@ class AlignHMRPi3:
             else:
                 verts_tf = verts
 
-            frame_data['vertices'] = verts_tf
+            frame_data['vertices'] = [verts_tf[0]]
 
         if len(all_verts_for_floor) > 0:
             all_verts_for_floor = torch.cat(all_verts_for_floor)
@@ -801,7 +883,7 @@ class AlignHMRPi3:
             time.sleep(1)
 
     def infer_all_videos(self, split: str):
-        video_id_list = ["0DJ6R.mp4"]
+        video_id_list = ["0A8CF.mp4"]
         for video_id in tqdm(video_id_list, desc=f"Processing videos in split {split}", unit="video"):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
@@ -813,7 +895,7 @@ class AlignHMRPi3:
 # CLI
 # ------------------------------------------------------------
 def parse_args():
-    parser = argparse.ArgumentParser(description="Align SMPL to PI3 dynamic scene and visualize with rerun (per-frame sim + fixed floor).")
+    parser = argparse.ArgumentParser(description="Align SMPL to PI3 dynamic scene and visualize with rerun (per-frame sim + fixed floor) for a single actor.")
     parser.add_argument(
         "--output_dir_path", type=str, default="/data/rohith/ag/ag4D/human/",
         help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
@@ -825,7 +907,7 @@ def parse_args():
     parser.add_argument(
         "--dynamic_scene_dir_path",
         type=str,
-        default="/data2/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
+        default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
     )
     parser.add_argument(
         "--split", default="04",

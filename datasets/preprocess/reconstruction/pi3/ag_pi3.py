@@ -1,19 +1,16 @@
 import argparse
 import gc
 import os
-import pickle
-from typing import List
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
 from datasets.preprocess.reconstruction.pi3.recon_utils import get_video_belongs_to_split, \
-    predictions_to_glb_with_static, ground_dynamic_scene_to_static_scene
+    predictions_to_glb_with_static
 from pi3.models.pi3 import Pi3
 from pi3.utils.basic import load_images_as_tensor
 from pi3.utils.geometry import depth_edge
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class AgPi3:
