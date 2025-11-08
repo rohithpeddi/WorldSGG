@@ -106,7 +106,6 @@ class BBox3DGenerator:
             {"id": cid, "name": name} for name, cid in self.name_to_catid.items()
         ]
 
-        # important dirs
         self.dynamic_detections_root_path = self.ag_root_directory / "detection" / 'gdino_bboxes'
         self.static_detections_root_path = self.ag_root_directory / "detection" / 'gdino_bboxes_static'
         self.frame_annotated_dir_path = self.ag_root_directory / "frames_annotated"
@@ -133,7 +132,6 @@ class BBox3DGenerator:
         self.static_masks_vid_dir_path = self.ag_root_directory / "segmentation_static" / 'masks' / 'video_based'
         self.static_masks_combined_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "combined"
 
-    # ------------------- small utils ------------------- #
     @staticmethod
     def _is_empty_array(x):
         if x is None:
