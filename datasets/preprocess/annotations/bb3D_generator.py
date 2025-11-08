@@ -586,6 +586,7 @@ class BBox3DGenerator:
         video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
         annotated_frame_id_list = os.listdir(video_frames_annotated_dir_path)
         annotated_frame_id_list = [f for f in annotated_frame_id_list if f.endswith('.png')]
+        annotated_frame_id_list.sort(key=lambda x: int(x[:-4]))
         annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
         annotated_last_frame_id = int(annotated_frame_id_list[-1][:-4])
 
