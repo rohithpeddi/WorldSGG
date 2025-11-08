@@ -69,7 +69,7 @@ def rerun_vis_world4d(
     """
     Visualization now supports per-frame similarity transforms.
     For each frame:
-      - take world4d[i]['vertices_orig'] (list per person)
+      - take world[i]['vertices_orig'] (list per person)
       - if per_frame_sims[i] exists -> apply that (s,R,t) and show in green
       - always show original in red
     """
@@ -171,16 +171,6 @@ def rerun_vis_world4d(
                         )
                 # else: nothing to render for that idx
 
-        # # floor
-        # if floor is not None:
-        #     fv, ff = floor
-        #     fv = np.asarray(fv, dtype=np.float32)
-        #     ff = _faces_u32(np.asarray(ff))
-        #     rr.log(
-        #         f"{BASE}/floor",
-        #         rr.Mesh3D(vertex_positions=fv, triangle_indices=ff),
-        #     )
-
         # dynamic points
         rr.log(
             f"{BASE}/points",
@@ -189,39 +179,6 @@ def rerun_vis_world4d(
                 colors=colors[i].reshape(-1, 3),
             ),
         )
-
-        # # sparse correspondences
-        # if frame_kp_corr is not None and i in frame_kp_corr:
-        #     smpl_pts, scene_pts = frame_kp_corr[i]
-        #     smpl_pts = np.asarray(smpl_pts, dtype=np.float32)
-        #     scene_pts = np.asarray(scene_pts, dtype=np.float32)
-        #
-        #     rr.log(
-        #         f"{BASE}/corr/frame_{i}/smpl_kps",
-        #         rr.Points3D(
-        #             positions=smpl_pts,
-        #             colors=np.full((smpl_pts.shape[0], 3), [255, 0, 0], dtype=np.uint8),
-        #             radii=0.015,
-        #         ),
-        #     )
-        #     rr.log(
-        #         f"{BASE}/corr/frame_{i}/scene_kps",
-        #         rr.Points3D(
-        #             positions=scene_pts,
-        #             colors=np.full((scene_pts.shape[0], 3), [0, 255, 0], dtype=np.uint8),
-        #             radii=0.017,
-        #         ),
-        #     )
-        #
-        #     if smpl_pts.shape[0] == scene_pts.shape[0]:
-        #         rr.log(
-        #             f"{BASE}/corr/frame_{i}/arrows",
-        #             rr.Arrows3D(
-        #                 origins=smpl_pts,
-        #                 vectors=(scene_pts - smpl_pts),
-        #                 colors=np.full((smpl_pts.shape[0], 3), [0, 0, 255], dtype=np.uint8),
-        #             ),
-        #         )
 
         # camera
         cam_3x4 = np.asarray(world4d[i]["camera"], dtype=np.float32)
