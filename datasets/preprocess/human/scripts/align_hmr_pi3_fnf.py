@@ -198,7 +198,6 @@ def rerun_vis_world4d(
         else:
             print(f"[{video_id}] Track id not found for frame {i}, skipping human visualization.")
 
-
         # dynamic points
         rr.log(
             f"{BASE}/points",
@@ -317,12 +316,14 @@ class AlignHMRPi3:
     # --------------------------------------------------------
     # utility for single actor
     # --------------------------------------------------------
-    def _choose_primary_actor(self, results: dict, world4d: Dict[int, dict]) -> Optional[str]:
+    def _choose_primary_actor(self, results: dict, world4d: Dict[int, dict]) -> Tuple[Optional[str], Optional[int]]:
         """
-        Try to pick one stable actor:
-          1. prefer the person in results['people'] with the most frames
-          2. otherwise fall back to the first track_id found in world4d
-        Returns actor id as string (since results keys are often strings).
+        We have two spaces:
+          - results['people'] is 1-indexed: "1", "2", ...
+          - world4d[frame]['track_id'] is 0-indexed: 0, 1, ...
+
+        This function returns *both*:
+          (person_id_1idx_str, track_id_0idx_int)
         """
         people = results.get("people", {})
         if people:
@@ -330,39 +331,42 @@ class AlignHMRPi3:
             for pid, pdata in people.items():
                 frames = pdata.get("frames", [])
                 counts[pid] = len(frames)
-            primary = max(counts.items(), key=lambda x: x[1])[0]
-            return primary
+            primary_person_id_1 = max(counts.items(), key=lambda x: x[1])[0]  # e.g. "1"
+            primary_track_id_0 = int(primary_person_id_1) - 1  # convert to 0-index
+            return primary_person_id_1, primary_track_id_0  # <<< changed
 
-        # fallback
+        # fallback: pick from world4d (0-indexed) and make a matching 1-indexed id
         for _, frame_data in world4d.items():
             tids = frame_data.get("track_id", [])
             if tids:
-                return str(tids[0])
-        return None
+                track_id_0 = int(tids[0]) if not isinstance(tids[0], torch.Tensor) else int(tids[0].item())
+                person_id_1 = str(track_id_0 + 1)
+                return person_id_1, track_id_0
+        return None, None
 
-    def _find_actor_index_in_frame(self, frame_data: dict, primary_actor_id: Optional[str]) -> Optional[int]:
+    def _find_actor_index_in_frame(self, frame_data: dict, primary_track_id_0: Optional[int]) -> Optional[int]:
         """
-        Given frame_data and the chosen actor id, return the index into
-        frame_data['pose']/['shape']/['trans'] for that actor.
+        Given frame_data and the chosen actor TRACK id (0-indexed),
+        return the index into frame_data['pose']/['shape']/['trans'] for that actor.
         """
         track_ids = frame_data.get("track_id", [])
         if len(track_ids) == 0:
             print("No track ids in frame data.")
             return None
 
-        if primary_actor_id is None:
-            print(f"No primary actor id specified, defaulting to first person.")
-            return 0  # fallback: first person
+        if primary_track_id_0 is None:
+            print("No primary track id specified, defaulting to first person.")
+            return 0  # fallback
 
-        # normalize to string for comparison
-        # Here track_ids is a tensor
         for idx, tid in enumerate(track_ids):
-            tid_str = str(tid.item()) if isinstance(tid, torch.Tensor) else str(tid)
-            if tid_str == str(primary_actor_id):
+            if isinstance(tid, torch.Tensor):
+                tid_val = int(tid.item())
+            else:
+                tid_val = int(tid)
+            if tid_val == int(primary_track_id_0):
                 return idx
 
-        # actor not present in this frame
-        print("Primary actor id not present in this frame.")
+        print("Primary track id not present in this frame.")
         return None
 
     # --------------------------------------------------------
@@ -504,21 +508,21 @@ class AlignHMRPi3:
             return None
         return p3d
 
-    def _build_frame_to_kps_map(self, results: dict, primary_actor_id: Optional[str]):
+    def _build_frame_to_kps_map(self, results: dict, primary_person_id_1: Optional[str]):
         """
         Build {frame_idx -> keypoints_dict} but ONLY for the chosen actor.
-        Assumes results['people'][actor]['keypoints_2d_map'] exists.
+        Here we explicitly use the 1-indexed person id from results['people'].
         """
         frame_to_kps = {}
         people_results = results.get("people", {})
         if not people_results:
             return frame_to_kps
 
-        if primary_actor_id is None:
+        if primary_person_id_1 is None:
             # fallback to any person
-            primary_actor_id = list(people_results.keys())[0]
+            primary_person_id_1 = list(people_results.keys())[0]
 
-        pdata = people_results.get(primary_actor_id, None)
+        pdata = people_results.get(primary_person_id_1, None)
         if pdata is None:
             return frame_to_kps
 
@@ -595,17 +599,19 @@ class AlignHMRPi3:
         return frame_idx_frame_path_map
 
     def _collect_kp_corr_for_frame(self, frame_idx: int, frame_data: dict, frame_to_kps: dict,
-                                   primary_actor_id: Optional[str]):
+                                   primary_track_id_0: Optional[int]):
         """
         Collect sparse 2D->3D correspondences for ONLY the chosen actor.
+        frame_to_kps was built from 1-indexed results['people'], but here we are
+        matching the actor in world4d via 0-indexed track ids.
         """
         if frame_idx not in frame_to_kps:
-            print(f"[Frame {frame_idx}] No 2D keypoints for primary actor {primary_actor_id}")
+            print(f"[Frame {frame_idx}] No 2D keypoints for primary actor (1-indexed source)")
             return None, None
 
-        actor_idx = self._find_actor_index_in_frame(frame_data, primary_actor_id)
+        actor_idx = self._find_actor_index_in_frame(frame_data, primary_track_id_0)
         if actor_idx is None:
-            print(f"[Frame {frame_idx}] Primary actor {primary_actor_id} not present in frame.")
+            print(f"[Frame {frame_idx}] Primary actor (track={primary_track_id_0}) not present in frame.")
             return None, None
 
         kps_2d = frame_to_kps[frame_idx]
@@ -689,14 +695,15 @@ class AlignHMRPi3:
             frame_idx: int,
             frame_data: dict,
             frame_idx_frame_path_map: dict,
-            primary_actor_id: Optional[str],
+            primary_track_id_0: Optional[int],
             num_smpl_samples_per_person: int = 400,
             num_scene_subsample: int = 800,
     ):
         """
         Dense-ish correspondences but for a single actor.
+        Here we match in world4d space (0-indexed track ids).
         """
-        actor_idx = self._find_actor_index_in_frame(frame_data, primary_actor_id)
+        actor_idx = self._find_actor_index_in_frame(frame_data, primary_track_id_0)
         if actor_idx is None:
             return None, None
 
@@ -752,11 +759,11 @@ class AlignHMRPi3:
         world4d = {i: world4d[k] for i, k in enumerate(world4d)}
 
         # pick one actor for the whole video
-        primary_actor_id = self._choose_primary_actor(results, world4d)
-        print(f"[align] Using primary actor: {primary_actor_id}")
+        primary_person_id_1, primary_track_id_0 = self._choose_primary_actor(results, world4d)  # <<< changed
+        print(f"[align] Using primary actor -> results(person,1idx)={primary_person_id_1}, world4d(track,0idx)={primary_track_id_0}")
 
         frame_idx_frame_path_map = self.idx_to_frame_idx_path(video_id)
-        frame_to_kps = self._build_frame_to_kps_map(results, primary_actor_id)
+        frame_to_kps = self._build_frame_to_kps_map(results, primary_person_id_1)  # <<< changed
 
         frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
         per_frame_sims: Dict[int, Dict[str, Any]] = {}
@@ -764,7 +771,7 @@ class AlignHMRPi3:
         # ---------- 1) per-frame robust sim ----------
         for frame_idx, frame_data in list(world4d.items()):
             smpl_s, scene_s = self._collect_kp_corr_for_frame(
-                frame_idx, frame_data, frame_to_kps, primary_actor_id
+                frame_idx, frame_data, frame_to_kps, primary_track_id_0  # <<< changed
             )
 
             if smpl_s is not None and scene_s is not None and smpl_s.shape[0] > 0:
@@ -780,7 +787,7 @@ class AlignHMRPi3:
 
             if include_dense:
                 smpl_d, scene_d = self._collect_dense_corr_for_frame(
-                    video_id, frame_idx, frame_data, frame_idx_frame_path_map, primary_actor_id
+                    video_id, frame_idx, frame_data, frame_idx_frame_path_map, primary_track_id_0  # <<< changed
                 )
                 if smpl_d is not None and scene_d is not None:
                     smpl_all.append(smpl_d)
@@ -814,7 +821,7 @@ class AlignHMRPi3:
         # ---------- 2) build verts per frame + collect untransformed verts for floor ----------
         all_verts_for_floor = []
         for frame_idx, frame_data in world4d.items():
-            actor_idx = self._find_actor_index_in_frame(frame_data, primary_actor_id)
+            actor_idx = self._find_actor_index_in_frame(frame_data, primary_track_id_0)  # <<< changed
             if actor_idx is None:
                 # ensure it's empty so visualization won't try to draw random actors
                 frame_data['track_id'] = []
@@ -832,8 +839,8 @@ class AlignHMRPi3:
             )
             verts = smpl_out.vertices.cpu().numpy()  # (1, V, 3)
 
-            # force only this actor's track_id for this frame
-            frame_data['track_id'] = [primary_actor_id]
+            # force only this actor's TRACK id (0-indexed) for this frame
+            frame_data['track_id'] = [primary_track_id_0]  # <<< changed
             frame_data['vertices_orig'] = [verts[0].copy()]
 
             # store UNTRANSFORMED verts to derive canonical floor
@@ -883,7 +890,7 @@ class AlignHMRPi3:
             time.sleep(1)
 
     def infer_all_videos(self, split: str):
-        video_id_list = ["0A8CF.mp4"]
+        video_id_list = ["00ZCA.mp4"]
         for video_id in tqdm(video_id_list, desc=f"Processing videos in split {split}", unit="video"):
             if get_video_belongs_to_split(video_id) != split:
                 print(f"Skipping video {video_id} not in split {split}")
