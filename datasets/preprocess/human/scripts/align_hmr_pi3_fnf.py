@@ -45,7 +45,7 @@ def _pinhole_from_fov(w: int, h: int, fov_y: float):
 
 
 # ------------------------------------------------------------
-# updated visualization
+# visualization
 # ------------------------------------------------------------
 def rerun_vis_world4d(
         video_id: str,
@@ -55,7 +55,7 @@ def rerun_vis_world4d(
         pipeline: AgPipeline,
         faces: np.ndarray,
         init_fps: float = 25.0,
-        floor: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None,
         img_maxsize: int = 320,
         app_id: str = "World4D",
         *,
@@ -65,13 +65,16 @@ def rerun_vis_world4d(
         dynamic_prediction_path: Optional[str] = None,
         frame_kp_corr: Optional[Dict[int, Tuple[np.ndarray, np.ndarray]]] = None,
         per_frame_sims: Optional[Dict[int, Dict[str, Any]]] = None,
+        global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None,
 ):
     """
-    Visualization now supports per-frame similarity transforms.
-    For each frame:
-      - take world[i]['vertices_orig'] (list per person)
-      - if per_frame_sims[i] exists -> apply that (s,R,t) and show in green
-      - always show original in red
+    Visualize:
+      - dynamic point cloud from PI3
+      - per-frame transformed SMPL (green)
+      - fixed floor mesh transformed by an averaged similarity
+      - camera frustum + image
+
+    Floor is kept fixed across frames using the averaged similarity.
     """
     faces_u32 = _faces_u32(faces)
 
@@ -85,6 +88,8 @@ def rerun_vis_world4d(
     num_frames = len(world4d)
 
     # load dynamic PI3 predictions
+    if dynamic_prediction_path is None:
+        raise ValueError("dynamic_prediction_path is required for visualization.")
     video_dynamic_prediction_path = os.path.join(dynamic_prediction_path, f"{video_id[:-4]}_10", "predictions.npz")
     video_dynamic_predictions = np.load(video_dynamic_prediction_path, allow_pickle=True)
     video_dynamic_predictions = {k: video_dynamic_predictions[k] for k in video_dynamic_predictions.files}
@@ -96,6 +101,29 @@ def rerun_vis_world4d(
 
     BASE = "world"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
+
+    # precompute floor transformed by global sim
+    floor_vertices_tf = None
+    floor_faces = None
+    floor_kwargs = None
+    if floor is not None:
+        floor_verts0, floor_faces0, floor_colors0 = floor
+        floor_verts0 = np.asarray(floor_verts0, dtype=np.float32)
+        floor_faces0 = _faces_u32(np.asarray(floor_faces0))
+
+        if global_floor_sim is not None:
+            s_g, R_g, t_g = global_floor_sim
+            floor_vertices_tf = s_g * (floor_verts0 @ R_g.T) + t_g
+        else:
+            floor_vertices_tf = floor_verts0
+
+        floor_kwargs = {}
+        if floor_colors0 is not None:
+            floor_colors0 = np.asarray(floor_colors0, dtype=np.uint8)
+            floor_kwargs["vertex_colors"] = floor_colors0
+        else:
+            floor_kwargs["albedo_factor"] = [160, 160, 160]
+        floor_faces = floor_faces0
 
     def _get_image_for_time(i: int) -> Optional[np.ndarray]:
         src_idx = i
@@ -126,37 +154,36 @@ def rerun_vis_world4d(
 
     for i in range(num_frames):
         rr.set_time_sequence("frame", i)
+        # clear current frame
         rr.log("/", rr.Clear(recursive=True))
 
-        # humans (original + transformed)
-        track_ids = world4d[i].get("track_id", [])
-        verts_list_orig = world4d[i].get("vertices_orig", [])
+        # log fixed floor every frame (so clear won't remove it)
+        if floor_vertices_tf is not None and floor_faces is not None:
+            rr.log(
+                f"{BASE}/floor",
+                rr.Mesh3D(
+                    vertex_positions=floor_vertices_tf.astype(np.float32),
+                    triangle_indices=floor_faces,
+                    **(floor_kwargs or {}),
+                ),
+            )
 
-        # if we have per-frame s,R,t for this frame, use it
-        sft = None
+        # per-frame sim for humans
         if per_frame_sims is not None and i in per_frame_sims:
-            sft = per_frame_sims[i]
-            s_i = float(sft["s"])
-            R_i = np.asarray(sft["R"], dtype=np.float32)
-            t_i = np.asarray(sft["t"], dtype=np.float32)
+            s_i = float(per_frame_sims[i]["s"])
+            R_i = np.asarray(per_frame_sims[i]["R"], dtype=np.float32)
+            t_i = np.asarray(per_frame_sims[i]["t"], dtype=np.float32)
         else:
             s_i, R_i, t_i = None, None, None
 
+        # humans
+        track_ids = world4d[i].get("track_id", [])
+        verts_list_orig = world4d[i].get("vertices_orig", [])
         if len(track_ids) > 0 and len(verts_list_orig) > 0:
             for idx, tid in enumerate(track_ids):
-                # original in red
                 if idx < len(verts_list_orig):
                     verts_orig = np.asarray(verts_list_orig[idx], dtype=np.float32)
-                    # rr.log(
-                    #     _human_path(int(tid), i, "orig"),
-                    #     rr.Mesh3D(
-                    #         vertex_positions=verts_orig,
-                    #         triangle_indices=faces_u32,
-                    #         albedo_factor=[255, 0, 0],
-                    #     ),
-                    # )
-
-                    # transformed in green (apply per-frame sim)
+                    # transformed in green
                     if s_i is not None:
                         verts_flat = verts_orig.reshape(-1, 3)
                         verts_tf = s_i * (verts_flat @ R_i.T) + t_i
@@ -169,7 +196,6 @@ def rerun_vis_world4d(
                                 albedo_factor=[0, 255, 0],
                             ),
                         )
-                # else: nothing to render for that idx
 
         # dynamic points
         rr.log(
@@ -225,7 +251,7 @@ def rerun_vis_world4d(
             ),
         )
 
-    print("Rerun visualization started. Scrub the 'frame' timeline to compare original (red) vs per-frame transformed (green).")
+    print("Rerun visualization started. Scrub the 'frame' timeline to compare per-frame transformed humans vs fixed floor.")
 
 
 # ------------------------------------------------------------
@@ -368,6 +394,48 @@ class AlignHMRPi3:
             return self._similarity_umeyama(src, dst)
 
         return best_model
+
+    def _average_sims(self, per_frame_sims: Dict[int, Dict[str, Any]]):
+        """
+        per_frame_sims[i] = {"s": float, "R": (3,3), "t": (3,), "w": weight}
+        We compute a weighted avg scale, weighted avg translation, and
+        a weighted avg rotation via quaternion averaging.
+        """
+        if len(per_frame_sims) == 0:
+            return 1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32)
+
+        ws = []
+        scales = []
+        trans = []
+        quats = []
+
+        for _, d in per_frame_sims.items():
+            w = float(d.get("w", 1.0))
+            s = float(d["s"])
+            R = np.asarray(d["R"], dtype=np.float64)
+            t = np.asarray(d["t"], dtype=np.float64)
+
+            quat = SciRot.from_matrix(R).as_quat()  # (4,)
+
+            ws.append(w)
+            scales.append(s)
+            trans.append(t)
+            quats.append(quat)
+
+        ws = np.asarray(ws, dtype=np.float64)
+        ws = ws / (ws.sum() + 1e-8)
+
+        scales = np.asarray(scales, dtype=np.float64)
+        trans = np.asarray(trans, dtype=np.float64)
+        s_avg = float((ws * scales).sum())
+        t_avg = (ws[:, None] * trans).sum(axis=0)
+
+        quats = np.asarray(quats, dtype=np.float64)  # (N,4)
+        q_avg = (ws[:, None] * quats).sum(axis=0)
+        q_avg = q_avg / (np.linalg.norm(q_avg) + 1e-8)
+        R_avg = SciRot.from_quat(q_avg).as_matrix().astype(np.float32)
+
+        return s_avg, R_avg, t_avg.astype(np.float32)
 
     # --------------------------------------------------------
     # lifting, masks, etc.
@@ -624,7 +692,7 @@ class AlignHMRPi3:
         frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
         per_frame_sims: Dict[int, Dict[str, Any]] = {}
 
-        # ---------- 1) per-frame robust sim (NO averaging) ----------
+        # ---------- 1) per-frame robust sim ----------
         for frame_idx, frame_data in list(world4d.items())[:max_frames]:
             smpl_s, scene_s = self._collect_kp_corr_for_frame(frame_idx, frame_data, frame_to_kps)
 
@@ -669,7 +737,7 @@ class AlignHMRPi3:
                 "w": float(smpl_all.shape[0]),
             }
 
-        # ---------- 2) build final verts per frame using per-frame sim ----------
+        # ---------- 2) build verts per frame + collect untransformed verts for floor ----------
         all_verts_for_floor = []
         for frame_idx, frame_data in world4d.items():
             if len(frame_data['track_id']) == 0:
@@ -683,9 +751,13 @@ class AlignHMRPi3:
                 transl=frame_data['trans'].cuda()
             )
             verts = smpl_out.vertices.cpu().numpy()  # (P, V, 3)
+
             frame_data['vertices_orig'] = verts.copy()
 
-            # if we have per-frame sim, apply it now to collect for floor
+            # store UNTRANSFORMED verts to derive canonical floor
+            all_verts_for_floor.append(torch.tensor(verts, dtype=torch.bfloat16))
+
+            # also store transformed verts per frame if available
             if frame_idx in per_frame_sims:
                 s_f = per_frame_sims[frame_idx]["s"]
                 R_f = per_frame_sims[frame_idx]["R"]
@@ -696,18 +768,18 @@ class AlignHMRPi3:
             else:
                 verts_tf = verts
 
-            # store transformed too (not strictly needed by vis now, but handy)
             frame_data['vertices'] = verts_tf
-
-            all_verts_for_floor.append(torch.tensor(verts_tf, dtype=torch.bfloat16))
 
         if len(all_verts_for_floor) > 0:
             all_verts_for_floor = torch.cat(all_verts_for_floor)
-            [gv, gf, gc] = get_floor_mesh(all_verts_for_floor, scale=2)
+            gv, gf, gc = get_floor_mesh(all_verts_for_floor, scale=2)
         else:
-            gv, gf = None, None
+            gv, gf, gc = None, None, None
 
-        # ---------- 3) visualize (now with per-frame sims) ----------
+        # ---------- 3) average sim for fixed floor ----------
+        s_avg, R_avg, t_avg = self._average_sims(per_frame_sims)
+
+        # ---------- 4) visualize ----------
         rerun_vis_world4d(
             video_id=video_id,
             images=images,
@@ -715,12 +787,13 @@ class AlignHMRPi3:
             results=results,
             pipeline=self.pipeline,
             faces=self.smplx.faces,
-            floor=(gv, gf) if gv is not None else None,
+            floor=(gv, gf, gc) if gv is not None else None,
             init_fps=10,
             img_maxsize=480,
             dynamic_prediction_path=str(self.dynamic_scene_dir_path),
             frame_kp_corr=frame_kp_corr,
             per_frame_sims=per_frame_sims,
+            global_floor_sim=(s_avg, R_avg, t_avg),
         )
 
         print('Rerun visualization running. Press Ctrl+C to terminate.')
@@ -740,7 +813,7 @@ class AlignHMRPi3:
 # CLI
 # ------------------------------------------------------------
 def parse_args():
-    parser = argparse.ArgumentParser(description="Align SMPL to PI3 dynamic scene and visualize with rerun (per-frame sim).")
+    parser = argparse.ArgumentParser(description="Align SMPL to PI3 dynamic scene and visualize with rerun (per-frame sim + fixed floor).")
     parser.add_argument(
         "--output_dir_path", type=str, default="/data/rohith/ag/ag4D/human/",
         help="Path to root dataset directory (must contain 'videos', 'frames', etc.)"
