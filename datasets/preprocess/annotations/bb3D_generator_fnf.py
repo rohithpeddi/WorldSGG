@@ -607,9 +607,36 @@ class BBox3DGenerator:
         an_last_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_last_frame_id)
         sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, an_last_id_in_vid_sam_frame_id_list + 1))
 
+        annotated_frame_idx_in_sample_idx = []
+        for frame_name in annotated_frame_id_list:
+            frame_id = int(frame_name[:-4])
+            if frame_id in video_sampled_frame_id_list:
+                idx_in_sampled = video_sampled_frame_id_list.index(frame_id)
+                annotated_frame_idx_in_sample_idx.append(sample_idx.index(idx_in_sampled))
+
+
         chosen_frames = [video_sampled_frame_id_list[i] for i in sample_idx]
         frame_idx_frame_path_map = {i: f"{frame_id:06d}.png" for i, frame_id in enumerate(chosen_frames)}
-        return frame_idx_frame_path_map, sample_idx, video_sampled_frame_id_list, annotated_frame_id_list
+        return frame_idx_frame_path_map, sample_idx, video_sampled_frame_id_list, annotated_frame_id_list, annotated_frame_idx_in_sample_idx
+
+    def annotated_idx_to_frame_idx_path(self, video_id: str):
+        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
+        annotated_frame_id_list = [f for f in os.listdir(video_frames_annotated_dir_path) if f.endswith('.png')]
+        annotated_frame_id_list.sort(key=lambda x: int(x[:-4]))
+
+        video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir, f"{video_id[:-4]}.npy")
+        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()
+
+        sample_idx = []
+        for frame_name in annotated_frame_id_list:
+            frame_id = int(frame_name[:-4])
+            if frame_id in video_sampled_frame_id_list:
+                idx_in_sampled = video_sampled_frame_id_list.index(frame_id)
+                sample_idx.append(idx_in_sampled)
+
+        chosen_frames = [video_sampled_frame_id_list[i] for i in sample_idx]
+        frame_idx_frame_path_map = {i: f"{frame_id:06d}.png" for i, frame_id in enumerate(chosen_frames)}
+        return frame_idx_frame_path_map, sample_idx, video_sampled_frame_id_list, annotated_frame_id_list, sample_idx
 
     def _load_points_for_video(self, video_id: str) -> Dict[str, Any]:
         video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
@@ -628,7 +655,8 @@ class BBox3DGenerator:
 
         S, H, W, _ = points.shape
 
-        frame_idx_frame_path_map, sample_idx, video_sampled_frame_id_list, annotated_frame_id_list = self.idx_to_frame_idx_path(video_id)
+        (frame_idx_frame_path_map, sample_idx, video_sampled_frame_id_list,
+         annotated_frame_id_list, annotated_frame_idx_in_sample_idx) = self.idx_to_frame_idx_path(video_id)
         assert S == len(sample_idx), "dynamic predictions length must match annotated sampled range"
 
         sampled_idx_frame_name_map = {}
@@ -802,7 +830,8 @@ class BBox3DGenerator:
         world4d = {i: world4d[k] for i, k in enumerate(world4d)}  # 0..N-1
 
         # sampled/annotated indices (CHANGE #1)
-        frame_idx_frame_path_map, sample_idx, _, _ = self.idx_to_frame_idx_path(video_id)
+        (frame_idx_frame_path_map, sample_idx, _, _,
+         annotated_frame_idx_in_sample_idx) = self.idx_to_frame_idx_path(video_id)
         sampled_frame_indices = sorted(frame_idx_frame_path_map.keys())
 
         primary_person_id_1, primary_track_id_0 = _choose_primary_actor(results, world4d)
@@ -909,7 +938,8 @@ class BBox3DGenerator:
         sampled_per_frame_sims = {k: v for k, v in per_frame_sims.items() if k in sampled_frame_indices}
         s_avg, R_avg, t_avg = _average_sims(sampled_per_frame_sims)
 
-        return images, world4d, sampled_frame_indices, per_frame_sims, s_avg, R_avg, t_avg, gv, gf, gc
+        return (images, world4d, sampled_frame_indices, per_frame_sims,
+                s_avg, R_avg, t_avg, gv, gf, gc, annotated_frame_idx_in_sample_idx)
 
     def generate_video_bb_annotations(
             self,
@@ -951,6 +981,7 @@ class BBox3DGenerator:
             gv,
             gf,
             gc,
+            annotated_frame_idx_in_sampled_idx,
         ) = self.process_video(video_id)
 
         # we will collect bboxes for visualization here:
@@ -1222,7 +1253,7 @@ def rerun_vis_world4d(
         floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None,
         img_maxsize: int = 320,
         app_id: str = "World4D",
-        frame_bbox_meshes: Optional[Dict[int, List[Dict[str, Any]]]] = None,  # <-- NEW
+        frame_bbox_meshes: Optional[Dict[int, List[Dict[str, Any]]]] = None,
 ):
     faces_u32 = _faces_u32(faces)
     rr.init(app_id, spawn=True)
@@ -1231,7 +1262,7 @@ def rerun_vis_world4d(
     except Exception:
         pass
 
-    # load dynamic predictions for visualization
+    # load dynamic predictions for visualization (NOTE: will index by vis_idx below)
     video_dynamic_prediction_path = os.path.join(dynamic_prediction_path, f"{video_id[:-4]}_10", "predictions.npz")
     video_dynamic_predictions = np.load(video_dynamic_prediction_path, allow_pickle=True)
     video_dynamic_predictions = {k: video_dynamic_predictions[k] for k in video_dynamic_predictions.files}
@@ -1277,11 +1308,19 @@ def rerun_vis_world4d(
             img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         return img
 
+    # edges for a cuboid (8 vertices) — indices match the order we stored earlier
+    cuboid_edges = [
+        (0, 1), (1, 3), (3, 2), (2, 0),  # bottom rectangle
+        (4, 5), (5, 7), (7, 6), (6, 4),  # top rectangle
+        (0, 4), (1, 5), (2, 6), (3, 7),  # verticals
+    ]
+
     for vis_idx, frame_idx in enumerate(sampled_indices):
+        # vis_idx == index into the sub-sampled predictions (points, colors)
         rr.set_time_sequence("frame", vis_idx)
         rr.log("/", rr.Clear(recursive=True))
 
-        # floor
+        # floor (constant per frame)
         if floor_vertices_tf is not None and floor_faces is not None:
             rr.log(
                 f"{BASE}/floor",
@@ -1305,24 +1344,14 @@ def rerun_vis_world4d(
         if frame_data is None:
             continue
 
-        # human meshes (orig + transformed)
+        # human meshes (orig is already stored in world4d; we only show transformed)
         track_ids = frame_data.get("track_id", [])
         verts_orig_list = frame_data.get("vertices_orig", [])
         if track_ids and verts_orig_list:
             tid = int(track_ids[0])
             verts_orig = np.asarray(verts_orig_list[0], dtype=np.float32)
 
-            # log original (red)
-            rr.log(
-                f"{BASE}/humans_orig/h{tid}",
-                rr.Mesh3D(
-                    vertex_positions=verts_orig.astype(np.float32),
-                    triangle_indices=faces_u32,
-                    albedo_factor=[255, 0, 0],
-                ),
-            )
-
-            # log transformed (green) if we have per-frame sim
+            # only show transformed mesh if we have per-frame sim
             if s_i is not None:
                 verts_flat = verts_orig.reshape(-1, 3)
                 verts_tf = s_i * (verts_flat @ R_i.T) + t_i
@@ -1336,32 +1365,36 @@ def rerun_vis_world4d(
                     ),
                 )
 
-        # dynamic points
-        if frame_idx < points.shape[0]:
+        # --- dynamic points: use vis_idx, not frame_idx ---
+        if vis_idx < points.shape[0]:
             rr.log(
                 f"{BASE}/points",
                 rr.Points3D(
-                    points[frame_idx].reshape(-1, 3),
-                    colors=colors[frame_idx].reshape(-1, 3),
+                    points[vis_idx].reshape(-1, 3),
+                    colors=colors[vis_idx].reshape(-1, 3),
                 ),
             )
 
-        # --- NEW: per-frame bbox meshes ---
+        # --- per-frame cuboid bboxes ---
         if frame_bbox_meshes is not None and frame_idx in frame_bbox_meshes:
             for bi, bbox_m in enumerate(frame_bbox_meshes[frame_idx]):
-                v = bbox_m["verts"].astype(np.float32)
-                f = _faces_u32(bbox_m["faces"])
+                verts_world = bbox_m["verts"].astype(np.float32)  # (8,3)
                 col = bbox_m.get("color", [255, 180, 0])
+
+                # build line-strips for the 12 edges
+                strips = []
+                for e0, e1 in cuboid_edges:
+                    strips.append(verts_world[[e0, e1], :])
+
                 rr.log(
                     f"{BASE}/bboxes/frame_{frame_idx}/bbox_{bi}",
-                    rr.Mesh3D(
-                        vertex_positions=v,
-                        triangle_indices=f,
-                        albedo_factor=col,
+                    rr.LineStrips3D(
+                        strips=strips,
+                        colors=[col] * len(strips),
                     ),
                 )
 
-        # camera
+        # camera (still use real frame_idx since world4d is keyed that way)
         cam_3x4 = np.asarray(frame_data["camera"], dtype=np.float32)
         R_wc = cam_3x4[:3, :3]
         t_wc = cam_3x4[:3, 3]
