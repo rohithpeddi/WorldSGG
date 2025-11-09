@@ -889,29 +889,38 @@ class BBox3DGenerator:
         matched_scene = np.asarray(matched_scene, dtype=np.float64)
         return smpl_sampled, matched_scene
 
-    def process_video(self, video_id: str, include_dense: bool = False):
-        # run human/scene pipeline
+    def process_video(self, video_id: str, include_dense: bool = False, use_consistent_transformation: bool = False):
+        # 0) run human/scene pipeline
         self.pipeline.__call__(video_id, save_only_essential=False)
         self.pipeline.estimate_2d_keypoints()
         results = self.pipeline.results
         images = self.pipeline.images
         world4d = self.pipeline.create_world4d()
-        world4d = {i: world4d[k] for i, k in enumerate(world4d)}  # 0..N-1
+        # make frame indices 0..N-1
+        world4d = {i: world4d[k] for i, k in enumerate(world4d)}
 
-        # sampled/annotated indices (CHANGE #1)
-        (frame_idx_frame_path_map, sample_idx, _, _,
+        # sampled / annotated indices
+        (frame_idx_frame_path_map,
+         sample_idx,
+         _,
+         _,
          annotated_frame_idx_in_sample_idx) = self.idx_to_frame_idx_path(video_id)
         sampled_frame_indices = sorted(frame_idx_frame_path_map.keys())
 
+        # choose primary actor
         primary_person_id_1, primary_track_id_0 = _choose_primary_actor(results, world4d)
         print(f"[align] Using primary actor -> results={primary_person_id_1}, world4d_track={primary_track_id_0}")
 
+        # map frame -> keypoints for that actor
         frame_to_kps = _build_frame_to_kps_map(results, primary_person_id_1)
 
+        # containers
         frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
         per_frame_sims: Dict[int, Dict[str, Any]] = {}
 
-        # ---------- 1) per-frame sim ONLY for sampled frames ----------
+        # ------------------------------------------------------------------
+        # 1) estimate per-frame similarity *for sampled frames*
+        # ------------------------------------------------------------------
         for frame_idx in sampled_frame_indices:
             frame_data = world4d.get(frame_idx, None)
             if frame_data is None:
@@ -923,6 +932,7 @@ class BBox3DGenerator:
 
             smpl_all = []
             scene_all = []
+
             if smpl_s is not None and scene_s is not None and smpl_s.shape[0] > 0:
                 frame_kp_corr[frame_idx] = (smpl_s, scene_s)
                 smpl_all.append(smpl_s)
@@ -942,10 +952,12 @@ class BBox3DGenerator:
 
             smpl_all = np.concatenate(smpl_all, axis=0)
             scene_all = np.concatenate(scene_all, axis=0)
+
             if smpl_all.shape[0] < 3:
                 print(f"[align][{video_id}] insufficient corr for frame {frame_idx}")
                 continue
 
+            # solve per-frame sim
             s_f, R_f, t_f = _robust_similarity_ransac(
                 smpl_all, scene_all,
                 max_iters=800,
@@ -953,6 +965,7 @@ class BBox3DGenerator:
                 min_inliers=4,
                 scale_bounds=(0.4, 3.0),
             )
+
             per_frame_sims[frame_idx] = {
                 "s": float(s_f),
                 "R": R_f,
@@ -960,7 +973,26 @@ class BBox3DGenerator:
                 "w": float(smpl_all.shape[0]),
             }
 
-        # ---------- 2) build verts per sampled frame ----------
+        # ------------------------------------------------------------------
+        # 2) compute robust average over sampled frames
+        # ------------------------------------------------------------------
+        sampled_per_frame_sims = {k: v for k, v in per_frame_sims.items() if k in sampled_frame_indices}
+        s_avg, R_avg, t_avg = _average_sims_robust(sampled_per_frame_sims)
+
+        if use_consistent_transformation:
+            per_frame_sims = {
+                fidx: {
+                    "s": float(s_avg),
+                    "R": R_avg,
+                    "t": t_avg,
+                    "w": 1.0,
+                }
+                for fidx in sampled_frame_indices
+            }
+
+        # ------------------------------------------------------------------
+        # 3) build verts per sampled frame and apply either per-frame or avg sim
+        # ------------------------------------------------------------------
         all_verts_for_floor = []
         for frame_idx in sampled_frame_indices:
             frame_data = world4d.get(frame_idx, None)
@@ -986,29 +1018,47 @@ class BBox3DGenerator:
 
             all_verts_for_floor.append(torch.tensor(verts, dtype=torch.bfloat16))
 
-            if frame_idx in per_frame_sims:
-                s_f = per_frame_sims[frame_idx]["s"]
-                R_f = per_frame_sims[frame_idx]["R"]
-                t_f = per_frame_sims[frame_idx]["t"]
+            if use_consistent_transformation and sampled_per_frame_sims:
+                # use the robust average for EVERY frame
+                s_use, R_use, t_use = s_avg, R_avg, t_avg
                 verts_flat = verts.reshape(-1, 3)
-                verts_tf = s_f * (verts_flat @ R_f.T) + t_f
+                verts_tf = s_use * (verts_flat @ R_use.T) + t_use
                 verts_tf = verts_tf.reshape(verts.shape)
             else:
-                verts_tf = verts
+                # fall back to per-frame sim if we have it
+                if frame_idx in per_frame_sims:
+                    s_f = per_frame_sims[frame_idx]["s"]
+                    R_f = per_frame_sims[frame_idx]["R"]
+                    t_f = per_frame_sims[frame_idx]["t"]
+                    verts_flat = verts.reshape(-1, 3)
+                    verts_tf = s_f * (verts_flat @ R_f.T) + t_f
+                    verts_tf = verts_tf.reshape(verts.shape)
+                else:
+                    verts_tf = verts
             frame_data['vertices'] = [verts_tf[0]]
 
+        # ------------------------------------------------------------------
+        # 4) floor mesh from all transformed verts' originals
+        # ------------------------------------------------------------------
         if len(all_verts_for_floor) > 0:
             all_verts_for_floor = torch.cat(all_verts_for_floor)
             gv, gf, gc = get_floor_mesh(all_verts_for_floor, scale=2)
         else:
             gv, gf, gc = None, None, None
 
-        # ---------- 3) average sim ONLY over sampled frames (CHANGE #2) ----------
-        sampled_per_frame_sims = {k: v for k, v in per_frame_sims.items() if k in sampled_frame_indices}
-        s_avg, R_avg, t_avg = _average_sims_robust(sampled_per_frame_sims)
-
-        return (images, world4d, sampled_frame_indices, per_frame_sims,
-                s_avg, R_avg, t_avg, gv, gf, gc, annotated_frame_idx_in_sample_idx)
+        return (
+            images,
+            world4d,
+            sampled_frame_indices,
+            per_frame_sims,
+            s_avg,
+            R_avg,
+            t_avg,
+            gv,
+            gf,
+            gc,
+            annotated_frame_idx_in_sample_idx,
+        )
 
     def generate_video_bb_annotations(
             self,
@@ -1018,7 +1068,8 @@ class BBox3DGenerator:
             *,
             min_points: int = 50,
             iou_thr: float = 0.3,
-            visualize: bool = False
+            visualize: bool = False,
+            use_consistent_transformation: bool = False,
     ) -> None:
         # 1) load dynamic points (already sub-sampled to annotated frames)
         P = self._load_points_for_video(video_id)
@@ -1051,7 +1102,7 @@ class BBox3DGenerator:
             gf,
             gc,
             annotated_frame_idx_in_sampled_idx,
-        ) = self.process_video(video_id)
+        ) = self.process_video(video_id, use_consistent_transformation)
 
         # we will collect bboxes for visualization here:
         # key: frame_idx (i.e. index into world4d / sampled frames)
@@ -1575,7 +1626,7 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
         output_human_dir_path=args.output_human_dir_path,
     )
-    video_id = "00T1E.mp4"
+    video_id = "53FPM.mp4"
     bbox_3d_generator.generate_sample_gt_world_bb_annotations(video_id=video_id)
 
 
