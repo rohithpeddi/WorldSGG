@@ -792,9 +792,6 @@ class BBox3DGenerator:
         matched_scene = np.asarray(matched_scene, dtype=np.float64)
         return smpl_sampled, matched_scene
 
-    # ------------------------------------------------------------------
-    # MAIN PER-VIDEO BBOX GEN (CHANGED: AABB parallel to floor)
-    # ------------------------------------------------------------------
     def process_video(self, video_id: str, include_dense: bool = False):
         # run human/scene pipeline
         self.pipeline.__call__(video_id, save_only_essential=False)
@@ -1189,6 +1186,29 @@ class BBox3DGenerator:
             }, f, protocol=pickle.HIGHEST_PROTOCOL)
         print(f"[bbox] saved floor-aligned 3D bboxes to {out_path}")
 
+    def generate_gt_world_bb_annotations(self, dataloader, split) -> None:
+        for data in tqdm(dataloader):
+            video_id = data['video_id']
+            if get_video_belongs_to_split(video_id) == split:
+                video_id_gt_bboxes_map, video_id_gt_annotations_map = self.get_video_gt_annotations(video_id)
+                video_id_gdino_annotations_map = self.get_video_gdino_annotations(video_id)
+                self.generate_video_bb_annotations(
+                    video_id,
+                    video_id_gt_annotations_map[video_id],
+                    video_id_gdino_annotations_map.get(video_id, {}),
+                    visualize=True
+                )
+
+    def generate_sample_gt_world_bb_annotations(self, video_id: str) -> None:
+        video_id_gt_bboxes_map, video_id_gt_annotations_map = self.get_video_gt_annotations(video_id)
+        video_id_gdino_annotations_map = self.get_video_gdino_annotations(video_id)
+        self.generate_video_bb_annotations(
+            video_id,
+            video_id_gt_annotations_map[video_id],
+            video_id_gdino_annotations_map.get(video_id, {}),
+            visualize=True
+        )
+
 def rerun_vis_world4d(
         video_id: str,
         images: List[Optional[np.ndarray]],
@@ -1371,9 +1391,6 @@ def rerun_vis_world4d(
     print("Rerun visualization running. Scrub the 'frame' timeline.")
 
 
-# =====================================================================
-# DATASET LOADER (same as original bbox script)
-# =====================================================================
 def load_dataset(ag_root_directory: str):
     train_dataset = StandardAG(
         phase="train",
@@ -1411,9 +1428,6 @@ def load_dataset(ag_root_directory: str):
     return train_dataset, test_dataset, dataloader_train, dataloader_test
 
 
-# =====================================================================
-# CLI
-# =====================================================================
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Combined: (a) floor-aligned 3D bbox generator + (b) SMPL↔PI3 human mesh aligner (sampled frames only)."
@@ -1440,6 +1454,17 @@ def main():
     bbox_3d_generator.generate_gt_world_bb_annotations(dataloader=dataloader_train, split=args.split)
     bbox_3d_generator.generate_gt_world_bb_annotations(dataloader=dataloader_test, split=args.split)
 
+def main_sample():
+    args = parse_args()
+
+    bbox_3d_generator = BBox3DGenerator(
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
+        ag_root_directory=args.ag_root_directory,
+        output_human_dir_path=args.output_human_dir_path,
+    )
+    video_id = "0DJ6R.mp4"
+    bbox_3d_generator.generate_sample_gt_world_bb_annotations(video_id=video_id)
+
 
 if __name__ == "__main__":
-    main()
+    main_sample()
