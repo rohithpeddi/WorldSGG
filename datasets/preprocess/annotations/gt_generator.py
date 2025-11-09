@@ -45,7 +45,7 @@ def main():
     os.makedirs(output_directory, exist_ok=True)
 
     dataset = BaseAG(
-        phase="train",
+        phase="test",
         mode="sgdet",
         datasize="large",
         data_path=ag_root_directory,

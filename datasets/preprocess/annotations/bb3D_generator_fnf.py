@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import os
+import pickle
 import sys
 import time
-import pickle
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Callable
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import rerun as rr
 import torch
+from scipy.spatial.transform import Rotation as SciRot
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import rerun as rr
-from scipy.spatial.transform import Rotation as SciRot
 
 # ---------------------------------------------------------------------
 # make local imports work like in your original files
@@ -29,7 +30,6 @@ from datasets.preprocess.human.prompt_hmr.smpl_family import SMPLX as SMPLX_Laye
 from datasets.preprocess.human.prompt_hmr.utils.rotation_conversions import axis_angle_to_matrix
 from datasets.preprocess.human.prompt_hmr.vis.traj import (
     get_floor_mesh,
-    align_meshes_to_ground,
 )
 from datasets.preprocess.human.pipeline.kp_utils import (
     get_openpose_joint_names,
@@ -88,6 +88,7 @@ class BBox3DGenerator:
             self,
             dynamic_scene_dir_path: Optional[str] = None,
             ag_root_directory: Optional[str] = None,
+            output_human_dir_path: Optional[str] = None,
     ) -> None:
         self.ag_root_directory = Path(ag_root_directory)
         self.dynamic_scene_dir_path = Path(dynamic_scene_dir_path)
@@ -115,8 +116,9 @@ class BBox3DGenerator:
         self.bbox_3d_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d"
         os.makedirs(self.bbox_3d_root_dir, exist_ok=True)
 
-        self.gt_annotations_map_path = self.world_annotations_root_dir / "gt_annotations_map.pkl"
-        self.gdino_annotations_map_path = self.world_annotations_root_dir / "gdino_annotations_map.pkl"
+        self.gt_annotations_root_dir = self.ag_root_directory / "gt_annotations"
+        self.pipeline = AgPipeline(static_cam=False, dynamic_scene_dir_path=self.dynamic_scene_dir_path)
+        self.smplx = SMPLX_Layer(SMPLX_PATH).cuda()
 
         # segmentation dirs
         self.dynamic_masked_frames_im_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'image_based'
@@ -131,6 +133,8 @@ class BBox3DGenerator:
         self.static_masks_im_dir_path = self.ag_root_directory / "segmentation_static" / 'masks' / 'image_based'
         self.static_masks_vid_dir_path = self.ag_root_directory / "segmentation_static" / 'masks' / 'video_based'
         self.static_masks_combined_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "combined"
+
+        self.output_human_dir_path = Path(output_human_dir_path)
 
     @staticmethod
     def _is_empty_array(x):
@@ -235,23 +239,6 @@ class BBox3DGenerator:
                 ),
             )
 
-    # ------------------------------------------------------------------
-    # floor build
-    # ------------------------------------------------------------------
-    def build_scene_floor(self, scene_pts_xyz: np.ndarray,
-                          floor_scale=2.0,
-                          floor_color=None,
-                          device="cpu"):
-        if scene_pts_xyz.ndim == 2:
-            scene_pts_xyz = scene_pts_xyz[None, ...]
-        verts = torch.from_numpy(scene_pts_xyz).float().to(device)
-        verts_world, floor_data, R, offset = align_meshes_to_ground(
-            verts, floor_scale=floor_scale, floor_color=floor_color
-        )
-        floor_v, floor_f, floor_c = floor_data
-        R = R.detach().cpu().numpy()
-        offset = offset.detach().cpu().numpy()
-        return R, offset, floor_v, floor_f, floor_c
 
     # ------------------------------------------------------------------
     # masks from seg dirs
@@ -319,117 +306,105 @@ class BBox3DGenerator:
     # ------------------------------------------------------------------
     # annotation map creators
     # ------------------------------------------------------------------
-    def create_gt_annotations_map(self, dataloader, split):
-        video_id_gt_annotations_map = {}
-        video_id_gt_bboxes_map = {}
-        for data in tqdm(dataloader):
-            video_id = data['video_id']
 
-            if get_video_belongs_to_split(video_id) == split:
-                gt_annotations = data['gt_annotations']
-                video_id_gt_annotations_map[video_id] = gt_annotations
+    def get_video_gt_annotations(self, video_id):
+        video_gt_annotations_json_path = self.gt_annotations_root_dir / video_id / "gt_annotations.json"
+        if not video_gt_annotations_json_path.exists():
+            raise FileNotFoundError(f"GT annotations file not found: {video_gt_annotations_json_path}")
 
-        for video_id, gt_annotations in video_id_gt_annotations_map.items():
-            video_gt_bboxes = {}
-            for frame_idx, frame_items in enumerate(gt_annotations):
-                frame_name = frame_items[0]["frame"].split("/")[-1]
-                boxes = []
-                labels = []
-                for item in frame_items:
-                    if 'person_bbox' in item:
-                        boxes.append(item['person_bbox'][0])
-                        labels.append('person')
-                        continue
-                    category_id = item['class']
-                    category_name = self.catid_to_name_map[category_id]
-                    if category_name:
-                        if category_name == "closet/cabinet":
-                            category_name = "closet"
-                        elif category_name == "cup/glass/bottle":
-                            category_name = "cup"
-                        elif category_name == "paper/notebook":
-                            category_name = "paper"
-                        elif category_name == "sofa/couch":
-                            category_name = "sofa"
-                        elif category_name == "phone/camera":
-                            category_name = "phone"
-                        boxes.append(item['bbox'])
-                        labels.append(category_name)
-                if boxes:
-                    video_gt_bboxes[frame_name] = {
-                        'boxes': boxes,
-                        'labels': labels
-                    }
-            video_id_gt_bboxes_map[video_id] = video_gt_bboxes
+        with open(video_gt_annotations_json_path, "r") as f:
+            video_gt_annotations = json.load(f)
 
-        return video_id_gt_bboxes_map, video_id_gt_annotations_map
-
-    def create_gdino_annotations_map(self, dataloader, split):
-        video_id_gdino_annotations_map = {}
-        for data in tqdm(dataloader):
-            video_id = data["video_id"]
-
-            if get_video_belongs_to_split(video_id) != split:
-                continue
-
-            video_dynamic_gdino_prediction_file_path = self.dynamic_detections_root_path / f"{video_id}.pkl"
-            video_dynamic_predictions = self._load_pkl_if_exists(video_dynamic_gdino_prediction_file_path)
-
-            video_static_gdino_prediction_file_path = self.static_detections_root_path / f"{video_id}.pkl"
-            video_static_predictions = self._load_pkl_if_exists(video_static_gdino_prediction_file_path)
-
-            if video_dynamic_predictions is None:
-                video_dynamic_predictions = {}
-            if video_static_predictions is None:
-                video_static_predictions = {}
-
-            if not video_dynamic_predictions and not video_static_predictions:
-                raise ValueError(
-                    f"No GDINO predictions found for video {video_id}"
-                )
-
-            all_frame_names = set(video_dynamic_predictions.keys()) | set(video_static_predictions.keys())
-            combined_gdino_predictions = {}
-            for frame_name in all_frame_names:
-                dyn_pred = video_dynamic_predictions.get(frame_name, None)
-                stat_pred = video_static_predictions.get(frame_name, None)
-                if dyn_pred is None:
-                    dyn_pred = {"boxes": [], "labels": [], "scores": []}
-                if stat_pred is None:
-                    stat_pred = {"boxes": [], "labels": [], "scores": []}
-
-                if self._is_empty_array(dyn_pred["boxes"]) and self._is_empty_array(stat_pred["boxes"]):
-                    combined_gdino_predictions[frame_name] = {
-                        "boxes": [],
-                        "labels": [],
-                        "scores": [],
-                    }
+        video_gt_bboxes = {}
+        for frame_idx, frame_items in enumerate(video_gt_annotations):
+            frame_name = frame_items[0]["frame"].split("/")[-1]
+            boxes = []
+            labels = []
+            for item in frame_items:
+                if 'person_bbox' in item:
+                    boxes.append(item['person_bbox'][0])
+                    labels.append('person')
                     continue
-
-                combined_boxes = []
-                combined_labels = []
-                combined_scores = []
-
-                if not self._is_empty_array(dyn_pred["boxes"]):
-                    combined_boxes += list(dyn_pred["boxes"])
-                    combined_labels += list(dyn_pred["labels"])
-                    combined_scores += list(dyn_pred["scores"])
-
-                if not self._is_empty_array(stat_pred["boxes"]):
-                    combined_boxes += list(stat_pred["boxes"])
-                    combined_labels += list(stat_pred["labels"])
-                    combined_scores += list(stat_pred["scores"])
-
-                final_pred = {
-                    "boxes": combined_boxes,
-                    "labels": combined_labels,
-                    "scores": combined_scores,
+                category_id = item['class']
+                category_name = self.catid_to_name_map[category_id]
+                if category_name:
+                    if category_name == "closet/cabinet":
+                        category_name = "closet"
+                    elif category_name == "cup/glass/bottle":
+                        category_name = "cup"
+                    elif category_name == "paper/notebook":
+                        category_name = "paper"
+                    elif category_name == "sofa/couch":
+                        category_name = "sofa"
+                    elif category_name == "phone/camera":
+                        category_name = "phone"
+                    boxes.append(item['bbox'])
+                    labels.append(category_name)
+            if boxes:
+                video_gt_bboxes[frame_name] = {
+                    'boxes': boxes,
+                    'labels': labels
                 }
 
-                combined_gdino_predictions[frame_name] = final_pred
-            video_id_gdino_annotations_map[video_id] = combined_gdino_predictions
+        return video_gt_bboxes, video_gt_annotations
 
-        return video_id_gdino_annotations_map
+    def get_video_gdino_annotations(self, video_id):
+        video_dynamic_gdino_prediction_file_path = self.dynamic_detections_root_path / f"{video_id}.pkl"
+        video_dynamic_predictions = self._load_pkl_if_exists(video_dynamic_gdino_prediction_file_path)
+
+        video_static_gdino_prediction_file_path = self.static_detections_root_path / f"{video_id}.pkl"
+        video_static_predictions = self._load_pkl_if_exists(video_static_gdino_prediction_file_path)
+
+        if video_dynamic_predictions is None:
+            video_dynamic_predictions = {}
+        if video_static_predictions is None:
+            video_static_predictions = {}
+
+        if not video_dynamic_predictions and not video_static_predictions:
+            raise ValueError(
+                f"No GDINO predictions found for video {video_id}"
+            )
+
+        all_frame_names = set(video_dynamic_predictions.keys()) | set(video_static_predictions.keys())
+        combined_gdino_predictions = {}
+        for frame_name in all_frame_names:
+            dyn_pred = video_dynamic_predictions.get(frame_name, None)
+            stat_pred = video_static_predictions.get(frame_name, None)
+            if dyn_pred is None:
+                dyn_pred = {"boxes": [], "labels": [], "scores": []}
+            if stat_pred is None:
+                stat_pred = {"boxes": [], "labels": [], "scores": []}
+
+            if self._is_empty_array(dyn_pred["boxes"]) and self._is_empty_array(stat_pred["boxes"]):
+                combined_gdino_predictions[frame_name] = {
+                    "boxes": [],
+                    "labels": [],
+                    "scores": [],
+                }
+                continue
+
+            combined_boxes = []
+            combined_labels = []
+            combined_scores = []
+
+            if not self._is_empty_array(dyn_pred["boxes"]):
+                combined_boxes += list(dyn_pred["boxes"])
+                combined_labels += list(dyn_pred["labels"])
+                combined_scores += list(dyn_pred["scores"])
+
+            if not self._is_empty_array(stat_pred["boxes"]):
+                combined_boxes += list(stat_pred["boxes"])
+                combined_labels += list(stat_pred["labels"])
+                combined_scores += list(stat_pred["scores"])
+
+            final_pred = {
+                "boxes": combined_boxes,
+                "labels": combined_labels,
+                "scores": combined_scores,
+            }
+
+            combined_gdino_predictions[frame_name] = final_pred
+        return combined_gdino_predictions
 
     def create_label_wise_masks_map(
             self,
@@ -552,6 +527,325 @@ class BBox3DGenerator:
 
         best = max(candidates, key=lambda t: t[1])[0]
         return best
+
+    # ------------------------------------------------------------------
+    # HUMAN MESH ALIGNMENT RELATED FUNCTIONS
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    def get_union_mask(self, video_id: str, stem: str, label: str, is_static: bool):
+        if is_static:
+            return None
+        else:
+            im_p = self.dynamic_masks_im_dir_path / video_id / f"{stem}__{label}.png"
+            vd_p = self.dynamic_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
+        m_im = cv2.imread(str(im_p), cv2.IMREAD_GRAYSCALE) if im_p.exists() else None
+        m_vd = cv2.imread(str(vd_p), cv2.IMREAD_GRAYSCALE) if vd_p.exists() else None
+        if m_im is None and m_vd is None:
+            return None
+        if m_im is None:
+            m = (m_vd > 127)
+        elif m_vd is None:
+            m = (m_im > 127)
+        else:
+            m = (m_im > 127) | (m_vd > 127)
+        return m.astype(bool)
+
+    def idx_to_frame_idx_path(self, video_id: str):
+        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
+        annotated_frame_id_list = [f for f in os.listdir(video_frames_annotated_dir_path) if f.endswith('.png')]
+        annotated_frame_id_list.sort(key=lambda x: int(x[:-4]))
+
+        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
+        annotated_last_frame_id = int(annotated_frame_id_list[-1][:-4])
+
+        video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir, f"{video_id[:-4]}.npy")
+        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()
+
+        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
+        an_last_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_last_frame_id)
+        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, an_last_id_in_vid_sam_frame_id_list + 1))
+
+        chosen_frames = [video_sampled_frame_id_list[i] for i in sample_idx]
+        frame_idx_frame_path_map = {i: f"{frame_id:06d}.png" for i, frame_id in enumerate(chosen_frames)}
+        return frame_idx_frame_path_map
+
+    def _choose_primary_actor(self, results: dict, world4d: Dict[int, dict]) -> Tuple[Optional[str], Optional[int]]:
+        people = results.get("people", {})
+        if people:
+            counts = {pid: len(pdata.get("frames", [])) for pid, pdata in people.items()}
+            primary_person_id_1 = max(counts.items(), key=lambda x: x[1])[0]
+            primary_track_id_0 = int(primary_person_id_1) - 1
+            return primary_person_id_1, primary_track_id_0
+
+        for _, frame_data in world4d.items():
+            tids = frame_data.get("track_id", [])
+            if tids:
+                track_id_0 = int(tids[0]) if not isinstance(tids[0], torch.Tensor) else int(tids[0].item())
+                person_id_1 = str(track_id_0 + 1)
+                return person_id_1, track_id_0
+        return None, None
+
+    def _find_actor_index_in_frame(self, frame_data: dict, primary_track_id_0: Optional[int]) -> Optional[int]:
+        track_ids = frame_data.get("track_id", [])
+        if len(track_ids) == 0:
+            return None
+        if primary_track_id_0 is None:
+            return 0
+        for idx, tid in enumerate(track_ids):
+            tid_val = int(tid.item()) if isinstance(tid, torch.Tensor) else int(tid)
+            if tid_val == int(primary_track_id_0):
+                return idx
+        return None
+
+    # ------------------------------------------------------------------
+    # similarity estimation
+    # ------------------------------------------------------------------
+    def _similarity_umeyama(self, src: np.ndarray, dst: np.ndarray):
+        src = np.asarray(src, dtype=np.float64)
+        dst = np.asarray(dst, dtype=np.float64)
+        assert src.shape == dst.shape
+        n = src.shape[0]
+        mu_src = src.mean(axis=0)
+        mu_dst = dst.mean(axis=0)
+        src_c = src - mu_src
+        dst_c = dst - mu_dst
+        cov = (dst_c.T @ src_c) / n
+        U, S, Vt = np.linalg.svd(cov)
+        R = U @ Vt
+        if np.linalg.det(R) < 0:
+            Vt[-1, :] *= -1
+            R = U @ Vt
+        var_src = (src_c ** 2).sum() / n
+        s = (S * np.array([1, 1, np.linalg.det(U @ Vt)])).sum() / var_src
+        t = mu_dst - s * (R @ mu_src)
+        return s, R, t
+
+    def _robust_similarity_ransac(
+            self,
+            src: np.ndarray,
+            dst: np.ndarray,
+            *,
+            max_iters: int = 800,
+            inlier_thresh: float = 0.03,
+            min_inliers: int = 4,
+            scale_bounds: Tuple[float, float] = (0.4, 3.0),
+    ):
+        src = np.asarray(src, dtype=np.float64)
+        dst = np.asarray(dst, dtype=np.float64)
+        assert src.shape == dst.shape
+        N = src.shape[0]
+        if N < 3:
+            return self._similarity_umeyama(src, dst)
+
+        best_num = -1
+        best_model = None
+        iters = min(max_iters, 100 + 30 * N)
+        for _ in range(iters):
+            idx = np.random.choice(N, 3, replace=False)
+            s_cand, R_cand, t_cand = self._similarity_umeyama(src[idx], dst[idx])
+            s_cand = float(np.clip(s_cand, scale_bounds[0], scale_bounds[1]))
+            src_tf = s_cand * (src @ R_cand.T) + t_cand
+            err = np.linalg.norm(dst - src_tf, axis=1)
+            inliers = err < inlier_thresh
+            num_inl = int(inliers.sum())
+            if num_inl > best_num and num_inl >= min_inliers:
+                s_ref, R_ref, t_ref = self._similarity_umeyama(src[inliers], dst[inliers])
+                s_ref = float(np.clip(s_ref, scale_bounds[0], scale_bounds[1]))
+                best_num = num_inl
+                best_model = (s_ref, R_ref, t_ref)
+        if best_model is None:
+            return self._similarity_umeyama(src, dst)
+        return best_model
+
+    def _average_sims(self, per_frame_sims: Dict[int, Dict[str, Any]]):
+        if len(per_frame_sims) == 0:
+            return 1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32)
+        ws, scales, trans, quats = [], [], [], []
+        for _, d in per_frame_sims.items():
+            w = float(d.get("w", 1.0))
+            s = float(d["s"])
+            R = np.asarray(d["R"], dtype=np.float64)
+            t = np.asarray(d["t"], dtype=np.float64)
+            quat = SciRot.from_matrix(R).as_quat()
+            ws.append(w);
+            scales.append(s);
+            trans.append(t);
+            quats.append(quat)
+        ws = np.asarray(ws, dtype=np.float64)
+        ws = ws / (ws.sum() + 1e-8)
+        scales = np.asarray(scales, dtype=np.float64)
+        trans = np.asarray(trans, dtype=np.float64)
+        s_avg = float((ws * scales).sum())
+        t_avg = (ws[:, None] * trans).sum(axis=0)
+        quats = np.asarray(quats, dtype=np.float64)
+        q_avg = (ws[:, None] * quats).sum(axis=0)
+        q_avg = q_avg / (np.linalg.norm(q_avg) + 1e-8)
+        R_avg = SciRot.from_quat(q_avg).as_matrix().astype(np.float32)
+        return s_avg, R_avg, t_avg.astype(np.float32)
+
+    # ------------------------------------------------------------------
+    # lifting and partial pointcloud
+    # ------------------------------------------------------------------
+    def _lift_2d_to_3d(self, frame_points_hw3: np.ndarray, u: float, v: float):
+        H, W, _ = frame_points_hw3.shape
+        ui = int(round(u))
+        vi = int(round(v))
+        if ui < 0 or ui >= W or vi < 0 or vi >= H:
+            return None
+        p3d = frame_points_hw3[vi, ui]
+        if not np.isfinite(p3d).all() or np.abs(p3d).sum() < 1e-6:
+            return None
+        return p3d
+
+    def _build_frame_to_kps_map(self, results: dict, primary_person_id_1: Optional[str]):
+        frame_to_kps = {}
+        people_results = results.get("people", {})
+        if not people_results:
+            return frame_to_kps
+        if primary_person_id_1 is None:
+            primary_person_id_1 = list(people_results.keys())[0]
+        pdata = people_results.get(primary_person_id_1, None)
+        if pdata is None:
+            return frame_to_kps
+        frames = pdata.get("frames", None)
+        kp_maps = pdata.get("keypoints_2d_map", None)
+        if frames is None or kp_maps is None:
+            return frame_to_kps
+        for i, fidx in enumerate(frames):
+            frame_to_kps[fidx] = kp_maps[i]
+        return frame_to_kps
+
+    def _get_partial_pointcloud(self, video_id: str, frame_idx: int, frame_idx_frame_path_map,
+                                label: str = "person") -> np.ndarray:
+        pts_hw3 = self.pipeline.points[frame_idx]
+        H, W, _ = pts_hw3.shape
+        stem = frame_idx_frame_path_map[frame_idx][:-4]
+        mask = self.get_union_mask(video_id, stem, label, is_static=False)
+        if mask is not None:
+            mask = mask.astype(bool)
+            if mask.shape[0] != H or mask.shape[1] != W:
+                mask = cv2.resize(mask.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
+            pts = pts_hw3[mask]
+        else:
+            pts = pts_hw3.reshape(-1, 3)
+        pts = pts[np.isfinite(pts).all(axis=1)]
+        nonzero = ~(np.abs(pts).sum(axis=1) < 1e-6)
+        pts = pts[nonzero]
+        return pts
+
+    def _collect_kp_corr_for_frame(self, frame_idx: int, frame_data: dict, frame_to_kps: dict,
+                                   primary_track_id_0: Optional[int]):
+        if frame_idx not in frame_to_kps:
+            return None, None
+        actor_idx = self._find_actor_index_in_frame(frame_data, primary_track_id_0)
+        if actor_idx is None:
+            return None, None
+        kps_2d = frame_to_kps[frame_idx]
+        rotmat_all = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
+        rotmat_actor = rotmat_all[actor_idx:actor_idx + 1]
+
+        smpl_out = self.smplx(
+            global_orient=rotmat_actor[:, :1].cuda(),
+            body_pose=rotmat_actor[:, 1:22].cuda(),
+            betas=frame_data['shape'][actor_idx:actor_idx + 1].cuda(),
+            transl=frame_data['trans'][actor_idx:actor_idx + 1].cuda()
+        )
+        joints = smpl_out.joints.cpu().numpy()
+        joints = joints[:, :24, :]
+        smpl_joints_actor = joints[0]
+
+        frame_points_hw3 = self.pipeline.points[frame_idx]
+        smpl_joint_names = get_smpl_joint_names()
+        openpose_joint_names = get_openpose_joint_names()
+        OPENPOSE_TO_SMPL = {
+            "OP Nose": "head",
+            "OP Neck": "neck",
+            "OP MidHip": "hips",
+            "OP LHip": "leftUpLeg",
+            "OP RHip": "rightUpLeg",
+            "OP LKnee": "leftLeg",
+            "OP RKnee": "rightLeg",
+            "OP LAnkle": "leftFoot",
+            "OP RAnkle": "rightFoot",
+            "OP LShoulder": "leftShoulder",
+            "OP RShoulder": "rightShoulder",
+            "OP LElbow": "leftForeArm",
+            "OP RElbow": "rightForeArm",
+            "OP LWrist": "leftHand",
+            "OP RWrist": "rightHand",
+            "OP LBigToe": "leftToeBase",
+            "OP RBigToe": "rightToeBase",
+        }
+        if not smpl_joint_names or len(smpl_joint_names) < smpl_joints_actor.shape[0]:
+            return None, None
+        smpl_name_to_pt = {smpl_joint_names[j]: smpl_joints_actor[j] for j in range(smpl_joints_actor.shape[0])}
+
+        smpl_list = []
+        scene_list = []
+        for op_name, kp in kps_2d.items():
+            smpl_name = OPENPOSE_TO_SMPL.get(op_name, None)
+            if smpl_name is None:
+                continue
+            if smpl_name not in smpl_name_to_pt:
+                continue
+            u = float(kp[0]);
+            v = float(kp[1])
+            scene_p = self._lift_2d_to_3d(frame_points_hw3, u, v)
+            if scene_p is None:
+                continue
+            smpl_list.append(smpl_name_to_pt[smpl_name])
+            scene_list.append(scene_p)
+
+        if len(smpl_list) == 0:
+            return None, None
+        return np.stack(smpl_list, axis=0), np.stack(scene_list, axis=0)
+
+    def _collect_dense_corr_for_frame(
+            self,
+            video_id: str,
+            frame_idx: int,
+            frame_data: dict,
+            frame_idx_frame_path_map: dict,
+            primary_track_id_0: Optional[int],
+            num_smpl_samples_per_person: int = 400,
+            num_scene_subsample: int = 800,
+    ):
+        actor_idx = self._find_actor_index_in_frame(frame_data, primary_track_id_0)
+        if actor_idx is None:
+            return None, None
+        rotmat_all = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
+        rotmat_actor = rotmat_all[actor_idx:actor_idx + 1]
+        smpl_out = self.smplx(
+            global_orient=rotmat_actor[:, :1].cuda(),
+            body_pose=rotmat_actor[:, 1:22].cuda(),
+            betas=frame_data['shape'][actor_idx:actor_idx + 1].cuda(),
+            transl=frame_data['trans'][actor_idx:actor_idx + 1].cuda()
+        )
+        verts = smpl_out.vertices.cpu().numpy()
+        smpl_verts = verts[0]
+
+        scene_pts = self._get_partial_pointcloud(video_id, frame_idx, frame_idx_frame_path_map, label="person")
+        if scene_pts.shape[0] == 0:
+            return None, None
+
+        if scene_pts.shape[0] > num_scene_subsample:
+            choice = np.random.choice(scene_pts.shape[0], num_scene_subsample, replace=False)
+            scene_pts = scene_pts[choice]
+
+        if smpl_verts.shape[0] > num_smpl_samples_per_person:
+            idx = np.random.choice(smpl_verts.shape[0], num_smpl_samples_per_person, replace=False)
+            smpl_sampled = smpl_verts[idx]
+        else:
+            smpl_sampled = smpl_verts
+
+        matched_scene = []
+        for sp in smpl_sampled:
+            dists = np.sum((scene_pts - sp[None, :]) ** 2, axis=1)
+            nn_idx = np.argmin(dists)
+            matched_scene.append(scene_pts[nn_idx])
+        matched_scene = np.asarray(matched_scene, dtype=np.float64)
+        return smpl_sampled, matched_scene
 
     # ------------------------------------------------------------------
     # MAIN PER-VIDEO BBOX GEN (CHANGED: AABB parallel to floor)
@@ -733,15 +1027,148 @@ class BBox3DGenerator:
         print(f"[bbox] saved floor-aligned 3D bboxes to {out_path}")
 
     # ------------------------------------------------------------------
-    def generate_gt_world_bb_annotations(self, dataloader, split) -> None:
-        print("Creating GT annotations map...")
-        video_id_gt_bboxes_map, video_id_gt_annotations_map = self.create_gt_annotations_map(dataloader, split)
-        print("Creating GDINO annotations map...")
-        video_id_gdino_annotations_map = self.create_gdino_annotations_map(dataloader, split)
+    def process_video(self, video_id: str, include_dense: bool = False):
+        # run human/scene pipeline
+        self.pipeline.__call__(video_id, save_only_essential=False)
+        self.pipeline.estimate_2d_keypoints()
+        results = self.pipeline.results
+        images = self.pipeline.images
+        world4d = self.pipeline.create_world4d()
+        world4d = {i: world4d[k] for i, k in enumerate(world4d)}  # 0..N-1
 
+        # sampled/annotated indices (CHANGE #1)
+        frame_idx_frame_path_map = self.idx_to_frame_idx_path(video_id)
+        sampled_frame_indices = sorted(frame_idx_frame_path_map.keys())
+
+        primary_person_id_1, primary_track_id_0 = self._choose_primary_actor(results, world4d)
+        print(f"[align] Using primary actor -> results={primary_person_id_1}, world4d_track={primary_track_id_0}")
+
+        frame_to_kps = self._build_frame_to_kps_map(results, primary_person_id_1)
+
+        frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+        per_frame_sims: Dict[int, Dict[str, Any]] = {}
+
+        # ---------- 1) per-frame sim ONLY for sampled frames ----------
+        for frame_idx in sampled_frame_indices:
+            frame_data = world4d.get(frame_idx, None)
+            if frame_data is None:
+                continue
+
+            smpl_s, scene_s = self._collect_kp_corr_for_frame(
+                frame_idx, frame_data, frame_to_kps, primary_track_id_0
+            )
+
+            smpl_all = []
+            scene_all = []
+            if smpl_s is not None and scene_s is not None and smpl_s.shape[0] > 0:
+                frame_kp_corr[frame_idx] = (smpl_s, scene_s)
+                smpl_all.append(smpl_s)
+                scene_all.append(scene_s)
+
+            if include_dense:
+                smpl_d, scene_d = self._collect_dense_corr_for_frame(
+                    video_id, frame_idx, frame_data, frame_idx_frame_path_map, primary_track_id_0
+                )
+                if smpl_d is not None and scene_d is not None:
+                    smpl_all.append(smpl_d)
+                    scene_all.append(scene_d)
+
+            if len(smpl_all) == 0:
+                print(f"[align][{video_id}] no corr for sampled frame {frame_idx}")
+                continue
+
+            smpl_all = np.concatenate(smpl_all, axis=0)
+            scene_all = np.concatenate(scene_all, axis=0)
+            if smpl_all.shape[0] < 3:
+                print(f"[align][{video_id}] insufficient corr for frame {frame_idx}")
+                continue
+
+            s_f, R_f, t_f = self._robust_similarity_ransac(
+                smpl_all, scene_all,
+                max_iters=800,
+                inlier_thresh=0.03,
+                min_inliers=4,
+                scale_bounds=(0.4, 3.0),
+            )
+            per_frame_sims[frame_idx] = {
+                "s": float(s_f),
+                "R": R_f,
+                "t": t_f,
+                "w": float(smpl_all.shape[0]),
+            }
+
+        # ---------- 2) build verts per sampled frame ----------
+        all_verts_for_floor = []
+        for frame_idx in sampled_frame_indices:
+            frame_data = world4d.get(frame_idx, None)
+            if frame_data is None:
+                continue
+            actor_idx = self._find_actor_index_in_frame(frame_data, primary_track_id_0)
+            if actor_idx is None:
+                frame_data['track_id'] = []
+                continue
+
+            rotmat_all = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
+            rotmat_actor = rotmat_all[actor_idx:actor_idx + 1]
+            smpl_out = self.smplx(
+                global_orient=rotmat_actor[:, :1].cuda(),
+                body_pose=rotmat_actor[:, 1:22].cuda(),
+                betas=frame_data['shape'][actor_idx:actor_idx + 1].cuda(),
+                transl=frame_data['trans'][actor_idx:actor_idx + 1].cuda()
+            )
+            verts = smpl_out.vertices.cpu().numpy()
+
+            frame_data['track_id'] = [primary_track_id_0]
+            frame_data['vertices_orig'] = [verts[0].copy()]
+
+            all_verts_for_floor.append(torch.tensor(verts, dtype=torch.bfloat16))
+
+            if frame_idx in per_frame_sims:
+                s_f = per_frame_sims[frame_idx]["s"]
+                R_f = per_frame_sims[frame_idx]["R"]
+                t_f = per_frame_sims[frame_idx]["t"]
+                verts_flat = verts.reshape(-1, 3)
+                verts_tf = s_f * (verts_flat @ R_f.T) + t_f
+                verts_tf = verts_tf.reshape(verts.shape)
+            else:
+                verts_tf = verts
+            frame_data['vertices'] = [verts_tf[0]]
+
+        if len(all_verts_for_floor) > 0:
+            all_verts_for_floor = torch.cat(all_verts_for_floor)
+            gv, gf, gc = get_floor_mesh(all_verts_for_floor, scale=2)
+        else:
+            gv, gf, gc = None, None, None
+
+        # ---------- 3) average sim ONLY over sampled frames (CHANGE #2) ----------
+        sampled_per_frame_sims = {k: v for k, v in per_frame_sims.items() if k in sampled_frame_indices}
+        s_avg, R_avg, t_avg = self._average_sims(sampled_per_frame_sims)
+
+        # ---------- 4) visualize ONLY sampled frames ----------
+        rerun_vis_world4d(
+            video_id=video_id,
+            images=images,
+            world4d=world4d,
+            faces=self.smplx.faces,
+            sampled_indices=sampled_frame_indices,
+            dynamic_prediction_path=str(self.dynamic_scene_dir_path),
+            per_frame_sims=per_frame_sims,
+            global_floor_sim=(s_avg, R_avg, t_avg),
+            floor=(gv, gf, gc) if gv is not None else None,
+            img_maxsize=480,
+            app_id="World4D-Combined",
+        )
+
+        print("Visualization running. Press Ctrl+C to stop.")
+        while True:
+            time.sleep(1)
+
+    def generate_gt_world_bb_annotations(self, dataloader, split) -> None:
         for data in tqdm(dataloader):
             video_id = data['video_id']
             if get_video_belongs_to_split(video_id) == split:
+                video_id_gt_bboxes_map, video_id_gt_annotations_map = self.get_video_gt_annotations(video_id)
+                video_id_gdino_annotations_map = self.get_video_gdino_annotations(video_id)
                 self.generate_video_bb_annotations(
                     video_id,
                     video_id_gt_annotations_map[video_id],
@@ -916,488 +1343,6 @@ def rerun_vis_world4d(
     print("Rerun visualization running. Scrub the 'frame' timeline.")
 
 
-class AlignHMRPi3:
-
-    def __init__(
-            self,
-            output_root,
-            ag_root_directory,
-            dynamic_scene_dir_path,
-    ):
-        self.output_root = output_root
-        os.makedirs(self.output_root, exist_ok=True)
-
-        self.ag_root_directory = Path(ag_root_directory)
-        self.dynamic_scene_dir_path = Path(dynamic_scene_dir_path)
-
-        self.frame_annotated_dir_path = self.ag_root_directory / "frames_annotated"
-        self.sampled_frames_idx_root_dir = self.ag_root_directory / "sampled_frames_idx"
-        self.videos_directory = self.ag_root_directory / "videos"
-
-        # segmentation dirs (for partial point cloud)
-        self.dynamic_masks_im_dir_path = self.ag_root_directory / "segmentation" / "masks" / "image_based"
-        self.dynamic_masks_vid_dir_path = self.ag_root_directory / "segmentation" / "masks" / "video_based"
-
-        self.pipeline = AgPipeline(static_cam=False, dynamic_scene_dir_path=self.dynamic_scene_dir_path)
-        self.smplx = SMPLX_Layer(SMPLX_PATH).cuda()
-
-    # ------------------------------------------------------------------
-    def get_union_mask(self, video_id: str, stem: str, label: str, is_static: bool):
-        if is_static:
-            return None
-        else:
-            im_p = self.dynamic_masks_im_dir_path / video_id / f"{stem}__{label}.png"
-            vd_p = self.dynamic_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
-        m_im = cv2.imread(str(im_p), cv2.IMREAD_GRAYSCALE) if im_p.exists() else None
-        m_vd = cv2.imread(str(vd_p), cv2.IMREAD_GRAYSCALE) if vd_p.exists() else None
-        if m_im is None and m_vd is None:
-            return None
-        if m_im is None:
-            m = (m_vd > 127)
-        elif m_vd is None:
-            m = (m_im > 127)
-        else:
-            m = (m_im > 127) | (m_vd > 127)
-        return m.astype(bool)
-
-    def idx_to_frame_idx_path(self, video_id: str):
-        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
-        annotated_frame_id_list = [f for f in os.listdir(video_frames_annotated_dir_path) if f.endswith('.png')]
-        annotated_frame_id_list.sort(key=lambda x: int(x[:-4]))
-
-        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
-        annotated_last_frame_id = int(annotated_frame_id_list[-1][:-4])
-
-        video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir, f"{video_id[:-4]}.npy")
-        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()
-
-        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
-        an_last_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_last_frame_id)
-        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, an_last_id_in_vid_sam_frame_id_list + 1))
-
-        chosen_frames = [video_sampled_frame_id_list[i] for i in sample_idx]
-        frame_idx_frame_path_map = {i: f"{frame_id:06d}.png" for i, frame_id in enumerate(chosen_frames)}
-        return frame_idx_frame_path_map
-
-    def _choose_primary_actor(self, results: dict, world4d: Dict[int, dict]) -> Tuple[Optional[str], Optional[int]]:
-        people = results.get("people", {})
-        if people:
-            counts = {pid: len(pdata.get("frames", [])) for pid, pdata in people.items()}
-            primary_person_id_1 = max(counts.items(), key=lambda x: x[1])[0]
-            primary_track_id_0 = int(primary_person_id_1) - 1
-            return primary_person_id_1, primary_track_id_0
-
-        for _, frame_data in world4d.items():
-            tids = frame_data.get("track_id", [])
-            if tids:
-                track_id_0 = int(tids[0]) if not isinstance(tids[0], torch.Tensor) else int(tids[0].item())
-                person_id_1 = str(track_id_0 + 1)
-                return person_id_1, track_id_0
-        return None, None
-
-    def _find_actor_index_in_frame(self, frame_data: dict, primary_track_id_0: Optional[int]) -> Optional[int]:
-        track_ids = frame_data.get("track_id", [])
-        if len(track_ids) == 0:
-            return None
-        if primary_track_id_0 is None:
-            return 0
-        for idx, tid in enumerate(track_ids):
-            tid_val = int(tid.item()) if isinstance(tid, torch.Tensor) else int(tid)
-            if tid_val == int(primary_track_id_0):
-                return idx
-        return None
-
-    # ------------------------------------------------------------------
-    # similarity estimation
-    # ------------------------------------------------------------------
-    def _similarity_umeyama(self, src: np.ndarray, dst: np.ndarray):
-        src = np.asarray(src, dtype=np.float64)
-        dst = np.asarray(dst, dtype=np.float64)
-        assert src.shape == dst.shape
-        n = src.shape[0]
-        mu_src = src.mean(axis=0)
-        mu_dst = dst.mean(axis=0)
-        src_c = src - mu_src
-        dst_c = dst - mu_dst
-        cov = (dst_c.T @ src_c) / n
-        U, S, Vt = np.linalg.svd(cov)
-        R = U @ Vt
-        if np.linalg.det(R) < 0:
-            Vt[-1, :] *= -1
-            R = U @ Vt
-        var_src = (src_c ** 2).sum() / n
-        s = (S * np.array([1, 1, np.linalg.det(U @ Vt)])).sum() / var_src
-        t = mu_dst - s * (R @ mu_src)
-        return s, R, t
-
-    def _robust_similarity_ransac(
-            self,
-            src: np.ndarray,
-            dst: np.ndarray,
-            *,
-            max_iters: int = 800,
-            inlier_thresh: float = 0.03,
-            min_inliers: int = 4,
-            scale_bounds: Tuple[float, float] = (0.4, 3.0),
-    ):
-        src = np.asarray(src, dtype=np.float64)
-        dst = np.asarray(dst, dtype=np.float64)
-        assert src.shape == dst.shape
-        N = src.shape[0]
-        if N < 3:
-            return self._similarity_umeyama(src, dst)
-
-        best_num = -1
-        best_model = None
-        iters = min(max_iters, 100 + 30 * N)
-        for _ in range(iters):
-            idx = np.random.choice(N, 3, replace=False)
-            s_cand, R_cand, t_cand = self._similarity_umeyama(src[idx], dst[idx])
-            s_cand = float(np.clip(s_cand, scale_bounds[0], scale_bounds[1]))
-            src_tf = s_cand * (src @ R_cand.T) + t_cand
-            err = np.linalg.norm(dst - src_tf, axis=1)
-            inliers = err < inlier_thresh
-            num_inl = int(inliers.sum())
-            if num_inl > best_num and num_inl >= min_inliers:
-                s_ref, R_ref, t_ref = self._similarity_umeyama(src[inliers], dst[inliers])
-                s_ref = float(np.clip(s_ref, scale_bounds[0], scale_bounds[1]))
-                best_num = num_inl
-                best_model = (s_ref, R_ref, t_ref)
-        if best_model is None:
-            return self._similarity_umeyama(src, dst)
-        return best_model
-
-    def _average_sims(self, per_frame_sims: Dict[int, Dict[str, Any]]):
-        if len(per_frame_sims) == 0:
-            return 1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32)
-        ws, scales, trans, quats = [], [], [], []
-        for _, d in per_frame_sims.items():
-            w = float(d.get("w", 1.0))
-            s = float(d["s"])
-            R = np.asarray(d["R"], dtype=np.float64)
-            t = np.asarray(d["t"], dtype=np.float64)
-            quat = SciRot.from_matrix(R).as_quat()
-            ws.append(w); scales.append(s); trans.append(t); quats.append(quat)
-        ws = np.asarray(ws, dtype=np.float64)
-        ws = ws / (ws.sum() + 1e-8)
-        scales = np.asarray(scales, dtype=np.float64)
-        trans = np.asarray(trans, dtype=np.float64)
-        s_avg = float((ws * scales).sum())
-        t_avg = (ws[:, None] * trans).sum(axis=0)
-        quats = np.asarray(quats, dtype=np.float64)
-        q_avg = (ws[:, None] * quats).sum(axis=0)
-        q_avg = q_avg / (np.linalg.norm(q_avg) + 1e-8)
-        R_avg = SciRot.from_quat(q_avg).as_matrix().astype(np.float32)
-        return s_avg, R_avg, t_avg.astype(np.float32)
-
-    # ------------------------------------------------------------------
-    # lifting and partial pointcloud
-    # ------------------------------------------------------------------
-    def _lift_2d_to_3d(self, frame_points_hw3: np.ndarray, u: float, v: float):
-        H, W, _ = frame_points_hw3.shape
-        ui = int(round(u))
-        vi = int(round(v))
-        if ui < 0 or ui >= W or vi < 0 or vi >= H:
-            return None
-        p3d = frame_points_hw3[vi, ui]
-        if not np.isfinite(p3d).all() or np.abs(p3d).sum() < 1e-6:
-            return None
-        return p3d
-
-    def _build_frame_to_kps_map(self, results: dict, primary_person_id_1: Optional[str]):
-        frame_to_kps = {}
-        people_results = results.get("people", {})
-        if not people_results:
-            return frame_to_kps
-        if primary_person_id_1 is None:
-            primary_person_id_1 = list(people_results.keys())[0]
-        pdata = people_results.get(primary_person_id_1, None)
-        if pdata is None:
-            return frame_to_kps
-        frames = pdata.get("frames", None)
-        kp_maps = pdata.get("keypoints_2d_map", None)
-        if frames is None or kp_maps is None:
-            return frame_to_kps
-        for i, fidx in enumerate(frames):
-            frame_to_kps[fidx] = kp_maps[i]
-        return frame_to_kps
-
-    def _get_partial_pointcloud(self, video_id: str, frame_idx: int, frame_idx_frame_path_map,
-                                label: str = "person") -> np.ndarray:
-        pts_hw3 = self.pipeline.points[frame_idx]
-        H, W, _ = pts_hw3.shape
-        stem = frame_idx_frame_path_map[frame_idx][:-4]
-        mask = self.get_union_mask(video_id, stem, label, is_static=False)
-        if mask is not None:
-            mask = mask.astype(bool)
-            if mask.shape[0] != H or mask.shape[1] != W:
-                mask = cv2.resize(mask.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
-            pts = pts_hw3[mask]
-        else:
-            pts = pts_hw3.reshape(-1, 3)
-        pts = pts[np.isfinite(pts).all(axis=1)]
-        nonzero = ~(np.abs(pts).sum(axis=1) < 1e-6)
-        pts = pts[nonzero]
-        return pts
-
-    def _collect_kp_corr_for_frame(self, frame_idx: int, frame_data: dict, frame_to_kps: dict,
-                                   primary_track_id_0: Optional[int]):
-        if frame_idx not in frame_to_kps:
-            return None, None
-        actor_idx = self._find_actor_index_in_frame(frame_data, primary_track_id_0)
-        if actor_idx is None:
-            return None, None
-        kps_2d = frame_to_kps[frame_idx]
-        rotmat_all = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
-        rotmat_actor = rotmat_all[actor_idx:actor_idx + 1]
-
-        smpl_out = self.smplx(
-            global_orient=rotmat_actor[:, :1].cuda(),
-            body_pose=rotmat_actor[:, 1:22].cuda(),
-            betas=frame_data['shape'][actor_idx:actor_idx + 1].cuda(),
-            transl=frame_data['trans'][actor_idx:actor_idx + 1].cuda()
-        )
-        joints = smpl_out.joints.cpu().numpy()
-        joints = joints[:, :24, :]
-        smpl_joints_actor = joints[0]
-
-        frame_points_hw3 = self.pipeline.points[frame_idx]
-        smpl_joint_names = get_smpl_joint_names()
-        openpose_joint_names = get_openpose_joint_names()
-        OPENPOSE_TO_SMPL = {
-            "OP Nose": "head",
-            "OP Neck": "neck",
-            "OP MidHip": "hips",
-            "OP LHip": "leftUpLeg",
-            "OP RHip": "rightUpLeg",
-            "OP LKnee": "leftLeg",
-            "OP RKnee": "rightLeg",
-            "OP LAnkle": "leftFoot",
-            "OP RAnkle": "rightFoot",
-            "OP LShoulder": "leftShoulder",
-            "OP RShoulder": "rightShoulder",
-            "OP LElbow": "leftForeArm",
-            "OP RElbow": "rightForeArm",
-            "OP LWrist": "leftHand",
-            "OP RWrist": "rightHand",
-            "OP LBigToe": "leftToeBase",
-            "OP RBigToe": "rightToeBase",
-        }
-        if not smpl_joint_names or len(smpl_joint_names) < smpl_joints_actor.shape[0]:
-            return None, None
-        smpl_name_to_pt = {smpl_joint_names[j]: smpl_joints_actor[j] for j in range(smpl_joints_actor.shape[0])}
-
-        smpl_list = []
-        scene_list = []
-        for op_name, kp in kps_2d.items():
-            smpl_name = OPENPOSE_TO_SMPL.get(op_name, None)
-            if smpl_name is None:
-                continue
-            if smpl_name not in smpl_name_to_pt:
-                continue
-            u = float(kp[0]); v = float(kp[1])
-            scene_p = self._lift_2d_to_3d(frame_points_hw3, u, v)
-            if scene_p is None:
-                continue
-            smpl_list.append(smpl_name_to_pt[smpl_name])
-            scene_list.append(scene_p)
-
-        if len(smpl_list) == 0:
-            return None, None
-        return np.stack(smpl_list, axis=0), np.stack(scene_list, axis=0)
-
-    def _collect_dense_corr_for_frame(
-            self,
-            video_id: str,
-            frame_idx: int,
-            frame_data: dict,
-            frame_idx_frame_path_map: dict,
-            primary_track_id_0: Optional[int],
-            num_smpl_samples_per_person: int = 400,
-            num_scene_subsample: int = 800,
-    ):
-        actor_idx = self._find_actor_index_in_frame(frame_data, primary_track_id_0)
-        if actor_idx is None:
-            return None, None
-        rotmat_all = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
-        rotmat_actor = rotmat_all[actor_idx:actor_idx + 1]
-        smpl_out = self.smplx(
-            global_orient=rotmat_actor[:, :1].cuda(),
-            body_pose=rotmat_actor[:, 1:22].cuda(),
-            betas=frame_data['shape'][actor_idx:actor_idx + 1].cuda(),
-            transl=frame_data['trans'][actor_idx:actor_idx + 1].cuda()
-        )
-        verts = smpl_out.vertices.cpu().numpy()
-        smpl_verts = verts[0]
-
-        scene_pts = self._get_partial_pointcloud(video_id, frame_idx, frame_idx_frame_path_map, label="person")
-        if scene_pts.shape[0] == 0:
-            return None, None
-
-        if scene_pts.shape[0] > num_scene_subsample:
-            choice = np.random.choice(scene_pts.shape[0], num_scene_subsample, replace=False)
-            scene_pts = scene_pts[choice]
-
-        if smpl_verts.shape[0] > num_smpl_samples_per_person:
-            idx = np.random.choice(smpl_verts.shape[0], num_smpl_samples_per_person, replace=False)
-            smpl_sampled = smpl_verts[idx]
-        else:
-            smpl_sampled = smpl_verts
-
-        matched_scene = []
-        for sp in smpl_sampled:
-            dists = np.sum((scene_pts - sp[None, :]) ** 2, axis=1)
-            nn_idx = np.argmin(dists)
-            matched_scene.append(scene_pts[nn_idx])
-        matched_scene = np.asarray(matched_scene, dtype=np.float64)
-        return smpl_sampled, matched_scene
-
-    # ------------------------------------------------------------------
-    def process_video(self, video_id: str, include_dense: bool = False):
-        # run human/scene pipeline
-        self.pipeline.__call__(video_id, save_only_essential=False)
-        self.pipeline.estimate_2d_keypoints()
-        results = self.pipeline.results
-        images = self.pipeline.images
-        world4d = self.pipeline.create_world4d()
-        world4d = {i: world4d[k] for i, k in enumerate(world4d)}  # 0..N-1
-
-        # sampled/annotated indices (CHANGE #1)
-        frame_idx_frame_path_map = self.idx_to_frame_idx_path(video_id)
-        sampled_frame_indices = sorted(frame_idx_frame_path_map.keys())
-
-        primary_person_id_1, primary_track_id_0 = self._choose_primary_actor(results, world4d)
-        print(f"[align] Using primary actor -> results={primary_person_id_1}, world4d_track={primary_track_id_0}")
-
-        frame_to_kps = self._build_frame_to_kps_map(results, primary_person_id_1)
-
-        frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
-        per_frame_sims: Dict[int, Dict[str, Any]] = {}
-
-        # ---------- 1) per-frame sim ONLY for sampled frames ----------
-        for frame_idx in sampled_frame_indices:
-            frame_data = world4d.get(frame_idx, None)
-            if frame_data is None:
-                continue
-
-            smpl_s, scene_s = self._collect_kp_corr_for_frame(
-                frame_idx, frame_data, frame_to_kps, primary_track_id_0
-            )
-
-            smpl_all = []
-            scene_all = []
-            if smpl_s is not None and scene_s is not None and smpl_s.shape[0] > 0:
-                frame_kp_corr[frame_idx] = (smpl_s, scene_s)
-                smpl_all.append(smpl_s)
-                scene_all.append(scene_s)
-
-            if include_dense:
-                smpl_d, scene_d = self._collect_dense_corr_for_frame(
-                    video_id, frame_idx, frame_data, frame_idx_frame_path_map, primary_track_id_0
-                )
-                if smpl_d is not None and scene_d is not None:
-                    smpl_all.append(smpl_d)
-                    scene_all.append(scene_d)
-
-            if len(smpl_all) == 0:
-                print(f"[align][{video_id}] no corr for sampled frame {frame_idx}")
-                continue
-
-            smpl_all = np.concatenate(smpl_all, axis=0)
-            scene_all = np.concatenate(scene_all, axis=0)
-            if smpl_all.shape[0] < 3:
-                print(f"[align][{video_id}] insufficient corr for frame {frame_idx}")
-                continue
-
-            s_f, R_f, t_f = self._robust_similarity_ransac(
-                smpl_all, scene_all,
-                max_iters=800,
-                inlier_thresh=0.03,
-                min_inliers=4,
-                scale_bounds=(0.4, 3.0),
-            )
-            per_frame_sims[frame_idx] = {
-                "s": float(s_f),
-                "R": R_f,
-                "t": t_f,
-                "w": float(smpl_all.shape[0]),
-            }
-
-        # ---------- 2) build verts per sampled frame ----------
-        all_verts_for_floor = []
-        for frame_idx in sampled_frame_indices:
-            frame_data = world4d.get(frame_idx, None)
-            if frame_data is None:
-                continue
-            actor_idx = self._find_actor_index_in_frame(frame_data, primary_track_id_0)
-            if actor_idx is None:
-                frame_data['track_id'] = []
-                continue
-
-            rotmat_all = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
-            rotmat_actor = rotmat_all[actor_idx:actor_idx + 1]
-            smpl_out = self.smplx(
-                global_orient=rotmat_actor[:, :1].cuda(),
-                body_pose=rotmat_actor[:, 1:22].cuda(),
-                betas=frame_data['shape'][actor_idx:actor_idx + 1].cuda(),
-                transl=frame_data['trans'][actor_idx:actor_idx + 1].cuda()
-            )
-            verts = smpl_out.vertices.cpu().numpy()
-
-            frame_data['track_id'] = [primary_track_id_0]
-            frame_data['vertices_orig'] = [verts[0].copy()]
-
-            all_verts_for_floor.append(torch.tensor(verts, dtype=torch.bfloat16))
-
-            if frame_idx in per_frame_sims:
-                s_f = per_frame_sims[frame_idx]["s"]
-                R_f = per_frame_sims[frame_idx]["R"]
-                t_f = per_frame_sims[frame_idx]["t"]
-                verts_flat = verts.reshape(-1, 3)
-                verts_tf = s_f * (verts_flat @ R_f.T) + t_f
-                verts_tf = verts_tf.reshape(verts.shape)
-            else:
-                verts_tf = verts
-            frame_data['vertices'] = [verts_tf[0]]
-
-        if len(all_verts_for_floor) > 0:
-            all_verts_for_floor = torch.cat(all_verts_for_floor)
-            gv, gf, gc = get_floor_mesh(all_verts_for_floor, scale=2)
-        else:
-            gv, gf, gc = None, None, None
-
-        # ---------- 3) average sim ONLY over sampled frames (CHANGE #2) ----------
-        sampled_per_frame_sims = {k: v for k, v in per_frame_sims.items() if k in sampled_frame_indices}
-        s_avg, R_avg, t_avg = self._average_sims(sampled_per_frame_sims)
-
-        # ---------- 4) visualize ONLY sampled frames ----------
-        rerun_vis_world4d(
-            video_id=video_id,
-            images=images,
-            world4d=world4d,
-            faces=self.smplx.faces,
-            sampled_indices=sampled_frame_indices,
-            dynamic_prediction_path=str(self.dynamic_scene_dir_path),
-            per_frame_sims=per_frame_sims,
-            global_floor_sim=(s_avg, R_avg, t_avg),
-            floor=(gv, gf, gc) if gv is not None else None,
-            img_maxsize=480,
-            app_id="World4D-Combined",
-        )
-
-        print("Visualization running. Press Ctrl+C to stop.")
-        while True:
-            time.sleep(1)
-
-    def infer_all_videos(self, split: str):
-        # you can plug your actual list here
-        video_id_list = ["0ACZ8.mp4"]
-        for video_id in tqdm(video_id_list, desc=f"Processing videos in split {split}", unit="video"):
-            if get_video_belongs_to_split(video_id) != split:
-                continue
-            self.process_video(video_id)
-
-
 # =====================================================================
 # DATASET LOADER (same as original bbox script)
 # =====================================================================
@@ -1445,11 +1390,10 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Combined: (a) floor-aligned 3D bbox generator + (b) SMPL↔PI3 human mesh aligner (sampled frames only)."
     )
-    parser.add_argument("--task", choices=["bbox", "align", "both"], default="both")
     parser.add_argument("--ag_root_directory", type=str, default="/data/rohith/ag")
     parser.add_argument("--dynamic_scene_dir_path", type=str,
                         default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic")
-    parser.add_argument("--output_dir_path", type=str, default="/data/rohith/ag/ag4D/human/")
+    parser.add_argument("--output_human_dir_path", type=str, default="/data/rohith/ag/ag4D/human/")
     parser.add_argument("--split", type=str, default="04")
     parser.add_argument("--include_dense", action="store_true",
                         help="use dense correspondences for human aligner")
@@ -1459,21 +1403,14 @@ def parse_args():
 def main():
     args = parse_args()
 
-    if args.task in ("bbox", "both"):
-        bbox_3d_generator = BBox3DGenerator(
-            dynamic_scene_dir_path=args.dynamic_scene_dir_path,
-            ag_root_directory=args.ag_root_directory,
-        )
-        _, _, dataloader_train, _ = load_dataset(args.ag_root_directory)
-        bbox_3d_generator.generate_gt_world_bb_annotations(dataloader=dataloader_train, split=args.split)
-
-    if args.task in ("align", "both"):
-        processor = AlignHMRPi3(
-            output_root=args.output_dir_path,
-            ag_root_directory=args.ag_root_directory,
-            dynamic_scene_dir_path=args.dynamic_scene_dir_path,
-        )
-        processor.infer_all_videos(split=args.split)
+    bbox_3d_generator = BBox3DGenerator(
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
+        ag_root_directory=args.ag_root_directory,
+        output_human_dir_path=args.output_human_dir_path,
+    )
+    train_dataset, test_dataset, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
+    bbox_3d_generator.generate_gt_world_bb_annotations(dataloader=dataloader_train, split=args.split)
+    bbox_3d_generator.generate_gt_world_bb_annotations(dataloader=dataloader_test, split=args.split)
 
 
 if __name__ == "__main__":
