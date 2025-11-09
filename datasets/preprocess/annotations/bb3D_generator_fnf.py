@@ -113,7 +113,7 @@ def _iou_xyxy(a, b) -> float:
     inter = iw * ih
     if inter <= 0:
         return 0.0
-    ua = BBox3DGenerator._area_xyxy(a) + BBox3DGenerator._area_xyxy(b) - inter
+    ua = _area_xyxy(a) + _area_xyxy(b) - inter
     return inter / max(ua, 1e-8)
 
 def _mask_from_bbox(h: int, w: int, xyxy: List[float]) -> np.ndarray:
@@ -1190,22 +1190,22 @@ class BBox3DGenerator:
         for data in tqdm(dataloader):
             video_id = data['video_id']
             if get_video_belongs_to_split(video_id) == split:
-                video_id_gt_bboxes_map, video_id_gt_annotations_map = self.get_video_gt_annotations(video_id)
-                video_id_gdino_annotations_map = self.get_video_gdino_annotations(video_id)
+                video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
+                video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
                 self.generate_video_bb_annotations(
                     video_id,
-                    video_id_gt_annotations_map[video_id],
-                    video_id_gdino_annotations_map.get(video_id, {}),
+                    video_id_gt_annotations,
+                    video_id_gdino_annotations,
                     visualize=True
                 )
 
     def generate_sample_gt_world_bb_annotations(self, video_id: str) -> None:
-        video_id_gt_bboxes_map, video_id_gt_annotations_map = self.get_video_gt_annotations(video_id)
-        video_id_gdino_annotations_map = self.get_video_gdino_annotations(video_id)
+        video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
+        video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
         self.generate_video_bb_annotations(
             video_id,
-            video_id_gt_annotations_map[video_id],
-            video_id_gdino_annotations_map.get(video_id, {}),
+            video_id_gt_annotations,
+            video_id_gdino_annotations,
             visualize=True
         )
 
