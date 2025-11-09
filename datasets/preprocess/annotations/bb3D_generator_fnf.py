@@ -1195,6 +1195,7 @@ class BBox3DGenerator:
                 world4d=world4d,
                 faces=self.smplx.faces,
                 sampled_indices=sampled_frame_indices,
+                annotated_frame_idx_in_sample_idx=annotated_frame_idx_in_sampled_idx,
                 dynamic_prediction_path=str(self.dynamic_scene_dir_path),
                 per_frame_sims=per_frame_sims,
                 global_floor_sim=(s_avg, R_avg, t_avg),
@@ -1246,6 +1247,7 @@ def rerun_vis_world4d(
         world4d: Dict[int, dict],
         faces: np.ndarray,
         *,
+        annotated_frame_idx_in_sample_idx: List[int],
         sampled_indices: List[int],
         dynamic_prediction_path: str,
         per_frame_sims: Optional[Dict[int, Dict[str, Any]]] = None,
@@ -1257,12 +1259,8 @@ def rerun_vis_world4d(
 ):
     faces_u32 = _faces_u32(faces)
     rr.init(app_id, spawn=True)
-    try:
-        rr.log("/", rr.ViewCoordinates.RUB)
-    except Exception:
-        pass
+    rr.log("/", rr.ViewCoordinates.RUB)
 
-    # load dynamic predictions for visualization (NOTE: will index by vis_idx below)
     video_dynamic_prediction_path = os.path.join(dynamic_prediction_path, f"{video_id[:-4]}_10", "predictions.npz")
     video_dynamic_predictions = np.load(video_dynamic_prediction_path, allow_pickle=True)
     video_dynamic_predictions = {k: video_dynamic_predictions[k] for k in video_dynamic_predictions.files}
@@ -1315,9 +1313,24 @@ def rerun_vis_world4d(
         (0, 4), (1, 5), (2, 6), (3, 7),  # verticals
     ]
 
-    for vis_idx, frame_idx in enumerate(sampled_indices):
-        # vis_idx == index into the sub-sampled predictions (points, colors)
-        rr.set_time_sequence("frame", vis_idx)
+    # ------------------------------------------------------------------
+    # use only the annotated frames (indices into sampled_indices)
+    # ------------------------------------------------------------------
+    # if list is empty, we can fall back to showing all sampled_indices
+    if annotated_frame_idx_in_sample_idx:
+        iter_indices = annotated_frame_idx_in_sample_idx
+    else:
+        iter_indices = list(range(len(sampled_indices)))
+
+    for vis_t, sample_idx in enumerate(iter_indices):
+        # sample_idx is an index into sampled_indices
+        if sample_idx < 0 or sample_idx >= len(sampled_indices):
+            continue
+
+        frame_idx = sampled_indices[sample_idx]  # actual frame id in world4d
+
+        # set timeline to a dense 0..N-1 sequence of annotated frames
+        rr.set_time_sequence("frame", vis_t)
         rr.log("/", rr.Clear(recursive=True))
 
         # floor (constant per frame)
@@ -1351,7 +1364,6 @@ def rerun_vis_world4d(
             tid = int(track_ids[0])
             verts_orig = np.asarray(verts_orig_list[0], dtype=np.float32)
 
-            # only show transformed mesh if we have per-frame sim
             if s_i is not None:
                 verts_flat = verts_orig.reshape(-1, 3)
                 verts_tf = s_i * (verts_flat @ R_i.T) + t_i
@@ -1365,13 +1377,13 @@ def rerun_vis_world4d(
                     ),
                 )
 
-        # --- dynamic points: use vis_idx, not frame_idx ---
-        if vis_idx < points.shape[0]:
+        # --- dynamic points: NOTE we index by sample_idx, not vis_t ---
+        if sample_idx < points.shape[0]:
             rr.log(
                 f"{BASE}/points",
                 rr.Points3D(
-                    points[vis_idx].reshape(-1, 3),
-                    colors=colors[vis_idx].reshape(-1, 3),
+                    points[sample_idx].reshape(-1, 3),
+                    colors=colors[sample_idx].reshape(-1, 3),
                 ),
             )
 
@@ -1381,7 +1393,6 @@ def rerun_vis_world4d(
                 verts_world = bbox_m["verts"].astype(np.float32)  # (8,3)
                 col = bbox_m.get("color", [255, 180, 0])
 
-                # build line-strips for the 12 edges
                 strips = []
                 for e0, e1 in cuboid_edges:
                     strips.append(verts_world[[e0, e1], :])
@@ -1394,7 +1405,7 @@ def rerun_vis_world4d(
                     ),
                 )
 
-        # camera (still use real frame_idx since world4d is keyed that way)
+        # camera
         cam_3x4 = np.asarray(frame_data["camera"], dtype=np.float32)
         R_wc = cam_3x4[:3, :3]
         t_wc = cam_3x4[:3, 3]
