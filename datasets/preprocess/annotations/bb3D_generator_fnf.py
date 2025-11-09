@@ -1388,8 +1388,8 @@ def rerun_vis_world4d(
             )
 
         # --- per-frame cuboid bboxes ---
-        if frame_bbox_meshes is not None and frame_idx in frame_bbox_meshes:
-            for bi, bbox_m in enumerate(frame_bbox_meshes[frame_idx]):
+        if frame_bbox_meshes is not None and vis_t in frame_bbox_meshes:
+            for bi, bbox_m in enumerate(frame_bbox_meshes[vis_t]):
                 verts_world = bbox_m["verts"].astype(np.float32)  # (8,3)
                 col = bbox_m.get("color", [255, 180, 0])
 
@@ -1398,7 +1398,7 @@ def rerun_vis_world4d(
                     strips.append(verts_world[[e0, e1], :])
 
                 rr.log(
-                    f"{BASE}/bboxes/frame_{frame_idx}/bbox_{bi}",
+                    f"{BASE}/bboxes/frame_{vis_t}/bbox_{bi}",
                     rr.LineStrips3D(
                         strips=strips,
                         colors=[col] * len(strips),
