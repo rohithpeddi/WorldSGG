@@ -346,7 +346,6 @@ def _average_sims(per_frame_sims: Dict[int, Dict[str, Any]]):
     R_avg = SciRot.from_quat(q_avg).as_matrix().astype(np.float32)
     return s_avg, R_avg, t_avg.astype(np.float32)
 
-
 # =====================================================================
 # BOUNDING BOX GENERATOR (AABB is floor-aligned)
 # =====================================================================
@@ -925,57 +924,93 @@ class BBox3DGenerator:
             iou_thr: float = 0.3,
             visualize: bool = False
     ) -> None:
+        # 1) load dynamic points (already sub-sampled to annotated frames)
         P = self._load_points_for_video(video_id)
-        points_S = P["points"]
-        conf_S = P["conf"]
-        stems_S = P["frame_stems"]
+        points_S = P["points"]  # (S, H, W, 3)
+        conf_S = P["conf"]  # (S, H, W) or None
+        stems_S = P["frame_stems"]  # list[str], len S
         colors = P["colors"]
         camera_poses = P["camera_poses"]
         S, H, W, _ = points_S.shape
 
+        # map stem -> index in the above arrays
         stem_to_idx = {stems_S[i]: i for i in range(S)}
 
-        if visualize:
-            base = f"world_bb/{video_id}"
-            rr.init("world_bb", spawn=True)
-
-        out_frames: Dict[str, Dict[str, Any]] = {}
+        # 2) build label-wise masks (static + dynamic) for this video
         video_to_frame_to_label_mask, _, _ = self.create_label_wise_masks_map(
             video_id=video_id,
             gt_annotations=video_gt_annotations
         )
 
-        images, world4d, sampled_frame_indices, per_frame_sims, s_avg, R_avg, t_avg, gv, gf, gc = self.process_video(video_id)
+        # 3) run the human/scene pipeline & get the global floor sim
+        (
+            images,
+            world4d,
+            sampled_frame_indices,
+            per_frame_sims,
+            s_avg,
+            R_avg,
+            t_avg,
+            gv,
+            gf,
+            gc,
+        ) = self.process_video(video_id)
 
-        # --------------- prepare floor mesh ---------------
-        floor_verts0, floor_faces0, floor_colors0 = gv, gf, gc
-        floor_verts0 = np.asarray(floor_verts0, dtype=np.float32)
-        floor_faces0 = _faces_u32(np.asarray(floor_faces0))
-        global_floor_sim = (s_avg, R_avg, t_avg)
-        floor_vertices_tf = s_avg * (floor_verts0 @ R_avg.T) + t_avg
+        # we will collect bboxes for visualization here:
+        # key: frame_idx (i.e. index into world4d / sampled frames)
+        # val: list of { "verts": (8,3), "faces": (12,3), "color": (3,) }
+        frame_bbox_meshes: Dict[int, List[Dict[str, Any]]] = {}
 
-        floor_kwargs = {}
-        if floor_colors0 is not None:
-            floor_colors0 = np.asarray(floor_colors0, dtype=np.uint8)
-            floor_kwargs["vertex_colors"] = floor_colors0
-        else:
-            floor_kwargs["albedo_factor"] = [160, 160, 160]
-        floor_faces = floor_faces0
+        # ----- helper to make a box mesh from 8 world corners -----
+        def _make_box_mesh(corners_world: np.ndarray):
+            # corners order we used:
+            # 0: (minx, miny, minz)
+            # 1: (minx, miny, maxz)
+            # 2: (minx, maxy, minz)
+            # 3: (minx, maxy, maxz)
+            # 4: (maxx, miny, minz)
+            # 5: (maxx, miny, maxz)
+            # 6: (maxx, maxy, minz)
+            # 7: (maxx, maxy, maxz)
+            faces = np.array([
+                [0, 1, 2], [1, 3, 2],  # min-x side
+                [4, 6, 5], [5, 6, 7],  # max-x side
+                [0, 4, 1], [1, 4, 5],  # min-y side
+                [2, 3, 6], [3, 7, 6],  # max-y side
+                [0, 2, 4], [2, 6, 4],  # min-z side
+                [1, 5, 3], [3, 5, 7],  # max-z side
+            ], dtype=np.uint32)
+            return corners_world.astype(np.float32), faces
 
-        # --------------- build per-frame bbox annotations ---------------
+        # ----- floor transform -----
+        # process_video already applied the SAME sim to the floor mesh, so to go
+        # from world -> "floor-local" we invert that sim:
+        #   p_local = ((p_world - t_avg) / s_avg) @ R_avg
+        # and to go back:
+        #   p_world = (p_local @ R_avg.T) * s_avg + t_avg
+        has_floor = gv is not None and gf is not None
+        s_floor = float(s_avg) if s_avg is not None else 1.0
+        R_floor = np.asarray(R_avg, dtype=np.float32) if R_avg is not None else np.eye(3, dtype=np.float32)
+        t_floor = np.asarray(t_avg, dtype=np.float32) if t_avg is not None else np.zeros(3, dtype=np.float32)
 
-        for frame_idx, frame_items in enumerate(video_gt_annotations):
+        out_frames: Dict[str, Dict[str, Any]] = {}
+
+        # --------------- per-frame bbox annotations ---------------
+        for frame_idx_anno, frame_items in enumerate(video_gt_annotations):
             frame_name = frame_items[0]["frame"].split("/")[-1]
             stem = Path(frame_name).stem
+
+            # this annotated frame may not have corresponding dynamic points
             if stem not in stem_to_idx:
                 continue
-            sidx = stem_to_idx[stem]
-            pts_hw3 = points_S[sidx]
+            sidx = stem_to_idx[stem]  # index into points_S, also matches sampled frame idx
+            pts_hw3 = points_S[sidx]  # (H,W,3)
             colors_hw3 = colors[sidx]
             conf_hw = conf_S[sidx] if conf_S is not None else None
 
             frame_non_zero_pts = _finite_and_nonzero(pts_hw3)
 
+            # gdino per-frame predictions
             gd = video_gdino_predictions.get(frame_name, None)
             if gd is None:
                 gd_boxes, gd_labels, gd_scores = [], [], []
@@ -986,7 +1021,7 @@ class BBox3DGenerator:
 
             frame_rec = {"objects": []}
 
-            # build per-frame objects
+            # iterate over GT objects in this frame
             for item in frame_items:
                 if "person_bbox" in item:
                     label = "person"
@@ -996,6 +1031,7 @@ class BBox3DGenerator:
                     label = self.catid_to_name_map.get(cid, None)
                     if not label:
                         continue
+                    # normalize label names just like your original code
                     if label == "closet/cabinet":
                         label = "closet"
                     elif label == "cup/glass/bottle":
@@ -1008,14 +1044,20 @@ class BBox3DGenerator:
                         label = "phone"
                     gt_xyxy = [float(v) for v in item["bbox"]]
 
+                # match GDINO
                 chosen_gd_xyxy = _match_gdino_to_gt(
-                    label, gt_xyxy,
-                    gd_boxes, gd_labels, gd_scores,
+                    label,
+                    gt_xyxy,
+                    gd_boxes,
+                    gd_labels,
+                    gd_scores,
                     iou_thr=iou_thr
                 )
 
+                # get mask for this label
                 frame_label_mask = video_to_frame_to_label_mask[video_id][stem].get(label, None)
                 if frame_label_mask is None:
+                    # fallback to bbox
                     box = chosen_gd_xyxy if chosen_gd_xyxy is not None else gt_xyxy
                     frame_label_mask = _mask_from_bbox(H, W, box)
                 else:
@@ -1026,6 +1068,7 @@ class BBox3DGenerator:
                     sel &= (conf_hw > 1e-6)
 
                 if sel.sum() < min_points:
+                    # too few 3D points → store meta only
                     frame_rec["objects"].append({
                         "label": label,
                         "gt_bbox_xyxy": gt_xyxy,
@@ -1035,43 +1078,88 @@ class BBox3DGenerator:
                     })
                     continue
 
+                # actual 3D points for this object (world space)
                 label_non_zero_pts = pts_hw3[sel].reshape(-1, 3).astype(np.float32)
 
-                # ---- floor-aligned AABB (CHANGE #3) ----
-                # transform points into floor frame
-                pts_floor = transform_pts_R_offset(label_non_zero_pts, R_floor, offset_floor)
-                mins = pts_floor.min(axis=0)
-                maxs = pts_floor.max(axis=0)
-                # corners in floor frame
-                corners_floor = np.array([
-                    [mins[0], mins[1], mins[2]],
-                    [mins[0], mins[1], maxs[2]],
-                    [mins[0], maxs[1], mins[2]],
-                    [mins[0], maxs[1], maxs[2]],
-                    [maxs[0], mins[1], mins[2]],
-                    [maxs[0], mins[1], maxs[2]],
-                    [maxs[0], maxs[1], mins[2]],
-                    [maxs[0], maxs[1], maxs[2]],
-                ], dtype=np.float32)
-                # back to world for visualization
-                corners_world = inv_transform_pts_R_offset(corners_floor, R_floor, offset_floor)
+                if has_floor:
+                    # --- world → floor-local ---
+                    pts_floor = ((label_non_zero_pts - t_floor[None, :]) / s_floor) @ R_floor
+                    mins = pts_floor.min(axis=0)
+                    maxs = pts_floor.max(axis=0)
 
-                frame_rec["objects"].append({
-                    "label": label,
-                    "gt_bbox_xyxy": gt_xyxy,
-                    "gdino_bbox_xyxy": chosen_gd_xyxy,
-                    "num_points": int(label_non_zero_pts.shape[0]),
-                    "aabb_floor_aligned": {
-                        "mins_floor": mins.tolist(),
-                        "maxs_floor": maxs.tolist(),
-                        "corners_world": corners_world.tolist(),
-                    },
-                })
+                    # 8 corners in floor-local
+                    corners_floor = np.array([
+                        [mins[0], mins[1], mins[2]],
+                        [mins[0], mins[1], maxs[2]],
+                        [mins[0], maxs[1], mins[2]],
+                        [mins[0], maxs[1], maxs[2]],
+                        [maxs[0], mins[1], mins[2]],
+                        [maxs[0], mins[1], maxs[2]],
+                        [maxs[0], maxs[1], mins[2]],
+                        [maxs[0], maxs[1], maxs[2]],
+                    ], dtype=np.float32)
+
+                    # floor-local → world
+                    corners_world = (corners_floor @ R_floor.T) * s_floor + t_floor
+
+                    frame_rec["objects"].append({
+                        "label": label,
+                        "gt_bbox_xyxy": gt_xyxy,
+                        "gdino_bbox_xyxy": chosen_gd_xyxy,
+                        "num_points": int(label_non_zero_pts.shape[0]),
+                        "aabb_floor_aligned": {
+                            "mins_floor": mins.tolist(),
+                            "maxs_floor": maxs.tolist(),
+                            "corners_world": corners_world.tolist(),
+                        },
+                    })
+
+                    # also stash for visualization
+                    verts_box, faces_box = _make_box_mesh(corners_world)
+                    frame_bbox_meshes.setdefault(sidx, []).append({
+                        "verts": verts_box,
+                        "faces": faces_box,
+                        "color": [255, 180, 0],  # orangish
+                        "label": label,
+                    })
+                else:
+                    # fallback: just world AABB
+                    mins = label_non_zero_pts.min(axis=0)
+                    maxs = label_non_zero_pts.max(axis=0)
+                    corners_world = np.array([
+                        [mins[0], mins[1], mins[2]],
+                        [mins[0], mins[1], maxs[2]],
+                        [mins[0], maxs[1], mins[2]],
+                        [mins[0], maxs[1], maxs[2]],
+                        [maxs[0], mins[1], mins[2]],
+                        [maxs[0], mins[1], maxs[2]],
+                        [maxs[0], maxs[1], mins[2]],
+                        [maxs[0], maxs[1], maxs[2]],
+                    ], dtype=np.float32)
+
+                    frame_rec["objects"].append({
+                        "label": label,
+                        "gt_bbox_xyxy": gt_xyxy,
+                        "gdino_bbox_xyxy": chosen_gd_xyxy,
+                        "num_points": int(label_non_zero_pts.shape[0]),
+                        "aabb_floor_aligned": {
+                            "mins_world": mins.tolist(),
+                            "maxs_world": maxs.tolist(),
+                            "corners_world": corners_world.tolist(),
+                        },
+                    })
+                    verts_box, faces_box = _make_box_mesh(corners_world)
+                    frame_bbox_meshes.setdefault(sidx, []).append({
+                        "verts": verts_box,
+                        "faces": faces_box,
+                        "color": [255, 0, 0],
+                        "label": label,
+                    })
 
             if frame_rec["objects"]:
                 out_frames[frame_name] = frame_rec
 
-        # ---------- 4) visualize ONLY sampled frames ----------
+        # --------------- visualization ---------------
         if visualize:
             rerun_vis_world4d(
                 video_id=video_id,
@@ -1085,12 +1173,14 @@ class BBox3DGenerator:
                 floor=(gv, gf, gc) if gv is not None else None,
                 img_maxsize=480,
                 app_id="World4D-Combined",
+                frame_bbox_meshes=frame_bbox_meshes,  # <-- new
             )
 
             print("Visualization running. Press Ctrl+C to stop.")
             while True:
                 time.sleep(1)
 
+        # --------------- dump to disk ---------------
         out_path = self.bbox_3d_root_dir / f"{video_id}.pkl"
         with open(out_path, "wb") as f:
             pickle.dump({
@@ -1099,23 +1189,6 @@ class BBox3DGenerator:
             }, f, protocol=pickle.HIGHEST_PROTOCOL)
         print(f"[bbox] saved floor-aligned 3D bboxes to {out_path}")
 
-    def generate_gt_world_bb_annotations(self, dataloader, split) -> None:
-        for data in tqdm(dataloader):
-            video_id = data['video_id']
-            if get_video_belongs_to_split(video_id) == split:
-                video_id_gt_bboxes_map, video_id_gt_annotations_map = self.get_video_gt_annotations(video_id)
-                video_id_gdino_annotations_map = self.get_video_gdino_annotations(video_id)
-                self.generate_video_bb_annotations(
-                    video_id,
-                    video_id_gt_annotations_map[video_id],
-                    video_id_gdino_annotations_map.get(video_id, {}),
-                    visualize=True
-                )
-
-
-# =====================================================================
-# HUMAN MESH ALIGNER (modified to use ONLY sampled indices everywhere)
-# =====================================================================
 def rerun_vis_world4d(
         video_id: str,
         images: List[Optional[np.ndarray]],
@@ -1129,6 +1202,7 @@ def rerun_vis_world4d(
         floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None,
         img_maxsize: int = 320,
         app_id: str = "World4D",
+        frame_bbox_meshes: Optional[Dict[int, List[Dict[str, Any]]]] = None,  # <-- NEW
 ):
     faces_u32 = _faces_u32(faces)
     rr.init(app_id, spawn=True)
@@ -1148,6 +1222,7 @@ def rerun_vis_world4d(
     BASE = "world"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
 
+    # floor
     floor_vertices_tf = None
     floor_faces = None
     floor_kwargs = None
@@ -1182,11 +1257,11 @@ def rerun_vis_world4d(
             img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         return img
 
-    # visualize ONLY sampled indices (CHANGE #1)
     for vis_idx, frame_idx in enumerate(sampled_indices):
         rr.set_time_sequence("frame", vis_idx)
         rr.log("/", rr.Clear(recursive=True))
 
+        # floor
         if floor_vertices_tf is not None and floor_faces is not None:
             rr.log(
                 f"{BASE}/floor",
@@ -1197,7 +1272,7 @@ def rerun_vis_world4d(
                 ),
             )
 
-        # per-frame sim (only if exists)
+        # per-frame sim
         s_i = None
         R_i = None
         t_i = None
@@ -1210,11 +1285,24 @@ def rerun_vis_world4d(
         if frame_data is None:
             continue
 
+        # human meshes (orig + transformed)
         track_ids = frame_data.get("track_id", [])
         verts_orig_list = frame_data.get("vertices_orig", [])
         if track_ids and verts_orig_list:
             tid = int(track_ids[0])
             verts_orig = np.asarray(verts_orig_list[0], dtype=np.float32)
+
+            # log original (red)
+            rr.log(
+                f"{BASE}/humans_orig/h{tid}",
+                rr.Mesh3D(
+                    vertex_positions=verts_orig.astype(np.float32),
+                    triangle_indices=faces_u32,
+                    albedo_factor=[255, 0, 0],
+                ),
+            )
+
+            # log transformed (green) if we have per-frame sim
             if s_i is not None:
                 verts_flat = verts_orig.reshape(-1, 3)
                 verts_tf = s_i * (verts_flat @ R_i.T) + t_i
@@ -1227,18 +1315,8 @@ def rerun_vis_world4d(
                         albedo_factor=[0, 255, 0],
                     ),
                 )
-            else:
-                rr.log(
-                    f"{BASE}/humans_xform/h{tid}",
-                    rr.Mesh3D(
-                        vertex_positions=verts_orig.astype(np.float32),
-                        triangle_indices=faces_u32,
-                        albedo_factor=[255, 0, 0],
-                    ),
-                )
 
-        # dynamic points: sampled_indices are in the same order as dynamic predictions subset
-        # here we assume the sampled/annotated set is contiguous and aligns with points
+        # dynamic points
         if frame_idx < points.shape[0]:
             rr.log(
                 f"{BASE}/points",
@@ -1248,17 +1326,32 @@ def rerun_vis_world4d(
                 ),
             )
 
+        # --- NEW: per-frame bbox meshes ---
+        if frame_bbox_meshes is not None and frame_idx in frame_bbox_meshes:
+            for bi, bbox_m in enumerate(frame_bbox_meshes[frame_idx]):
+                v = bbox_m["verts"].astype(np.float32)
+                f = _faces_u32(bbox_m["faces"])
+                col = bbox_m.get("color", [255, 180, 0])
+                rr.log(
+                    f"{BASE}/bboxes/frame_{frame_idx}/bbox_{bi}",
+                    rr.Mesh3D(
+                        vertex_positions=v,
+                        triangle_indices=f,
+                        albedo_factor=col,
+                    ),
+                )
+
         # camera
         cam_3x4 = np.asarray(frame_data["camera"], dtype=np.float32)
         R_wc = cam_3x4[:3, :3]
         t_wc = cam_3x4[:3, 3]
         image = _get_image_for_time(frame_idx)
         if image is not None:
-            H, W = image.shape[:2]
+            H_img, W_img = image.shape[:2]
         else:
-            H, W = 480, 640
+            H_img, W_img = 480, 640
         fov_y = 0.96
-        fx, fy, cx, cy = _pinhole_from_fov(W, H, fov_y)
+        fx, fy, cx, cy = _pinhole_from_fov(W_img, H_img, fov_y)
         quat_xyzw = SciRot.from_matrix(R_wc).as_quat().astype(np.float32)
         frus_path = f"{BASE}/frustum"
         rr.log(
@@ -1270,7 +1363,7 @@ def rerun_vis_world4d(
         )
         rr.log(
             f"{frus_path}/camera",
-            rr.Pinhole(focal_length=(fx, fy), principal_point=(cx, cy), resolution=(W, H)),
+            rr.Pinhole(focal_length=(fx, fy), principal_point=(cx, cy), resolution=(W_img, H_img)),
         )
         if image is not None:
             rr.log(f"{frus_path}/image", rr.Image(image))
