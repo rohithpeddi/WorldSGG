@@ -320,30 +320,99 @@ def _robust_similarity_ransac(
         return _similarity_umeyama(src, dst)
     return best_model
 
-def _average_sims(per_frame_sims: Dict[int, Dict[str, Any]]):
+def _mad_based_mask(values: np.ndarray, thresh: float = 3.5) -> np.ndarray:
+    """
+    values: (N,) array
+    returns: boolean mask where True = keep (not an outlier)
+    """
+    if values.size == 0:
+        return np.ones_like(values, dtype=bool)
+    median = np.median(values)
+    abs_dev = np.abs(values - median)
+    mad = np.median(abs_dev) + 1e-8  # to avoid div by zero
+    modified_z = 0.6745 * abs_dev / mad
+    return modified_z < thresh
+
+
+def _average_sims_robust(per_frame_sims: Dict[int, Dict[str, Any]],
+                         rot_thresh_deg: float = 15.0,
+                         trans_thresh_scale: float = 3.5
+                         ) -> Tuple[float, np.ndarray, np.ndarray]:
     if len(per_frame_sims) == 0:
         return 1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32)
-    ws, scales, trans, quats = [], [], [], []
+
+    ws, scales, trans, quats, rotvecs = [], [], [], [], []
+
     for _, d in per_frame_sims.items():
         w = float(d.get("w", 1.0))
         s = float(d["s"])
         R = np.asarray(d["R"], dtype=np.float64)
         t = np.asarray(d["t"], dtype=np.float64)
-        quat = SciRot.from_matrix(R).as_quat()
+
+        rot = SciRot.from_matrix(R)
+        quat = rot.as_quat()
+        rotvec = rot.as_rotvec()  # axis * angle
+
         ws.append(w)
         scales.append(s)
         trans.append(t)
         quats.append(quat)
+        rotvecs.append(rotvec)
+
     ws = np.asarray(ws, dtype=np.float64)
-    ws = ws / (ws.sum() + 1e-8)
     scales = np.asarray(scales, dtype=np.float64)
-    trans = np.asarray(trans, dtype=np.float64)
-    s_avg = float((ws * scales).sum())
-    t_avg = (ws[:, None] * trans).sum(axis=0)
-    quats = np.asarray(quats, dtype=np.float64)
-    q_avg = (ws[:, None] * quats).sum(axis=0)
+    trans = np.asarray(trans, dtype=np.float64)     # (N, 3)
+    quats = np.asarray(quats, dtype=np.float64)     # (N, 4)
+    rotvecs = np.asarray(rotvecs, dtype=np.float64) # (N, 3)
+
+    # --- 1) scale outliers (MAD)
+    scale_mask = _mad_based_mask(scales, thresh=3.5)
+
+    # --- 2) translation outliers:
+    # use L2 norm deviation from median
+    trans_norms = np.linalg.norm(trans, axis=1)
+    trans_mask = _mad_based_mask(trans_norms, thresh=trans_thresh_scale)
+
+    # --- 3) rotation outliers:
+    # compare each rotvec magnitude to median magnitude
+    rot_mags = np.linalg.norm(rotvecs, axis=1)  # in radians
+    rot_mags_deg = np.degrees(rot_mags)
+    # simpler than MAD: hard threshold on degrees
+    rot_mask = rot_mags_deg < rot_thresh_deg
+
+    # combine masks
+    keep_mask = scale_mask & trans_mask & rot_mask
+
+    if not np.any(keep_mask):
+        # fallback to naive average
+        ws = ws / (ws.sum() + 1e-8)
+        s_avg = float((ws * scales).sum())
+        t_avg = (ws[:, None] * trans).sum(axis=0)
+        q_avg = (ws[:, None] * quats).sum(axis=0)
+        q_avg = q_avg / (np.linalg.norm(q_avg) + 1e-8)
+        R_avg = SciRot.from_quat(q_avg).as_matrix().astype(np.float32)
+        return s_avg, R_avg, t_avg.astype(np.float32)
+
+    # filter
+    ws_f  = ws[keep_mask]
+    scales_f = scales[keep_mask]
+    trans_f  = trans[keep_mask]
+    quats_f  = quats[keep_mask]
+
+    # reweight to sum to 1
+    ws_f = ws_f / (ws_f.sum() + 1e-8)
+
+    # scale
+    s_avg = float((ws_f * scales_f).sum())
+
+    # translation
+    t_avg = (ws_f[:, None] * trans_f).sum(axis=0)
+
+    # rotation: weighted quat average on inliers
+    q_avg = (ws_f[:, None] * quats_f).sum(axis=0)
     q_avg = q_avg / (np.linalg.norm(q_avg) + 1e-8)
     R_avg = SciRot.from_quat(q_avg).as_matrix().astype(np.float32)
+
     return s_avg, R_avg, t_avg.astype(np.float32)
 
 # =====================================================================
@@ -936,7 +1005,7 @@ class BBox3DGenerator:
 
         # ---------- 3) average sim ONLY over sampled frames (CHANGE #2) ----------
         sampled_per_frame_sims = {k: v for k, v in per_frame_sims.items() if k in sampled_frame_indices}
-        s_avg, R_avg, t_avg = _average_sims(sampled_per_frame_sims)
+        s_avg, R_avg, t_avg = _average_sims_robust(sampled_per_frame_sims)
 
         return (images, world4d, sampled_frame_indices, per_frame_sims,
                 s_avg, R_avg, t_avg, gv, gf, gc, annotated_frame_idx_in_sample_idx)
@@ -1506,7 +1575,7 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
         output_human_dir_path=args.output_human_dir_path,
     )
-    video_id = "0DJ6R.mp4"
+    video_id = "00T1E.mp4"
     bbox_3d_generator.generate_sample_gt_world_bb_annotations(video_id=video_id)
 
 
