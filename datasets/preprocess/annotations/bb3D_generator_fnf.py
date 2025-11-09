@@ -16,9 +16,6 @@ from scipy.spatial.transform import Rotation as SciRot
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-# ---------------------------------------------------------------------
-# make local imports work like in your original files
-# ---------------------------------------------------------------------
 sys.path.insert(0, os.path.dirname(__file__) + '/..')
 
 # from AG / human pipeline codebase
@@ -78,9 +75,280 @@ def _pinhole_from_fov(w: int, h: int, fov_y: float):
     cy = h / 2.0
     return fx, fy, cx, cy
 
+def _is_empty_array(x):
+    if x is None:
+        return True
+    if isinstance(x, (list, tuple)):
+        return len(x) == 0
+    try:
+        return getattr(x, "numel", None) and x.numel() == 0
+    except Exception:
+        pass
+    try:
+        return hasattr(x, "size") and hasattr(x, "shape") and x.size == 0
+    except Exception:
+        pass
+    return False
+
+def _load_pkl_if_exists(path: Path):
+    if path.exists():
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    return None
+
+def _xywh_to_xyxy(b):  # [x,y,w,h] -> [x1,y1,x2,y2]
+    x, y, w, h = [float(v) for v in b]
+    return [x, y, x + w, y + h]
+
+def _area_xyxy(b):
+    x1, y1, x2, y2 = b
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+def _iou_xyxy(a, b) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    ua = BBox3DGenerator._area_xyxy(a) + BBox3DGenerator._area_xyxy(b) - inter
+    return inter / max(ua, 1e-8)
+
+def _mask_from_bbox(h: int, w: int, xyxy: List[float]) -> np.ndarray:
+    m = np.zeros((h, w), dtype=bool)
+    x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
+    x1, y1 = max(x1, 0), max(y1, 0)
+    x2, y2 = min(x2, w), min(y2, h)
+    if x2 > x1 and y2 > y1:
+        m[y1:y2, x1:x2] = True
+    return m
+
+def _resize_mask_to(mask: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
+    th, tw = target_hw
+    if mask.shape == (th, tw):
+        return mask.astype(bool)
+    return cv2.resize(mask.astype(np.uint8), (tw, th), interpolation=cv2.INTER_NEAREST).astype(bool)
+
+def _finite_and_nonzero(pts: np.ndarray) -> np.ndarray:
+    good = np.isfinite(pts).all(axis=-1)
+    nz = np.linalg.norm(pts, axis=-1) > 1e-12
+    return good & nz
+
+def transform_pts_R_offset(pts: np.ndarray, R: np.ndarray, offset: np.ndarray):
+    return (R @ pts.T).T + offset[None, :]
+
+def inv_transform_pts_R_offset(pts: np.ndarray, R: np.ndarray, offset: np.ndarray):
+    # inverse of x' = R x + o  -> x = R^T (x' - o)
+    return (R.T @ (pts - offset[None, :]).T).T
+
+def _box_edges_from_corners(corners: np.ndarray) -> List[np.ndarray]:
+    idx_pairs = [
+        (0, 1), (0, 2), (0, 4),
+        (7, 6), (7, 5), (7, 3),
+        (1, 3), (1, 5),
+        (2, 3), (2, 6),
+        (4, 5), (4, 6)
+    ]
+    return [np.vstack([corners[i], corners[j]]) for (i, j) in idx_pairs]
+
+
+def _lift_2d_to_3d(frame_points_hw3: np.ndarray, u: float, v: float):
+    H, W, _ = frame_points_hw3.shape
+    ui = int(round(u))
+    vi = int(round(v))
+    if ui < 0 or ui >= W or vi < 0 or vi >= H:
+        return None
+    p3d = frame_points_hw3[vi, ui]
+    if not np.isfinite(p3d).all() or np.abs(p3d).sum() < 1e-6:
+        return None
+    return p3d
+
+def _build_frame_to_kps_map(results: dict, primary_person_id_1: Optional[str]):
+        frame_to_kps = {}
+        people_results = results.get("people", {})
+        if not people_results:
+            return frame_to_kps
+        if primary_person_id_1 is None:
+            primary_person_id_1 = list(people_results.keys())[0]
+        pdata = people_results.get(primary_person_id_1, None)
+        if pdata is None:
+            return frame_to_kps
+        frames = pdata.get("frames", None)
+        kp_maps = pdata.get("keypoints_2d_map", None)
+        if frames is None or kp_maps is None:
+            return frame_to_kps
+        for i, fidx in enumerate(frames):
+            frame_to_kps[fidx] = kp_maps[i]
+        return frame_to_kps
+
+# ---------------------------------------------------------------------
+# RERUN VIS HELPERS
+# ---------------------------------------------------------------------
+
+def _log_box_lines_rr(path: str, corners: np.ndarray,
+                      rgba=(255, 255, 255, 255), radius=0.002):
+    edges = _box_edges_from_corners(corners)
+    for k, e in enumerate(edges):
+        e = np.asarray(e, dtype=np.float32)
+        rr.log(
+            f"{path}/edge_{k}",
+            rr.LineStrips3D(
+                [e],
+                radii=radius,
+                colors=[rgba],
+            ),
+        )
+
+# ------------------------------------------------------------------
+# gdino <-> gt match
+# ------------------------------------------------------------------
+def _match_gdino_to_gt(
+        gt_label: str,
+        gt_xyxy: List[float],
+        gd_boxes: List[List[float]],
+        gd_labels: List[str],
+        gd_scores: List[float],
+        iou_thr: float = 0.3,
+) -> List[float]:
+    candidates = [
+        (b, s) for b, l, s in zip(gd_boxes, gd_labels, gd_scores)
+        if (l == gt_label)
+    ]
+    if not candidates:
+        return gt_xyxy
+
+    passing = [b for (b, s) in candidates if _iou_xyxy(b, gt_xyxy) >= iou_thr]
+    if passing:
+        x1 = min(p[0] for p in passing)
+        y1 = min(p[1] for p in passing)
+        x2 = max(p[2] for p in passing)
+        y2 = max(p[3] for p in passing)
+        return [x1, y1, x2, y2]
+
+    best = max(candidates, key=lambda t: t[1])[0]
+    return best
+
+# ------------------------------------------------------------------
+# HUMAN MESH ALIGNMENT RELATED FUNCTIONS
+# ------------------------------------------------------------------
+def _choose_primary_actor(results: dict, world4d: Dict[int, dict]) -> Tuple[Optional[str], Optional[int]]:
+    people = results.get("people", {})
+    if people:
+        counts = {pid: len(pdata.get("frames", [])) for pid, pdata in people.items()}
+        primary_person_id_1 = max(counts.items(), key=lambda x: x[1])[0]
+        primary_track_id_0 = int(primary_person_id_1) - 1
+        return primary_person_id_1, primary_track_id_0
+
+    for _, frame_data in world4d.items():
+        tids = frame_data.get("track_id", [])
+        if tids:
+            track_id_0 = int(tids[0]) if not isinstance(tids[0], torch.Tensor) else int(tids[0].item())
+            person_id_1 = str(track_id_0 + 1)
+            return person_id_1, track_id_0
+    return None, None
+
+def _find_actor_index_in_frame(frame_data: dict, primary_track_id_0: Optional[int]) -> Optional[int]:
+    track_ids = frame_data.get("track_id", [])
+    if len(track_ids) == 0:
+        return None
+    if primary_track_id_0 is None:
+        return 0
+    for idx, tid in enumerate(track_ids):
+        tid_val = int(tid.item()) if isinstance(tid, torch.Tensor) else int(tid)
+        if tid_val == int(primary_track_id_0):
+            return idx
+    return None
+
+# ------------------------------------------------------------------
+# similarity estimation
+# ------------------------------------------------------------------
+def _similarity_umeyama(src: np.ndarray, dst: np.ndarray):
+    src = np.asarray(src, dtype=np.float64)
+    dst = np.asarray(dst, dtype=np.float64)
+    assert src.shape == dst.shape
+    n = src.shape[0]
+    mu_src = src.mean(axis=0)
+    mu_dst = dst.mean(axis=0)
+    src_c = src - mu_src
+    dst_c = dst - mu_dst
+    cov = (dst_c.T @ src_c) / n
+    U, S, Vt = np.linalg.svd(cov)
+    R = U @ Vt
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = U @ Vt
+    var_src = (src_c ** 2).sum() / n
+    s = (S * np.array([1, 1, np.linalg.det(U @ Vt)])).sum() / var_src
+    t = mu_dst - s * (R @ mu_src)
+    return s, R, t
+
+def _robust_similarity_ransac(
+        src: np.ndarray,
+        dst: np.ndarray,
+        *,
+        max_iters: int = 800,
+        inlier_thresh: float = 0.03,
+        min_inliers: int = 4,
+        scale_bounds: Tuple[float, float] = (0.4, 3.0),
+):
+    src = np.asarray(src, dtype=np.float64)
+    dst = np.asarray(dst, dtype=np.float64)
+    assert src.shape == dst.shape
+    N = src.shape[0]
+    if N < 3:
+        return _similarity_umeyama(src, dst)
+
+    best_num = -1
+    best_model = None
+    iters = min(max_iters, 100 + 30 * N)
+    for _ in range(iters):
+        idx = np.random.choice(N, 3, replace=False)
+        s_cand, R_cand, t_cand = _similarity_umeyama(src[idx], dst[idx])
+        s_cand = float(np.clip(s_cand, scale_bounds[0], scale_bounds[1]))
+        src_tf = s_cand * (src @ R_cand.T) + t_cand
+        err = np.linalg.norm(dst - src_tf, axis=1)
+        inliers = err < inlier_thresh
+        num_inl = int(inliers.sum())
+        if num_inl > best_num and num_inl >= min_inliers:
+            s_ref, R_ref, t_ref = _similarity_umeyama(src[inliers], dst[inliers])
+            s_ref = float(np.clip(s_ref, scale_bounds[0], scale_bounds[1]))
+            best_num = num_inl
+            best_model = (s_ref, R_ref, t_ref)
+    if best_model is None:
+        return _similarity_umeyama(src, dst)
+    return best_model
+
+def _average_sims(per_frame_sims: Dict[int, Dict[str, Any]]):
+    if len(per_frame_sims) == 0:
+        return 1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32)
+    ws, scales, trans, quats = [], [], [], []
+    for _, d in per_frame_sims.items():
+        w = float(d.get("w", 1.0))
+        s = float(d["s"])
+        R = np.asarray(d["R"], dtype=np.float64)
+        t = np.asarray(d["t"], dtype=np.float64)
+        quat = SciRot.from_matrix(R).as_quat()
+        ws.append(w)
+        scales.append(s)
+        trans.append(t)
+        quats.append(quat)
+    ws = np.asarray(ws, dtype=np.float64)
+    ws = ws / (ws.sum() + 1e-8)
+    scales = np.asarray(scales, dtype=np.float64)
+    trans = np.asarray(trans, dtype=np.float64)
+    s_avg = float((ws * scales).sum())
+    t_avg = (ws[:, None] * trans).sum(axis=0)
+    quats = np.asarray(quats, dtype=np.float64)
+    q_avg = (ws[:, None] * quats).sum(axis=0)
+    q_avg = q_avg / (np.linalg.norm(q_avg) + 1e-8)
+    R_avg = SciRot.from_quat(q_avg).as_matrix().astype(np.float32)
+    return s_avg, R_avg, t_avg.astype(np.float32)
+
 
 # =====================================================================
-# BOUNDING BOX GENERATOR (modified so AABB is floor-aligned)
+# BOUNDING BOX GENERATOR (AABB is floor-aligned)
 # =====================================================================
 class BBox3DGenerator:
 
@@ -136,113 +404,105 @@ class BBox3DGenerator:
 
         self.output_human_dir_path = Path(output_human_dir_path)
 
-    @staticmethod
-    def _is_empty_array(x):
-        if x is None:
-            return True
-        if isinstance(x, (list, tuple)):
-            return len(x) == 0
-        try:
-            return getattr(x, "numel", None) and x.numel() == 0
-        except Exception:
-            pass
-        try:
-            return hasattr(x, "size") and hasattr(x, "shape") and x.size == 0
-        except Exception:
-            pass
-        return False
+    def get_video_gt_annotations(self, video_id):
+        video_gt_annotations_json_path = self.gt_annotations_root_dir / video_id / "gt_annotations.json"
+        if not video_gt_annotations_json_path.exists():
+            raise FileNotFoundError(f"GT annotations file not found: {video_gt_annotations_json_path}")
 
-    @staticmethod
-    def _load_pkl_if_exists(path: Path):
-        if path.exists():
-            with open(path, "rb") as f:
-                return pickle.load(f)
-        return None
+        with open(video_gt_annotations_json_path, "r") as f:
+            video_gt_annotations = json.load(f)
 
-    @staticmethod
-    def _xywh_to_xyxy(b):  # [x,y,w,h] -> [x1,y1,x2,y2]
-        x, y, w, h = [float(v) for v in b]
-        return [x, y, x + w, y + h]
+        video_gt_bboxes = {}
+        for frame_idx, frame_items in enumerate(video_gt_annotations):
+            frame_name = frame_items[0]["frame"].split("/")[-1]
+            boxes = []
+            labels = []
+            for item in frame_items:
+                if 'person_bbox' in item:
+                    boxes.append(item['person_bbox'][0])
+                    labels.append('person')
+                    continue
+                category_id = item['class']
+                category_name = self.catid_to_name_map[category_id]
+                if category_name:
+                    if category_name == "closet/cabinet":
+                        category_name = "closet"
+                    elif category_name == "cup/glass/bottle":
+                        category_name = "cup"
+                    elif category_name == "paper/notebook":
+                        category_name = "paper"
+                    elif category_name == "sofa/couch":
+                        category_name = "sofa"
+                    elif category_name == "phone/camera":
+                        category_name = "phone"
+                    boxes.append(item['bbox'])
+                    labels.append(category_name)
+            if boxes:
+                video_gt_bboxes[frame_name] = {
+                    'boxes': boxes,
+                    'labels': labels
+                }
 
-    @staticmethod
-    def _area_xyxy(b):
-        x1, y1, x2, y2 = b
-        return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        return video_gt_bboxes, video_gt_annotations
 
-    @staticmethod
-    def _iou_xyxy(a, b) -> float:
-        ax1, ay1, ax2, ay2 = a
-        bx1, by1, bx2, by2 = b
-        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-        inter = iw * ih
-        if inter <= 0:
-            return 0.0
-        ua = BBox3DGenerator._area_xyxy(a) + BBox3DGenerator._area_xyxy(b) - inter
-        return inter / max(ua, 1e-8)
+    def get_video_gdino_annotations(self, video_id):
+        video_dynamic_gdino_prediction_file_path = self.dynamic_detections_root_path / f"{video_id}.pkl"
+        video_dynamic_predictions = _load_pkl_if_exists(video_dynamic_gdino_prediction_file_path)
 
-    @staticmethod
-    def _mask_from_bbox(h: int, w: int, xyxy: List[float]) -> np.ndarray:
-        m = np.zeros((h, w), dtype=bool)
-        x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
-        x1, y1 = max(x1, 0), max(y1, 0)
-        x2, y2 = min(x2, w), min(y2, h)
-        if x2 > x1 and y2 > y1:
-            m[y1:y2, x1:x2] = True
-        return m
+        video_static_gdino_prediction_file_path = self.static_detections_root_path / f"{video_id}.pkl"
+        video_static_predictions = _load_pkl_if_exists(video_static_gdino_prediction_file_path)
 
-    @staticmethod
-    def _resize_mask_to(mask: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
-        th, tw = target_hw
-        if mask.shape == (th, tw):
-            return mask.astype(bool)
-        return cv2.resize(mask.astype(np.uint8), (tw, th), interpolation=cv2.INTER_NEAREST).astype(bool)
+        if video_dynamic_predictions is None:
+            video_dynamic_predictions = {}
+        if video_static_predictions is None:
+            video_static_predictions = {}
 
-    @staticmethod
-    def _finite_and_nonzero(pts: np.ndarray) -> np.ndarray:
-        good = np.isfinite(pts).all(axis=-1)
-        nz = np.linalg.norm(pts, axis=-1) > 1e-12
-        return good & nz
-
-    @staticmethod
-    def transform_pts_R_offset(pts: np.ndarray, R: np.ndarray, offset: np.ndarray):
-        return (R @ pts.T).T + offset[None, :]
-
-    @staticmethod
-    def inv_transform_pts_R_offset(pts: np.ndarray, R: np.ndarray, offset: np.ndarray):
-        # inverse of x' = R x + o  -> x = R^T (x' - o)
-        return (R.T @ (pts - offset[None, :]).T).T
-
-    @staticmethod
-    def _box_edges_from_corners(corners: np.ndarray) -> List[np.ndarray]:
-        idx_pairs = [
-            (0, 1), (0, 2), (0, 4),
-            (7, 6), (7, 5), (7, 3),
-            (1, 3), (1, 5),
-            (2, 3), (2, 6),
-            (4, 5), (4, 6)
-        ]
-        return [np.vstack([corners[i], corners[j]]) for (i, j) in idx_pairs]
-
-    def _log_box_lines_rr(self, path: str, corners: np.ndarray,
-                          rgba=(255, 255, 255, 255), radius=0.002):
-        edges = self._box_edges_from_corners(corners)
-        for k, e in enumerate(edges):
-            e = np.asarray(e, dtype=np.float32)
-            rr.log(
-                f"{path}/edge_{k}",
-                rr.LineStrips3D(
-                    [e],
-                    radii=radius,
-                    colors=[rgba],
-                ),
+        if not video_dynamic_predictions and not video_static_predictions:
+            raise ValueError(
+                f"No GDINO predictions found for video {video_id}"
             )
 
+        all_frame_names = set(video_dynamic_predictions.keys()) | set(video_static_predictions.keys())
+        combined_gdino_predictions = {}
+        for frame_name in all_frame_names:
+            dyn_pred = video_dynamic_predictions.get(frame_name, None)
+            stat_pred = video_static_predictions.get(frame_name, None)
+            if dyn_pred is None:
+                dyn_pred = {"boxes": [], "labels": [], "scores": []}
+            if stat_pred is None:
+                stat_pred = {"boxes": [], "labels": [], "scores": []}
 
-    # ------------------------------------------------------------------
-    # masks from seg dirs
-    # ------------------------------------------------------------------
+            if _is_empty_array(dyn_pred["boxes"]) and _is_empty_array(stat_pred["boxes"]):
+                combined_gdino_predictions[frame_name] = {
+                    "boxes": [],
+                    "labels": [],
+                    "scores": [],
+                }
+                continue
+
+            combined_boxes = []
+            combined_labels = []
+            combined_scores = []
+
+            if not _is_empty_array(dyn_pred["boxes"]):
+                combined_boxes += list(dyn_pred["boxes"])
+                combined_labels += list(dyn_pred["labels"])
+                combined_scores += list(dyn_pred["scores"])
+
+            if not _is_empty_array(stat_pred["boxes"]):
+                combined_boxes += list(stat_pred["boxes"])
+                combined_labels += list(stat_pred["labels"])
+                combined_scores += list(stat_pred["scores"])
+
+            final_pred = {
+                "boxes": combined_boxes,
+                "labels": combined_labels,
+                "scores": combined_scores,
+            }
+
+            combined_gdino_predictions[frame_name] = final_pred
+        return combined_gdino_predictions
+
     def labels_for_frame(self, video_id: str, stem: str, is_static: bool) -> List[str]:
         lbls = set()
         if is_static:
@@ -303,116 +563,12 @@ class BBox3DGenerator:
                     frame_map[stem][lbl] = m
         return frame_map, all_labels
 
-    # ------------------------------------------------------------------
-    # annotation map creators
-    # ------------------------------------------------------------------
-
-    def get_video_gt_annotations(self, video_id):
-        video_gt_annotations_json_path = self.gt_annotations_root_dir / video_id / "gt_annotations.json"
-        if not video_gt_annotations_json_path.exists():
-            raise FileNotFoundError(f"GT annotations file not found: {video_gt_annotations_json_path}")
-
-        with open(video_gt_annotations_json_path, "r") as f:
-            video_gt_annotations = json.load(f)
-
-        video_gt_bboxes = {}
-        for frame_idx, frame_items in enumerate(video_gt_annotations):
-            frame_name = frame_items[0]["frame"].split("/")[-1]
-            boxes = []
-            labels = []
-            for item in frame_items:
-                if 'person_bbox' in item:
-                    boxes.append(item['person_bbox'][0])
-                    labels.append('person')
-                    continue
-                category_id = item['class']
-                category_name = self.catid_to_name_map[category_id]
-                if category_name:
-                    if category_name == "closet/cabinet":
-                        category_name = "closet"
-                    elif category_name == "cup/glass/bottle":
-                        category_name = "cup"
-                    elif category_name == "paper/notebook":
-                        category_name = "paper"
-                    elif category_name == "sofa/couch":
-                        category_name = "sofa"
-                    elif category_name == "phone/camera":
-                        category_name = "phone"
-                    boxes.append(item['bbox'])
-                    labels.append(category_name)
-            if boxes:
-                video_gt_bboxes[frame_name] = {
-                    'boxes': boxes,
-                    'labels': labels
-                }
-
-        return video_gt_bboxes, video_gt_annotations
-
-    def get_video_gdino_annotations(self, video_id):
-        video_dynamic_gdino_prediction_file_path = self.dynamic_detections_root_path / f"{video_id}.pkl"
-        video_dynamic_predictions = self._load_pkl_if_exists(video_dynamic_gdino_prediction_file_path)
-
-        video_static_gdino_prediction_file_path = self.static_detections_root_path / f"{video_id}.pkl"
-        video_static_predictions = self._load_pkl_if_exists(video_static_gdino_prediction_file_path)
-
-        if video_dynamic_predictions is None:
-            video_dynamic_predictions = {}
-        if video_static_predictions is None:
-            video_static_predictions = {}
-
-        if not video_dynamic_predictions and not video_static_predictions:
-            raise ValueError(
-                f"No GDINO predictions found for video {video_id}"
-            )
-
-        all_frame_names = set(video_dynamic_predictions.keys()) | set(video_static_predictions.keys())
-        combined_gdino_predictions = {}
-        for frame_name in all_frame_names:
-            dyn_pred = video_dynamic_predictions.get(frame_name, None)
-            stat_pred = video_static_predictions.get(frame_name, None)
-            if dyn_pred is None:
-                dyn_pred = {"boxes": [], "labels": [], "scores": []}
-            if stat_pred is None:
-                stat_pred = {"boxes": [], "labels": [], "scores": []}
-
-            if self._is_empty_array(dyn_pred["boxes"]) and self._is_empty_array(stat_pred["boxes"]):
-                combined_gdino_predictions[frame_name] = {
-                    "boxes": [],
-                    "labels": [],
-                    "scores": [],
-                }
-                continue
-
-            combined_boxes = []
-            combined_labels = []
-            combined_scores = []
-
-            if not self._is_empty_array(dyn_pred["boxes"]):
-                combined_boxes += list(dyn_pred["boxes"])
-                combined_labels += list(dyn_pred["labels"])
-                combined_scores += list(dyn_pred["scores"])
-
-            if not self._is_empty_array(stat_pred["boxes"]):
-                combined_boxes += list(stat_pred["boxes"])
-                combined_labels += list(stat_pred["labels"])
-                combined_scores += list(stat_pred["scores"])
-
-            final_pred = {
-                "boxes": combined_boxes,
-                "labels": combined_labels,
-                "scores": combined_scores,
-            }
-
-            combined_gdino_predictions[frame_name] = final_pred
-        return combined_gdino_predictions
-
     def create_label_wise_masks_map(
             self,
             video_id,
             gt_annotations
     ) -> Tuple[Dict[str, Dict[str, Dict[str, np.ndarray]]], set, set]:
         video_to_frame_to_label_mask: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
-
         frame_stems = []
         for frame_items in gt_annotations:
             frame_name = frame_items[0]["frame"].split("/")[-1]
@@ -437,9 +593,25 @@ class BBox3DGenerator:
 
         return video_to_frame_to_label_mask, all_static_labels, all_dynamic_labels
 
-    # ------------------------------------------------------------------
-    # load points and find the annotated/sampled indices (important!)
-    # ------------------------------------------------------------------
+    def idx_to_frame_idx_path(self, video_id: str):
+        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
+        annotated_frame_id_list = [f for f in os.listdir(video_frames_annotated_dir_path) if f.endswith('.png')]
+        annotated_frame_id_list.sort(key=lambda x: int(x[:-4]))
+
+        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
+        annotated_last_frame_id = int(annotated_frame_id_list[-1][:-4])
+
+        video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir, f"{video_id[:-4]}.npy")
+        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()
+
+        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
+        an_last_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_last_frame_id)
+        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, an_last_id_in_vid_sam_frame_id_list + 1))
+
+        chosen_frames = [video_sampled_frame_id_list[i] for i in sample_idx]
+        frame_idx_frame_path_map = {i: f"{frame_id:06d}.png" for i, frame_id in enumerate(chosen_frames)}
+        return frame_idx_frame_path_map, sample_idx, video_sampled_frame_id_list, annotated_frame_id_list
+
     def _load_points_for_video(self, video_id: str) -> Dict[str, Any]:
         video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
         video_dynamic_predictions = np.load(video_dynamic_3d_scene_path, allow_pickle=True)
@@ -457,19 +629,7 @@ class BBox3DGenerator:
 
         S, H, W, _ = points.shape
 
-        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
-        annotated_frame_id_list = [f for f in os.listdir(video_frames_annotated_dir_path) if f.endswith('.png')]
-        annotated_frame_id_list.sort(key=lambda x: int(x[:-4]))
-        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
-        annotated_last_frame_id = int(annotated_frame_id_list[-1][:-4])
-
-        video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir, f"{video_id[:-4]}.npy")
-        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()
-
-        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
-        an_last_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_last_frame_id)
-        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, an_last_id_in_vid_sam_frame_id_list + 1))
-
+        frame_idx_frame_path_map, sample_idx, video_sampled_frame_id_list, annotated_frame_id_list = self.idx_to_frame_idx_path(video_id)
         assert S == len(sample_idx), "dynamic predictions length must match annotated sampled range"
 
         sampled_idx_frame_name_map = {}
@@ -498,224 +658,10 @@ class BBox3DGenerator:
             "camera_poses": camera_poses_sub
         }
 
-    # ------------------------------------------------------------------
-    # gdino <-> gt match
-    # ------------------------------------------------------------------
-    def _match_gdino_to_gt(
-            self,
-            gt_label: str,
-            gt_xyxy: List[float],
-            gd_boxes: List[List[float]],
-            gd_labels: List[str],
-            gd_scores: List[float],
-            iou_thr: float = 0.3,
-    ) -> List[float]:
-        candidates = [
-            (b, s) for b, l, s in zip(gd_boxes, gd_labels, gd_scores)
-            if (l == gt_label)
-        ]
-        if not candidates:
-            return gt_xyxy
-
-        passing = [b for (b, s) in candidates if self._iou_xyxy(b, gt_xyxy) >= iou_thr]
-        if passing:
-            x1 = min(p[0] for p in passing)
-            y1 = min(p[1] for p in passing)
-            x2 = max(p[2] for p in passing)
-            y2 = max(p[3] for p in passing)
-            return [x1, y1, x2, y2]
-
-        best = max(candidates, key=lambda t: t[1])[0]
-        return best
-
-    # ------------------------------------------------------------------
-    # HUMAN MESH ALIGNMENT RELATED FUNCTIONS
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    def get_union_mask(self, video_id: str, stem: str, label: str, is_static: bool):
-        if is_static:
-            return None
-        else:
-            im_p = self.dynamic_masks_im_dir_path / video_id / f"{stem}__{label}.png"
-            vd_p = self.dynamic_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
-        m_im = cv2.imread(str(im_p), cv2.IMREAD_GRAYSCALE) if im_p.exists() else None
-        m_vd = cv2.imread(str(vd_p), cv2.IMREAD_GRAYSCALE) if vd_p.exists() else None
-        if m_im is None and m_vd is None:
-            return None
-        if m_im is None:
-            m = (m_vd > 127)
-        elif m_vd is None:
-            m = (m_im > 127)
-        else:
-            m = (m_im > 127) | (m_vd > 127)
-        return m.astype(bool)
-
-    def idx_to_frame_idx_path(self, video_id: str):
-        video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
-        annotated_frame_id_list = [f for f in os.listdir(video_frames_annotated_dir_path) if f.endswith('.png')]
-        annotated_frame_id_list.sort(key=lambda x: int(x[:-4]))
-
-        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
-        annotated_last_frame_id = int(annotated_frame_id_list[-1][:-4])
-
-        video_sampled_frames_npy_path = os.path.join(self.sampled_frames_idx_root_dir, f"{video_id[:-4]}.npy")
-        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()
-
-        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
-        an_last_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_last_frame_id)
-        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, an_last_id_in_vid_sam_frame_id_list + 1))
-
-        chosen_frames = [video_sampled_frame_id_list[i] for i in sample_idx]
-        frame_idx_frame_path_map = {i: f"{frame_id:06d}.png" for i, frame_id in enumerate(chosen_frames)}
-        return frame_idx_frame_path_map
-
-    def _choose_primary_actor(self, results: dict, world4d: Dict[int, dict]) -> Tuple[Optional[str], Optional[int]]:
-        people = results.get("people", {})
-        if people:
-            counts = {pid: len(pdata.get("frames", [])) for pid, pdata in people.items()}
-            primary_person_id_1 = max(counts.items(), key=lambda x: x[1])[0]
-            primary_track_id_0 = int(primary_person_id_1) - 1
-            return primary_person_id_1, primary_track_id_0
-
-        for _, frame_data in world4d.items():
-            tids = frame_data.get("track_id", [])
-            if tids:
-                track_id_0 = int(tids[0]) if not isinstance(tids[0], torch.Tensor) else int(tids[0].item())
-                person_id_1 = str(track_id_0 + 1)
-                return person_id_1, track_id_0
-        return None, None
-
-    def _find_actor_index_in_frame(self, frame_data: dict, primary_track_id_0: Optional[int]) -> Optional[int]:
-        track_ids = frame_data.get("track_id", [])
-        if len(track_ids) == 0:
-            return None
-        if primary_track_id_0 is None:
-            return 0
-        for idx, tid in enumerate(track_ids):
-            tid_val = int(tid.item()) if isinstance(tid, torch.Tensor) else int(tid)
-            if tid_val == int(primary_track_id_0):
-                return idx
-        return None
-
-    # ------------------------------------------------------------------
-    # similarity estimation
-    # ------------------------------------------------------------------
-    def _similarity_umeyama(self, src: np.ndarray, dst: np.ndarray):
-        src = np.asarray(src, dtype=np.float64)
-        dst = np.asarray(dst, dtype=np.float64)
-        assert src.shape == dst.shape
-        n = src.shape[0]
-        mu_src = src.mean(axis=0)
-        mu_dst = dst.mean(axis=0)
-        src_c = src - mu_src
-        dst_c = dst - mu_dst
-        cov = (dst_c.T @ src_c) / n
-        U, S, Vt = np.linalg.svd(cov)
-        R = U @ Vt
-        if np.linalg.det(R) < 0:
-            Vt[-1, :] *= -1
-            R = U @ Vt
-        var_src = (src_c ** 2).sum() / n
-        s = (S * np.array([1, 1, np.linalg.det(U @ Vt)])).sum() / var_src
-        t = mu_dst - s * (R @ mu_src)
-        return s, R, t
-
-    def _robust_similarity_ransac(
-            self,
-            src: np.ndarray,
-            dst: np.ndarray,
-            *,
-            max_iters: int = 800,
-            inlier_thresh: float = 0.03,
-            min_inliers: int = 4,
-            scale_bounds: Tuple[float, float] = (0.4, 3.0),
-    ):
-        src = np.asarray(src, dtype=np.float64)
-        dst = np.asarray(dst, dtype=np.float64)
-        assert src.shape == dst.shape
-        N = src.shape[0]
-        if N < 3:
-            return self._similarity_umeyama(src, dst)
-
-        best_num = -1
-        best_model = None
-        iters = min(max_iters, 100 + 30 * N)
-        for _ in range(iters):
-            idx = np.random.choice(N, 3, replace=False)
-            s_cand, R_cand, t_cand = self._similarity_umeyama(src[idx], dst[idx])
-            s_cand = float(np.clip(s_cand, scale_bounds[0], scale_bounds[1]))
-            src_tf = s_cand * (src @ R_cand.T) + t_cand
-            err = np.linalg.norm(dst - src_tf, axis=1)
-            inliers = err < inlier_thresh
-            num_inl = int(inliers.sum())
-            if num_inl > best_num and num_inl >= min_inliers:
-                s_ref, R_ref, t_ref = self._similarity_umeyama(src[inliers], dst[inliers])
-                s_ref = float(np.clip(s_ref, scale_bounds[0], scale_bounds[1]))
-                best_num = num_inl
-                best_model = (s_ref, R_ref, t_ref)
-        if best_model is None:
-            return self._similarity_umeyama(src, dst)
-        return best_model
-
-    def _average_sims(self, per_frame_sims: Dict[int, Dict[str, Any]]):
-        if len(per_frame_sims) == 0:
-            return 1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32)
-        ws, scales, trans, quats = [], [], [], []
-        for _, d in per_frame_sims.items():
-            w = float(d.get("w", 1.0))
-            s = float(d["s"])
-            R = np.asarray(d["R"], dtype=np.float64)
-            t = np.asarray(d["t"], dtype=np.float64)
-            quat = SciRot.from_matrix(R).as_quat()
-            ws.append(w);
-            scales.append(s);
-            trans.append(t);
-            quats.append(quat)
-        ws = np.asarray(ws, dtype=np.float64)
-        ws = ws / (ws.sum() + 1e-8)
-        scales = np.asarray(scales, dtype=np.float64)
-        trans = np.asarray(trans, dtype=np.float64)
-        s_avg = float((ws * scales).sum())
-        t_avg = (ws[:, None] * trans).sum(axis=0)
-        quats = np.asarray(quats, dtype=np.float64)
-        q_avg = (ws[:, None] * quats).sum(axis=0)
-        q_avg = q_avg / (np.linalg.norm(q_avg) + 1e-8)
-        R_avg = SciRot.from_quat(q_avg).as_matrix().astype(np.float32)
-        return s_avg, R_avg, t_avg.astype(np.float32)
 
     # ------------------------------------------------------------------
     # lifting and partial pointcloud
     # ------------------------------------------------------------------
-    def _lift_2d_to_3d(self, frame_points_hw3: np.ndarray, u: float, v: float):
-        H, W, _ = frame_points_hw3.shape
-        ui = int(round(u))
-        vi = int(round(v))
-        if ui < 0 or ui >= W or vi < 0 or vi >= H:
-            return None
-        p3d = frame_points_hw3[vi, ui]
-        if not np.isfinite(p3d).all() or np.abs(p3d).sum() < 1e-6:
-            return None
-        return p3d
-
-    def _build_frame_to_kps_map(self, results: dict, primary_person_id_1: Optional[str]):
-        frame_to_kps = {}
-        people_results = results.get("people", {})
-        if not people_results:
-            return frame_to_kps
-        if primary_person_id_1 is None:
-            primary_person_id_1 = list(people_results.keys())[0]
-        pdata = people_results.get(primary_person_id_1, None)
-        if pdata is None:
-            return frame_to_kps
-        frames = pdata.get("frames", None)
-        kp_maps = pdata.get("keypoints_2d_map", None)
-        if frames is None or kp_maps is None:
-            return frame_to_kps
-        for i, fidx in enumerate(frames):
-            frame_to_kps[fidx] = kp_maps[i]
-        return frame_to_kps
-
     def _get_partial_pointcloud(self, video_id: str, frame_idx: int, frame_idx_frame_path_map,
                                 label: str = "person") -> np.ndarray:
         pts_hw3 = self.pipeline.points[frame_idx]
@@ -738,7 +684,7 @@ class BBox3DGenerator:
                                    primary_track_id_0: Optional[int]):
         if frame_idx not in frame_to_kps:
             return None, None
-        actor_idx = self._find_actor_index_in_frame(frame_data, primary_track_id_0)
+        actor_idx = _find_actor_index_in_frame(frame_data, primary_track_id_0)
         if actor_idx is None:
             return None, None
         kps_2d = frame_to_kps[frame_idx]
@@ -791,7 +737,7 @@ class BBox3DGenerator:
                 continue
             u = float(kp[0]);
             v = float(kp[1])
-            scene_p = self._lift_2d_to_3d(frame_points_hw3, u, v)
+            scene_p = _lift_2d_to_3d(frame_points_hw3, u, v)
             if scene_p is None:
                 continue
             smpl_list.append(smpl_name_to_pt[smpl_name])
@@ -811,7 +757,7 @@ class BBox3DGenerator:
             num_smpl_samples_per_person: int = 400,
             num_scene_subsample: int = 800,
     ):
-        actor_idx = self._find_actor_index_in_frame(frame_data, primary_track_id_0)
+        actor_idx = _find_actor_index_in_frame(frame_data, primary_track_id_0)
         if actor_idx is None:
             return None, None
         rotmat_all = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
@@ -850,183 +796,6 @@ class BBox3DGenerator:
     # ------------------------------------------------------------------
     # MAIN PER-VIDEO BBOX GEN (CHANGED: AABB parallel to floor)
     # ------------------------------------------------------------------
-    def generate_video_bb_annotations(
-            self,
-            video_id: str,
-            video_gt_annotations: List[Any],
-            video_gdino_predictions: Dict[str, Any],
-            *,
-            min_points: int = 50,
-            iou_thr: float = 0.3,
-            visualize: bool = False
-    ) -> None:
-        P = self._load_points_for_video(video_id)
-        points_S = P["points"]
-        conf_S = P["conf"]
-        stems_S = P["frame_stems"]
-        colors = P["colors"]
-        camera_poses = P["camera_poses"]
-        S, H, W, _ = points_S.shape
-
-        stem_to_idx = {stems_S[i]: i for i in range(S)}
-
-        # Build floor from first frame points
-        R_floor, offset_floor, floor_v, floor_f, floor_c = self.build_scene_floor(points_S[0])
-
-        if visualize:
-            base = f"world_bb/{video_id}"
-            rr.init("world_bb", spawn=True)
-
-        out_frames: Dict[str, Dict[str, Any]] = {}
-        video_to_frame_to_label_mask, _, _ = self.create_label_wise_masks_map(
-            video_id=video_id,
-            gt_annotations=video_gt_annotations
-        )
-
-        for frame_idx, frame_items in enumerate(video_gt_annotations):
-            frame_name = frame_items[0]["frame"].split("/")[-1]
-            stem = Path(frame_name).stem
-            if stem not in stem_to_idx:
-                continue
-            sidx = stem_to_idx[stem]
-            pts_hw3 = points_S[sidx]
-            colors_hw3 = colors[sidx]
-            conf_hw = conf_S[sidx] if conf_S is not None else None
-
-            frame_non_zero_pts = self._finite_and_nonzero(pts_hw3)
-
-            gd = video_gdino_predictions.get(frame_name, None)
-            if gd is None:
-                gd_boxes, gd_labels, gd_scores = [], [], []
-            else:
-                gd_boxes = [list(map(float, b)) for b in gd["boxes"]]
-                gd_labels = gd["labels"]
-                gd_scores = [float(s) for s in gd["scores"]]
-
-            frame_rec = {"objects": []}
-
-            if visualize:
-                rr.set_time_sequence("frame", int(frame_idx))
-                rr.log("/", rr.Clear(recursive=True))
-                # log floor in world coords (not transformed back)
-                rr.log(
-                    f"{base}/floor",
-                    rr.Mesh3D(
-                        vertex_positions=np.asarray(floor_v, dtype=np.float32),
-                        triangle_indices=np.asarray(floor_f, dtype=np.uint32),
-                        vertex_colors=np.asarray(floor_c, dtype=np.uint8),
-                    ),
-                )
-                rr.log(
-                    f"{base}/points",
-                    rr.Points3D(
-                        pts_hw3.reshape(-1, 3),
-                        colors=colors_hw3.reshape(-1, 3),
-                    )
-                )
-
-            # build per-frame objects
-            for item in frame_items:
-                if "person_bbox" in item:
-                    label = "person"
-                    gt_xyxy = self._xywh_to_xyxy(item["person_bbox"][0])
-                else:
-                    cid = item["class"]
-                    label = self.catid_to_name_map.get(cid, None)
-                    if not label:
-                        continue
-                    if label == "closet/cabinet":
-                        label = "closet"
-                    elif label == "cup/glass/bottle":
-                        label = "cup"
-                    elif label == "paper/notebook":
-                        label = "paper"
-                    elif label == "sofa/couch":
-                        label = "sofa"
-                    elif label == "phone/camera":
-                        label = "phone"
-                    gt_xyxy = [float(v) for v in item["bbox"]]
-
-                chosen_gd_xyxy = self._match_gdino_to_gt(
-                    label, gt_xyxy,
-                    gd_boxes, gd_labels, gd_scores,
-                    iou_thr=iou_thr
-                )
-
-                frame_label_mask = video_to_frame_to_label_mask[video_id][stem].get(label, None)
-                if frame_label_mask is None:
-                    box = chosen_gd_xyxy if chosen_gd_xyxy is not None else gt_xyxy
-                    frame_label_mask = self._mask_from_bbox(H, W, box)
-                else:
-                    frame_label_mask = self._resize_mask_to(frame_label_mask, (H, W))
-
-                sel = frame_label_mask & frame_non_zero_pts
-                if conf_hw is not None:
-                    sel &= (conf_hw > 1e-6)
-
-                if sel.sum() < min_points:
-                    frame_rec["objects"].append({
-                        "label": label,
-                        "gt_bbox_xyxy": gt_xyxy,
-                        "gdino_bbox_xyxy": chosen_gd_xyxy,
-                        "num_points": int(sel.sum()),
-                        "aabb_floor_aligned": None
-                    })
-                    continue
-
-                label_non_zero_pts = pts_hw3[sel].reshape(-1, 3).astype(np.float32)
-
-                # ---- floor-aligned AABB (CHANGE #3) ----
-                # transform points into floor frame
-                pts_floor = self.transform_pts_R_offset(label_non_zero_pts, R_floor, offset_floor)
-                mins = pts_floor.min(axis=0)
-                maxs = pts_floor.max(axis=0)
-                # corners in floor frame
-                corners_floor = np.array([
-                    [mins[0], mins[1], mins[2]],
-                    [mins[0], mins[1], maxs[2]],
-                    [mins[0], maxs[1], mins[2]],
-                    [mins[0], maxs[1], maxs[2]],
-                    [maxs[0], mins[1], mins[2]],
-                    [maxs[0], mins[1], maxs[2]],
-                    [maxs[0], maxs[1], mins[2]],
-                    [maxs[0], maxs[1], maxs[2]],
-                ], dtype=np.float32)
-                # back to world for visualization
-                corners_world = self.inv_transform_pts_R_offset(corners_floor, R_floor, offset_floor)
-
-                if visualize:
-                    obj_base = f"{base}/{stem}/{label}"
-                    self._log_box_lines_rr(
-                        f"{obj_base}/aabb_floor",
-                        corners_world,
-                        rgba=(255, 255, 0, 255),
-                    )
-
-                frame_rec["objects"].append({
-                    "label": label,
-                    "gt_bbox_xyxy": gt_xyxy,
-                    "gdino_bbox_xyxy": chosen_gd_xyxy,
-                    "num_points": int(label_non_zero_pts.shape[0]),
-                    "aabb_floor_aligned": {
-                        "mins_floor": mins.tolist(),
-                        "maxs_floor": maxs.tolist(),
-                        "corners_world": corners_world.tolist(),
-                    },
-                })
-
-            if frame_rec["objects"]:
-                out_frames[frame_name] = frame_rec
-
-        out_path = self.bbox_3d_root_dir / f"{video_id}.pkl"
-        with open(out_path, "wb") as f:
-            pickle.dump({
-                "video_id": video_id,
-                "frames": out_frames
-            }, f, protocol=pickle.HIGHEST_PROTOCOL)
-        print(f"[bbox] saved floor-aligned 3D bboxes to {out_path}")
-
-    # ------------------------------------------------------------------
     def process_video(self, video_id: str, include_dense: bool = False):
         # run human/scene pipeline
         self.pipeline.__call__(video_id, save_only_essential=False)
@@ -1037,13 +806,13 @@ class BBox3DGenerator:
         world4d = {i: world4d[k] for i, k in enumerate(world4d)}  # 0..N-1
 
         # sampled/annotated indices (CHANGE #1)
-        frame_idx_frame_path_map = self.idx_to_frame_idx_path(video_id)
+        frame_idx_frame_path_map, sample_idx, _, _ = self.idx_to_frame_idx_path(video_id)
         sampled_frame_indices = sorted(frame_idx_frame_path_map.keys())
 
-        primary_person_id_1, primary_track_id_0 = self._choose_primary_actor(results, world4d)
+        primary_person_id_1, primary_track_id_0 = _choose_primary_actor(results, world4d)
         print(f"[align] Using primary actor -> results={primary_person_id_1}, world4d_track={primary_track_id_0}")
 
-        frame_to_kps = self._build_frame_to_kps_map(results, primary_person_id_1)
+        frame_to_kps = _build_frame_to_kps_map(results, primary_person_id_1)
 
         frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
         per_frame_sims: Dict[int, Dict[str, Any]] = {}
@@ -1083,7 +852,7 @@ class BBox3DGenerator:
                 print(f"[align][{video_id}] insufficient corr for frame {frame_idx}")
                 continue
 
-            s_f, R_f, t_f = self._robust_similarity_ransac(
+            s_f, R_f, t_f = _robust_similarity_ransac(
                 smpl_all, scene_all,
                 max_iters=800,
                 inlier_thresh=0.03,
@@ -1103,7 +872,7 @@ class BBox3DGenerator:
             frame_data = world4d.get(frame_idx, None)
             if frame_data is None:
                 continue
-            actor_idx = self._find_actor_index_in_frame(frame_data, primary_track_id_0)
+            actor_idx = _find_actor_index_in_frame(frame_data, primary_track_id_0)
             if actor_idx is None:
                 frame_data['track_id'] = []
                 continue
@@ -1142,26 +911,193 @@ class BBox3DGenerator:
 
         # ---------- 3) average sim ONLY over sampled frames (CHANGE #2) ----------
         sampled_per_frame_sims = {k: v for k, v in per_frame_sims.items() if k in sampled_frame_indices}
-        s_avg, R_avg, t_avg = self._average_sims(sampled_per_frame_sims)
+        s_avg, R_avg, t_avg = _average_sims(sampled_per_frame_sims)
 
-        # ---------- 4) visualize ONLY sampled frames ----------
-        rerun_vis_world4d(
+        return images, world4d, sampled_frame_indices, per_frame_sims, s_avg, R_avg, t_avg, gv, gf, gc
+
+    def generate_video_bb_annotations(
+            self,
+            video_id: str,
+            video_gt_annotations: List[Any],
+            video_gdino_predictions: Dict[str, Any],
+            *,
+            min_points: int = 50,
+            iou_thr: float = 0.3,
+            visualize: bool = False
+    ) -> None:
+        P = self._load_points_for_video(video_id)
+        points_S = P["points"]
+        conf_S = P["conf"]
+        stems_S = P["frame_stems"]
+        colors = P["colors"]
+        camera_poses = P["camera_poses"]
+        S, H, W, _ = points_S.shape
+
+        stem_to_idx = {stems_S[i]: i for i in range(S)}
+
+        if visualize:
+            base = f"world_bb/{video_id}"
+            rr.init("world_bb", spawn=True)
+
+        out_frames: Dict[str, Dict[str, Any]] = {}
+        video_to_frame_to_label_mask, _, _ = self.create_label_wise_masks_map(
             video_id=video_id,
-            images=images,
-            world4d=world4d,
-            faces=self.smplx.faces,
-            sampled_indices=sampled_frame_indices,
-            dynamic_prediction_path=str(self.dynamic_scene_dir_path),
-            per_frame_sims=per_frame_sims,
-            global_floor_sim=(s_avg, R_avg, t_avg),
-            floor=(gv, gf, gc) if gv is not None else None,
-            img_maxsize=480,
-            app_id="World4D-Combined",
+            gt_annotations=video_gt_annotations
         )
 
-        print("Visualization running. Press Ctrl+C to stop.")
-        while True:
-            time.sleep(1)
+        images, world4d, sampled_frame_indices, per_frame_sims, s_avg, R_avg, t_avg, gv, gf, gc = self.process_video(video_id)
+
+        # --------------- prepare floor mesh ---------------
+        floor_verts0, floor_faces0, floor_colors0 = gv, gf, gc
+        floor_verts0 = np.asarray(floor_verts0, dtype=np.float32)
+        floor_faces0 = _faces_u32(np.asarray(floor_faces0))
+        global_floor_sim = (s_avg, R_avg, t_avg)
+        floor_vertices_tf = s_avg * (floor_verts0 @ R_avg.T) + t_avg
+
+        floor_kwargs = {}
+        if floor_colors0 is not None:
+            floor_colors0 = np.asarray(floor_colors0, dtype=np.uint8)
+            floor_kwargs["vertex_colors"] = floor_colors0
+        else:
+            floor_kwargs["albedo_factor"] = [160, 160, 160]
+        floor_faces = floor_faces0
+
+        # --------------- build per-frame bbox annotations ---------------
+
+        for frame_idx, frame_items in enumerate(video_gt_annotations):
+            frame_name = frame_items[0]["frame"].split("/")[-1]
+            stem = Path(frame_name).stem
+            if stem not in stem_to_idx:
+                continue
+            sidx = stem_to_idx[stem]
+            pts_hw3 = points_S[sidx]
+            colors_hw3 = colors[sidx]
+            conf_hw = conf_S[sidx] if conf_S is not None else None
+
+            frame_non_zero_pts = _finite_and_nonzero(pts_hw3)
+
+            gd = video_gdino_predictions.get(frame_name, None)
+            if gd is None:
+                gd_boxes, gd_labels, gd_scores = [], [], []
+            else:
+                gd_boxes = [list(map(float, b)) for b in gd["boxes"]]
+                gd_labels = gd["labels"]
+                gd_scores = [float(s) for s in gd["scores"]]
+
+            frame_rec = {"objects": []}
+
+            # build per-frame objects
+            for item in frame_items:
+                if "person_bbox" in item:
+                    label = "person"
+                    gt_xyxy = _xywh_to_xyxy(item["person_bbox"][0])
+                else:
+                    cid = item["class"]
+                    label = self.catid_to_name_map.get(cid, None)
+                    if not label:
+                        continue
+                    if label == "closet/cabinet":
+                        label = "closet"
+                    elif label == "cup/glass/bottle":
+                        label = "cup"
+                    elif label == "paper/notebook":
+                        label = "paper"
+                    elif label == "sofa/couch":
+                        label = "sofa"
+                    elif label == "phone/camera":
+                        label = "phone"
+                    gt_xyxy = [float(v) for v in item["bbox"]]
+
+                chosen_gd_xyxy = _match_gdino_to_gt(
+                    label, gt_xyxy,
+                    gd_boxes, gd_labels, gd_scores,
+                    iou_thr=iou_thr
+                )
+
+                frame_label_mask = video_to_frame_to_label_mask[video_id][stem].get(label, None)
+                if frame_label_mask is None:
+                    box = chosen_gd_xyxy if chosen_gd_xyxy is not None else gt_xyxy
+                    frame_label_mask = _mask_from_bbox(H, W, box)
+                else:
+                    frame_label_mask = _resize_mask_to(frame_label_mask, (H, W))
+
+                sel = frame_label_mask & frame_non_zero_pts
+                if conf_hw is not None:
+                    sel &= (conf_hw > 1e-6)
+
+                if sel.sum() < min_points:
+                    frame_rec["objects"].append({
+                        "label": label,
+                        "gt_bbox_xyxy": gt_xyxy,
+                        "gdino_bbox_xyxy": chosen_gd_xyxy,
+                        "num_points": int(sel.sum()),
+                        "aabb_floor_aligned": None
+                    })
+                    continue
+
+                label_non_zero_pts = pts_hw3[sel].reshape(-1, 3).astype(np.float32)
+
+                # ---- floor-aligned AABB (CHANGE #3) ----
+                # transform points into floor frame
+                pts_floor = transform_pts_R_offset(label_non_zero_pts, R_floor, offset_floor)
+                mins = pts_floor.min(axis=0)
+                maxs = pts_floor.max(axis=0)
+                # corners in floor frame
+                corners_floor = np.array([
+                    [mins[0], mins[1], mins[2]],
+                    [mins[0], mins[1], maxs[2]],
+                    [mins[0], maxs[1], mins[2]],
+                    [mins[0], maxs[1], maxs[2]],
+                    [maxs[0], mins[1], mins[2]],
+                    [maxs[0], mins[1], maxs[2]],
+                    [maxs[0], maxs[1], mins[2]],
+                    [maxs[0], maxs[1], maxs[2]],
+                ], dtype=np.float32)
+                # back to world for visualization
+                corners_world = inv_transform_pts_R_offset(corners_floor, R_floor, offset_floor)
+
+                frame_rec["objects"].append({
+                    "label": label,
+                    "gt_bbox_xyxy": gt_xyxy,
+                    "gdino_bbox_xyxy": chosen_gd_xyxy,
+                    "num_points": int(label_non_zero_pts.shape[0]),
+                    "aabb_floor_aligned": {
+                        "mins_floor": mins.tolist(),
+                        "maxs_floor": maxs.tolist(),
+                        "corners_world": corners_world.tolist(),
+                    },
+                })
+
+            if frame_rec["objects"]:
+                out_frames[frame_name] = frame_rec
+
+        # ---------- 4) visualize ONLY sampled frames ----------
+        if visualize:
+            rerun_vis_world4d(
+                video_id=video_id,
+                images=images,
+                world4d=world4d,
+                faces=self.smplx.faces,
+                sampled_indices=sampled_frame_indices,
+                dynamic_prediction_path=str(self.dynamic_scene_dir_path),
+                per_frame_sims=per_frame_sims,
+                global_floor_sim=(s_avg, R_avg, t_avg),
+                floor=(gv, gf, gc) if gv is not None else None,
+                img_maxsize=480,
+                app_id="World4D-Combined",
+            )
+
+            print("Visualization running. Press Ctrl+C to stop.")
+            while True:
+                time.sleep(1)
+
+        out_path = self.bbox_3d_root_dir / f"{video_id}.pkl"
+        with open(out_path, "wb") as f:
+            pickle.dump({
+                "video_id": video_id,
+                "frames": out_frames
+            }, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"[bbox] saved floor-aligned 3D bboxes to {out_path}")
 
     def generate_gt_world_bb_annotations(self, dataloader, split) -> None:
         for data in tqdm(dataloader):
@@ -1212,7 +1148,6 @@ def rerun_vis_world4d(
     BASE = "world"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
 
-    # precompute floor transformed by global sim (CHANGE #2)
     floor_vertices_tf = None
     floor_faces = None
     floor_kwargs = None
