@@ -1080,7 +1080,6 @@ class BBox3DGenerator:
         camera_poses = P["camera_poses"]
         S, H, W, _ = points_S.shape
 
-        # map stem -> index in the above arrays
         stem_to_idx = {stems_S[i]: i for i in range(S)}
 
         # 2) build label-wise masks (static + dynamic) for this video
@@ -1104,22 +1103,11 @@ class BBox3DGenerator:
             annotated_frame_idx_in_sampled_idx,
         ) = self.process_video(video_id, use_consistent_transformation)
 
-        # we will collect bboxes for visualization here:
-        # key: frame_idx (i.e. index into world4d / sampled frames)
-        # val: list of { "verts": (8,3), "faces": (12,3), "color": (3,) }
+        # we will collect bboxes for visualization here
         frame_bbox_meshes: Dict[int, List[Dict[str, Any]]] = {}
 
         # ----- helper to make a box mesh from 8 world corners -----
         def _make_box_mesh(corners_world: np.ndarray):
-            # corners order we used:
-            # 0: (minx, miny, minz)
-            # 1: (minx, miny, maxz)
-            # 2: (minx, maxy, minz)
-            # 3: (minx, maxy, maxz)
-            # 4: (maxx, miny, minz)
-            # 5: (maxx, miny, maxz)
-            # 6: (maxx, maxy, minz)
-            # 7: (maxx, maxy, maxz)
             faces = np.array([
                 [0, 1, 2], [1, 3, 2],  # min-x side
                 [4, 6, 5], [5, 6, 7],  # max-x side
@@ -1131,31 +1119,71 @@ class BBox3DGenerator:
             return corners_world.astype(np.float32), faces
 
         # ----- floor transform -----
-        # process_video already applied the SAME sim to the floor mesh, so to go
-        # from world -> "floor-local" we invert that sim:
-        #   p_local = ((p_world - t_avg) / s_avg) @ R_avg
-        # and to go back:
-        #   p_world = (p_local @ R_avg.T) * s_avg + t_avg
         has_floor = gv is not None and gf is not None
         s_floor = float(s_avg) if s_avg is not None else 1.0
         R_floor = np.asarray(R_avg, dtype=np.float32) if R_avg is not None else np.eye(3, dtype=np.float32)
         t_floor = np.asarray(t_avg, dtype=np.float32) if t_avg is not None else np.zeros(3, dtype=np.float32)
 
+        # ----- helpers specific to humans -----
+        def _get_human_verts_world(world4d: Dict[int, dict], frame_idx: int):
+            """
+            Try a few common keys to get the human mesh vertices for this frame.
+            Adjust this if your world4d uses a different key.
+            """
+            f = world4d.get(frame_idx, None)
+            if f is None:
+                return None
+            # common patterns from your earlier scripts
+            if "smpl_verts" in f:
+                return np.asarray(f["smpl_verts"], dtype=np.float32)
+            if "verts" in f:
+                return np.asarray(f["verts"], dtype=np.float32)
+            if "body" in f and "verts" in f["body"]:
+                return np.asarray(f["body"]["verts"], dtype=np.float32)
+            return None
+
+        def _floor_align_points(points_world: np.ndarray) -> np.ndarray:
+            # world -> floor-local
+            return ((points_world - t_floor[None, :]) / s_floor) @ R_floor
+
+        def _floor_to_world(points_floor: np.ndarray) -> np.ndarray:
+            # floor-local -> world
+            return (points_floor @ R_floor.T) * s_floor + t_floor
+
+        def _corners_from_mins_maxs(mins: np.ndarray, maxs: np.ndarray) -> np.ndarray:
+            return np.array([
+                [mins[0], mins[1], mins[2]],
+                [mins[0], mins[1], maxs[2]],
+                [mins[0], maxs[1], mins[2]],
+                [mins[0], maxs[1], maxs[2]],
+                [maxs[0], mins[1], mins[2]],
+                [maxs[0], mins[1], maxs[2]],
+                [maxs[0], maxs[1], mins[2]],
+                [maxs[0], maxs[1], maxs[2]],
+            ], dtype=np.float32)
+
+        def _corners_from_center_dims(center_floor: np.ndarray, dims: np.ndarray) -> np.ndarray:
+            """Make floor-aligned cuboid using center + (dx,dy,dz)."""
+            half = 0.5 * dims
+            mins = center_floor - half
+            maxs = center_floor + half
+            return _corners_from_mins_maxs(mins, maxs)
+
         out_frames: Dict[str, Dict[str, Any]] = {}
 
-        # --------------- per-frame bbox annotations ---------------
         for frame_idx_anno, frame_items in enumerate(video_gt_annotations):
             frame_name = frame_items[0]["frame"].split("/")[-1]
             stem = Path(frame_name).stem
 
-            # this annotated frame may not have corresponding dynamic points
             if stem not in stem_to_idx:
                 continue
-            sidx = stem_to_idx[stem]  # index into points_S, also matches sampled frame idx
-            pts_hw3 = points_S[sidx]  # (H,W,3)
+
+            sidx = stem_to_idx[stem]
+            pts_hw3 = points_S[sidx]
             colors_hw3 = colors[sidx]
             conf_hw = conf_S[sidx] if conf_S is not None else None
 
+            ann_frame_id_in_sampled = annotated_frame_idx_in_sampled_idx[sidx]
             frame_non_zero_pts = _finite_and_nonzero(pts_hw3)
 
             # gdino per-frame predictions
@@ -1169,6 +1197,23 @@ class BBox3DGenerator:
 
             frame_rec = {"objects": []}
 
+            # try to read per-frame human mesh (we'll reuse for all "person" in this frame)
+            human_mesh_floor_aabb = None
+            human_mesh_dims = None
+            human_mesh_volume = None
+            human_mesh_available = False
+            if has_floor:
+                human_verts_world = _get_human_verts_world(world4d, ann_frame_id_in_sampled)
+                if human_verts_world is not None and human_verts_world.size > 0:
+                    human_verts_floor = _floor_align_points(human_verts_world)
+                    hmins = human_verts_floor.min(axis=0)
+                    hmaxs = human_verts_floor.max(axis=0)
+                    human_mesh_dims = (hmaxs - hmins).astype(np.float32)
+                    # very small guard to avoid 0 volume
+                    human_mesh_volume = float(np.prod(np.maximum(human_mesh_dims, 1e-4)))
+                    human_mesh_floor_aabb = (hmins, hmaxs)
+                    human_mesh_available = True
+
             # iterate over GT objects in this frame
             for item in frame_items:
                 if "person_bbox" in item:
@@ -1179,7 +1224,6 @@ class BBox3DGenerator:
                     label = self.catid_to_name_map.get(cid, None)
                     if not label:
                         continue
-                    # normalize label names just like your original code
                     if label == "closet/cabinet":
                         label = "closet"
                     elif label == "cup/glass/bottle":
@@ -1205,7 +1249,6 @@ class BBox3DGenerator:
                 # get mask for this label
                 frame_label_mask = video_to_frame_to_label_mask[video_id][stem].get(label, None)
                 if frame_label_mask is None:
-                    # fallback to bbox
                     box = chosen_gd_xyxy if chosen_gd_xyxy is not None else gt_xyxy
                     frame_label_mask = _mask_from_bbox(H, W, box)
                 else:
@@ -1216,7 +1259,6 @@ class BBox3DGenerator:
                     sel &= (conf_hw > 1e-6)
 
                 if sel.sum() < min_points:
-                    # too few 3D points → store meta only
                     frame_rec["objects"].append({
                         "label": label,
                         "gt_bbox_xyxy": gt_xyxy,
@@ -1230,26 +1272,58 @@ class BBox3DGenerator:
                 label_non_zero_pts = pts_hw3[sel].reshape(-1, 3).astype(np.float32)
 
                 if has_floor:
-                    # --- world → floor-local ---
-                    pts_floor = ((label_non_zero_pts - t_floor[None, :]) / s_floor) @ R_floor
+                    # world → floor-local
+                    pts_floor = _floor_align_points(label_non_zero_pts)
                     mins = pts_floor.min(axis=0)
                     maxs = pts_floor.max(axis=0)
 
-                    # 8 corners in floor-local
-                    corners_floor = np.array([
-                        [mins[0], mins[1], mins[2]],
-                        [mins[0], mins[1], maxs[2]],
-                        [mins[0], maxs[1], mins[2]],
-                        [mins[0], maxs[1], maxs[2]],
-                        [maxs[0], mins[1], mins[2]],
-                        [maxs[0], mins[1], maxs[2]],
-                        [maxs[0], maxs[1], mins[2]],
-                        [maxs[0], maxs[1], maxs[2]],
-                    ], dtype=np.float32)
+                    # default corners from point cloud
+                    corners_floor = _corners_from_mins_maxs(mins, maxs)
+                    corners_world = _floor_to_world(corners_floor)
 
-                    # floor-local → world
-                    corners_world = (corners_floor @ R_floor.T) * s_floor + t_floor
+                    # ---------------- PERSON SPECIAL CASE ----------------
+                    if label == "person" and human_mesh_available:
+                        # volume from sparse PC box
+                        pc_dims = (maxs - mins)
+                        pc_volume = float(np.prod(np.maximum(pc_dims, 1e-4)))
 
+                        # allow some slack over mesh volume
+                        volume_scale = 1.25
+                        use_mesh_like_box = (pc_volume > volume_scale * human_mesh_volume)
+
+                        # center of observed points (in floor coords)
+                        pc_center_floor = pts_floor.mean(axis=0)
+
+                        if use_mesh_like_box:
+                            # construct cuboid with human mesh dims but centered on pc cluster
+                            corners_floor = _corners_from_center_dims(pc_center_floor, human_mesh_dims)
+                            corners_world = _floor_to_world(corners_floor)
+                            frame_rec["objects"].append({
+                                "label": label,
+                                "gt_bbox_xyxy": gt_xyxy,
+                                "gdino_bbox_xyxy": chosen_gd_xyxy,
+                                "num_points": int(label_non_zero_pts.shape[0]),
+                                "aabb_floor_aligned": {
+                                    "mins_floor": (pc_center_floor - 0.5 * human_mesh_dims).tolist(),
+                                    "maxs_floor": (pc_center_floor + 0.5 * human_mesh_dims).tolist(),
+                                    "corners_world": corners_world.tolist(),
+                                    "source": "mesh-shaped-from-volume",
+                                    "mesh_volume": human_mesh_volume,
+                                    "pc_volume": pc_volume,
+                                },
+                            })
+
+                            # viz in a different color (greenish)
+                            verts_box, faces_box = _make_box_mesh(corners_world)
+                            frame_bbox_meshes.setdefault(sidx, []).append({
+                                "verts": verts_box,
+                                "faces": faces_box,
+                                "color": [0, 255, 0],
+                                "label": label,
+                            })
+                            continue  # done with person
+
+                    # ---------------- DEFAULT PATH (for non-person or no mesh) ----------------
                     frame_rec["objects"].append({
                         "label": label,
                         "gt_bbox_xyxy": gt_xyxy,
@@ -1259,32 +1333,23 @@ class BBox3DGenerator:
                             "mins_floor": mins.tolist(),
                             "maxs_floor": maxs.tolist(),
                             "corners_world": corners_world.tolist(),
+                            "source": "pc-aabb",
                         },
                     })
 
-                    # also stash for visualization
                     verts_box, faces_box = _make_box_mesh(corners_world)
                     frame_bbox_meshes.setdefault(sidx, []).append({
                         "verts": verts_box,
                         "faces": faces_box,
-                        "color": [255, 180, 0],  # orangish
+                        "color": [255, 180, 0] if label != "person" else [0, 255, 0],
                         "label": label,
                     })
+
                 else:
                     # fallback: just world AABB
                     mins = label_non_zero_pts.min(axis=0)
                     maxs = label_non_zero_pts.max(axis=0)
-                    corners_world = np.array([
-                        [mins[0], mins[1], mins[2]],
-                        [mins[0], mins[1], maxs[2]],
-                        [mins[0], maxs[1], mins[2]],
-                        [mins[0], maxs[1], maxs[2]],
-                        [maxs[0], mins[1], mins[2]],
-                        [maxs[0], mins[1], maxs[2]],
-                        [maxs[0], maxs[1], mins[2]],
-                        [maxs[0], maxs[1], maxs[2]],
-                    ], dtype=np.float32)
-
+                    corners_world = _corners_from_mins_maxs(mins, maxs)
                     frame_rec["objects"].append({
                         "label": label,
                         "gt_bbox_xyxy": gt_xyxy,
@@ -1294,6 +1359,7 @@ class BBox3DGenerator:
                             "mins_world": mins.tolist(),
                             "maxs_world": maxs.tolist(),
                             "corners_world": corners_world.tolist(),
+                            "source": "world-aabb",
                         },
                     })
                     verts_box, faces_box = _make_box_mesh(corners_world)
@@ -1322,7 +1388,7 @@ class BBox3DGenerator:
                 floor=(gv, gf, gc) if gv is not None else None,
                 img_maxsize=480,
                 app_id="World4D-Combined",
-                frame_bbox_meshes=frame_bbox_meshes,  # <-- new
+                frame_bbox_meshes=frame_bbox_meshes,
             )
 
             print("Visualization running. Press Ctrl+C to stop.")
@@ -1626,7 +1692,7 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
         output_human_dir_path=args.output_human_dir_path,
     )
-    video_id = "53FPM.mp4"
+    video_id = "6AVDE.mp4"
     bbox_3d_generator.generate_sample_gt_world_bb_annotations(video_id=video_id)
 
 
