@@ -1134,12 +1134,10 @@ class BBox3DGenerator:
             if f is None:
                 return None
             # common patterns from your earlier scripts
-            if "smpl_verts" in f:
-                return np.asarray(f["smpl_verts"], dtype=np.float32)
-            if "verts" in f:
-                return np.asarray(f["verts"], dtype=np.float32)
-            if "body" in f and "verts" in f["body"]:
-                return np.asarray(f["body"]["verts"], dtype=np.float32)
+            if "vertices" in f:
+                return np.asarray(f["vertices"][0], dtype=np.float32)
+            else:
+                print(f"[bbox][{video_id}][frame {frame_idx}] no 'vertices' key in world4d frame data")
             return None
 
         def _floor_align_points(points_world: np.ndarray) -> np.ndarray:
@@ -1213,6 +1211,9 @@ class BBox3DGenerator:
                     human_mesh_volume = float(np.prod(np.maximum(human_mesh_dims, 1e-4)))
                     human_mesh_floor_aabb = (hmins, hmaxs)
                     human_mesh_available = True
+                    print(f"[bbox][{video_id}][{frame_name}] human mesh floor-aabb dims {human_mesh_dims}, volume {human_mesh_volume:.4f}")
+            else:
+                print(f"[bbox][{video_id}][{frame_name}] no floor mesh available; skipping human mesh bbox")
 
             # iterate over GT objects in this frame
             for item in frame_items:
@@ -1288,14 +1289,15 @@ class BBox3DGenerator:
                         pc_volume = float(np.prod(np.maximum(pc_dims, 1e-4)))
 
                         # allow some slack over mesh volume
-                        volume_scale = 1.25
+                        volume_scale = 1.5
                         use_mesh_like_box = (pc_volume > volume_scale * human_mesh_volume)
 
                         # center of observed points (in floor coords)
                         pc_center_floor = pts_floor.mean(axis=0)
 
                         if use_mesh_like_box:
-                            # construct cuboid with human mesh dims but centered on pc cluster
+                            print(f"[bbox][{video_id}][{frame_name}] using mesh-shaped box for person "
+                                  f"(pc volume {pc_volume:.4f} > {volume_scale} x mesh volume {human_mesh_volume:.4f})")
                             corners_floor = _corners_from_center_dims(pc_center_floor, human_mesh_dims)
                             corners_world = _floor_to_world(corners_floor)
                             frame_rec["objects"].append({
@@ -1313,7 +1315,6 @@ class BBox3DGenerator:
                                 },
                             })
 
-                            # viz in a different color (greenish)
                             verts_box, faces_box = _make_box_mesh(corners_world)
                             frame_bbox_meshes.setdefault(sidx, []).append({
                                 "verts": verts_box,
@@ -1321,9 +1322,8 @@ class BBox3DGenerator:
                                 "color": [0, 255, 0],
                                 "label": label,
                             })
-                            continue  # done with person
+                            continue
 
-                    # ---------------- DEFAULT PATH (for non-person or no mesh) ----------------
                     frame_rec["objects"].append({
                         "label": label,
                         "gt_bbox_xyxy": gt_xyxy,
@@ -1513,7 +1513,7 @@ def rerun_vis_world4d(
         if sample_idx < 0 or sample_idx >= len(sampled_indices):
             continue
 
-        frame_idx = sampled_indices[sample_idx]  # actual frame id in world4d
+        frame_idx = sampled_indices[sample_idx]
 
         # set timeline to a dense 0..N-1 sequence of annotated frames
         rr.set_time_sequence("frame", vis_t)
