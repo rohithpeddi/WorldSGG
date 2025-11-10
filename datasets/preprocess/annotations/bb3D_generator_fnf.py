@@ -100,6 +100,18 @@ def _xywh_to_xyxy(b):  # [x,y,w,h] -> [x1,y1,x2,y2]
     x, y, w, h = [float(v) for v in b]
     return [x, y, x + w, y + h]
 
+def _resize_bbox_to(box_xyxy, original_size, target_size):
+    orig_W, orig_H = original_size
+    tgt_W, tgt_H = target_size
+    x_scale = tgt_W / orig_W
+    y_scale = tgt_H / orig_H
+    return [
+        box_xyxy[0] * x_scale,
+        box_xyxy[1] * y_scale,
+        box_xyxy[2] * x_scale,
+        box_xyxy[3] * y_scale,
+    ]
+
 def _area_xyxy(b):
     x1, y1, x2, y2 = b
     return max(0.0, x2 - x1) * max(0.0, y2 - y1)
@@ -1078,8 +1090,13 @@ class BBox3DGenerator:
         conf_S = P["conf"]  # (S, H, W) or None
         stems_S = P["frame_stems"]  # list[str], len S
         colors = P["colors"]
-        camera_poses = P["camera_poses"]
         S, H, W, _ = points_S.shape
+
+        # Original image height and width of images corresponding to the video
+        # We will use them to re-size the bounding boxes and masks to the size points - (H, W)
+        sample_image_frame = self.frame_annotated_dir_path / video_id / f"{stems_S[0]}.png"
+        orig_img = cv2.imread(str(sample_image_frame))
+        orig_H, orig_W = orig_img.shape[:2]
 
         stem_to_idx = {stems_S[i]: i for i in range(S)}
 
@@ -1186,14 +1203,14 @@ class BBox3DGenerator:
             ann_frame_id_in_sampled = annotated_frame_idx_in_sampled_idx[sidx]
             frame_non_zero_pts = _finite_and_nonzero(pts_hw3)
 
-            # gdino per-frame predictions
-            gd = video_gdino_predictions.get(frame_name, None)
-            if gd is None:
-                gd_boxes, gd_labels, gd_scores = [], [], []
-            else:
-                gd_boxes = [list(map(float, b)) for b in gd["boxes"]]
-                gd_labels = gd["labels"]
-                gd_scores = [float(s) for s in gd["scores"]]
+            # # gdino per-frame predictions
+            # gd = video_gdino_predictions.get(frame_name, None)
+            # if gd is None:
+            #     gd_boxes, gd_labels, gd_scores = [], [], []
+            # else:
+            #     gd_boxes = [list(map(float, b)) for b in gd["boxes"]]
+            #     gd_labels = gd["labels"]
+            #     gd_scores = [float(s) for s in gd["scores"]]
 
             frame_rec = {"objects": []}
 
@@ -1240,22 +1257,40 @@ class BBox3DGenerator:
                     gt_xyxy = [float(v) for v in item["bbox"]]
 
                 # match GDINO
-                chosen_gd_xyxy = _match_gdino_to_gt(
-                    label,
-                    gt_xyxy,
-                    gd_boxes,
-                    gd_labels,
-                    gd_scores,
-                    iou_thr=iou_thr
-                )
+                # chosen_gd_xyxy = _match_gdino_to_gt(
+                #     label,
+                #     gt_xyxy,
+                #     gd_boxes,
+                #     gd_labels,
+                #     gd_scores,
+                #     iou_thr=iou_thr
+                # )
+                chosen_gd_xyxy = gt_xyxy
+                # Resize gt_xyxy to (H, W) from (orig_H, orig_W)
+                gt_xyxy = _resize_bbox_to(gt_xyxy, (orig_W, orig_H), (W, H))
+                if chosen_gd_xyxy is not None:
+                    chosen_gd_xyxy = _resize_bbox_to(chosen_gd_xyxy, (orig_W, orig_H), (W, H))
 
-                # get mask for this label
                 frame_label_mask = video_to_frame_to_label_mask[video_id][stem].get(label, None)
                 if frame_label_mask is None:
+                    print(f"[bbox][{video_id}][{frame_name}] no mask for label '{label}', Creating from bbox")
                     box = chosen_gd_xyxy if chosen_gd_xyxy is not None else gt_xyxy
                     frame_label_mask = _mask_from_bbox(H, W, box)
                 else:
+                    mask_h, mask_w = frame_label_mask.shape
+                    assert  mask_h == orig_H and mask_w == orig_W
+
                     frame_label_mask = _resize_mask_to(frame_label_mask, (H, W))
+
+                    mask_h, mask_w = frame_label_mask.shape
+                    assert  mask_h == H and mask_w == W
+
+                    # Change the mask to include only those that are inside the chosen_gd_xyxy bbox
+                    box = chosen_gd_xyxy if chosen_gd_xyxy is not None else gt_xyxy
+                    x1, y1, x2, y2 = map(int, box)
+                    bbox_mask = np.zeros_like(frame_label_mask, dtype=bool)
+                    bbox_mask[y1:y2, x1:x2] = True
+                    frame_label_mask = frame_label_mask & bbox_mask
 
                 sel = frame_label_mask & frame_non_zero_pts
                 if conf_hw is not None:
