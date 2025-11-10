@@ -1058,6 +1058,7 @@ class BBox3DGenerator:
             gf,
             gc,
             annotated_frame_idx_in_sample_idx,
+            primary_track_id_0
         )
 
     def generate_video_bb_annotations(
@@ -1101,6 +1102,7 @@ class BBox3DGenerator:
             gf,
             gc,
             annotated_frame_idx_in_sampled_idx,
+            primary_track_id_0
         ) = self.process_video(video_id, use_consistent_transformation)
 
         # we will collect bboxes for visualization here
@@ -1125,7 +1127,7 @@ class BBox3DGenerator:
         t_floor = np.asarray(t_avg, dtype=np.float32) if t_avg is not None else np.zeros(3, dtype=np.float32)
 
         # ----- helpers specific to humans -----
-        def _get_human_verts_world(world4d: Dict[int, dict], frame_idx: int):
+        def _get_human_verts_world(world4d: Dict[int, dict], frame_idx: int, track_id: int) -> Optional[np.ndarray]:
             """
             Try a few common keys to get the human mesh vertices for this frame.
             Adjust this if your world4d uses a different key.
@@ -1135,7 +1137,7 @@ class BBox3DGenerator:
                 return None
             # common patterns from your earlier scripts
             if "vertices" in f:
-                return np.asarray(f["vertices"][0], dtype=np.float32)
+                return np.asarray(f["vertices"][track_id], dtype=np.float32)
             else:
                 print(f"[bbox][{video_id}][frame {frame_idx}] no 'vertices' key in world4d frame data")
             return None
@@ -1201,7 +1203,7 @@ class BBox3DGenerator:
             human_mesh_volume = None
             human_mesh_available = False
             if has_floor:
-                human_verts_world = _get_human_verts_world(world4d, ann_frame_id_in_sampled)
+                human_verts_world = _get_human_verts_world(world4d, ann_frame_id_in_sampled, primary_track_id_0)
                 if human_verts_world is not None and human_verts_world.size > 0:
                     human_verts_floor = _floor_align_points(human_verts_world)
                     hmins = human_verts_floor.min(axis=0)
@@ -1671,7 +1673,6 @@ def parse_args():
                         help="use dense correspondences for human aligner")
     return parser.parse_args()
 
-
 def main():
     args = parse_args()
 
@@ -1692,7 +1693,7 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
         output_human_dir_path=args.output_human_dir_path,
     )
-    video_id = "6AVDE.mp4"
+    video_id = "GYAR9.mp4"
     bbox_3d_generator.generate_sample_gt_world_bb_annotations(video_id=video_id)
 
 
