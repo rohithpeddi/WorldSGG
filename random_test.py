@@ -38,19 +38,15 @@ def main():
     video_id_filesize = {}  # video_id -> size_bytes
 
     for static_video_name in os.listdir(static_video_dir_path):
-        # e.g. dir: ABCD1234 and file inside: ABCD12.glb ?
-        # you're doing static_video_name[:-3] so preserve your logic
         glb_path = os.path.join(
             static_video_dir_path,
             static_video_name,
             f"{static_video_name[:-3]}.glb"
         )
         if not os.path.exists(glb_path):
-            # skip if that file doesn't actually exist
             continue
         size_bytes = os.path.getsize(glb_path)
         files_with_sizes.append((glb_path, size_bytes))
-        # use the same id key you used originally
         video_id = static_video_name[:-3]
         video_id_filesize[video_id] = size_bytes
 
@@ -74,7 +70,6 @@ def main():
     rows = []
     for video_id, size_bytes in video_id_filesize.items():
         if video_id not in video_id_quality:
-            # your static names might not match Charades ids; skip quietly
             continue
         quality = video_id_quality[video_id]
         size_mb = size_bytes / (1024 * 1024)
@@ -108,8 +103,33 @@ def main():
 
     df["size_bucket"] = pd.Categorical(df["size_bucket"], ordered=True, categories=ordered_labels)
 
+    # ---------------------------------------------------------------------
+    # NEW: write an Excel file with one sheet per size bucket
+    # ---------------------------------------------------------------------
+    output_excel = "charades_video_sizes_by_bucket.xlsx"
+    with pd.ExcelWriter(output_excel, engine="xlsxwriter") as writer:
+        # summary sheet first (the full df)
+        df.sort_values(["size_bucket", "quality", "video_id"]).to_excel(
+            writer, sheet_name="all_videos", index=False
+        )
+
+        # per-bucket sheets
+        for bucket in ordered_labels:
+            bucket_df = df[df["size_bucket"] == bucket].copy()
+            # sort to make it nice: quality -> video_id
+            bucket_df = bucket_df.sort_values(["quality", "video_id"])
+            # keep only the relevant columns; you can add/remove as needed
+            cols = ["video_id", "quality", "size_mb"]
+            bucket_df.to_excel(
+                writer,
+                sheet_name=bucket[:31],  # Excel sheet name max length = 31
+                index=False,
+                columns=cols,
+            )
+    print(f"Wrote Excel report to {output_excel}")
+    # ---------------------------------------------------------------------
+
     # 5) pivot to counts: rows=quality, cols=size_bucket, values=count
-    # you could also do aggfunc="mean" on size_mb if quality were numeric, but it’s probably string
     pivot_table = pd.pivot_table(
         df,
         index="quality",
@@ -134,7 +154,7 @@ def main():
     plt.tight_layout()
     plt.show()
 
-    # (optional) your earlier bar plot by size bucket — now using what we already computed
+    # bar plot by size bucket
     counts_by_bucket = df["size_bucket"].value_counts().reindex(ordered_labels, fill_value=0)
     plt.figure()
     counts_by_bucket.plot(kind="bar")

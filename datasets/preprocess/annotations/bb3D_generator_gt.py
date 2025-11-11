@@ -1252,9 +1252,15 @@ class BBox3DGenerator:
 
                 sel = frame_label_mask
                 if sel.sum() > min_points:
+                    # make sure it's uint8 (0/1 is fine; 0/255 also works)
+                    mask_u8 = frame_label_mask.astype(np.uint8)
+
                     # Erode the mask to avoid boundary points
                     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                    sel = cv2.erode(frame_label_mask, kernel, iterations=1)
+                    eroded = cv2.erode(mask_u8, kernel, iterations=1)
+
+                    # turn back into a boolean / 0-1 selector
+                    sel = eroded.astype(bool)
 
                 sel = sel & frame_non_zero_pts
                 if conf_hw is not None:
