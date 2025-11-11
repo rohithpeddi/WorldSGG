@@ -1154,7 +1154,8 @@ class BBox3DGenerator:
                 return None
             # common patterns from your earlier scripts
             if "vertices" in f:
-                return np.asarray(f["vertices"][track_id], dtype=np.float32)
+                pos_id_track_id = f["track_id"].index(track_id)
+                return np.asarray(f["vertices"][pos_id_track_id], dtype=np.float32)
             else:
                 print(f"[bbox][{video_id}][frame {frame_idx}] no 'vertices' key in world4d frame data")
             return None
@@ -1294,7 +1295,7 @@ class BBox3DGenerator:
 
                 sel = frame_label_mask & frame_non_zero_pts
                 if conf_hw is not None:
-                    sel &= (conf_hw > 1e-6)
+                    sel &= (conf_hw > 1e-3)
 
                 if sel.sum() < min_points:
                     frame_rec["objects"].append({
@@ -1381,7 +1382,6 @@ class BBox3DGenerator:
                         "color": [255, 180, 0] if label != "person" else [0, 255, 0],
                         "label": label,
                     })
-
                 else:
                     # fallback: just world AABB
                     mins = label_non_zero_pts.min(axis=0)
@@ -1694,7 +1694,6 @@ def load_dataset(ag_root_directory: str):
 
     return train_dataset, test_dataset, dataloader_train, dataloader_test
 
-
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Combined: (a) floor-aligned 3D bbox generator + (b) SMPL↔PI3 human mesh aligner (sampled frames only)."
@@ -1728,7 +1727,7 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
         output_human_dir_path=args.output_human_dir_path,
     )
-    video_id = "GYAR9.mp4"
+    video_id = "L1O0N.mp4"
     bbox_3d_generator.generate_sample_gt_world_bb_annotations(video_id=video_id)
 
 
