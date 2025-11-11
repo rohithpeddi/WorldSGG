@@ -505,6 +505,10 @@ class BBox3DGenerator:
 
         self.output_human_dir_path = Path(output_human_dir_path)
 
+        self.erosion_kernel_sizes = list(range(0, 11))
+        self.min_points_per_scale = 50
+
+
     def get_video_gt_annotations(self, video_id):
         video_gt_annotations_json_path = self.gt_annotations_root_dir / video_id / "gt_annotations.json"
         if not video_gt_annotations_json_path.exists():
@@ -1106,26 +1110,25 @@ class BBox3DGenerator:
         # 1) load dynamic points (already sub-sampled to annotated frames)
         P = self._load_points_for_video(video_id)
         points_S = P["points"]  # (S, H, W, 3)
-        conf_S = P["conf"]  # (S, H, W) or None
-        stems_S = P["frame_stems"]  # list[str], len S
+        conf_S = P["conf"]      # (S, H, W) or None
+        stems_S = P["frame_stems"]
         colors = P["colors"]
         S, H, W, _ = points_S.shape
 
-        # Original image height and width of images corresponding to the video
-        # We will use them to re-size the bounding boxes and masks to the size points - (H, W)
+        # to resize bboxes/masks
         sample_image_frame = self.frame_annotated_dir_path / video_id / f"{stems_S[0]}.png"
         orig_img = cv2.imread(str(sample_image_frame))
         orig_H, orig_W = orig_img.shape[:2]
 
         stem_to_idx = {stems_S[i]: i for i in range(S)}
 
-        # 2) build label-wise masks (static + dynamic) for this video
+        # 2) build label-wise masks (static + dynamic)
         video_to_frame_to_label_mask, _, _ = self.create_label_wise_masks_map(
             video_id=video_id,
             gt_annotations=video_gt_annotations
         )
 
-        # 3) run the human/scene pipeline & get the global floor sim
+        # 3) run human/scene pipeline to get floor sim
         (
             images,
             world4d,
@@ -1141,33 +1144,28 @@ class BBox3DGenerator:
             primary_track_id_0
         ) = self.process_video(video_id, use_consistent_transformation)
 
-        # we will collect bboxes for visualization here
         frame_bbox_meshes: Dict[int, List[Dict[str, Any]]] = {}
 
-        # ----- helper to make a box mesh from 8 world corners -----
         def _make_box_mesh(corners_world: np.ndarray):
             faces = np.array([
-                [0, 1, 2], [1, 3, 2],  # min-x side
-                [4, 6, 5], [5, 6, 7],  # max-x side
-                [0, 4, 1], [1, 4, 5],  # min-y side
-                [2, 3, 6], [3, 7, 6],  # max-y side
-                [0, 2, 4], [2, 6, 4],  # min-z side
-                [1, 5, 3], [3, 5, 7],  # max-z side
+                [0, 1, 2], [1, 3, 2],
+                [4, 6, 5], [5, 6, 7],
+                [0, 4, 1], [1, 4, 5],
+                [2, 3, 6], [3, 7, 6],
+                [0, 2, 4], [2, 6, 4],
+                [1, 5, 3], [3, 5, 7],
             ], dtype=np.uint32)
             return corners_world.astype(np.float32), faces
 
-        # ----- floor transform -----
         has_floor = gv is not None and gf is not None
         s_floor = float(s_avg) if s_avg is not None else 1.0
         R_floor = np.asarray(R_avg, dtype=np.float32) if R_avg is not None else np.eye(3, dtype=np.float32)
         t_floor = np.asarray(t_avg, dtype=np.float32) if t_avg is not None else np.zeros(3, dtype=np.float32)
 
         def _floor_align_points(points_world: np.ndarray) -> np.ndarray:
-            # world -> floor-local
             return ((points_world - t_floor[None, :]) / s_floor) @ R_floor
 
         def _floor_to_world(points_floor: np.ndarray) -> np.ndarray:
-            # floor-local -> world
             return (points_floor @ R_floor.T) * s_floor + t_floor
 
         def _corners_from_mins_maxs(mins: np.ndarray, maxs: np.ndarray) -> np.ndarray:
@@ -1193,16 +1191,16 @@ class BBox3DGenerator:
 
             sidx = stem_to_idx[stem]
             pts_hw3 = points_S[sidx]
-            colors_hw3 = colors[sidx]
             conf_hw = conf_S[sidx] if conf_S is not None else None
-
-            ann_frame_id_in_sampled = annotated_frame_idx_in_sampled_idx[sidx]
             frame_non_zero_pts = _finite_and_nonzero(pts_hw3)
+
+            # index into annotated frames for visualization
+            ann_frame_vis_idx = annotated_frame_idx_in_sampled_idx[sidx]
 
             frame_rec = {"objects": []}
 
-            # iterate over GT objects in this frame
-            for item in frame_items:
+            for obj_local_idx, item in enumerate(frame_items):
+                # ---- resolve label and 2D box ----
                 if "person_bbox" in item:
                     label = "person"
                     gt_xyxy = _xywh_to_xyxy(item["person_bbox"][0])
@@ -1211,6 +1209,7 @@ class BBox3DGenerator:
                     label = self.catid_to_name_map.get(cid, None)
                     if not label:
                         continue
+                    # normalize label names
                     if label == "closet/cabinet":
                         label = "closet"
                     elif label == "cup/glass/bottle":
@@ -1223,96 +1222,158 @@ class BBox3DGenerator:
                         label = "phone"
                     gt_xyxy = [float(v) for v in item["bbox"]]
 
-                chosen_gd_xyxy = gt_xyxy
-                # Resize gt_xyxy to (H, W) from (orig_H, orig_W)
+                # resize bbox to (H, W)
                 gt_xyxy = _resize_bbox_to(gt_xyxy, (orig_W, orig_H), (W, H))
-                if chosen_gd_xyxy is not None:
-                    chosen_gd_xyxy = _resize_bbox_to(chosen_gd_xyxy, (orig_W, orig_H), (W, H))
 
+                # try to get label mask
                 frame_label_mask = video_to_frame_to_label_mask[video_id][stem].get(label, None)
                 if frame_label_mask is None:
-                    print(f"[bbox][{video_id}][{frame_name}] no mask for label '{label}', Creating from bbox")
-                    box = chosen_gd_xyxy if chosen_gd_xyxy is not None else gt_xyxy
-                    frame_label_mask = _mask_from_bbox(H, W, box)
+                    # fallback to bbox mask
+                    frame_label_mask = _mask_from_bbox(H, W, gt_xyxy)
                 else:
-                    mask_h, mask_w = frame_label_mask.shape
-                    assert mask_h == orig_H and mask_w == orig_W
-
                     frame_label_mask = _resize_mask_to(frame_label_mask, (H, W))
-
-                    mask_h, mask_w = frame_label_mask.shape
-                    assert mask_h == H and mask_w == W
-
-                    # Change the mask to include only those that are inside the chosen_gd_xyxy bbox
-                    box = chosen_gd_xyxy if chosen_gd_xyxy is not None else gt_xyxy
-                    x1, y1, x2, y2 = map(int, box)
+                    # intersect with bbox region
+                    x1, y1, x2, y2 = map(int, gt_xyxy)
                     bbox_mask = np.zeros_like(frame_label_mask, dtype=bool)
                     bbox_mask[y1:y2, x1:x2] = True
                     frame_label_mask = frame_label_mask & bbox_mask
 
-                sel = frame_label_mask
-                if sel.sum() > min_points:
-                    # make sure it's uint8 (0/1 is fine; 0/255 also works)
-                    mask_u8 = frame_label_mask.astype(np.uint8)
+                # ------------------------------------------------
+                # MULTI-SCALE EROSION: 0..10 px
+                # ------------------------------------------------
+                multi_scale_candidates = []
+                for ksz in self.erosion_kernel_sizes:  # 0..10
+                    if ksz == 0:
+                        sel_mask = frame_label_mask.astype(bool)
+                    else:
+                        mask_u8 = frame_label_mask.astype(np.uint8)
+                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksz, ksz))
+                        eroded = cv2.erode(mask_u8, kernel, iterations=1)
+                        sel_mask = eroded.astype(bool)
 
-                    # Erode the mask to avoid boundary points
-                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                    eroded = cv2.erode(mask_u8, kernel, iterations=1)
+                    sel = sel_mask & frame_non_zero_pts
+                    if conf_hw is not None:
+                        sel &= (conf_hw > 1e-3)
 
-                    # turn back into a boolean / 0-1 selector
-                    sel = eroded.astype(bool)
+                    num_sel = int(sel.sum())
+                    if num_sel < self.min_points_per_scale:
+                        # skip this scale
+                        continue
 
-                sel = sel & frame_non_zero_pts
-                if conf_hw is not None:
-                    sel &= (conf_hw > 1e-3)
+                    obj_pts_world = pts_hw3[sel].reshape(-1, 3).astype(np.float32)
 
-                if sel.sum() < min_points:
-                    frame_rec["objects"].append({
-                        "label": label,
-                        "gt_bbox_xyxy": gt_xyxy,
-                        "gdino_bbox_xyxy": chosen_gd_xyxy,
-                        "num_points": int(sel.sum()),
-                        "aabb_floor_aligned": None
-                    })
-                    print(f"[bbox][{video_id}][{frame_name}] label '{label}' skipped due to insufficient points "
-                          f"after masking: {sel.sum()} < {min_points}")
-                    continue
+                    if not has_floor:
+                        # cannot build floor-aligned BB
+                        continue
 
-                # actual 3D points for this object (world space)
-                label_non_zero_pts = pts_hw3[sel].reshape(-1, 3).astype(np.float32)
-
-                if has_floor:
-                    # world → floor-local
-                    pts_floor = _floor_align_points(label_non_zero_pts)
+                    pts_floor = _floor_align_points(obj_pts_world)
                     mins = pts_floor.min(axis=0)
                     maxs = pts_floor.max(axis=0)
+                    size = (maxs - mins).clip(1e-6)
+                    volume = float(size[0] * size[1] * size[2])
 
-                    # default corners from point cloud
                     corners_floor = _corners_from_mins_maxs(mins, maxs)
                     corners_world = _floor_to_world(corners_floor)
 
+                    multi_scale_candidates.append({
+                        "kernel_size": ksz,
+                        "num_points": num_sel,
+                        "mins_floor": mins,
+                        "maxs_floor": maxs,
+                        "corners_world": corners_world,
+                        "volume": volume,
+                    })
+
+                if len(multi_scale_candidates) == 0:
+                    # nothing valid at any scale
                     frame_rec["objects"].append({
                         "label": label,
                         "gt_bbox_xyxy": gt_xyxy,
-                        "gdino_bbox_xyxy": chosen_gd_xyxy,
-                        "num_points": int(label_non_zero_pts.shape[0]),
-                        "aabb_floor_aligned": {
-                            "mins_floor": mins.tolist(),
-                            "maxs_floor": maxs.tolist(),
-                            "corners_world": corners_world.tolist(),
-                            "source": "pc-aabb",
-                        },
+                        "gdino_bbox_xyxy": None,
+                        "num_points": 0,
+                        "aabb_floor_aligned": None,
+                        "multi_scale_candidates": [],
                     })
+                    print(f"[bbox][{video_id}][{frame_name}] label '{label}' skipped: no valid erosion scale")
+                    continue
 
-                    verts_box, faces_box = _make_box_mesh(corners_world)
-                    frame_bbox_meshes.setdefault(sidx, []).append({
-                        "verts": verts_box,
-                        "faces": faces_box,
-                        "color": [255, 180, 0] if label != "person" else [0, 255, 0],
-                        "label": label,
-                    })
+                # ------------------------------------------------
+                # PICK SCALE:
+                # 1) find k=0 candidate -> baseline volume
+                # 2) walk k=1..10, pick first whose volume <= 0.5 * vol0
+                # 3) if none, pick k=3 if present
+                # 4) else fall back sensibly
+                # ------------------------------------------------
+                # sort by kernel_size so 0..10 order is preserved
+                multi_scale_candidates.sort(key=lambda c: c["kernel_size"])
+
+                base_candidate = None
+                for c in multi_scale_candidates:
+                    if c["kernel_size"] == 0:
+                        base_candidate = c
+                        break
+
+                chosen_cand = None
+                if base_candidate is not None:
+                    base_vol = base_candidate["volume"]
+                    # search for 50% drop
+                    for c in multi_scale_candidates:
+                        if c["kernel_size"] == 0:
+                            continue
+                        if c["volume"] <= 0.5 * base_vol:
+                            chosen_cand = c
+                            print(f"[bbox][{video_id}][{frame_name}] label '{label}' chose k={c['kernel_size']} "
+                                  f"with volume drop {base_vol:.6f} -> {c['volume']:.6f}")
+                            break
+                    if chosen_cand is None:
+                        # no 50% drop found -> try k=3
+                        chosen_cand = next(
+                            (c for c in multi_scale_candidates if c["kernel_size"] == 3),
+                            base_candidate  # else fallback to k=0
+                        )
                 else:
-                    raise ValueError(f"[bbox][{video_id}][{frame_name}] no floor mesh available; cannot compute floor-aligned AABB")
+                    # no k=0 candidate (rare, but possible if 0 erosion leaves too few points)
+                    # try k=3, else smallest volume
+                    chosen_cand = next(
+                        (c for c in multi_scale_candidates if c["kernel_size"] == 3),
+                        min(multi_scale_candidates, key=lambda c: c["volume"])
+                    )
+
+                print(f"[bbox][{video_id}][{frame_name}] label '{label}' final chosen k={chosen_cand['kernel_size']} ")
+
+                frame_rec["objects"].append({
+                    "label": label,
+                    "gt_bbox_xyxy": gt_xyxy,
+                    "gdino_bbox_xyxy": None,
+                    "num_points": int(chosen_cand["num_points"]),
+                    "aabb_floor_aligned": {
+                        "mins_floor": chosen_cand["mins_floor"].tolist(),
+                        "maxs_floor": chosen_cand["maxs_floor"].tolist(),
+                        "corners_world": chosen_cand["corners_world"].tolist(),
+                        "source": "pc-aabb-multiscale",
+                        "kernel_size": chosen_cand["kernel_size"],
+                        "volume": float(chosen_cand["volume"]),
+                    },
+                    "multi_scale_candidates": [
+                        {
+                            "kernel_size": c["kernel_size"],
+                            "num_points": int(c["num_points"]),
+                            "mins_floor": c["mins_floor"].tolist(),
+                            "maxs_floor": c["maxs_floor"].tolist(),
+                            "volume": float(c["volume"]),
+                        }
+                        for c in multi_scale_candidates
+                    ],
+                })
+
+                # vis: only chosen one
+                verts_box, faces_box = _make_box_mesh(chosen_cand["corners_world"])
+                frame_bbox_meshes.setdefault(sidx, []).append({
+                    "verts": verts_box,
+                    "faces": faces_box,
+                    "color": [255, 180, 0] if label != "person" else [0, 255, 0],
+                    "label": label,
+                })
 
             if frame_rec["objects"]:
                 out_frames[frame_name] = frame_rec
@@ -1348,7 +1409,8 @@ class BBox3DGenerator:
                 "video_id": video_id,
                 "frames": out_frames
             }, f, protocol=pickle.HIGHEST_PROTOCOL)
-        print(f"[bbox] saved floor-aligned 3D bboxes to {out_path}")
+        print(f"[bbox] saved floor-aligned 3D bboxes (multiscale 0-10) to {out_path}")
+
 
     def generate_gt_world_bb_annotations(self, dataloader, split) -> None:
         for data in tqdm(dataloader):
