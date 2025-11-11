@@ -106,27 +106,27 @@ def main():
     # ---------------------------------------------------------------------
     # NEW: write an Excel file with one sheet per size bucket
     # ---------------------------------------------------------------------
-    output_excel = "charades_video_sizes_by_bucket.xlsx"
-    with pd.ExcelWriter(output_excel, engine="xlsxwriter") as writer:
-        # summary sheet first (the full df)
-        df.sort_values(["size_bucket", "quality", "video_id"]).to_excel(
-            writer, sheet_name="all_videos", index=False
-        )
-
-        # per-bucket sheets
-        for bucket in ordered_labels:
-            bucket_df = df[df["size_bucket"] == bucket].copy()
-            # sort to make it nice: quality -> video_id
-            bucket_df = bucket_df.sort_values(["quality", "video_id"])
-            # keep only the relevant columns; you can add/remove as needed
-            cols = ["video_id", "quality", "size_mb"]
-            bucket_df.to_excel(
-                writer,
-                sheet_name=bucket[:31],  # Excel sheet name max length = 31
-                index=False,
-                columns=cols,
-            )
-    print(f"Wrote Excel report to {output_excel}")
+    # output_excel = "charades_video_sizes_by_bucket.xlsx"
+    # with pd.ExcelWriter(output_excel, engine="xlsxwriter") as writer:
+    #     # summary sheet first (the full df)
+    #     df.sort_values(["size_bucket", "quality", "video_id"]).to_excel(
+    #         writer, sheet_name="all_videos", index=False
+    #     )
+    #
+    #     # per-bucket sheets
+    #     for bucket in ordered_labels:
+    #         bucket_df = df[df["size_bucket"] == bucket].copy()
+    #         # sort to make it nice: quality -> video_id
+    #         bucket_df = bucket_df.sort_values(["quality", "video_id"])
+    #         # keep only the relevant columns; you can add/remove as needed
+    #         cols = ["video_id", "quality", "size_mb"]
+    #         bucket_df.to_excel(
+    #             writer,
+    #             sheet_name=bucket[:31],  # Excel sheet name max length = 31
+    #             index=False,
+    #             columns=cols,
+    #         )
+    # print(f"Wrote Excel report to {output_excel}")
     # ---------------------------------------------------------------------
 
     # 5) pivot to counts: rows=quality, cols=size_bucket, values=count

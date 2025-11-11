@@ -1644,7 +1644,7 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
         output_human_dir_path=args.output_human_dir_path,
     )
-    video_id = "L1O0N.mp4"
+    video_id = "KTKWL.mp4"
     bbox_3d_generator.generate_sample_gt_world_bb_annotations(video_id=video_id)
 
 
