@@ -75,6 +75,7 @@ def _pinhole_from_fov(w: int, h: int, fov_y: float):
     cy = h / 2.0
     return fx, fy, cx, cy
 
+
 def _is_empty_array(x):
     if x is None:
         return True
@@ -90,15 +91,18 @@ def _is_empty_array(x):
         pass
     return False
 
+
 def _load_pkl_if_exists(path: Path):
     if path.exists():
         with open(path, "rb") as f:
             return pickle.load(f)
     return None
 
+
 def _xywh_to_xyxy(b):  # [x,y,w,h] -> [x1,y1,x2,y2]
     x, y, w, h = [float(v) for v in b]
     return [x, y, x + w, y + h]
+
 
 def _resize_bbox_to(box_xyxy, original_size, target_size):
     orig_W, orig_H = original_size
@@ -112,9 +116,11 @@ def _resize_bbox_to(box_xyxy, original_size, target_size):
         box_xyxy[3] * y_scale,
     ]
 
+
 def _area_xyxy(b):
     x1, y1, x2, y2 = b
     return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
 
 def _iou_xyxy(a, b) -> float:
     ax1, ay1, ax2, ay2 = a
@@ -128,6 +134,7 @@ def _iou_xyxy(a, b) -> float:
     ua = _area_xyxy(a) + _area_xyxy(b) - inter
     return inter / max(ua, 1e-8)
 
+
 def _mask_from_bbox(h: int, w: int, xyxy: List[float]) -> np.ndarray:
     m = np.zeros((h, w), dtype=bool)
     x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
@@ -137,23 +144,28 @@ def _mask_from_bbox(h: int, w: int, xyxy: List[float]) -> np.ndarray:
         m[y1:y2, x1:x2] = True
     return m
 
+
 def _resize_mask_to(mask: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
     th, tw = target_hw
     if mask.shape == (th, tw):
         return mask.astype(bool)
     return cv2.resize(mask.astype(np.uint8), (tw, th), interpolation=cv2.INTER_NEAREST).astype(bool)
 
+
 def _finite_and_nonzero(pts: np.ndarray) -> np.ndarray:
     good = np.isfinite(pts).all(axis=-1)
     nz = np.linalg.norm(pts, axis=-1) > 1e-12
     return good & nz
 
+
 def transform_pts_R_offset(pts: np.ndarray, R: np.ndarray, offset: np.ndarray):
     return (R @ pts.T).T + offset[None, :]
+
 
 def inv_transform_pts_R_offset(pts: np.ndarray, R: np.ndarray, offset: np.ndarray):
     # inverse of x' = R x + o  -> x = R^T (x' - o)
     return (R.T @ (pts - offset[None, :]).T).T
+
 
 def _box_edges_from_corners(corners: np.ndarray) -> List[np.ndarray]:
     idx_pairs = [
@@ -177,23 +189,25 @@ def _lift_2d_to_3d(frame_points_hw3: np.ndarray, u: float, v: float):
         return None
     return p3d
 
+
 def _build_frame_to_kps_map(results: dict, primary_person_id_1: Optional[str]):
-        frame_to_kps = {}
-        people_results = results.get("people", {})
-        if not people_results:
-            return frame_to_kps
-        if primary_person_id_1 is None:
-            primary_person_id_1 = list(people_results.keys())[0]
-        pdata = people_results.get(primary_person_id_1, None)
-        if pdata is None:
-            return frame_to_kps
-        frames = pdata.get("frames", None)
-        kp_maps = pdata.get("keypoints_2d_map", None)
-        if frames is None or kp_maps is None:
-            return frame_to_kps
-        for i, fidx in enumerate(frames):
-            frame_to_kps[fidx] = kp_maps[i]
+    frame_to_kps = {}
+    people_results = results.get("people", {})
+    if not people_results:
         return frame_to_kps
+    if primary_person_id_1 is None:
+        primary_person_id_1 = list(people_results.keys())[0]
+    pdata = people_results.get(primary_person_id_1, None)
+    if pdata is None:
+        return frame_to_kps
+    frames = pdata.get("frames", None)
+    kp_maps = pdata.get("keypoints_2d_map", None)
+    if frames is None or kp_maps is None:
+        return frame_to_kps
+    for i, fidx in enumerate(frames):
+        frame_to_kps[fidx] = kp_maps[i]
+    return frame_to_kps
+
 
 # ---------------------------------------------------------------------
 # RERUN VIS HELPERS
@@ -212,6 +226,7 @@ def _log_box_lines_rr(path: str, corners: np.ndarray,
                 colors=[rgba],
             ),
         )
+
 
 # ------------------------------------------------------------------
 # gdino <-> gt match
@@ -242,6 +257,7 @@ def _match_gdino_to_gt(
     best = max(candidates, key=lambda t: t[1])[0]
     return best
 
+
 # ------------------------------------------------------------------
 # HUMAN MESH ALIGNMENT RELATED FUNCTIONS
 # ------------------------------------------------------------------
@@ -261,6 +277,7 @@ def _choose_primary_actor(results: dict, world4d: Dict[int, dict]) -> Tuple[Opti
             return person_id_1, track_id_0
     return None, None
 
+
 def _find_actor_index_in_frame(frame_data: dict, primary_track_id_0: Optional[int]) -> Optional[int]:
     track_ids = frame_data.get("track_id", [])
     if len(track_ids) == 0:
@@ -272,6 +289,7 @@ def _find_actor_index_in_frame(frame_data: dict, primary_track_id_0: Optional[in
         if tid_val == int(primary_track_id_0):
             return idx
     return None
+
 
 # ------------------------------------------------------------------
 # similarity estimation
@@ -295,6 +313,7 @@ def _similarity_umeyama(src: np.ndarray, dst: np.ndarray):
     s = (S * np.array([1, 1, np.linalg.det(U @ Vt)])).sum() / var_src
     t = mu_dst - s * (R @ mu_src)
     return s, R, t
+
 
 def _robust_similarity_ransac(
         src: np.ndarray,
@@ -331,6 +350,7 @@ def _robust_similarity_ransac(
     if best_model is None:
         return _similarity_umeyama(src, dst)
     return best_model
+
 
 def _mad_based_mask(values: np.ndarray, thresh: float = 3.5) -> np.ndarray:
     """
@@ -373,9 +393,9 @@ def _average_sims_robust(per_frame_sims: Dict[int, Dict[str, Any]],
 
     ws = np.asarray(ws, dtype=np.float64)
     scales = np.asarray(scales, dtype=np.float64)
-    trans = np.asarray(trans, dtype=np.float64)     # (N, 3)
-    quats = np.asarray(quats, dtype=np.float64)     # (N, 4)
-    rotvecs = np.asarray(rotvecs, dtype=np.float64) # (N, 3)
+    trans = np.asarray(trans, dtype=np.float64)  # (N, 3)
+    quats = np.asarray(quats, dtype=np.float64)  # (N, 4)
+    rotvecs = np.asarray(rotvecs, dtype=np.float64)  # (N, 3)
 
     # --- 1) scale outliers (MAD)
     scale_mask = _mad_based_mask(scales, thresh=3.5)
@@ -406,10 +426,10 @@ def _average_sims_robust(per_frame_sims: Dict[int, Dict[str, Any]],
         return s_avg, R_avg, t_avg.astype(np.float32)
 
     # filter
-    ws_f  = ws[keep_mask]
+    ws_f = ws[keep_mask]
     scales_f = scales[keep_mask]
-    trans_f  = trans[keep_mask]
-    quats_f  = quats[keep_mask]
+    trans_f = trans[keep_mask]
+    quats_f = quats[keep_mask]
 
     # reweight to sum to 1
     ws_f = ws_f / (ws_f.sum() + 1e-8)
@@ -426,6 +446,7 @@ def _average_sims_robust(per_frame_sims: Dict[int, Dict[str, Any]],
     R_avg = SciRot.from_quat(q_avg).as_matrix().astype(np.float32)
 
     return s_avg, R_avg, t_avg.astype(np.float32)
+
 
 # =====================================================================
 # BOUNDING BOX GENERATOR (AABB is floor-aligned)
@@ -695,7 +716,6 @@ class BBox3DGenerator:
                 idx_in_sampled = video_sampled_frame_id_list.index(frame_id)
                 annotated_frame_idx_in_sample_idx.append(sample_idx.index(idx_in_sampled))
 
-
         chosen_frames = [video_sampled_frame_id_list[i] for i in sample_idx]
         frame_idx_frame_path_map = {i: f"{frame_id:06d}.png" for i, frame_id in enumerate(chosen_frames)}
         return frame_idx_frame_path_map, sample_idx, video_sampled_frame_id_list, annotated_frame_id_list, annotated_frame_idx_in_sample_idx
@@ -765,7 +785,6 @@ class BBox3DGenerator:
             "colors": colors_sub,
             "camera_poses": camera_poses_sub
         }
-
 
     # ------------------------------------------------------------------
     # lifting and partial pointcloud
@@ -1143,23 +1162,6 @@ class BBox3DGenerator:
         R_floor = np.asarray(R_avg, dtype=np.float32) if R_avg is not None else np.eye(3, dtype=np.float32)
         t_floor = np.asarray(t_avg, dtype=np.float32) if t_avg is not None else np.zeros(3, dtype=np.float32)
 
-        # ----- helpers specific to humans -----
-        def _get_human_verts_world(world4d: Dict[int, dict], frame_idx: int, track_id: int) -> Optional[np.ndarray]:
-            """
-            Try a few common keys to get the human mesh vertices for this frame.
-            Adjust this if your world4d uses a different key.
-            """
-            f = world4d.get(frame_idx, None)
-            if f is None:
-                return None
-            # common patterns from your earlier scripts
-            if "vertices" in f:
-                pos_id_track_id = f["track_id"].index(track_id)
-                return np.asarray(f["vertices"][pos_id_track_id], dtype=np.float32)
-            else:
-                print(f"[bbox][{video_id}][frame {frame_idx}] no 'vertices' key in world4d frame data")
-            return None
-
         def _floor_align_points(points_world: np.ndarray) -> np.ndarray:
             # world -> floor-local
             return ((points_world - t_floor[None, :]) / s_floor) @ R_floor
@@ -1180,13 +1182,6 @@ class BBox3DGenerator:
                 [maxs[0], maxs[1], maxs[2]],
             ], dtype=np.float32)
 
-        def _corners_from_center_dims(center_floor: np.ndarray, dims: np.ndarray) -> np.ndarray:
-            """Make floor-aligned cuboid using center + (dx,dy,dz)."""
-            half = 0.5 * dims
-            mins = center_floor - half
-            maxs = center_floor + half
-            return _corners_from_mins_maxs(mins, maxs)
-
         out_frames: Dict[str, Dict[str, Any]] = {}
 
         for frame_idx_anno, frame_items in enumerate(video_gt_annotations):
@@ -1204,36 +1199,7 @@ class BBox3DGenerator:
             ann_frame_id_in_sampled = annotated_frame_idx_in_sampled_idx[sidx]
             frame_non_zero_pts = _finite_and_nonzero(pts_hw3)
 
-            # # gdino per-frame predictions
-            # gd = video_gdino_predictions.get(frame_name, None)
-            # if gd is None:
-            #     gd_boxes, gd_labels, gd_scores = [], [], []
-            # else:
-            #     gd_boxes = [list(map(float, b)) for b in gd["boxes"]]
-            #     gd_labels = gd["labels"]
-            #     gd_scores = [float(s) for s in gd["scores"]]
-
             frame_rec = {"objects": []}
-
-            # try to read per-frame human mesh (we'll reuse for all "person" in this frame)
-            human_mesh_floor_aabb = None
-            human_mesh_dims = None
-            human_mesh_volume = None
-            human_mesh_available = False
-            if has_floor:
-                human_verts_world = _get_human_verts_world(world4d, ann_frame_id_in_sampled, primary_track_id_0)
-                if human_verts_world is not None and human_verts_world.size > 0:
-                    human_verts_floor = _floor_align_points(human_verts_world)
-                    hmins = human_verts_floor.min(axis=0)
-                    hmaxs = human_verts_floor.max(axis=0)
-                    human_mesh_dims = (hmaxs - hmins).astype(np.float32)
-                    # very small guard to avoid 0 volume
-                    human_mesh_volume = float(np.prod(np.maximum(human_mesh_dims, 1e-4)))
-                    human_mesh_floor_aabb = (hmins, hmaxs)
-                    human_mesh_available = True
-                    print(f"[bbox][{video_id}][{frame_name}] human mesh floor-aabb dims {human_mesh_dims}, volume {human_mesh_volume:.4f}")
-            else:
-                print(f"[bbox][{video_id}][{frame_name}] no floor mesh available; skipping human mesh bbox")
 
             # iterate over GT objects in this frame
             for item in frame_items:
@@ -1257,15 +1223,6 @@ class BBox3DGenerator:
                         label = "phone"
                     gt_xyxy = [float(v) for v in item["bbox"]]
 
-                # match GDINO
-                # chosen_gd_xyxy = _match_gdino_to_gt(
-                #     label,
-                #     gt_xyxy,
-                #     gd_boxes,
-                #     gd_labels,
-                #     gd_scores,
-                #     iou_thr=iou_thr
-                # )
                 chosen_gd_xyxy = gt_xyxy
                 # Resize gt_xyxy to (H, W) from (orig_H, orig_W)
                 gt_xyxy = _resize_bbox_to(gt_xyxy, (orig_W, orig_H), (W, H))
@@ -1279,12 +1236,12 @@ class BBox3DGenerator:
                     frame_label_mask = _mask_from_bbox(H, W, box)
                 else:
                     mask_h, mask_w = frame_label_mask.shape
-                    assert  mask_h == orig_H and mask_w == orig_W
+                    assert mask_h == orig_H and mask_w == orig_W
 
                     frame_label_mask = _resize_mask_to(frame_label_mask, (H, W))
 
                     mask_h, mask_w = frame_label_mask.shape
-                    assert  mask_h == H and mask_w == W
+                    assert mask_h == H and mask_w == W
 
                     # Change the mask to include only those that are inside the chosen_gd_xyxy bbox
                     box = chosen_gd_xyxy if chosen_gd_xyxy is not None else gt_xyxy
@@ -1311,6 +1268,8 @@ class BBox3DGenerator:
                         "num_points": int(sel.sum()),
                         "aabb_floor_aligned": None
                     })
+                    print(f"[bbox][{video_id}][{frame_name}] label '{label}' skipped due to insufficient points "
+                          f"after masking: {sel.sum()} < {min_points}")
                     continue
 
                 # actual 3D points for this object (world space)
@@ -1325,48 +1284,6 @@ class BBox3DGenerator:
                     # default corners from point cloud
                     corners_floor = _corners_from_mins_maxs(mins, maxs)
                     corners_world = _floor_to_world(corners_floor)
-
-                    # ---------------- PERSON SPECIAL CASE ----------------
-                    if label == "person" and human_mesh_available:
-                        # volume from sparse PC box
-                        pc_dims = (maxs - mins)
-                        pc_volume = float(np.prod(np.maximum(pc_dims, 1e-4)))
-
-                        # allow some slack over mesh volume
-                        volume_scale = 1.5
-                        use_mesh_like_box = (pc_volume > volume_scale * human_mesh_volume)
-
-                        # center of observed points (in floor coords)
-                        pc_center_floor = pts_floor.mean(axis=0)
-
-                        if use_mesh_like_box:
-                            print(f"[bbox][{video_id}][{frame_name}] using mesh-shaped box for person "
-                                  f"(pc volume {pc_volume:.4f} > {volume_scale} x mesh volume {human_mesh_volume:.4f})")
-                            corners_floor = _corners_from_center_dims(pc_center_floor, human_mesh_dims)
-                            corners_world = _floor_to_world(corners_floor)
-                            frame_rec["objects"].append({
-                                "label": label,
-                                "gt_bbox_xyxy": gt_xyxy,
-                                "gdino_bbox_xyxy": chosen_gd_xyxy,
-                                "num_points": int(label_non_zero_pts.shape[0]),
-                                "aabb_floor_aligned": {
-                                    "mins_floor": (pc_center_floor - 0.5 * human_mesh_dims).tolist(),
-                                    "maxs_floor": (pc_center_floor + 0.5 * human_mesh_dims).tolist(),
-                                    "corners_world": corners_world.tolist(),
-                                    "source": "mesh-shaped-from-volume",
-                                    "mesh_volume": human_mesh_volume,
-                                    "pc_volume": pc_volume,
-                                },
-                            })
-
-                            verts_box, faces_box = _make_box_mesh(corners_world)
-                            frame_bbox_meshes.setdefault(sidx, []).append({
-                                "verts": verts_box,
-                                "faces": faces_box,
-                                "color": [0, 255, 0],
-                                "label": label,
-                            })
-                            continue
 
                     frame_rec["objects"].append({
                         "label": label,
@@ -1389,29 +1306,7 @@ class BBox3DGenerator:
                         "label": label,
                     })
                 else:
-                    # fallback: just world AABB
-                    mins = label_non_zero_pts.min(axis=0)
-                    maxs = label_non_zero_pts.max(axis=0)
-                    corners_world = _corners_from_mins_maxs(mins, maxs)
-                    frame_rec["objects"].append({
-                        "label": label,
-                        "gt_bbox_xyxy": gt_xyxy,
-                        "gdino_bbox_xyxy": chosen_gd_xyxy,
-                        "num_points": int(label_non_zero_pts.shape[0]),
-                        "aabb_floor_aligned": {
-                            "mins_world": mins.tolist(),
-                            "maxs_world": maxs.tolist(),
-                            "corners_world": corners_world.tolist(),
-                            "source": "world-aabb",
-                        },
-                    })
-                    verts_box, faces_box = _make_box_mesh(corners_world)
-                    frame_bbox_meshes.setdefault(sidx, []).append({
-                        "verts": verts_box,
-                        "faces": faces_box,
-                        "color": [255, 0, 0],
-                        "label": label,
-                    })
+                    raise ValueError(f"[bbox][{video_id}][{frame_name}] no floor mesh available; cannot compute floor-aligned AABB")
 
             if frame_rec["objects"]:
                 out_frames[frame_name] = frame_rec
@@ -1432,6 +1327,8 @@ class BBox3DGenerator:
                 img_maxsize=480,
                 app_id="World4D-Combined",
                 frame_bbox_meshes=frame_bbox_meshes,
+                vis_floor=False,
+                vis_humans=False
             )
 
             print("Visualization running. Press Ctrl+C to stop.")
@@ -1470,6 +1367,7 @@ class BBox3DGenerator:
             visualize=True
         )
 
+
 def rerun_vis_world4d(
         video_id: str,
         images: List[Optional[np.ndarray]],
@@ -1485,6 +1383,8 @@ def rerun_vis_world4d(
         img_maxsize: int = 320,
         app_id: str = "World4D",
         frame_bbox_meshes: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+        vis_floor: bool = True,
+        vis_humans: bool = True,
 ):
     faces_u32 = _faces_u32(faces)
     rr.init(app_id, spawn=True)
@@ -1563,15 +1463,16 @@ def rerun_vis_world4d(
         rr.log("/", rr.Clear(recursive=True))
 
         # floor (constant per frame)
-        if floor_vertices_tf is not None and floor_faces is not None:
-            rr.log(
-                f"{BASE}/floor",
-                rr.Mesh3D(
-                    vertex_positions=floor_vertices_tf.astype(np.float32),
-                    triangle_indices=floor_faces,
-                    **(floor_kwargs or {}),
-                ),
-            )
+        if vis_floor:
+            if floor_vertices_tf is not None and floor_faces is not None:
+                rr.log(
+                    f"{BASE}/floor",
+                    rr.Mesh3D(
+                        vertex_positions=floor_vertices_tf.astype(np.float32),
+                        triangle_indices=floor_faces,
+                        **(floor_kwargs or {}),
+                    ),
+                )
 
         # per-frame sim
         s_i = None
@@ -1587,24 +1488,25 @@ def rerun_vis_world4d(
             continue
 
         # human meshes (orig is already stored in world4d; we only show transformed)
-        track_ids = frame_data.get("track_id", [])
-        verts_orig_list = frame_data.get("vertices_orig", [])
-        if track_ids and verts_orig_list:
-            tid = int(track_ids[0])
-            verts_orig = np.asarray(verts_orig_list[0], dtype=np.float32)
+        if vis_humans:
+            track_ids = frame_data.get("track_id", [])
+            verts_orig_list = frame_data.get("vertices_orig", [])
+            if track_ids and verts_orig_list:
+                tid = int(track_ids[0])
+                verts_orig = np.asarray(verts_orig_list[0], dtype=np.float32)
 
-            if s_i is not None:
-                verts_flat = verts_orig.reshape(-1, 3)
-                verts_tf = s_i * (verts_flat @ R_i.T) + t_i
-                verts_tf = verts_tf.reshape(verts_orig.shape)
-                rr.log(
-                    f"{BASE}/humans_xform/h{tid}",
-                    rr.Mesh3D(
-                        vertex_positions=verts_tf.astype(np.float32),
-                        triangle_indices=faces_u32,
-                        albedo_factor=[0, 255, 0],
-                    ),
-                )
+                if s_i is not None:
+                    verts_flat = verts_orig.reshape(-1, 3)
+                    verts_tf = s_i * (verts_flat @ R_i.T) + t_i
+                    verts_tf = verts_tf.reshape(verts_orig.shape)
+                    rr.log(
+                        f"{BASE}/humans_xform/h{tid}",
+                        rr.Mesh3D(
+                            vertex_positions=verts_tf.astype(np.float32),
+                            triangle_indices=faces_u32,
+                            albedo_factor=[0, 255, 0],
+                        ),
+                    )
 
         # --- dynamic points: NOTE we index by sample_idx, not vis_t ---
         if sample_idx < points.shape[0]:
@@ -1700,6 +1602,7 @@ def load_dataset(ag_root_directory: str):
 
     return train_dataset, test_dataset, dataloader_train, dataloader_test
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Combined: (a) floor-aligned 3D bbox generator + (b) SMPL↔PI3 human mesh aligner (sampled frames only)."
@@ -1713,6 +1616,7 @@ def parse_args():
                         help="use dense correspondences for human aligner")
     return parser.parse_args()
 
+
 def main():
     args = parse_args()
 
@@ -1724,6 +1628,7 @@ def main():
     train_dataset, test_dataset, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
     bbox_3d_generator.generate_gt_world_bb_annotations(dataloader=dataloader_train, split=args.split)
     bbox_3d_generator.generate_gt_world_bb_annotations(dataloader=dataloader_test, split=args.split)
+
 
 def main_sample():
     args = parse_args()
