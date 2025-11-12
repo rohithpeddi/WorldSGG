@@ -1173,7 +1173,7 @@ class BBox3DGenerator:
             gf=gf,
             gc=gc,
             label_colors=label_colors,
-            enable_temporal_smoothing=True
+            enable_temporal_smoothing=False
         )
 
         # 3) visualize if asked
@@ -1202,11 +1202,23 @@ class BBox3DGenerator:
 
         # 4) save to disk
         out_path = self.bbox_3d_root_dir / f"{video_id}.pkl"
+        results_dictionary = {
+            "video_id": video_id,
+            "frames": out_frames,
+            "per_frame_sims": per_frame_sims,
+            "global_floor_sim": {
+                "s": float(s_avg),
+                "R": R_avg,
+                "t": t_avg,
+            },
+            "primary_track_id_0": primary_track_id_0,
+            "frame_bbox_meshes": frame_bbox_meshes,
+            "gv": gv,
+            "gf": gf,
+            "gc": gc
+        }
         with open(out_path, "wb") as f:
-            pickle.dump({
-                "video_id": video_id,
-                "frames": out_frames
-            }, f, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(results_dictionary, f, protocol=pickle.HIGHEST_PROTOCOL)
         print(f"[bbox] saved floor-aligned 3D bboxes (multiscale + fused KF + RTS) to {out_path}")
 
     # ------------------------------------------------------------------
@@ -1759,7 +1771,7 @@ class BBox3DGenerator:
                     video_id,
                     video_id_gt_annotations,
                     video_id_gdino_annotations,
-                    visualize=True
+                    visualize=False
                 )
 
     def generate_sample_gt_world_bb_annotations(self, video_id: str) -> None:
@@ -2062,9 +2074,9 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
         output_human_dir_path=args.output_human_dir_path,
     )
-    video_id = "9BCOH.mp4"
+    video_id = "DEY6U.mp4"
     bbox_3d_generator.generate_sample_gt_world_bb_annotations(video_id=video_id)
 
 
 if __name__ == "__main__":
-    main_sample()
+    main()
