@@ -1172,7 +1172,8 @@ class BBox3DGenerator:
             gv=gv,
             gf=gf,
             gc=gc,
-            label_colors=label_colors,  # pass through
+            label_colors=label_colors,
+            enable_temporal_smoothing=False
         )
 
         # 3) visualize if asked
@@ -1255,6 +1256,22 @@ class BBox3DGenerator:
 
             frame_rec = {"objects": []}
 
+            conf_thr = None
+            if conf_hw is not None:
+                cfs_flat = conf_hw.reshape(-1)
+                mask_valid = np.isfinite(cfs_flat)
+                cfs_valid = cfs_flat[mask_valid]
+                if cfs_valid.size > 0:
+                    med = np.median(cfs_valid)
+                    # p99 = np.percentile(cfs_valid, )
+                    # base rule
+                    thr = max(1e-3, 0.5 * med)
+                    # thr = max(thr, p99)
+                    conf_thr = float(thr)
+                    print(f"[bbox][{video_id}][{stem}] conf thr set to {conf_thr:.4f} (med={med:.4f})")
+                else:
+                    conf_thr = 0.05  # fallback
+
             for item in frame_items:
                 # resolve label + original bbox
                 if "person_bbox" in item:
@@ -1305,7 +1322,7 @@ class BBox3DGenerator:
 
                     sel = sel_mask & frame_non_zero_pts
                     if conf_hw is not None:
-                        sel &= (conf_hw > 1e-3)
+                        sel &= (conf_hw > conf_thr)
                     num_sel = int(sel.sum())
                     if num_sel < self.min_points_per_scale:
                         continue
@@ -1409,13 +1426,9 @@ class BBox3DGenerator:
             gf: Optional[np.ndarray],
             gc: Optional[np.ndarray],
             label_colors: Optional[Dict[str, List[int]]] = None,  # NEW
+            enable_temporal_smoothing: bool = True,              # <--- NEW FLAG
     ) -> Dict[int, List[Dict[str, Any]]]:
-        # thresholds for pre-KF fusion
-        center_delta_thresh = 0.15
-        center_consistency_thresh = 0.12
-        volume_consistency_ratio = 1.7
-
-        # floor transforms
+        # floor transforms (used in both branches)
         s_floor = float(s_avg) if s_avg is not None else 1.0
         R_floor = np.asarray(R_avg, dtype=np.float32) if R_avg is not None else np.eye(3, dtype=np.float32)
         t_floor = np.asarray(t_avg, dtype=np.float32) if t_avg is not None else np.zeros(3, dtype=np.float32)
@@ -1435,6 +1448,44 @@ class BBox3DGenerator:
                 [maxs[0], maxs[1], maxs[2]],
             ], dtype=np.float32)
 
+        # ------------------------------------------------------------------
+        # FAST PATH: no temporal smoothing, just rebuild frame_bbox_meshes
+        # ------------------------------------------------------------------
+        if not enable_temporal_smoothing:
+            frame_bbox_meshes: Dict[int, List[Dict[str, Any]]] = {}
+            for frame_name, frame_rec in out_frames.items():
+                stem = Path(frame_name).stem
+                if stem not in stem_to_idx:
+                    continue
+                sidx = stem_to_idx[stem]
+                for obj in frame_rec["objects"]:
+                    aabb = obj.get("aabb_floor_aligned", None)
+                    if not aabb:
+                        continue
+                    corners_world = np.array(aabb["corners_world"], dtype=np.float32)
+                    verts_box, faces_box = self._make_box_mesh_from_corners(corners_world)
+
+                    label = obj["label"]
+                    if label_colors is not None and label in label_colors:
+                        color = label_colors[label]
+                    else:
+                        color = [0, 255, 0] if label == "person" else [255, 180, 0]
+
+                    frame_bbox_meshes.setdefault(sidx, []).append({
+                        "verts": verts_box,
+                        "faces": faces_box,
+                        "color": color,
+                        "label": label,
+                    })
+            return frame_bbox_meshes
+
+        # ------------------------------------------------------------------
+        # ORIGINAL TEMPORAL SMOOTHING PATH
+        # ------------------------------------------------------------------
+        center_delta_thresh = 0.15
+        center_consistency_thresh = 0.12
+        volume_consistency_ratio = 1.7
+
         # label -> frame_order -> list of objects for that frame
         label_to_frameobjs: Dict[str, Dict[int, List[dict]]] = {}
         for frame_name, frame_rec in out_frames.items():
@@ -1449,7 +1500,6 @@ class BBox3DGenerator:
                     "obj": obj,
                 })
 
-        # for each label: fuse -> forward KF -> RTS -> write-back
         for label, frame_dict in label_to_frameobjs.items():
             last_centers_per_scale: Dict[int, np.ndarray] = {}
             fused_meas = []
@@ -1458,7 +1508,7 @@ class BBox3DGenerator:
             for fo in frame_orders:
                 obj_refs = frame_dict[fo]
 
-                # gather all scale candidates from all objects of this label in this frame
+                # gather multiscale
                 scale_to_entries: Dict[int, List[dict]] = {}
                 for ref in obj_refs:
                     obj = ref["obj"]
@@ -1494,7 +1544,7 @@ class BBox3DGenerator:
                         "num_points": num_points,
                     }
 
-                # temporal per-scale gating
+                # temporal gating
                 valid_scales = []
                 for ksz, m in scale_meas.items():
                     c = m["center"]
@@ -1519,11 +1569,10 @@ class BBox3DGenerator:
                         inlier_scales.append((ksz, m))
 
                 if not inlier_scales:
-                    # pick best-supported scale
                     ksz_best, m_best = max(valid_scales, key=lambda km: km[1]["num_points"])
                     inlier_scales = [(ksz_best, m_best)]
 
-                # fuse across remaining scales
+                # fuse
                 weights = np.array([m["num_points"] for _, m in inlier_scales], dtype=np.float32)
                 weights = weights / (weights.sum() + 1e-6)
                 centers_stack = np.stack([m["center"] for _, m in inlier_scales], axis=0)
@@ -1545,7 +1594,6 @@ class BBox3DGenerator:
                     "maxs": fused_maxs,
                 })
 
-                # update last centers for inlier scales
                 for ksz, m in inlier_scales:
                     last_centers_per_scale[ksz] = m["center"]
 
@@ -1554,7 +1602,7 @@ class BBox3DGenerator:
 
             fused_meas.sort(key=lambda x: x["frame_order"])
 
-            # forward KF
+            # KF + RTS (as before)
             F = np.eye(4, dtype=np.float32)
             H = np.eye(4, dtype=np.float32)
             Q = np.diag([1e-4, 1e-4, 1e-4, 1e-3]).astype(np.float32)
@@ -1587,7 +1635,6 @@ class BBox3DGenerator:
                 x_pred_list.append(x_pred.copy())
                 P_pred_list.append(P_pred.copy())
 
-            # RTS backward smoothing
             Tn = len(fused_meas)
             x_smooth = [None] * Tn
             P_smooth = [None] * Tn
@@ -1601,7 +1648,7 @@ class BBox3DGenerator:
                 x_smooth[k] = x_fwd[k] + Ck @ (x_smooth[k + 1] - x_pred_list[k + 1])
                 P_smooth[k] = Pk + Ck @ (P_smooth[k + 1] - Pk_pred_next) @ Ck.T
 
-            # write back smoothed boxes
+            # write back
             for fm, xs in zip(fused_meas, x_smooth):
                 cx, cy, cz, v_smooth = xs.tolist()
                 for ref in fm["obj_refs"]:
@@ -1634,7 +1681,7 @@ class BBox3DGenerator:
                     aabb["volume"] = float(max(v_smooth, 1e-6))
                     aabb["source"] = aabb.get("source", "pc-aabb-multiscale") + "+kf-rts"
 
-        # rebuild frame bbox meshes with label-specific colors
+        # rebuild meshes for the (possibly) smoothed boxes
         frame_bbox_meshes: Dict[int, List[Dict[str, Any]]] = {}
         for frame_name, frame_rec in out_frames.items():
             stem = Path(frame_name).stem
@@ -1847,11 +1894,12 @@ def rerun_vis_world4d(
             cfs_valid = cfs[good]
             if cfs_valid.size > 0:
                 med = np.median(cfs_valid)
-                p99 = np.percentile(cfs_valid, 99)
+                # p99 = np.percentile(cfs_valid, 90)
                 # base threshold from median
                 thr = max(min_conf_default, 0.5 * med)
                 # don't let it exceed the 75th percentile (keeps enough points)
-                thr = min(thr, p99)
+                # thr = max(thr, p99)
+                print(f"frame {frame_idx}: conf thr = {thr:.4f} (med={med:.4f}, n_valid={cfs_valid.size})")
             else:
                 thr = min_conf_default
 
