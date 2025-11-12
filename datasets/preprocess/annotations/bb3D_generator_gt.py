@@ -1772,12 +1772,15 @@ class BBox3DGenerator:
             if get_video_belongs_to_split(video_id) == split:
                 video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
                 video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
-                self.generate_video_bb_annotations(
-                    video_id,
-                    video_id_gt_annotations,
-                    video_id_gdino_annotations,
-                    visualize=False
-                )
+                try:
+                    self.generate_video_bb_annotations(
+                        video_id,
+                        video_id_gt_annotations,
+                        video_id_gdino_annotations,
+                        visualize=False
+                    )
+                except Exception as e:
+                    print(f"[bbox] failed to process video {video_id}: {e}")
 
     def generate_sample_gt_world_bb_annotations(self, video_id: str) -> None:
         video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
