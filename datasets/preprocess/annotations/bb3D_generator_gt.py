@@ -1144,8 +1144,7 @@ class BBox3DGenerator:
             primary_track_id_0
         ) = self.process_video(video_id, use_consistent_transformation)
 
-        frame_bbox_meshes: Dict[int, List[Dict[str, Any]]] = {}
-
+        # helper to make box mesh (for later rebuild too)
         def _make_box_mesh(corners_world: np.ndarray):
             faces = np.array([
                 [0, 1, 2], [1, 3, 2],
@@ -1182,6 +1181,9 @@ class BBox3DGenerator:
 
         out_frames: Dict[str, Dict[str, Any]] = {}
 
+        # ------------------------------------------------------------------
+        # MAIN PER-FRAME LOOP: build multiscale, choose k, store per-frame boxes
+        # ------------------------------------------------------------------
         for frame_idx_anno, frame_items in enumerate(video_gt_annotations):
             frame_name = frame_items[0]["frame"].split("/")[-1]
             stem = Path(frame_name).stem
@@ -1302,9 +1304,8 @@ class BBox3DGenerator:
                 # 1) find k=0 candidate -> baseline volume
                 # 2) walk k=1..10, pick first whose volume <= 0.5 * vol0
                 # 3) if none, pick k=3 if present
-                # 4) else fall back sensibly
+                # 4) else fall back to k=0
                 # ------------------------------------------------
-                # sort by kernel_size so 0..10 order is preserved
                 multi_scale_candidates.sort(key=lambda c: c["kernel_size"])
 
                 base_candidate = None
@@ -1313,10 +1314,9 @@ class BBox3DGenerator:
                         base_candidate = c
                         break
 
-                chosen_cand = None
                 if base_candidate is not None:
                     base_vol = base_candidate["volume"]
-                    # search for 50% drop
+                    chosen_cand = None
                     for c in multi_scale_candidates:
                         if c["kernel_size"] == 0:
                             continue
@@ -1326,14 +1326,11 @@ class BBox3DGenerator:
                                   f"with volume drop {base_vol:.6f} -> {c['volume']:.6f}")
                             break
                     if chosen_cand is None:
-                        # no 50% drop found -> try k=3
                         chosen_cand = next(
                             (c for c in multi_scale_candidates if c["kernel_size"] == 3),
-                            base_candidate  # else fallback to k=0
+                            base_candidate
                         )
                 else:
-                    # no k=0 candidate (rare, but possible if 0 erosion leaves too few points)
-                    # try k=3, else smallest volume
                     chosen_cand = next(
                         (c for c in multi_scale_candidates if c["kernel_size"] == 3),
                         min(multi_scale_candidates, key=lambda c: c["volume"])
@@ -1366,17 +1363,113 @@ class BBox3DGenerator:
                     ],
                 })
 
-                # vis: only chosen one
-                verts_box, faces_box = _make_box_mesh(chosen_cand["corners_world"])
+            if frame_rec["objects"]:
+                out_frames[frame_name] = frame_rec
+
+        # ------------------------------------------------------------------
+        # TEMPORAL SMOOTHING (per label, skip floor/doorway)
+        # ------------------------------------------------------------------
+        per_label_entries: Dict[str, List[dict]] = {}
+        for frame_name, frame_rec in out_frames.items():
+            stem_int = int(Path(frame_name).stem)
+            for obj_idx, obj in enumerate(frame_rec["objects"]):
+                label = obj["label"]
+                if label in ("floor", "doorway"):
+                    continue
+                aabb = obj.get("aabb_floor_aligned", None)
+                if not aabb:
+                    continue
+                vol = aabb.get("volume", None)
+                if vol is None or vol <= 0.0:
+                    continue
+                mins_floor = np.array(aabb["mins_floor"], dtype=np.float32)
+                maxs_floor = np.array(aabb["maxs_floor"], dtype=np.float32)
+                center = 0.5 * (mins_floor + maxs_floor)
+
+                per_label_entries.setdefault(label, []).append({
+                    "frame_name": frame_name,
+                    "frame_order": stem_int,
+                    "obj_idx": obj_idx,
+                    "volume": float(vol),
+                    "mins_floor": mins_floor,
+                    "maxs_floor": maxs_floor,
+                    "center": center,
+                })
+
+        for label, entries in per_label_entries.items():
+            entries.sort(key=lambda e: e["frame_order"])
+            vols = np.array([e["volume"] for e in entries], dtype=np.float32)
+            med_vol = float(np.median(vols))
+            if med_vol <= 0.0:
+                continue
+            thresh = 1.5 * med_vol
+            n = len(entries)
+            for i, e in enumerate(entries):
+                cur_vol = e["volume"]
+                if cur_vol <= thresh:
+                    continue  # no change
+                frame_name = e["frame_name"]
+                obj_idx = e["obj_idx"]
+
+                aabb = out_frames[frame_name]["objects"][obj_idx]["aabb_floor_aligned"]
+                mins_floor = np.array(aabb["mins_floor"], dtype=np.float32)
+                maxs_floor = np.array(aabb["maxs_floor"], dtype=np.float32)
+                size = maxs_floor - mins_floor
+                cur_vol_exact = float(size[0] * size[1] * size[2])
+                if cur_vol_exact <= 0.0:
+                    continue
+
+                cur_center = 0.5 * (mins_floor + maxs_floor)
+                if i > 0:
+                    prev_center = entries[i - 1]["center"]
+                else:
+                    prev_center = cur_center
+                if i < n - 1:
+                    next_center = entries[i + 1]["center"]
+                else:
+                    next_center = cur_center
+
+                if (i > 0) and (i < n - 1):
+                    new_center = 0.5 * (prev_center + next_center)
+                else:
+                    new_center = cur_center
+
+                scale = (med_vol / cur_vol_exact) ** (1.0 / 3.0)
+                new_half_size = 0.5 * size * scale
+                new_mins = new_center - new_half_size
+                new_maxs = new_center + new_half_size
+
+                corners_floor = _corners_from_mins_maxs(new_mins, new_maxs)
+                corners_world = _floor_to_world(corners_floor)
+
+                aabb["mins_floor"] = new_mins.tolist()
+                aabb["maxs_floor"] = new_maxs.tolist()
+                aabb["corners_world"] = corners_world.tolist()
+                aabb["volume"] = float(med_vol)
+                aabb["source"] = aabb.get("source", "pc-aabb-multiscale") + "+temporal-midcenter"
+
+        # ------------------------------------------------------------------
+        # REBUILD FRAME BBOX MESHES AFTER SMOOTHING
+        # ------------------------------------------------------------------
+        frame_bbox_meshes: Dict[int, List[Dict[str, Any]]] = {}
+        for frame_name, frame_rec in out_frames.items():
+            stem = Path(frame_name).stem
+            if stem not in stem_to_idx:
+                continue
+            sidx = stem_to_idx[stem]
+            for obj in frame_rec["objects"]:
+                aabb = obj.get("aabb_floor_aligned", None)
+                if not aabb:
+                    continue
+                corners_world = np.array(aabb["corners_world"], dtype=np.float32)
+                verts_box, faces_box = _make_box_mesh(corners_world)
+                color = [255, 180, 0] if obj["label"] != "person" else [0, 255, 0]
                 frame_bbox_meshes.setdefault(sidx, []).append({
                     "verts": verts_box,
                     "faces": faces_box,
-                    "color": [255, 180, 0] if label != "person" else [0, 255, 0],
-                    "label": label,
+                    "color": color,
+                    "label": obj["label"],
                 })
-
-            if frame_rec["objects"]:
-                out_frames[frame_name] = frame_rec
 
         # --------------- visualization ---------------
         if visualize:
@@ -1409,7 +1502,7 @@ class BBox3DGenerator:
                 "video_id": video_id,
                 "frames": out_frames
             }, f, protocol=pickle.HIGHEST_PROTOCOL)
-        print(f"[bbox] saved floor-aligned 3D bboxes (multiscale 0-10) to {out_path}")
+        print(f"[bbox] saved floor-aligned 3D bboxes (multiscale 0-10 + temporal mid-center smoothing) to {out_path}")
 
 
     def generate_gt_world_bb_annotations(self, dataloader, split) -> None:
@@ -1706,7 +1799,7 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
         output_human_dir_path=args.output_human_dir_path,
     )
-    video_id = "KTKWL.mp4"
+    video_id = "67DPO.mp4"
     bbox_3d_generator.generate_sample_gt_world_bb_annotations(video_id=video_id)
 
 
