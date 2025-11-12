@@ -1107,28 +1107,28 @@ class BBox3DGenerator:
             visualize: bool = False,
             use_consistent_transformation: bool = False,
     ) -> None:
-        # 1) load dynamic points (already sub-sampled to annotated frames)
+        # 0) dynamic per-video data (points, stems, etc.)
         P = self._load_points_for_video(video_id)
-        points_S = P["points"]  # (S, H, W, 3)
-        conf_S = P["conf"]      # (S, H, W) or None
-        stems_S = P["frame_stems"]
-        colors = P["colors"]
+        points_S = P["points"]  # (S,H,W,3)  annotated frames only
+        conf_S = P["conf"]  # (S,H,W) or None
+        stems_S = P["frame_stems"]  # ["000123", ...]
         S, H, W, _ = points_S.shape
 
-        # to resize bboxes/masks
+        # read one annotated image to know original (H,W) for bbox-resize
         sample_image_frame = self.frame_annotated_dir_path / video_id / f"{stems_S[0]}.png"
         orig_img = cv2.imread(str(sample_image_frame))
         orig_H, orig_W = orig_img.shape[:2]
 
+        # stem -> index into points_S
         stem_to_idx = {stems_S[i]: i for i in range(S)}
 
-        # 2) build label-wise masks (static + dynamic)
+        # label masks (static + dynamic)
         video_to_frame_to_label_mask, _, _ = self.create_label_wise_masks_map(
             video_id=video_id,
             gt_annotations=video_gt_annotations
         )
 
-        # 3) run human/scene pipeline to get floor sim
+        # run human/scene pipeline once  we need floor sim + images for vis
         (
             images,
             world4d,
@@ -1144,334 +1144,36 @@ class BBox3DGenerator:
             primary_track_id_0
         ) = self.process_video(video_id, use_consistent_transformation)
 
-        # helper to make box mesh (for later rebuild too)
-        def _make_box_mesh(corners_world: np.ndarray):
-            faces = np.array([
-                [0, 1, 2], [1, 3, 2],
-                [4, 6, 5], [5, 6, 7],
-                [0, 4, 1], [1, 4, 5],
-                [2, 3, 6], [3, 7, 6],
-                [0, 2, 4], [2, 6, 4],
-                [1, 5, 3], [3, 5, 7],
-            ], dtype=np.uint32)
-            return corners_world.astype(np.float32), faces
+        # 1) multiscale per-frame box build
+        out_frames = self._build_multiscale_bboxes_for_video(
+            video_id=video_id,
+            video_gt_annotations=video_gt_annotations,
+            points_S=points_S,
+            conf_S=conf_S,
+            stems_S=stems_S,
+            orig_size=(orig_W, orig_H),
+            stem_to_idx=stem_to_idx,
+            video_to_frame_to_label_mask=video_to_frame_to_label_mask,
+            has_floor=(gv is not None and gf is not None),
+            s_avg=s_avg,
+            R_avg=R_avg,
+            t_avg=t_avg,
+        )
 
-        has_floor = gv is not None and gf is not None
-        s_floor = float(s_avg) if s_avg is not None else 1.0
-        R_floor = np.asarray(R_avg, dtype=np.float32) if R_avg is not None else np.eye(3, dtype=np.float32)
-        t_floor = np.asarray(t_avg, dtype=np.float32) if t_avg is not None else np.zeros(3, dtype=np.float32)
+        # 2) temporal smoothing (fuse across scales + forward KF + RTS)
+        frame_bbox_meshes = self._temporal_smooth_bboxes_for_video(
+            video_id=video_id,
+            out_frames=out_frames,
+            stem_to_idx=stem_to_idx,
+            s_avg=s_avg,
+            R_avg=R_avg,
+            t_avg=t_avg,
+            gv=gv,
+            gf=gf,
+            gc=gc,
+        )
 
-        def _floor_align_points(points_world: np.ndarray) -> np.ndarray:
-            return ((points_world - t_floor[None, :]) / s_floor) @ R_floor
-
-        def _floor_to_world(points_floor: np.ndarray) -> np.ndarray:
-            return (points_floor @ R_floor.T) * s_floor + t_floor
-
-        def _corners_from_mins_maxs(mins: np.ndarray, maxs: np.ndarray) -> np.ndarray:
-            return np.array([
-                [mins[0], mins[1], mins[2]],
-                [mins[0], mins[1], maxs[2]],
-                [mins[0], maxs[1], mins[2]],
-                [mins[0], maxs[1], maxs[2]],
-                [maxs[0], mins[1], mins[2]],
-                [maxs[0], mins[1], maxs[2]],
-                [maxs[0], maxs[1], mins[2]],
-                [maxs[0], maxs[1], maxs[2]],
-            ], dtype=np.float32)
-
-        out_frames: Dict[str, Dict[str, Any]] = {}
-
-        # ------------------------------------------------------------------
-        # MAIN PER-FRAME LOOP: build multiscale, choose k, store per-frame boxes
-        # ------------------------------------------------------------------
-        for frame_idx_anno, frame_items in enumerate(video_gt_annotations):
-            frame_name = frame_items[0]["frame"].split("/")[-1]
-            stem = Path(frame_name).stem
-
-            if stem not in stem_to_idx:
-                continue
-
-            sidx = stem_to_idx[stem]
-            pts_hw3 = points_S[sidx]
-            conf_hw = conf_S[sidx] if conf_S is not None else None
-            frame_non_zero_pts = _finite_and_nonzero(pts_hw3)
-
-            # index into annotated frames for visualization
-            ann_frame_vis_idx = annotated_frame_idx_in_sampled_idx[sidx]
-
-            frame_rec = {"objects": []}
-
-            for obj_local_idx, item in enumerate(frame_items):
-                # ---- resolve label and 2D box ----
-                if "person_bbox" in item:
-                    label = "person"
-                    gt_xyxy = _xywh_to_xyxy(item["person_bbox"][0])
-                else:
-                    cid = item["class"]
-                    label = self.catid_to_name_map.get(cid, None)
-                    if not label:
-                        continue
-                    # normalize label names
-                    if label == "closet/cabinet":
-                        label = "closet"
-                    elif label == "cup/glass/bottle":
-                        label = "cup"
-                    elif label == "paper/notebook":
-                        label = "paper"
-                    elif label == "sofa/couch":
-                        label = "sofa"
-                    elif label == "phone/camera":
-                        label = "phone"
-                    gt_xyxy = [float(v) for v in item["bbox"]]
-
-                # resize bbox to (H, W)
-                gt_xyxy = _resize_bbox_to(gt_xyxy, (orig_W, orig_H), (W, H))
-
-                # try to get label mask
-                frame_label_mask = video_to_frame_to_label_mask[video_id][stem].get(label, None)
-                if frame_label_mask is None:
-                    # fallback to bbox mask
-                    frame_label_mask = _mask_from_bbox(H, W, gt_xyxy)
-                else:
-                    frame_label_mask = _resize_mask_to(frame_label_mask, (H, W))
-                    # intersect with bbox region
-                    x1, y1, x2, y2 = map(int, gt_xyxy)
-                    bbox_mask = np.zeros_like(frame_label_mask, dtype=bool)
-                    bbox_mask[y1:y2, x1:x2] = True
-                    frame_label_mask = frame_label_mask & bbox_mask
-
-                # ------------------------------------------------
-                # MULTI-SCALE EROSION: 0..10 px
-                # ------------------------------------------------
-                multi_scale_candidates = []
-                for ksz in self.erosion_kernel_sizes:  # 0..10
-                    if ksz == 0:
-                        sel_mask = frame_label_mask.astype(bool)
-                    else:
-                        mask_u8 = frame_label_mask.astype(np.uint8)
-                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksz, ksz))
-                        eroded = cv2.erode(mask_u8, kernel, iterations=1)
-                        sel_mask = eroded.astype(bool)
-
-                    sel = sel_mask & frame_non_zero_pts
-                    if conf_hw is not None:
-                        sel &= (conf_hw > 1e-3)
-
-                    num_sel = int(sel.sum())
-                    if num_sel < self.min_points_per_scale:
-                        # skip this scale
-                        continue
-
-                    obj_pts_world = pts_hw3[sel].reshape(-1, 3).astype(np.float32)
-
-                    if not has_floor:
-                        # cannot build floor-aligned BB
-                        continue
-
-                    pts_floor = _floor_align_points(obj_pts_world)
-                    mins = pts_floor.min(axis=0)
-                    maxs = pts_floor.max(axis=0)
-                    size = (maxs - mins).clip(1e-6)
-                    volume = float(size[0] * size[1] * size[2])
-
-                    corners_floor = _corners_from_mins_maxs(mins, maxs)
-                    corners_world = _floor_to_world(corners_floor)
-
-                    multi_scale_candidates.append({
-                        "kernel_size": ksz,
-                        "num_points": num_sel,
-                        "mins_floor": mins,
-                        "maxs_floor": maxs,
-                        "corners_world": corners_world,
-                        "volume": volume,
-                    })
-
-                if len(multi_scale_candidates) == 0:
-                    # nothing valid at any scale
-                    frame_rec["objects"].append({
-                        "label": label,
-                        "gt_bbox_xyxy": gt_xyxy,
-                        "gdino_bbox_xyxy": None,
-                        "num_points": 0,
-                        "aabb_floor_aligned": None,
-                        "multi_scale_candidates": [],
-                    })
-                    print(f"[bbox][{video_id}][{frame_name}] label '{label}' skipped: no valid erosion scale")
-                    continue
-
-                # ------------------------------------------------
-                # PICK SCALE:
-                # 1) find k=0 candidate -> baseline volume
-                # 2) walk k=1..10, pick first whose volume <= 0.5 * vol0
-                # 3) if none, pick k=3 if present
-                # 4) else fall back to k=0
-                # ------------------------------------------------
-                multi_scale_candidates.sort(key=lambda c: c["kernel_size"])
-
-                base_candidate = None
-                for c in multi_scale_candidates:
-                    if c["kernel_size"] == 0:
-                        base_candidate = c
-                        break
-
-                if base_candidate is not None:
-                    base_vol = base_candidate["volume"]
-                    chosen_cand = None
-                    for c in multi_scale_candidates:
-                        if c["kernel_size"] == 0:
-                            continue
-                        if c["volume"] <= 0.5 * base_vol:
-                            chosen_cand = c
-                            print(f"[bbox][{video_id}][{frame_name}] label '{label}' chose k={c['kernel_size']} "
-                                  f"with volume drop {base_vol:.6f} -> {c['volume']:.6f}")
-                            break
-                    if chosen_cand is None:
-                        chosen_cand = next(
-                            (c for c in multi_scale_candidates if c["kernel_size"] == 3),
-                            base_candidate
-                        )
-                else:
-                    chosen_cand = next(
-                        (c for c in multi_scale_candidates if c["kernel_size"] == 3),
-                        min(multi_scale_candidates, key=lambda c: c["volume"])
-                    )
-
-                print(f"[bbox][{video_id}][{frame_name}] label '{label}' final chosen k={chosen_cand['kernel_size']} ")
-
-                frame_rec["objects"].append({
-                    "label": label,
-                    "gt_bbox_xyxy": gt_xyxy,
-                    "gdino_bbox_xyxy": None,
-                    "num_points": int(chosen_cand["num_points"]),
-                    "aabb_floor_aligned": {
-                        "mins_floor": chosen_cand["mins_floor"].tolist(),
-                        "maxs_floor": chosen_cand["maxs_floor"].tolist(),
-                        "corners_world": chosen_cand["corners_world"].tolist(),
-                        "source": "pc-aabb-multiscale",
-                        "kernel_size": chosen_cand["kernel_size"],
-                        "volume": float(chosen_cand["volume"]),
-                    },
-                    "multi_scale_candidates": [
-                        {
-                            "kernel_size": c["kernel_size"],
-                            "num_points": int(c["num_points"]),
-                            "mins_floor": c["mins_floor"].tolist(),
-                            "maxs_floor": c["maxs_floor"].tolist(),
-                            "volume": float(c["volume"]),
-                        }
-                        for c in multi_scale_candidates
-                    ],
-                })
-
-            if frame_rec["objects"]:
-                out_frames[frame_name] = frame_rec
-
-        # ------------------------------------------------------------------
-        # TEMPORAL SMOOTHING (per label, skip floor/doorway)
-        # ------------------------------------------------------------------
-        per_label_entries: Dict[str, List[dict]] = {}
-        for frame_name, frame_rec in out_frames.items():
-            stem_int = int(Path(frame_name).stem)
-            for obj_idx, obj in enumerate(frame_rec["objects"]):
-                label = obj["label"]
-                if label in ("floor", "doorway"):
-                    continue
-                aabb = obj.get("aabb_floor_aligned", None)
-                if not aabb:
-                    continue
-                vol = aabb.get("volume", None)
-                if vol is None or vol <= 0.0:
-                    continue
-                mins_floor = np.array(aabb["mins_floor"], dtype=np.float32)
-                maxs_floor = np.array(aabb["maxs_floor"], dtype=np.float32)
-                center = 0.5 * (mins_floor + maxs_floor)
-
-                per_label_entries.setdefault(label, []).append({
-                    "frame_name": frame_name,
-                    "frame_order": stem_int,
-                    "obj_idx": obj_idx,
-                    "volume": float(vol),
-                    "mins_floor": mins_floor,
-                    "maxs_floor": maxs_floor,
-                    "center": center,
-                })
-
-        for label, entries in per_label_entries.items():
-            entries.sort(key=lambda e: e["frame_order"])
-            vols = np.array([e["volume"] for e in entries], dtype=np.float32)
-            med_vol = float(np.median(vols))
-            if med_vol <= 0.0:
-                continue
-            thresh = 1.5 * med_vol
-            n = len(entries)
-            for i, e in enumerate(entries):
-                cur_vol = e["volume"]
-                if cur_vol <= thresh:
-                    continue  # no change
-                frame_name = e["frame_name"]
-                obj_idx = e["obj_idx"]
-
-                aabb = out_frames[frame_name]["objects"][obj_idx]["aabb_floor_aligned"]
-                mins_floor = np.array(aabb["mins_floor"], dtype=np.float32)
-                maxs_floor = np.array(aabb["maxs_floor"], dtype=np.float32)
-                size = maxs_floor - mins_floor
-                cur_vol_exact = float(size[0] * size[1] * size[2])
-                if cur_vol_exact <= 0.0:
-                    continue
-
-                cur_center = 0.5 * (mins_floor + maxs_floor)
-                if i > 0:
-                    prev_center = entries[i - 1]["center"]
-                else:
-                    prev_center = cur_center
-                if i < n - 1:
-                    next_center = entries[i + 1]["center"]
-                else:
-                    next_center = cur_center
-
-                if (i > 0) and (i < n - 1):
-                    new_center = 0.5 * (prev_center + next_center)
-                else:
-                    new_center = cur_center
-
-                scale = (med_vol / cur_vol_exact) ** (1.0 / 3.0)
-                new_half_size = 0.5 * size * scale
-                new_mins = new_center - new_half_size
-                new_maxs = new_center + new_half_size
-
-                corners_floor = _corners_from_mins_maxs(new_mins, new_maxs)
-                corners_world = _floor_to_world(corners_floor)
-
-                aabb["mins_floor"] = new_mins.tolist()
-                aabb["maxs_floor"] = new_maxs.tolist()
-                aabb["corners_world"] = corners_world.tolist()
-                aabb["volume"] = float(med_vol)
-                aabb["source"] = aabb.get("source", "pc-aabb-multiscale") + "+temporal-midcenter"
-
-        # ------------------------------------------------------------------
-        # REBUILD FRAME BBOX MESHES AFTER SMOOTHING
-        # ------------------------------------------------------------------
-        frame_bbox_meshes: Dict[int, List[Dict[str, Any]]] = {}
-        for frame_name, frame_rec in out_frames.items():
-            stem = Path(frame_name).stem
-            if stem not in stem_to_idx:
-                continue
-            sidx = stem_to_idx[stem]
-            for obj in frame_rec["objects"]:
-                aabb = obj.get("aabb_floor_aligned", None)
-                if not aabb:
-                    continue
-                corners_world = np.array(aabb["corners_world"], dtype=np.float32)
-                verts_box, faces_box = _make_box_mesh(corners_world)
-                color = [255, 180, 0] if obj["label"] != "person" else [0, 255, 0]
-                frame_bbox_meshes.setdefault(sidx, []).append({
-                    "verts": verts_box,
-                    "faces": faces_box,
-                    "color": color,
-                    "label": obj["label"],
-                })
-
-        # --------------- visualization ---------------
+        # 3) visualization (optional)
         if visualize:
             rerun_vis_world4d(
                 video_id=video_id,
@@ -1495,14 +1197,479 @@ class BBox3DGenerator:
             while True:
                 time.sleep(1)
 
-        # --------------- dump to disk ---------------
+        # 4) dump to disk
         out_path = self.bbox_3d_root_dir / f"{video_id}.pkl"
         with open(out_path, "wb") as f:
             pickle.dump({
                 "video_id": video_id,
                 "frames": out_frames
             }, f, protocol=pickle.HIGHEST_PROTOCOL)
-        print(f"[bbox] saved floor-aligned 3D bboxes (multiscale 0-10 + temporal mid-center smoothing) to {out_path}")
+        print(f"[bbox] saved floor-aligned 3D bboxes (multiscale + fused KF + RTS smoothing) to {out_path}")
+
+    # ------------------------------------------------------------------
+    # 1) MULTISCALE BLOCK (per-frame, per-label, keep all scales)
+    # ------------------------------------------------------------------
+    def _build_multiscale_bboxes_for_video(
+            self,
+            *,
+            video_id: str,
+            video_gt_annotations: List[Any],
+            points_S: np.ndarray,
+            conf_S: Optional[np.ndarray],
+            stems_S: List[str],
+            orig_size: Tuple[int, int],
+            stem_to_idx: Dict[str, int],
+            video_to_frame_to_label_mask: Dict[str, Dict[str, Dict[str, np.ndarray]]],
+            has_floor: bool,
+            s_avg: float,
+            R_avg: np.ndarray,
+            t_avg: np.ndarray,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Builds per-frame objects with multiscale candidates and one chosen bbox.
+        Returns:
+            out_frames: {frame_name: {"objects": [...]}}
+        """
+        out_frames: Dict[str, Dict[str, Any]] = {}
+        S, H, W, _ = points_S.shape
+        orig_W, orig_H = orig_size
+
+        # floor transforms
+        s_floor = float(s_avg) if s_avg is not None else 1.0
+        R_floor = np.asarray(R_avg, dtype=np.float32) if R_avg is not None else np.eye(3, dtype=np.float32)
+        t_floor = np.asarray(t_avg, dtype=np.float32) if t_avg is not None else np.zeros(3, dtype=np.float32)
+
+        def _floor_align_points(points_world: np.ndarray) -> np.ndarray:
+            return ((points_world - t_floor[None, :]) / s_floor) @ R_floor
+
+        def _floor_to_world(points_floor: np.ndarray) -> np.ndarray:
+            return (points_floor @ R_floor.T) * s_floor + t_floor
+
+        for frame_items in video_gt_annotations:
+            frame_name = frame_items[0]["frame"].split("/")[-1]
+            stem = Path(frame_name).stem
+            if stem not in stem_to_idx:
+                continue
+            sidx = stem_to_idx[stem]
+            pts_hw3 = points_S[sidx]
+            conf_hw = conf_S[sidx] if conf_S is not None else None
+            frame_non_zero_pts = _finite_and_nonzero(pts_hw3)
+
+            frame_rec = {"objects": []}
+
+            for item in frame_items:
+                # label + 2D bbox
+                if "person_bbox" in item:
+                    label = "person"
+                    gt_xyxy = _xywh_to_xyxy(item["person_bbox"][0])
+                else:
+                    cid = item["class"]
+                    label = self.catid_to_name_map.get(cid, None)
+                    if not label:
+                        continue
+                    if label == "closet/cabinet":
+                        label = "closet"
+                    elif label == "cup/glass/bottle":
+                        label = "cup"
+                    elif label == "paper/notebook":
+                        label = "paper"
+                    elif label == "sofa/couch":
+                        label = "sofa"
+                    elif label == "phone/camera":
+                        label = "phone"
+                    gt_xyxy = [float(v) for v in item["bbox"]]
+
+                # resize bbox to annotated hw
+                gt_xyxy = _resize_bbox_to(gt_xyxy, (orig_W, orig_H), (W, H))
+
+                # get mask
+                frame_label_mask = video_to_frame_to_label_mask[video_id][stem].get(label, None)
+                if frame_label_mask is None:
+                    frame_label_mask = _mask_from_bbox(H, W, gt_xyxy)
+                else:
+                    frame_label_mask = _resize_mask_to(frame_label_mask, (H, W))
+                    x1, y1, x2, y2 = map(int, gt_xyxy)
+                    bbox_mask = np.zeros_like(frame_label_mask, dtype=bool)
+                    bbox_mask[y1:y2, x1:x2] = True
+                    frame_label_mask = frame_label_mask & bbox_mask
+
+                # multiscale over 0..10
+                multi_scale_candidates = []
+                for ksz in self.erosion_kernel_sizes:
+                    if ksz == 0:
+                        sel_mask = frame_label_mask.astype(bool)
+                    else:
+                        mask_u8 = frame_label_mask.astype(np.uint8)
+                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksz, ksz))
+                        eroded = cv2.erode(mask_u8, kernel, iterations=1)
+                        sel_mask = eroded.astype(bool)
+
+                    sel = sel_mask & frame_non_zero_pts
+                    if conf_hw is not None:
+                        sel &= (conf_hw > 1e-3)
+
+                    num_sel = int(sel.sum())
+                    if num_sel < self.min_points_per_scale:
+                        continue
+
+                    obj_pts_world = pts_hw3[sel].reshape(-1, 3).astype(np.float32)
+                    if not has_floor:
+                        continue
+
+                    pts_floor = _floor_align_points(obj_pts_world)
+                    mins = pts_floor.min(axis=0)
+                    maxs = pts_floor.max(axis=0)
+                    size = (maxs - mins).clip(1e-6)
+                    volume = float(size[0] * size[1] * size[2])
+
+                    corners_floor = np.array([
+                        [mins[0], mins[1], mins[2]],
+                        [mins[0], mins[1], maxs[2]],
+                        [mins[0], maxs[1], mins[2]],
+                        [mins[0], maxs[1], maxs[2]],
+                        [maxs[0], mins[1], mins[2]],
+                        [maxs[0], mins[1], maxs[2]],
+                        [maxs[0], maxs[1], mins[2]],
+                        [maxs[0], maxs[1], maxs[2]],
+                    ], dtype=np.float32)
+                    corners_world = _floor_to_world(corners_floor)
+
+                    multi_scale_candidates.append({
+                        "kernel_size": int(ksz),
+                        "num_points": num_sel,
+                        "mins_floor": mins.tolist(),
+                        "maxs_floor": maxs.tolist(),
+                        "corners_world": corners_world.tolist(),
+                        "volume": volume,
+                    })
+
+                if not multi_scale_candidates:
+                    frame_rec["objects"].append({
+                        "label": label,
+                        "gt_bbox_xyxy": gt_xyxy,
+                        "aabb_floor_aligned": None,
+                        "multi_scale_candidates": [],
+                    })
+                    continue
+
+                # pick "chosen" candidate like before
+                multi_scale_candidates.sort(key=lambda c: c["kernel_size"])
+                base_candidate = next((c for c in multi_scale_candidates if c["kernel_size"] == 0), None)
+                if base_candidate is not None:
+                    base_vol = base_candidate["volume"]
+                    chosen = None
+                    for c in multi_scale_candidates:
+                        if c["kernel_size"] == 0:
+                            continue
+                        if c["volume"] <= 0.5 * base_vol:
+                            chosen = c
+                            break
+                    if chosen is None:
+                        chosen = next(
+                            (c for c in multi_scale_candidates if c["kernel_size"] == 3),
+                            base_candidate
+                        )
+                else:
+                    chosen = next(
+                        (c for c in multi_scale_candidates if c["kernel_size"] == 3),
+                        min(multi_scale_candidates, key=lambda c: c["volume"])
+                    )
+
+                frame_rec["objects"].append({
+                    "label": label,
+                    "gt_bbox_xyxy": gt_xyxy,
+                    "aabb_floor_aligned": {
+                        "mins_floor": chosen["mins_floor"],
+                        "maxs_floor": chosen["maxs_floor"],
+                        "corners_world": chosen["corners_world"],
+                        "source": "pc-aabb-multiscale",
+                        "kernel_size": chosen["kernel_size"],
+                        "volume": float(chosen["volume"]),
+                    },
+                    "multi_scale_candidates": multi_scale_candidates,
+                })
+
+            if frame_rec["objects"]:
+                out_frames[frame_name] = frame_rec
+
+        return out_frames
+
+    # ------------------------------------------------------------------
+    # 2) TEMPORAL SMOOTHING BLOCK (fuse across scales + KF + RTS)
+    # ------------------------------------------------------------------
+    def _temporal_smooth_bboxes_for_video(
+            self,
+            *,
+            video_id: str,
+            out_frames: Dict[str, Dict[str, Any]],
+            stem_to_idx: Dict[str, int],
+            s_avg: float,
+            R_avg: np.ndarray,
+            t_avg: np.ndarray,
+            gv: Optional[np.ndarray],
+            gf: Optional[np.ndarray],
+            gc: Optional[np.ndarray],
+    ) -> Dict[int, List[Dict[str, Any]]]:
+        """
+        Mutates out_frames in-place to apply two-sided (forward+backward) smoothing.
+        Returns frame_bbox_meshes for visualization.
+        """
+        # thresholds
+        center_delta_thresh = 0.15
+        center_consistency_thresh = 0.12
+        volume_consistency_ratio = 1.7
+
+        # floor xforms
+        s_floor = float(s_avg) if s_avg is not None else 1.0
+        R_floor = np.asarray(R_avg, dtype=np.float32) if R_avg is not None else np.eye(3, dtype=np.float32)
+        t_floor = np.asarray(t_avg, dtype=np.float32) if t_avg is not None else np.zeros(3, dtype=np.float32)
+
+        def _floor_to_world(points_floor: np.ndarray) -> np.ndarray:
+            return (points_floor @ R_floor.T) * s_floor + t_floor
+
+        def _corners_from_mins_maxs(mins: np.ndarray, maxs: np.ndarray) -> np.ndarray:
+            return np.array([
+                [mins[0], mins[1], mins[2]],
+                [mins[0], mins[1], maxs[2]],
+                [mins[0], maxs[1], mins[2]],
+                [mins[0], maxs[1], maxs[2]],
+                [maxs[0], mins[1], mins[2]],
+                [maxs[0], mins[1], maxs[2]],
+                [maxs[0], maxs[1], mins[2]],
+                [maxs[0], maxs[1], maxs[2]],
+            ], dtype=np.float32)
+
+        # label -> frame_order -> objs
+        label_to_frameobjs: Dict[str, Dict[int, List[dict]]] = {}
+        for frame_name, frame_rec in out_frames.items():
+            frame_order = int(Path(frame_name).stem)
+            for obj_idx, obj in enumerate(frame_rec["objects"]):
+                label = obj["label"]
+                if label in ("floor", "doorway"):
+                    continue
+                label_to_frameobjs.setdefault(label, {}).setdefault(frame_order, []).append({
+                    "frame_name": frame_name,
+                    "obj_idx": obj_idx,
+                    "obj": obj,
+                })
+
+        # for each label, do: fuse -> forward KF -> RTS -> write-back
+        for label, frame_dict in label_to_frameobjs.items():
+            last_centers_per_scale: Dict[int, np.ndarray] = {}
+            fused_meas = []
+            frame_orders = sorted(frame_dict.keys())
+
+            for fo in frame_orders:
+                obj_refs = frame_dict[fo]
+
+                # gather per-scale measurements
+                scale_to_entries: Dict[int, List[dict]] = {}
+                for ref in obj_refs:
+                    obj = ref["obj"]
+                    msc = obj.get("multi_scale_candidates", [])
+                    for cand in msc:
+                        ksz = int(cand["kernel_size"])
+                        mins = np.asarray(cand["mins_floor"], dtype=np.float32)
+                        maxs = np.asarray(cand["maxs_floor"], dtype=np.float32)
+                        center = 0.5 * (mins + maxs)
+                        vol = float(cand["volume"])
+                        npts = int(cand["num_points"])
+                        scale_to_entries.setdefault(ksz, []).append({
+                            "center": center,
+                            "volume": vol,
+                            "mins": mins,
+                            "maxs": maxs,
+                            "num_points": npts,
+                        })
+
+                # aggregate per scale
+                scale_meas = {}
+                for ksz, entries in scale_to_entries.items():
+                    centers = np.stack([e["center"] for e in entries], axis=0)
+                    vols = np.array([e["volume"] for e in entries], dtype=np.float32)
+                    mins_arr = np.stack([e["mins"] for e in entries], axis=0)
+                    maxs_arr = np.stack([e["maxs"] for e in entries], axis=0)
+                    num_points = sum(e["num_points"] for e in entries)
+                    scale_meas[ksz] = {
+                        "center": centers.mean(axis=0),
+                        "volume": float(vols.mean()),
+                        "mins": mins_arr.mean(axis=0),
+                        "maxs": maxs_arr.mean(axis=0),
+                        "num_points": num_points,
+                    }
+
+                # temporal per-scale gating
+                valid_scales = []
+                for ksz, m in scale_meas.items():
+                    c = m["center"]
+                    if ksz in last_centers_per_scale:
+                        if np.linalg.norm(c - last_centers_per_scale[ksz]) > center_delta_thresh:
+                            continue
+                    valid_scales.append((ksz, m))
+
+                if not valid_scales:
+                    valid_scales = list(scale_meas.items())
+
+                # cross-scale consistency
+                centers_all = np.stack([m["center"] for _, m in valid_scales], axis=0)
+                vols_all = np.array([m["volume"] for _, m in valid_scales], dtype=np.float32)
+                center_med = np.median(centers_all, axis=0)
+                vol_med = float(np.median(vols_all))
+
+                inlier_scales = []
+                for ksz, m in valid_scales:
+                    err = np.linalg.norm(m["center"] - center_med)
+                    vol_ratio = max(m["volume"], vol_med) / max(min(m["volume"], vol_med), 1e-6)
+                    if err <= center_consistency_thresh and vol_ratio <= volume_consistency_ratio:
+                        inlier_scales.append((ksz, m))
+
+                if not inlier_scales:
+                    # pick the one with most points
+                    ksz_best, m_best = max(valid_scales, key=lambda km: km[1]["num_points"])
+                    inlier_scales = [(ksz_best, m_best)]
+
+                # fuse inliers
+                weights = np.array([m["num_points"] for _, m in inlier_scales], dtype=np.float32)
+                weights = weights / (weights.sum() + 1e-6)
+                centers_stack = np.stack([m["center"] for _, m in inlier_scales], axis=0)
+                vols_stack = np.array([m["volume"] for _, m in inlier_scales], dtype=np.float32)
+                mins_stack = np.stack([m["mins"] for _, m in inlier_scales], axis=0)
+                maxs_stack = np.stack([m["maxs"] for _, m in inlier_scales], axis=0)
+
+                fused_center = (weights[:, None] * centers_stack).sum(axis=0)
+                fused_volume = float((weights * vols_stack).sum())
+                fused_mins = (weights[:, None] * mins_stack).sum(axis=0)
+                fused_maxs = (weights[:, None] * maxs_stack).sum(axis=0)
+
+                fused_meas.append({
+                    "frame_order": fo,
+                    "obj_refs": obj_refs,
+                    "center": fused_center,
+                    "volume": fused_volume,
+                    "mins": fused_mins,
+                    "maxs": fused_maxs,
+                })
+
+                for ksz, m in inlier_scales:
+                    last_centers_per_scale[ksz] = m["center"]
+
+            if not fused_meas:
+                continue
+
+            fused_meas.sort(key=lambda x: x["frame_order"])
+
+            # forward KF
+            F = np.eye(4, dtype=np.float32)
+            H = np.eye(4, dtype=np.float32)
+            Q = np.diag([1e-4, 1e-4, 1e-4, 1e-3]).astype(np.float32)
+            R = np.diag([1e-2, 1e-2, 1e-2, 1e-1]).astype(np.float32)
+
+            x_fwd = []
+            P_fwd = []
+            x_pred_list = []
+            P_pred_list = []
+
+            first = fused_meas[0]
+            x = np.array([first["center"][0], first["center"][1], first["center"][2], first["volume"]],
+                         dtype=np.float32)
+            P = np.eye(4, dtype=np.float32)
+
+            for fm in fused_meas:
+                z = np.array([fm["center"][0], fm["center"][1], fm["center"][2], fm["volume"]], dtype=np.float32)
+                x_pred = F @ x
+                P_pred = F @ P @ F.T + Q
+                y = z - (H @ x_pred)
+                S_mat = H @ P_pred @ H.T + R
+                K = P_pred @ H.T @ np.linalg.inv(S_mat)
+                x = x_pred + K @ y
+                P = (np.eye(4, dtype=np.float32) - K @ H) @ P_pred
+
+                x_fwd.append(x.copy())
+                P_fwd.append(P.copy())
+                x_pred_list.append(x_pred.copy())
+                P_pred_list.append(P_pred.copy())
+
+            # backward RTS
+            Tn = len(fused_meas)
+            x_smooth = [None] * Tn
+            P_smooth = [None] * Tn
+            x_smooth[-1] = x_fwd[-1]
+            P_smooth[-1] = P_fwd[-1]
+
+            for k in range(Tn - 2, -1, -1):
+                Pk = P_fwd[k]
+                Pk_pred_next = P_pred_list[k + 1]
+                Ck = Pk @ F.T @ np.linalg.inv(Pk_pred_next)
+                x_smooth[k] = x_fwd[k] + Ck @ (x_smooth[k + 1] - x_pred_list[k + 1])
+                P_smooth[k] = Pk + Ck @ (P_smooth[k + 1] - Pk_pred_next) @ Ck.T
+
+            # write back smoothed states
+            for fm, xs in zip(fused_meas, x_smooth):
+                cx, cy, cz, v_smooth = xs.tolist()
+                for ref in fm["obj_refs"]:
+                    frame_name = ref["frame_name"]
+                    obj_idx = ref["obj_idx"]
+                    obj = out_frames[frame_name]["objects"][obj_idx]
+                    aabb = obj.get("aabb_floor_aligned", None)
+                    if aabb is None:
+                        continue
+
+                    mins0 = fm["mins"]
+                    maxs0 = fm["maxs"]
+                    size0 = maxs0 - mins0
+                    vol0 = float(size0[0] * size0[1] * size0[2])
+                    if vol0 <= 0.0:
+                        continue
+
+                    scale = (v_smooth / vol0) ** (1.0 / 3.0) if v_smooth > 0 else 1.0
+                    new_center = np.array([cx, cy, cz], dtype=np.float32)
+                    new_half_size = 0.5 * size0 * scale
+                    new_mins = new_center - new_half_size
+                    new_maxs = new_center + new_half_size
+
+                    corners_floor = _corners_from_mins_maxs(new_mins, new_maxs)
+                    corners_world = _floor_to_world(corners_floor)
+
+                    aabb["mins_floor"] = new_mins.tolist()
+                    aabb["maxs_floor"] = new_maxs.tolist()
+                    aabb["corners_world"] = corners_world.tolist()
+                    aabb["volume"] = float(max(v_smooth, 1e-6))
+                    aabb["source"] = aabb.get("source", "pc-aabb-multiscale") + "+kf-rts"
+
+        # rebuild frame bbox meshes
+        frame_bbox_meshes: Dict[int, List[Dict[str, Any]]] = {}
+        for frame_name, frame_rec in out_frames.items():
+            stem = Path(frame_name).stem
+            if stem not in stem_to_idx:
+                continue
+            sidx = stem_to_idx[stem]
+            for obj in frame_rec["objects"]:
+                aabb = obj.get("aabb_floor_aligned", None)
+                if not aabb:
+                    continue
+                corners_world = np.array(aabb["corners_world"], dtype=np.float32)
+                verts_box, faces_box = self._make_box_mesh_from_corners(corners_world)
+                color = [255, 180, 0] if obj["label"] != "person" else [0, 255, 0]
+                frame_bbox_meshes.setdefault(sidx, []).append({
+                    "verts": verts_box,
+                    "faces": faces_box,
+                    "color": color,
+                    "label": obj["label"],
+                })
+
+        return frame_bbox_meshes
+
+    # small helper to keep mesh creation outside
+    def _make_box_mesh_from_corners(self, corners_world: np.ndarray):
+            faces = np.array([
+                [0, 1, 2], [1, 3, 2],
+                [4, 6, 5], [5, 6, 7],
+                [0, 4, 1], [1, 4, 5],
+                [2, 3, 6], [3, 7, 6],
+                [0, 2, 4], [2, 6, 4],
+                [1, 5, 3], [3, 5, 7],
+            ], dtype=np.uint32)
+            return corners_world.astype(np.float32), faces
 
 
     def generate_gt_world_bb_annotations(self, dataloader, split) -> None:
