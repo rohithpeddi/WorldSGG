@@ -749,6 +749,7 @@ class BBox3DGenerator:
 
         points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
         imgs_f32 = video_dynamic_predictions["images"]
+        confidence = video_dynamic_predictions["conf"]
         camera_poses = video_dynamic_predictions["camera_poses"]
         colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
 
@@ -1106,29 +1107,29 @@ class BBox3DGenerator:
             iou_thr: float = 0.3,
             visualize: bool = False,
             use_consistent_transformation: bool = False,
+            label_colors: Optional[Dict[str, List[int]]] = None,  # NEW
     ) -> None:
-        # 0) dynamic per-video data (points, stems, etc.)
+        # load dynamic points (annotated frames)
         P = self._load_points_for_video(video_id)
-        points_S = P["points"]  # (S,H,W,3)  annotated frames only
+        points_S = P["points"]  # (S,H,W,3)
         conf_S = P["conf"]  # (S,H,W) or None
         stems_S = P["frame_stems"]  # ["000123", ...]
         S, H, W, _ = points_S.shape
 
-        # read one annotated image to know original (H,W) for bbox-resize
+        # original image size (for resizing bboxes/masks)
         sample_image_frame = self.frame_annotated_dir_path / video_id / f"{stems_S[0]}.png"
         orig_img = cv2.imread(str(sample_image_frame))
         orig_H, orig_W = orig_img.shape[:2]
 
-        # stem -> index into points_S
         stem_to_idx = {stems_S[i]: i for i in range(S)}
 
-        # label masks (static + dynamic)
+        # segmentation maps for the video
         video_to_frame_to_label_mask, _, _ = self.create_label_wise_masks_map(
             video_id=video_id,
             gt_annotations=video_gt_annotations
         )
 
-        # run human/scene pipeline once  we need floor sim + images for vis
+        # run human/scene pipeline — we need floor transform + vis inputs
         (
             images,
             world4d,
@@ -1144,7 +1145,7 @@ class BBox3DGenerator:
             primary_track_id_0
         ) = self.process_video(video_id, use_consistent_transformation)
 
-        # 1) multiscale per-frame box build
+        # 1) build per-frame multiscale boxes
         out_frames = self._build_multiscale_bboxes_for_video(
             video_id=video_id,
             video_gt_annotations=video_gt_annotations,
@@ -1160,7 +1161,7 @@ class BBox3DGenerator:
             t_avg=t_avg,
         )
 
-        # 2) temporal smoothing (fuse across scales + forward KF + RTS)
+        # 2) temporal smoothing (multi-scale fuse + forward KF + RTS), return meshes for vis
         frame_bbox_meshes = self._temporal_smooth_bboxes_for_video(
             video_id=video_id,
             out_frames=out_frames,
@@ -1171,9 +1172,10 @@ class BBox3DGenerator:
             gv=gv,
             gf=gf,
             gc=gc,
+            label_colors=label_colors,  # pass through
         )
 
-        # 3) visualization (optional)
+        # 3) visualize if asked
         if visualize:
             rerun_vis_world4d(
                 video_id=video_id,
@@ -1197,14 +1199,14 @@ class BBox3DGenerator:
             while True:
                 time.sleep(1)
 
-        # 4) dump to disk
+        # 4) save to disk
         out_path = self.bbox_3d_root_dir / f"{video_id}.pkl"
         with open(out_path, "wb") as f:
             pickle.dump({
                 "video_id": video_id,
                 "frames": out_frames
             }, f, protocol=pickle.HIGHEST_PROTOCOL)
-        print(f"[bbox] saved floor-aligned 3D bboxes (multiscale + fused KF + RTS smoothing) to {out_path}")
+        print(f"[bbox] saved floor-aligned 3D bboxes (multiscale + fused KF + RTS) to {out_path}")
 
     # ------------------------------------------------------------------
     # 1) MULTISCALE BLOCK (per-frame, per-label, keep all scales)
@@ -1225,11 +1227,6 @@ class BBox3DGenerator:
             R_avg: np.ndarray,
             t_avg: np.ndarray,
     ) -> Dict[str, Dict[str, Any]]:
-        """
-        Builds per-frame objects with multiscale candidates and one chosen bbox.
-        Returns:
-            out_frames: {frame_name: {"objects": [...]}}
-        """
         out_frames: Dict[str, Dict[str, Any]] = {}
         S, H, W, _ = points_S.shape
         orig_W, orig_H = orig_size
@@ -1250,6 +1247,7 @@ class BBox3DGenerator:
             stem = Path(frame_name).stem
             if stem not in stem_to_idx:
                 continue
+
             sidx = stem_to_idx[stem]
             pts_hw3 = points_S[sidx]
             conf_hw = conf_S[sidx] if conf_S is not None else None
@@ -1258,7 +1256,7 @@ class BBox3DGenerator:
             frame_rec = {"objects": []}
 
             for item in frame_items:
-                # label + 2D bbox
+                # resolve label + original bbox
                 if "person_bbox" in item:
                     label = "person"
                     gt_xyxy = _xywh_to_xyxy(item["person_bbox"][0])
@@ -1267,6 +1265,7 @@ class BBox3DGenerator:
                     label = self.catid_to_name_map.get(cid, None)
                     if not label:
                         continue
+                    # normalize label
                     if label == "closet/cabinet":
                         label = "closet"
                     elif label == "cup/glass/bottle":
@@ -1279,10 +1278,10 @@ class BBox3DGenerator:
                         label = "phone"
                     gt_xyxy = [float(v) for v in item["bbox"]]
 
-                # resize bbox to annotated hw
+                # resize bbox to (W,H) of dynamic prediction
                 gt_xyxy = _resize_bbox_to(gt_xyxy, (orig_W, orig_H), (W, H))
 
-                # get mask
+                # get/resize/intersect mask
                 frame_label_mask = video_to_frame_to_label_mask[video_id][stem].get(label, None)
                 if frame_label_mask is None:
                     frame_label_mask = _mask_from_bbox(H, W, gt_xyxy)
@@ -1293,7 +1292,7 @@ class BBox3DGenerator:
                     bbox_mask[y1:y2, x1:x2] = True
                     frame_label_mask = frame_label_mask & bbox_mask
 
-                # multiscale over 0..10
+                # run multiscale erosion 0..10 px
                 multi_scale_candidates = []
                 for ksz in self.erosion_kernel_sizes:
                     if ksz == 0:
@@ -1307,7 +1306,6 @@ class BBox3DGenerator:
                     sel = sel_mask & frame_non_zero_pts
                     if conf_hw is not None:
                         sel &= (conf_hw > 1e-3)
-
                     num_sel = int(sel.sum())
                     if num_sel < self.min_points_per_scale:
                         continue
@@ -1343,6 +1341,7 @@ class BBox3DGenerator:
                         "volume": volume,
                     })
 
+                # if nothing valid, store empty
                 if not multi_scale_candidates:
                     frame_rec["objects"].append({
                         "label": label,
@@ -1352,7 +1351,7 @@ class BBox3DGenerator:
                     })
                     continue
 
-                # pick "chosen" candidate like before
+                # pick main candidate (your original logic)
                 multi_scale_candidates.sort(key=lambda c: c["kernel_size"])
                 base_candidate = next((c for c in multi_scale_candidates if c["kernel_size"] == 0), None)
                 if base_candidate is not None:
@@ -1409,17 +1408,14 @@ class BBox3DGenerator:
             gv: Optional[np.ndarray],
             gf: Optional[np.ndarray],
             gc: Optional[np.ndarray],
+            label_colors: Optional[Dict[str, List[int]]] = None,  # NEW
     ) -> Dict[int, List[Dict[str, Any]]]:
-        """
-        Mutates out_frames in-place to apply two-sided (forward+backward) smoothing.
-        Returns frame_bbox_meshes for visualization.
-        """
-        # thresholds
+        # thresholds for pre-KF fusion
         center_delta_thresh = 0.15
         center_consistency_thresh = 0.12
         volume_consistency_ratio = 1.7
 
-        # floor xforms
+        # floor transforms
         s_floor = float(s_avg) if s_avg is not None else 1.0
         R_floor = np.asarray(R_avg, dtype=np.float32) if R_avg is not None else np.eye(3, dtype=np.float32)
         t_floor = np.asarray(t_avg, dtype=np.float32) if t_avg is not None else np.zeros(3, dtype=np.float32)
@@ -1439,7 +1435,7 @@ class BBox3DGenerator:
                 [maxs[0], maxs[1], maxs[2]],
             ], dtype=np.float32)
 
-        # label -> frame_order -> objs
+        # label -> frame_order -> list of objects for that frame
         label_to_frameobjs: Dict[str, Dict[int, List[dict]]] = {}
         for frame_name, frame_rec in out_frames.items():
             frame_order = int(Path(frame_name).stem)
@@ -1453,7 +1449,7 @@ class BBox3DGenerator:
                     "obj": obj,
                 })
 
-        # for each label, do: fuse -> forward KF -> RTS -> write-back
+        # for each label: fuse -> forward KF -> RTS -> write-back
         for label, frame_dict in label_to_frameobjs.items():
             last_centers_per_scale: Dict[int, np.ndarray] = {}
             fused_meas = []
@@ -1462,7 +1458,7 @@ class BBox3DGenerator:
             for fo in frame_orders:
                 obj_refs = frame_dict[fo]
 
-                # gather per-scale measurements
+                # gather all scale candidates from all objects of this label in this frame
                 scale_to_entries: Dict[int, List[dict]] = {}
                 for ref in obj_refs:
                     obj = ref["obj"]
@@ -1506,7 +1502,6 @@ class BBox3DGenerator:
                         if np.linalg.norm(c - last_centers_per_scale[ksz]) > center_delta_thresh:
                             continue
                     valid_scales.append((ksz, m))
-
                 if not valid_scales:
                     valid_scales = list(scale_meas.items())
 
@@ -1524,11 +1519,11 @@ class BBox3DGenerator:
                         inlier_scales.append((ksz, m))
 
                 if not inlier_scales:
-                    # pick the one with most points
+                    # pick best-supported scale
                     ksz_best, m_best = max(valid_scales, key=lambda km: km[1]["num_points"])
                     inlier_scales = [(ksz_best, m_best)]
 
-                # fuse inliers
+                # fuse across remaining scales
                 weights = np.array([m["num_points"] for _, m in inlier_scales], dtype=np.float32)
                 weights = weights / (weights.sum() + 1e-6)
                 centers_stack = np.stack([m["center"] for _, m in inlier_scales], axis=0)
@@ -1550,6 +1545,7 @@ class BBox3DGenerator:
                     "maxs": fused_maxs,
                 })
 
+                # update last centers for inlier scales
                 for ksz, m in inlier_scales:
                     last_centers_per_scale[ksz] = m["center"]
 
@@ -1562,7 +1558,7 @@ class BBox3DGenerator:
             F = np.eye(4, dtype=np.float32)
             H = np.eye(4, dtype=np.float32)
             Q = np.diag([1e-4, 1e-4, 1e-4, 1e-3]).astype(np.float32)
-            R = np.diag([1e-2, 1e-2, 1e-2, 1e-1]).astype(np.float32)
+            Rm = np.diag([1e-2, 1e-2, 1e-2, 1e-1]).astype(np.float32)
 
             x_fwd = []
             P_fwd = []
@@ -1578,9 +1574,11 @@ class BBox3DGenerator:
                 z = np.array([fm["center"][0], fm["center"][1], fm["center"][2], fm["volume"]], dtype=np.float32)
                 x_pred = F @ x
                 P_pred = F @ P @ F.T + Q
+
                 y = z - (H @ x_pred)
-                S_mat = H @ P_pred @ H.T + R
+                S_mat = H @ P_pred @ H.T + Rm
                 K = P_pred @ H.T @ np.linalg.inv(S_mat)
+
                 x = x_pred + K @ y
                 P = (np.eye(4, dtype=np.float32) - K @ H) @ P_pred
 
@@ -1589,7 +1587,7 @@ class BBox3DGenerator:
                 x_pred_list.append(x_pred.copy())
                 P_pred_list.append(P_pred.copy())
 
-            # backward RTS
+            # RTS backward smoothing
             Tn = len(fused_meas)
             x_smooth = [None] * Tn
             P_smooth = [None] * Tn
@@ -1603,7 +1601,7 @@ class BBox3DGenerator:
                 x_smooth[k] = x_fwd[k] + Ck @ (x_smooth[k + 1] - x_pred_list[k + 1])
                 P_smooth[k] = Pk + Ck @ (P_smooth[k + 1] - Pk_pred_next) @ Ck.T
 
-            # write back smoothed states
+            # write back smoothed boxes
             for fm, xs in zip(fused_meas, x_smooth):
                 cx, cy, cz, v_smooth = xs.tolist()
                 for ref in fm["obj_refs"]:
@@ -1636,7 +1634,7 @@ class BBox3DGenerator:
                     aabb["volume"] = float(max(v_smooth, 1e-6))
                     aabb["source"] = aabb.get("source", "pc-aabb-multiscale") + "+kf-rts"
 
-        # rebuild frame bbox meshes
+        # rebuild frame bbox meshes with label-specific colors
         frame_bbox_meshes: Dict[int, List[Dict[str, Any]]] = {}
         for frame_name, frame_rec in out_frames.items():
             stem = Path(frame_name).stem
@@ -1649,12 +1647,18 @@ class BBox3DGenerator:
                     continue
                 corners_world = np.array(aabb["corners_world"], dtype=np.float32)
                 verts_box, faces_box = self._make_box_mesh_from_corners(corners_world)
-                color = [255, 180, 0] if obj["label"] != "person" else [0, 255, 0]
+
+                label = obj["label"]
+                if label_colors is not None and label in label_colors:
+                    color = label_colors[label]
+                else:
+                    color = [0, 255, 0] if label == "person" else [255, 180, 0]
+
                 frame_bbox_meshes.setdefault(sidx, []).append({
                     "verts": verts_box,
                     "faces": faces_box,
                     "color": color,
-                    "label": obj["label"],
+                    "label": label,
                 })
 
         return frame_bbox_meshes
@@ -1713,6 +1717,7 @@ def rerun_vis_world4d(
         frame_bbox_meshes: Optional[Dict[int, List[Dict[str, Any]]]] = None,
         vis_floor: bool = True,
         vis_humans: bool = True,
+        min_conf_default: float = 1e-6,  # floor for conf
 ):
     faces_u32 = _faces_u32(faces)
     rr.init(app_id, spawn=True)
@@ -1722,6 +1727,7 @@ def rerun_vis_world4d(
     video_dynamic_predictions = np.load(video_dynamic_prediction_path, allow_pickle=True)
     video_dynamic_predictions = {k: video_dynamic_predictions[k] for k in video_dynamic_predictions.files}
     points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
+    conf = video_dynamic_predictions["conf"].astype(np.float32)      # (S,H,W)
     imgs_f32 = video_dynamic_predictions["images"]
     colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
 
@@ -1763,34 +1769,29 @@ def rerun_vis_world4d(
             img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         return img
 
-    # edges for a cuboid (8 vertices) — indices match the order we stored earlier
+    # edges for a cuboid (8 vertices)
     cuboid_edges = [
-        (0, 1), (1, 3), (3, 2), (2, 0),  # bottom rectangle
-        (4, 5), (5, 7), (7, 6), (6, 4),  # top rectangle
-        (0, 4), (1, 5), (2, 6), (3, 7),  # verticals
+        (0, 1), (1, 3), (3, 2), (2, 0),
+        (4, 5), (5, 7), (7, 6), (6, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
     ]
 
-    # ------------------------------------------------------------------
-    # use only the annotated frames (indices into sampled_indices)
-    # ------------------------------------------------------------------
-    # if list is empty, we can fall back to showing all sampled_indices
+    # frames to iterate
     if annotated_frame_idx_in_sample_idx:
         iter_indices = annotated_frame_idx_in_sample_idx
     else:
         iter_indices = list(range(len(sampled_indices)))
 
     for vis_t, sample_idx in enumerate(iter_indices):
-        # sample_idx is an index into sampled_indices
         if sample_idx < 0 or sample_idx >= len(sampled_indices):
             continue
 
         frame_idx = sampled_indices[sample_idx]
 
-        # set timeline to a dense 0..N-1 sequence of annotated frames
         rr.set_time_sequence("frame", vis_t)
         rr.log("/", rr.Clear(recursive=True))
 
-        # floor (constant per frame)
+        # floor
         if vis_floor:
             if floor_vertices_tf is not None and floor_faces is not None:
                 rr.log(
@@ -1815,14 +1816,13 @@ def rerun_vis_world4d(
         if frame_data is None:
             continue
 
-        # human meshes (orig is already stored in world4d; we only show transformed)
+        # humans
         if vis_humans:
             track_ids = frame_data.get("track_id", [])
             verts_orig_list = frame_data.get("vertices_orig", [])
             if track_ids and verts_orig_list:
                 tid = int(track_ids[0])
                 verts_orig = np.asarray(verts_orig_list[0], dtype=np.float32)
-
                 if s_i is not None:
                     verts_flat = verts_orig.reshape(-1, 3)
                     verts_tf = s_i * (verts_flat @ R_i.T) + t_i
@@ -1836,20 +1836,42 @@ def rerun_vis_world4d(
                         ),
                     )
 
-        # --- dynamic points: NOTE we index by sample_idx, not vis_t ---
+        # --- dynamic points: confidence-filtered ---
         if sample_idx < points.shape[0]:
-            rr.log(
-                f"{BASE}/points",
-                rr.Points3D(
-                    points[sample_idx].reshape(-1, 3),
-                    colors=colors[sample_idx].reshape(-1, 3),
-                ),
-            )
+            pts = points[sample_idx].reshape(-1, 3)            # (N,3)
+            cols = colors[sample_idx].reshape(-1, 3)           # (N,3)
+            cfs = conf[sample_idx].reshape(-1)                 # (N,)
+
+            # adaptive threshold
+            good = np.isfinite(cfs)
+            cfs_valid = cfs[good]
+            if cfs_valid.size > 0:
+                med = np.median(cfs_valid)
+                p99 = np.percentile(cfs_valid, 99)
+                # base threshold from median
+                thr = max(min_conf_default, 0.5 * med)
+                # don't let it exceed the 75th percentile (keeps enough points)
+                thr = min(thr, p99)
+            else:
+                thr = min_conf_default
+
+            keep = (cfs >= thr) & np.isfinite(pts).all(axis=1)
+            pts_keep = pts[keep]
+            cols_keep = cols[keep]
+
+            if pts_keep.shape[0] > 0:
+                rr.log(
+                    f"{BASE}/points",
+                    rr.Points3D(
+                        pts_keep,
+                        colors=cols_keep,
+                    ),
+                )
 
         # --- per-frame cuboid bboxes ---
         if frame_bbox_meshes is not None and vis_t in frame_bbox_meshes:
             for bi, bbox_m in enumerate(frame_bbox_meshes[vis_t]):
-                verts_world = bbox_m["verts"].astype(np.float32)  # (8,3)
+                verts_world = bbox_m["verts"].astype(np.float32)
                 col = bbox_m.get("color", [255, 180, 0])
 
                 strips = []
