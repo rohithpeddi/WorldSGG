@@ -1173,7 +1173,7 @@ class BBox3DGenerator:
             gf=gf,
             gc=gc,
             label_colors=label_colors,
-            enable_temporal_smoothing=False
+            enable_temporal_smoothing=True
         )
 
         # 3) visualize if asked
@@ -1263,10 +1263,10 @@ class BBox3DGenerator:
                 cfs_valid = cfs_flat[mask_valid]
                 if cfs_valid.size > 0:
                     med = np.median(cfs_valid)
-                    # p99 = np.percentile(cfs_valid, )
+                    p5 = np.percentile(cfs_valid, 5)
                     # base rule
-                    thr = max(1e-3, 0.5 * med)
-                    # thr = max(thr, p99)
+                    # thr = max(1e-3, 0.5 * med)
+                    thr = max(1e-3, p5)
                     conf_thr = float(thr)
                     print(f"[bbox][{video_id}][{stem}] conf thr set to {conf_thr:.4f} (med={med:.4f})")
                 else:
@@ -1425,8 +1425,8 @@ class BBox3DGenerator:
             gv: Optional[np.ndarray],
             gf: Optional[np.ndarray],
             gc: Optional[np.ndarray],
-            label_colors: Optional[Dict[str, List[int]]] = None,  # NEW
-            enable_temporal_smoothing: bool = True,              # <--- NEW FLAG
+            label_colors: Optional[Dict[str, List[int]]] = None,
+            enable_temporal_smoothing: bool = True,
     ) -> Dict[int, List[Dict[str, Any]]]:
         # floor transforms (used in both branches)
         s_floor = float(s_avg) if s_avg is not None else 1.0
@@ -1448,9 +1448,7 @@ class BBox3DGenerator:
                 [maxs[0], maxs[1], maxs[2]],
             ], dtype=np.float32)
 
-        # ------------------------------------------------------------------
         # FAST PATH: no temporal smoothing, just rebuild frame_bbox_meshes
-        # ------------------------------------------------------------------
         if not enable_temporal_smoothing:
             frame_bbox_meshes: Dict[int, List[Dict[str, Any]]] = {}
             for frame_name, frame_rec in out_frames.items():
@@ -1480,13 +1478,16 @@ class BBox3DGenerator:
             return frame_bbox_meshes
 
         # ------------------------------------------------------------------
-        # ORIGINAL TEMPORAL SMOOTHING PATH
+        # TEMPORAL SMOOTHING PATH
         # ------------------------------------------------------------------
         center_delta_thresh = 0.15
         center_consistency_thresh = 0.12
-        volume_consistency_ratio = 1.7
 
-        # label -> frame_order -> list of objects for that frame
+        # make volume gate stricter than before
+        # (smaller ratio -> less tolerance to sudden volume jumps)
+        volume_consistency_ratio = 1.3
+
+        # label -> frame_order -> objects
         label_to_frameobjs: Dict[str, Dict[int, List[dict]]] = {}
         for frame_name, frame_rec in out_frames.items():
             frame_order = int(Path(frame_name).stem)
@@ -1508,7 +1509,7 @@ class BBox3DGenerator:
             for fo in frame_orders:
                 obj_refs = frame_dict[fo]
 
-                # gather multiscale
+                # collect all scale candidates (per label, this frame)
                 scale_to_entries: Dict[int, List[dict]] = {}
                 for ref in obj_refs:
                     obj = ref["obj"]
@@ -1544,7 +1545,7 @@ class BBox3DGenerator:
                         "num_points": num_points,
                     }
 
-                # temporal gating
+                # temporal gating on centers
                 valid_scales = []
                 for ksz, m in scale_meas.items():
                     c = m["center"]
@@ -1569,10 +1570,11 @@ class BBox3DGenerator:
                         inlier_scales.append((ksz, m))
 
                 if not inlier_scales:
+                    # fall back: pick best-supported scale
                     ksz_best, m_best = max(valid_scales, key=lambda km: km[1]["num_points"])
                     inlier_scales = [(ksz_best, m_best)]
 
-                # fuse
+                # fuse across remaining scales
                 weights = np.array([m["num_points"] for _, m in inlier_scales], dtype=np.float32)
                 weights = weights / (weights.sum() + 1e-6)
                 centers_stack = np.stack([m["center"] for _, m in inlier_scales], axis=0)
@@ -1585,6 +1587,12 @@ class BBox3DGenerator:
                 fused_mins = (weights[:, None] * mins_stack).sum(axis=0)
                 fused_maxs = (weights[:, None] * maxs_stack).sum(axis=0)
 
+                # NEW: clamp fused_volume to be near the median for this frame
+                # lets say we allow only 0.6x .. 1.4x of the frame's median volume
+                vol_low = 0.6 * vol_med
+                vol_high = 1.4 * vol_med
+                fused_volume = float(np.clip(fused_volume, vol_low, vol_high))
+
                 fused_meas.append({
                     "frame_order": fo,
                     "obj_refs": obj_refs,
@@ -1594,6 +1602,7 @@ class BBox3DGenerator:
                     "maxs": fused_maxs,
                 })
 
+                # update last centers
                 for ksz, m in inlier_scales:
                     last_centers_per_scale[ksz] = m["center"]
 
@@ -1602,11 +1611,15 @@ class BBox3DGenerator:
 
             fused_meas.sort(key=lambda x: x["frame_order"])
 
-            # KF + RTS (as before)
+            # KF setup (discourage volume jumps)
             F = np.eye(4, dtype=np.float32)
             H = np.eye(4, dtype=np.float32)
-            Q = np.diag([1e-4, 1e-4, 1e-4, 1e-3]).astype(np.float32)
-            Rm = np.diag([1e-2, 1e-2, 1e-2, 1e-1]).astype(np.float32)
+
+            # process noise: allow motion in center, very low on volume
+            Q = np.diag([1e-4, 1e-4, 1e-4, 1e-5]).astype(np.float32)
+
+            # measurement noise: trust centers, be more skeptical about volume
+            Rm = np.diag([1e-2, 1e-2, 1e-2, 5e-1]).astype(np.float32)
 
             x_fwd = []
             P_fwd = []
@@ -1614,15 +1627,27 @@ class BBox3DGenerator:
             P_pred_list = []
 
             first = fused_meas[0]
-            x = np.array([first["center"][0], first["center"][1], first["center"][2], first["volume"]],
-                         dtype=np.float32)
+            x = np.array([
+                first["center"][0],
+                first["center"][1],
+                first["center"][2],
+                first["volume"]
+            ], dtype=np.float32)
             P = np.eye(4, dtype=np.float32)
 
             for fm in fused_meas:
-                z = np.array([fm["center"][0], fm["center"][1], fm["center"][2], fm["volume"]], dtype=np.float32)
+                z = np.array([
+                    fm["center"][0],
+                    fm["center"][1],
+                    fm["center"][2],
+                    fm["volume"]
+                ], dtype=np.float32)
+
+                # predict
                 x_pred = F @ x
                 P_pred = F @ P @ F.T + Q
 
+                # update
                 y = z - (H @ x_pred)
                 S_mat = H @ P_pred @ H.T + Rm
                 K = P_pred @ H.T @ np.linalg.inv(S_mat)
@@ -1635,6 +1660,7 @@ class BBox3DGenerator:
                 x_pred_list.append(x_pred.copy())
                 P_pred_list.append(P_pred.copy())
 
+            # RTS smoothing
             Tn = len(fused_meas)
             x_smooth = [None] * Tn
             P_smooth = [None] * Tn
@@ -1648,7 +1674,7 @@ class BBox3DGenerator:
                 x_smooth[k] = x_fwd[k] + Ck @ (x_smooth[k + 1] - x_pred_list[k + 1])
                 P_smooth[k] = Pk + Ck @ (P_smooth[k + 1] - Pk_pred_next) @ Ck.T
 
-            # write back
+            # write back smoothed bboxes
             for fm, xs in zip(fused_meas, x_smooth):
                 cx, cy, cz, v_smooth = xs.tolist()
                 for ref in fm["obj_refs"]:
@@ -1666,6 +1692,7 @@ class BBox3DGenerator:
                     if vol0 <= 0.0:
                         continue
 
+                    # adjust size by the smoothed volume, but gently
                     scale = (v_smooth / vol0) ** (1.0 / 3.0) if v_smooth > 0 else 1.0
                     new_center = np.array([cx, cy, cz], dtype=np.float32)
                     new_half_size = 0.5 * size0 * scale
@@ -1681,7 +1708,7 @@ class BBox3DGenerator:
                     aabb["volume"] = float(max(v_smooth, 1e-6))
                     aabb["source"] = aabb.get("source", "pc-aabb-multiscale") + "+kf-rts"
 
-        # rebuild meshes for the (possibly) smoothed boxes
+        # rebuild meshes
         frame_bbox_meshes: Dict[int, List[Dict[str, Any]]] = {}
         for frame_name, frame_rec in out_frames.items():
             stem = Path(frame_name).stem
@@ -1721,7 +1748,6 @@ class BBox3DGenerator:
                 [1, 5, 3], [3, 5, 7],
             ], dtype=np.uint32)
             return corners_world.astype(np.float32), faces
-
 
     def generate_gt_world_bb_annotations(self, dataloader, split) -> None:
         for data in tqdm(dataloader):
@@ -1894,11 +1920,11 @@ def rerun_vis_world4d(
             cfs_valid = cfs[good]
             if cfs_valid.size > 0:
                 med = np.median(cfs_valid)
-                # p99 = np.percentile(cfs_valid, 90)
+                p5 = np.percentile(cfs_valid, 5)
                 # base threshold from median
-                thr = max(min_conf_default, 0.5 * med)
+                # thr = max(min_conf_default, 0.5 * med)
                 # don't let it exceed the 75th percentile (keeps enough points)
-                # thr = max(thr, p99)
+                thr = max(min_conf_default, p5)
                 print(f"frame {frame_idx}: conf thr = {thr:.4f} (med={med:.4f}, n_valid={cfs_valid.size})")
             else:
                 thr = min_conf_default
@@ -2036,7 +2062,7 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
         output_human_dir_path=args.output_human_dir_path,
     )
-    video_id = "67DPO.mp4"
+    video_id = "9BCOH.mp4"
     bbox_3d_generator.generate_sample_gt_world_bb_annotations(video_id=video_id)
 
 
