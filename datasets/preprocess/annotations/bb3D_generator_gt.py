@@ -1110,6 +1110,11 @@ class BBox3DGenerator:
             label_colors: Optional[Dict[str, List[int]]] = None,  # NEW
     ) -> None:
         # load dynamic points (annotated frames)
+
+        out_path = self.bbox_3d_root_dir / f"{video_id}.pkl"
+        if out_path.exists():
+            print(f"[bbox] floor-aligned 3D bboxes already exist for video {video_id}, skipping...")
+            return
         P = self._load_points_for_video(video_id)
         points_S = P["points"]  # (S,H,W,3)
         conf_S = P["conf"]  # (S,H,W) or None
@@ -1201,7 +1206,7 @@ class BBox3DGenerator:
                 time.sleep(1)
 
         # 4) save to disk
-        out_path = self.bbox_3d_root_dir / f"{video_id}.pkl"
+
         results_dictionary = {
             "video_id": video_id,
             "frames": out_frames,
