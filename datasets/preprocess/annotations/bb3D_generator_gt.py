@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+import contextlib
+import gc
 import json
 import os
 import pickle
@@ -447,6 +449,45 @@ def _average_sims_robust(per_frame_sims: Dict[int, Dict[str, Any]],
 
     return s_avg, R_avg, t_avg.astype(np.float32)
 
+def _safe_empty_cuda_cache():
+    try:
+        torch.cuda.synchronize()
+    except Exception:
+        pass
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.ipc_collect()
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+@contextlib.contextmanager
+def _torch_inference_ctx():
+    # inference_mode() is stronger than no_grad() and reduces autograd overhead
+    with torch.inference_mode():
+        yield
+
+@contextlib.contextmanager
+def _npz_open(path):
+    # Use mmap to avoid copying huge arrays outright; ensure file handle closes
+    f = np.load(path, allow_pickle=True, mmap_mode='r')
+    try:
+        yield f
+    finally:
+        try:
+            f.close()
+        except Exception:
+            pass
+
+def _del_and_collect(*objs):
+    for o in objs:
+        try:
+            del o
+        except Exception:
+            pass
+    gc.collect()
+    _safe_empty_cuda_cache()
+
 
 # =====================================================================
 # BOUNDING BOX GENERATOR (AABB is floor-aligned)
@@ -745,43 +786,43 @@ class BBox3DGenerator:
 
     def _load_points_for_video(self, video_id: str) -> Dict[str, Any]:
         video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
-        video_dynamic_predictions = np.load(video_dynamic_3d_scene_path, allow_pickle=True)
 
-        points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
-        imgs_f32 = video_dynamic_predictions["images"]
-        confidence = video_dynamic_predictions["conf"]
-        camera_poses = video_dynamic_predictions["camera_poses"]
-        colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
+        with _npz_open(video_dynamic_3d_scene_path) as video_dynamic_predictions:
+            points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
+            imgs_f32 = video_dynamic_predictions["images"]
+            confidence = video_dynamic_predictions["conf"]
+            camera_poses = video_dynamic_predictions["camera_poses"]
+            colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
 
-        conf = None
-        if "conf" in video_dynamic_predictions:
-            conf = video_dynamic_predictions["conf"]
-            if conf.ndim == 4 and conf.shape[-1] == 1:
-                conf = conf[..., 0]
+            conf = None
+            if "conf" in video_dynamic_predictions:
+                conf = video_dynamic_predictions["conf"]
+                if conf.ndim == 4 and conf.shape[-1] == 1:
+                    conf = conf[..., 0]
 
-        S, H, W, _ = points.shape
+            S, H, W, _ = points.shape
 
-        (frame_idx_frame_path_map, sample_idx, video_sampled_frame_id_list,
-         annotated_frame_id_list, annotated_frame_idx_in_sample_idx) = self.idx_to_frame_idx_path(video_id)
-        assert S == len(sample_idx), "dynamic predictions length must match annotated sampled range"
+            (frame_idx_frame_path_map, sample_idx, video_sampled_frame_id_list,
+             annotated_frame_id_list, annotated_frame_idx_in_sample_idx) = self.idx_to_frame_idx_path(video_id)
+            assert S == len(sample_idx), "dynamic predictions length must match annotated sampled range"
 
-        sampled_idx_frame_name_map = {}
-        frame_name_sampled_idx_map = {}
-        for idx_in_s, frame_idx in enumerate(sample_idx):
-            frame_name = f"{video_sampled_frame_id_list[frame_idx]:06d}.png"
-            sampled_idx_frame_name_map[idx_in_s] = frame_name
-            frame_name_sampled_idx_map[frame_name] = idx_in_s
+            sampled_idx_frame_name_map = {}
+            frame_name_sampled_idx_map = {}
+            for idx_in_s, frame_idx in enumerate(sample_idx):
+                frame_name = f"{video_sampled_frame_id_list[frame_idx]:06d}.png"
+                sampled_idx_frame_name_map[idx_in_s] = frame_name
+                frame_name_sampled_idx_map[frame_name] = idx_in_s
 
-        annotated_idx_in_sampled_idx = []
-        for frame_name in annotated_frame_id_list:
-            if frame_name in frame_name_sampled_idx_map:
-                annotated_idx_in_sampled_idx.append(frame_name_sampled_idx_map[frame_name])
+            annotated_idx_in_sampled_idx = []
+            for frame_name in annotated_frame_id_list:
+                if frame_name in frame_name_sampled_idx_map:
+                    annotated_idx_in_sampled_idx.append(frame_name_sampled_idx_map[frame_name])
 
-        points_sub = points[annotated_idx_in_sampled_idx]
-        conf_sub = conf[annotated_idx_in_sampled_idx] if conf is not None else None
-        stems_sub = [sampled_idx_frame_name_map[idx][:-4] for idx in annotated_idx_in_sampled_idx]
-        colors_sub = colors[annotated_idx_in_sampled_idx]
-        camera_poses_sub = camera_poses[annotated_idx_in_sampled_idx]
+            points_sub = points[annotated_idx_in_sampled_idx]
+            conf_sub = conf[annotated_idx_in_sampled_idx] if conf is not None else None
+            stems_sub = [sampled_idx_frame_name_map[idx][:-4] for idx in annotated_idx_in_sampled_idx]
+            colors_sub = colors[annotated_idx_in_sampled_idx]
+            camera_poses_sub = camera_poses[annotated_idx_in_sampled_idx]
 
         return {
             "points": points_sub,
@@ -925,153 +966,163 @@ class BBox3DGenerator:
         matched_scene = np.asarray(matched_scene, dtype=np.float64)
         return smpl_sampled, matched_scene
 
-    def process_video(self, video_id: str, include_dense: bool = False, use_consistent_transformation: bool = False):
+    def process_video(
+            self,
+            video_id: str,
+            include_dense: bool = False,
+            use_consistent_transformation: bool = False,
+            return_visualization_payload: bool = True,
+    ):
         # 0) run human/scene pipeline
-        self.pipeline.__call__(video_id, save_only_essential=False)
-        self.pipeline.estimate_2d_keypoints()
-        results = self.pipeline.results
-        images = self.pipeline.images
-        world4d = self.pipeline.create_world4d()
-        # make frame indices 0..N-1
-        world4d = {i: world4d[k] for i, k in enumerate(world4d)}
+        with _torch_inference_ctx():
+            self.pipeline.__call__(video_id, save_only_essential=False)
+            self.pipeline.estimate_2d_keypoints()
+            results = self.pipeline.results
+            images = self.pipeline.images
+            world4d = self.pipeline.create_world4d()
+            # make frame indices 0..N-1
+            world4d = {i: world4d[k] for i, k in enumerate(world4d)}
 
-        # sampled / annotated indices
-        (frame_idx_frame_path_map,
-         sample_idx,
-         _,
-         _,
-         annotated_frame_idx_in_sample_idx) = self.idx_to_frame_idx_path(video_id)
-        sampled_frame_indices = sorted(frame_idx_frame_path_map.keys())
+            # sampled / annotated indices
+            (frame_idx_frame_path_map,
+             sample_idx,
+             _,
+             _,
+             annotated_frame_idx_in_sample_idx) = self.idx_to_frame_idx_path(video_id)
+            sampled_frame_indices = sorted(frame_idx_frame_path_map.keys())
 
-        # choose primary actor
-        primary_person_id_1, primary_track_id_0 = _choose_primary_actor(results, world4d)
-        print(f"[align] Using primary actor -> results={primary_person_id_1}, world4d_track={primary_track_id_0}")
+            # choose primary actor
+            primary_person_id_1, primary_track_id_0 = _choose_primary_actor(results, world4d)
+            print(f"[align] Using primary actor -> results={primary_person_id_1}, world4d_track={primary_track_id_0}")
 
-        # map frame -> keypoints for that actor
-        frame_to_kps = _build_frame_to_kps_map(results, primary_person_id_1)
+            # map frame -> keypoints for that actor
+            frame_to_kps = _build_frame_to_kps_map(results, primary_person_id_1)
 
-        # containers
-        frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
-        per_frame_sims: Dict[int, Dict[str, Any]] = {}
+            # containers
+            frame_kp_corr: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+            per_frame_sims: Dict[int, Dict[str, Any]] = {}
 
-        # ------------------------------------------------------------------
-        # 1) estimate per-frame similarity *for sampled frames*
-        # ------------------------------------------------------------------
-        for frame_idx in sampled_frame_indices:
-            frame_data = world4d.get(frame_idx, None)
-            if frame_data is None:
-                continue
+            # ------------------------------------------------------------------
+            # 1) estimate per-frame similarity *for sampled frames*
+            # ------------------------------------------------------------------
+            for frame_idx in sampled_frame_indices:
+                frame_data = world4d.get(frame_idx, None)
+                if frame_data is None:
+                    continue
 
-            smpl_s, scene_s = self._collect_kp_corr_for_frame(
-                frame_idx, frame_data, frame_to_kps, primary_track_id_0
-            )
-
-            smpl_all = []
-            scene_all = []
-
-            if smpl_s is not None and scene_s is not None and smpl_s.shape[0] > 0:
-                frame_kp_corr[frame_idx] = (smpl_s, scene_s)
-                smpl_all.append(smpl_s)
-                scene_all.append(scene_s)
-
-            if include_dense:
-                smpl_d, scene_d = self._collect_dense_corr_for_frame(
-                    video_id, frame_idx, frame_data, frame_idx_frame_path_map, primary_track_id_0
+                smpl_s, scene_s = self._collect_kp_corr_for_frame(
+                    frame_idx, frame_data, frame_to_kps, primary_track_id_0
                 )
-                if smpl_d is not None and scene_d is not None:
-                    smpl_all.append(smpl_d)
-                    scene_all.append(scene_d)
 
-            if len(smpl_all) == 0:
-                print(f"[align][{video_id}] no corr for sampled frame {frame_idx}")
-                continue
+                smpl_all = []
+                scene_all = []
 
-            smpl_all = np.concatenate(smpl_all, axis=0)
-            scene_all = np.concatenate(scene_all, axis=0)
+                if smpl_s is not None and scene_s is not None and smpl_s.shape[0] > 0:
+                    frame_kp_corr[frame_idx] = (smpl_s, scene_s)
+                    smpl_all.append(smpl_s)
+                    scene_all.append(scene_s)
 
-            if smpl_all.shape[0] < 3:
-                print(f"[align][{video_id}] insufficient corr for frame {frame_idx}")
-                continue
+                if include_dense:
+                    smpl_d, scene_d = self._collect_dense_corr_for_frame(
+                        video_id, frame_idx, frame_data, frame_idx_frame_path_map, primary_track_id_0
+                    )
+                    if smpl_d is not None and scene_d is not None:
+                        smpl_all.append(smpl_d)
+                        scene_all.append(scene_d)
+                    _del_and_collect(smpl_d, scene_d)
 
-            # solve per-frame sim
-            s_f, R_f, t_f = _robust_similarity_ransac(
-                smpl_all, scene_all,
-                max_iters=800,
-                inlier_thresh=0.03,
-                min_inliers=4,
-                scale_bounds=(0.4, 3.0),
-            )
+                if len(smpl_all) == 0:
+                    print(f"[align][{video_id}] no corr for sampled frame {frame_idx}")
+                    _del_and_collect(smpl_s, scene_s)
+                    continue
 
-            per_frame_sims[frame_idx] = {
-                "s": float(s_f),
-                "R": R_f,
-                "t": t_f,
-                "w": float(smpl_all.shape[0]),
-            }
+                smpl_all = np.concatenate(smpl_all, axis=0)
+                scene_all = np.concatenate(scene_all, axis=0)
 
-        # ------------------------------------------------------------------
-        # 2) compute robust average over sampled frames
-        # ------------------------------------------------------------------
-        sampled_per_frame_sims = {k: v for k, v in per_frame_sims.items() if k in sampled_frame_indices}
-        s_avg, R_avg, t_avg = _average_sims_robust(sampled_per_frame_sims)
+                if smpl_all.shape[0] < 3:
+                    print(f"[align][{video_id}] insufficient corr for frame {frame_idx}")
+                    _del_and_collect(smpl_s, scene_s, smpl_all, scene_all)
+                    continue
 
-        if use_consistent_transformation:
-            per_frame_sims = {
-                fidx: {
-                    "s": float(s_avg),
-                    "R": R_avg,
-                    "t": t_avg,
-                    "w": 1.0,
+                # solve per-frame sim
+                s_f, R_f, t_f = _robust_similarity_ransac(
+                    smpl_all, scene_all,
+                    max_iters=800,
+                    inlier_thresh=0.03,
+                    min_inliers=4,
+                    scale_bounds=(0.4, 3.0),
+                )
+
+                per_frame_sims[frame_idx] = {
+                    "s": float(s_f),
+                    "R": R_f,
+                    "t": t_f,
+                    "w": float(smpl_all.shape[0]),
                 }
-                for fidx in sampled_frame_indices
-            }
 
-        # ------------------------------------------------------------------
-        # 3) build verts per sampled frame and apply either per-frame or avg sim
-        # ------------------------------------------------------------------
-        all_verts_for_floor = []
-        for frame_idx in sampled_frame_indices:
-            frame_data = world4d.get(frame_idx, None)
-            if frame_data is None:
-                continue
-            actor_idx = _find_actor_index_in_frame(frame_data, primary_track_id_0)
-            if actor_idx is None:
-                frame_data['track_id'] = []
-                continue
+            # ------------------------------------------------------------------
+            # 2) compute robust average over sampled frames
+            # ------------------------------------------------------------------
+            sampled_per_frame_sims = {k: v for k, v in per_frame_sims.items() if k in sampled_frame_indices}
+            s_avg, R_avg, t_avg = _average_sims_robust(sampled_per_frame_sims)
 
-            rotmat_all = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
-            rotmat_actor = rotmat_all[actor_idx:actor_idx + 1]
-            smpl_out = self.smplx(
-                global_orient=rotmat_actor[:, :1].cuda(),
-                body_pose=rotmat_actor[:, 1:22].cuda(),
-                betas=frame_data['shape'][actor_idx:actor_idx + 1].cuda(),
-                transl=frame_data['trans'][actor_idx:actor_idx + 1].cuda()
-            )
-            verts = smpl_out.vertices.cpu().numpy()
+            if use_consistent_transformation:
+                per_frame_sims = {
+                    fidx: {
+                        "s": float(s_avg),
+                        "R": R_avg,
+                        "t": t_avg,
+                        "w": 1.0,
+                    }
+                    for fidx in sampled_frame_indices
+                }
 
-            frame_data['track_id'] = [primary_track_id_0]
-            frame_data['vertices_orig'] = [verts[0].copy()]
+            # ------------------------------------------------------------------
+            # 3) build verts per sampled frame and apply either per-frame or avg sim
+            # ------------------------------------------------------------------
+            all_verts_for_floor = []
+            for frame_idx in sampled_frame_indices:
+                frame_data = world4d.get(frame_idx, None)
+                if frame_data is None:
+                    continue
+                actor_idx = _find_actor_index_in_frame(frame_data, primary_track_id_0)
+                if actor_idx is None:
+                    frame_data['track_id'] = []
+                    continue
 
-            all_verts_for_floor.append(torch.tensor(verts, dtype=torch.bfloat16))
+                rotmat_all = axis_angle_to_matrix(frame_data['pose'].reshape(-1, 55, 3))
+                rotmat_actor = rotmat_all[actor_idx:actor_idx + 1]
+                smpl_out = self.smplx(
+                    global_orient=rotmat_actor[:, :1].cuda(),
+                    body_pose=rotmat_actor[:, 1:22].cuda(),
+                    betas=frame_data['shape'][actor_idx:actor_idx + 1].cuda(),
+                    transl=frame_data['trans'][actor_idx:actor_idx + 1].cuda()
+                )
+                verts = smpl_out.vertices.cpu().numpy()
 
-            if use_consistent_transformation and sampled_per_frame_sims:
-                # use the robust average for EVERY frame
-                s_use, R_use, t_use = s_avg, R_avg, t_avg
-                verts_flat = verts.reshape(-1, 3)
-                verts_tf = s_use * (verts_flat @ R_use.T) + t_use
-                verts_tf = verts_tf.reshape(verts.shape)
-            else:
-                # fall back to per-frame sim if we have it
-                if frame_idx in per_frame_sims:
-                    s_f = per_frame_sims[frame_idx]["s"]
-                    R_f = per_frame_sims[frame_idx]["R"]
-                    t_f = per_frame_sims[frame_idx]["t"]
+                frame_data['track_id'] = [primary_track_id_0]
+                frame_data['vertices_orig'] = [verts[0].copy()]
+
+                all_verts_for_floor.append(torch.tensor(verts, dtype=torch.bfloat16))
+
+                if use_consistent_transformation and sampled_per_frame_sims:
+                    # use the robust average for EVERY frame
+                    s_use, R_use, t_use = s_avg, R_avg, t_avg
                     verts_flat = verts.reshape(-1, 3)
-                    verts_tf = s_f * (verts_flat @ R_f.T) + t_f
+                    verts_tf = s_use * (verts_flat @ R_use.T) + t_use
                     verts_tf = verts_tf.reshape(verts.shape)
                 else:
-                    verts_tf = verts
-            frame_data['vertices'] = [verts_tf[0]]
+                    # fall back to per-frame sim if we have it
+                    if frame_idx in per_frame_sims:
+                        s_f = per_frame_sims[frame_idx]["s"]
+                        R_f = per_frame_sims[frame_idx]["R"]
+                        t_f = per_frame_sims[frame_idx]["t"]
+                        verts_flat = verts.reshape(-1, 3)
+                        verts_tf = s_f * (verts_flat @ R_f.T) + t_f
+                        verts_tf = verts_tf.reshape(verts.shape)
+                    else:
+                        verts_tf = verts
+                frame_data['vertices'] = [verts_tf[0]]
 
         # ------------------------------------------------------------------
         # 4) floor mesh from all transformed verts' originals
@@ -1081,6 +1132,10 @@ class BBox3DGenerator:
             gv, gf, gc = get_floor_mesh(all_verts_for_floor, scale=2)
         else:
             gv, gf, gc = None, None, None
+
+        _del_and_collect(all_verts_for_floor)
+        _del_and_collect(verts, verts_tf)
+        _del_and_collect(smpl_out, rotmat_all, rotmat_actor)
 
         return (
             images,
@@ -1110,121 +1165,134 @@ class BBox3DGenerator:
             label_colors: Optional[Dict[str, List[int]]] = None,  # NEW
     ) -> None:
         # load dynamic points (annotated frames)
+        try:
+            out_path = self.bbox_3d_root_dir / f"{video_id[:-4]}.pkl"
+            if out_path.exists():
+                print(f"[bbox] floor-aligned 3D bboxes already exist for video {video_id}, skipping...")
+                return
+            P = self._load_points_for_video(video_id)
+            points_S = P["points"]  # (S,H,W,3)
+            conf_S = P["conf"]  # (S,H,W) or None
+            stems_S = P["frame_stems"]  # ["000123", ...]
+            S, H, W, _ = points_S.shape
 
-        out_path = self.bbox_3d_root_dir / f"{video_id}.pkl"
-        if out_path.exists():
-            print(f"[bbox] floor-aligned 3D bboxes already exist for video {video_id}, skipping...")
-            return
-        P = self._load_points_for_video(video_id)
-        points_S = P["points"]  # (S,H,W,3)
-        conf_S = P["conf"]  # (S,H,W) or None
-        stems_S = P["frame_stems"]  # ["000123", ...]
-        S, H, W, _ = points_S.shape
+            # original image size (for resizing bboxes/masks)
+            sample_image_frame = self.frame_annotated_dir_path / video_id / f"{stems_S[0]}.png"
+            orig_img = cv2.imread(str(sample_image_frame))
+            orig_H, orig_W = orig_img.shape[:2]
 
-        # original image size (for resizing bboxes/masks)
-        sample_image_frame = self.frame_annotated_dir_path / video_id / f"{stems_S[0]}.png"
-        orig_img = cv2.imread(str(sample_image_frame))
-        orig_H, orig_W = orig_img.shape[:2]
+            stem_to_idx = {stems_S[i]: i for i in range(S)}
 
-        stem_to_idx = {stems_S[i]: i for i in range(S)}
-
-        # segmentation maps for the video
-        video_to_frame_to_label_mask, _, _ = self.create_label_wise_masks_map(
-            video_id=video_id,
-            gt_annotations=video_gt_annotations
-        )
-
-        # run human/scene pipeline — we need floor transform + vis inputs
-        (
-            images,
-            world4d,
-            sampled_frame_indices,
-            per_frame_sims,
-            s_avg,
-            R_avg,
-            t_avg,
-            gv,
-            gf,
-            gc,
-            annotated_frame_idx_in_sampled_idx,
-            primary_track_id_0
-        ) = self.process_video(video_id, use_consistent_transformation)
-
-        # 1) build per-frame multiscale boxes
-        out_frames = self._build_multiscale_bboxes_for_video(
-            video_id=video_id,
-            video_gt_annotations=video_gt_annotations,
-            points_S=points_S,
-            conf_S=conf_S,
-            stems_S=stems_S,
-            orig_size=(orig_W, orig_H),
-            stem_to_idx=stem_to_idx,
-            video_to_frame_to_label_mask=video_to_frame_to_label_mask,
-            has_floor=(gv is not None and gf is not None),
-            s_avg=s_avg,
-            R_avg=R_avg,
-            t_avg=t_avg,
-        )
-
-        # 2) temporal smoothing (multi-scale fuse + forward KF + RTS), return meshes for vis
-        frame_bbox_meshes = self._temporal_smooth_bboxes_for_video(
-            video_id=video_id,
-            out_frames=out_frames,
-            stem_to_idx=stem_to_idx,
-            s_avg=s_avg,
-            R_avg=R_avg,
-            t_avg=t_avg,
-            gv=gv,
-            gf=gf,
-            gc=gc,
-            label_colors=label_colors,
-            enable_temporal_smoothing=False
-        )
-
-        # 3) visualize if asked
-        if visualize:
-            rerun_vis_world4d(
+            # segmentation maps for the video
+            video_to_frame_to_label_mask, _, _ = self.create_label_wise_masks_map(
                 video_id=video_id,
-                images=images,
-                world4d=world4d,
-                faces=self.smplx.faces,
-                sampled_indices=sampled_frame_indices,
-                annotated_frame_idx_in_sample_idx=annotated_frame_idx_in_sampled_idx,
-                dynamic_prediction_path=str(self.dynamic_scene_dir_path),
-                per_frame_sims=per_frame_sims,
-                global_floor_sim=(s_avg, R_avg, t_avg),
-                floor=(gv, gf, gc) if gv is not None else None,
-                img_maxsize=480,
-                app_id="World4D-Combined",
-                frame_bbox_meshes=frame_bbox_meshes,
-                vis_floor=False,
-                vis_humans=False
+                gt_annotations=video_gt_annotations
             )
 
-            print("Visualization running. Press Ctrl+C to stop.")
-            while True:
-                time.sleep(1)
+            (
+                images,
+                world4d,
+                sampled_frame_indices,
+                per_frame_sims,
+                s_avg,
+                R_avg,
+                t_avg,
+                gv,
+                gf,
+                gc,
+                annotated_frame_idx_in_sampled_idx,
+                primary_track_id_0
+            ) = self.process_video(video_id, use_consistent_transformation)
 
-        # 4) save to disk
+            # 1) build per-frame multiscale boxes
+            out_frames = self._build_multiscale_bboxes_for_video(
+                video_id=video_id,
+                video_gt_annotations=video_gt_annotations,
+                points_S=points_S,
+                conf_S=conf_S,
+                stems_S=stems_S,
+                orig_size=(orig_W, orig_H),
+                stem_to_idx=stem_to_idx,
+                video_to_frame_to_label_mask=video_to_frame_to_label_mask,
+                has_floor=(gv is not None and gf is not None),
+                s_avg=s_avg,
+                R_avg=R_avg,
+                t_avg=t_avg,
+            )
 
-        results_dictionary = {
-            "video_id": video_id,
-            "frames": out_frames,
-            "per_frame_sims": per_frame_sims,
-            "global_floor_sim": {
-                "s": float(s_avg),
-                "R": R_avg,
-                "t": t_avg,
-            },
-            "primary_track_id_0": primary_track_id_0,
-            "frame_bbox_meshes": frame_bbox_meshes,
-            "gv": gv,
-            "gf": gf,
-            "gc": gc
-        }
-        with open(out_path, "wb") as f:
-            pickle.dump(results_dictionary, f, protocol=pickle.HIGHEST_PROTOCOL)
-        print(f"[bbox] saved floor-aligned 3D bboxes (multiscale + fused KF + RTS) to {out_path}")
+            # 2) temporal smoothing (multiscale fuse + forward KF + RTS), return meshes for vis
+            frame_bbox_meshes = self._temporal_smooth_bboxes_for_video(
+                video_id=video_id,
+                out_frames=out_frames,
+                stem_to_idx=stem_to_idx,
+                s_avg=s_avg,
+                R_avg=R_avg,
+                t_avg=t_avg,
+                gv=gv,
+                gf=gf,
+                gc=gc,
+                label_colors=label_colors,
+                enable_temporal_smoothing=False
+            )
+
+            # 3) visualize if asked
+            if visualize:
+                rerun_vis_world4d(
+                    video_id=video_id,
+                    images=images,
+                    world4d=world4d,
+                    faces=self.smplx.faces,
+                    sampled_indices=sampled_frame_indices,
+                    annotated_frame_idx_in_sample_idx=annotated_frame_idx_in_sampled_idx,
+                    dynamic_prediction_path=str(self.dynamic_scene_dir_path),
+                    per_frame_sims=per_frame_sims,
+                    global_floor_sim=(s_avg, R_avg, t_avg),
+                    floor=(gv, gf, gc) if gv is not None else None,
+                    img_maxsize=480,
+                    app_id="World4D-Combined",
+                    frame_bbox_meshes=frame_bbox_meshes,
+                    vis_floor=False,
+                    vis_humans=False
+                )
+
+                print("Visualization running. Press Ctrl+C to stop.")
+                while True:
+                    time.sleep(1)
+
+            # 4) save to disk
+            results_dictionary = {
+                "video_id": video_id,
+                "frames": out_frames,
+                "per_frame_sims": per_frame_sims,
+                "global_floor_sim": {
+                    "s": float(s_avg),
+                    "R": R_avg,
+                    "t": t_avg,
+                },
+                "primary_track_id_0": primary_track_id_0,
+                "frame_bbox_meshes": frame_bbox_meshes,
+                "gv": gv,
+                "gf": gf,
+                "gc": gc
+            }
+            with open(out_path, "wb") as f:
+                pickle.dump(results_dictionary, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"[bbox] saved floor-aligned 3D bboxes (multiscale + fused KF + RTS) to {out_path}")
+        finally:
+            # aggressive cleanup: drop everything large in any case
+            _del_and_collect(
+                results_dictionary if 'results_dictionary' in locals() else None,
+                out_frames if 'out_frames' in locals() else None,
+                points_S if 'points_S' in locals() else None,
+                conf_S if 'conf_S' in locals() else None,
+                images if 'images' in locals() else None,
+                world4d if 'world4d' in locals() else None,
+                gv if 'gv' in locals() else None,
+                gf if 'gf' in locals() else None,
+                gc if 'gc' in locals() else None,
+                video_gdino_predictions if 'video_gdino_predictions' in locals() else None,
+                video_gt_annotations if 'video_gt_annotations' in locals() else None,
+            )
 
     # ------------------------------------------------------------------
     # 1) MULTISCALE BLOCK (per-frame, per-label, keep all scales)
@@ -2087,4 +2155,4 @@ def main_sample():
 
 
 if __name__ == "__main__":
-    main()
+    main_sample()
