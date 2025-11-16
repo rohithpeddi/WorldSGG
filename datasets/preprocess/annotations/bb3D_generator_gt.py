@@ -1005,6 +1005,7 @@ class BBox3DGenerator:
             # ------------------------------------------------------------------
             # 1) estimate per-frame similarity *for sampled frames*
             # ------------------------------------------------------------------
+            print(f"[align] Estimating per-frame similarities for {len(sampled_frame_indices)} sampled frames")
             for frame_idx in sampled_frame_indices:
                 frame_data = world4d.get(frame_idx, None)
                 if frame_data is None:
@@ -1047,7 +1048,7 @@ class BBox3DGenerator:
                 # solve per-frame sim
                 s_f, R_f, t_f = _robust_similarity_ransac(
                     smpl_all, scene_all,
-                    max_iters=800,
+                    max_iters=500,
                     inlier_thresh=0.03,
                     min_inliers=4,
                     scale_bounds=(0.4, 3.0),
@@ -1063,7 +1064,16 @@ class BBox3DGenerator:
             # ------------------------------------------------------------------
             # 2) compute robust average over sampled frames
             # ------------------------------------------------------------------
+            print(f"[align] Computing robust average similarity over {len(per_frame_sims)} sampled frames")
             sampled_per_frame_sims = {k: v for k, v in per_frame_sims.items() if k in sampled_frame_indices}
+
+            # If the non-zero/non-empty per-frame sims are less than 10% of the sampled frames raise Exception
+            if len(sampled_per_frame_sims) < max(3, 0.2 * len(sampled_frame_indices)):
+                raise ValueError(
+                    f"Insufficient per-frame similarities computed ({len(sampled_per_frame_sims)}/"
+                    f"{len(sampled_frame_indices)}) for video {video_id} to compute robust average."
+                )
+
             s_avg, R_avg, t_avg = _average_sims_robust(sampled_per_frame_sims)
 
             if use_consistent_transformation:
@@ -1080,6 +1090,7 @@ class BBox3DGenerator:
             # ------------------------------------------------------------------
             # 3) build verts per sampled frame and apply either per-frame or avg sim
             # ------------------------------------------------------------------
+            print(f"[align] Generating transformed verts for {len(sampled_frame_indices)} sampled frames")
             all_verts_for_floor = []
             for frame_idx in sampled_frame_indices:
                 frame_data = world4d.get(frame_idx, None)
@@ -1127,6 +1138,7 @@ class BBox3DGenerator:
         # ------------------------------------------------------------------
         # 4) floor mesh from all transformed verts' originals
         # ------------------------------------------------------------------
+        print(f"[align] Generating floor mesh from {len(all_verts_for_floor)} frames' verts")
         if len(all_verts_for_floor) > 0:
             all_verts_for_floor = torch.cat(all_verts_for_floor)
             gv, gf, gc = get_floor_mesh(all_verts_for_floor, scale=2)
@@ -1151,6 +1163,27 @@ class BBox3DGenerator:
             annotated_frame_idx_in_sample_idx,
             primary_track_id_0
         )
+
+    def _clear_pipeline_state(self):
+        # Drop large per-video arrays stored on the AgPipeline instance
+        print(f"[cleanup] clearing pipeline state to free memory")
+        for attr in [
+            "images",
+            "points",
+            "results",
+            "world4d",
+            "world4d_dict",
+            "kp2d",
+            "kp2d_map",
+            "frames",
+        ]:
+            if hasattr(self.pipeline, attr):
+                try:
+                    setattr(self.pipeline, attr, None)
+                except Exception:
+                    pass
+        print(f"[cleanup] pipeline state cleared, check: {torch.cuda.memory_summary()}")
+
 
     def generate_video_bb_annotations(
             self,
@@ -1205,6 +1238,7 @@ class BBox3DGenerator:
             ) = self.process_video(video_id, use_consistent_transformation)
 
             # 1) build per-frame multiscale boxes
+            print(f"[bbox] Building per-frame multiscale 3D bboxes for video {video_id}...")
             out_frames = self._build_multiscale_bboxes_for_video(
                 video_id=video_id,
                 video_gt_annotations=video_gt_annotations,
@@ -1221,6 +1255,7 @@ class BBox3DGenerator:
             )
 
             # 2) temporal smoothing (multiscale fuse + forward KF + RTS), return meshes for vis
+            print(f"[bbox] Temporal smoothing of 3D bboxes for video {video_id}...")
             frame_bbox_meshes = self._temporal_smooth_bboxes_for_video(
                 video_id=video_id,
                 out_frames=out_frames,
@@ -1237,6 +1272,7 @@ class BBox3DGenerator:
 
             # 3) visualize if asked
             if visualize:
+                print(f"[bbox] Launching World4D visualization for video {video_id}...")
                 rerun_vis_world4d(
                     video_id=video_id,
                     images=images,
@@ -1260,6 +1296,7 @@ class BBox3DGenerator:
                     time.sleep(1)
 
             # 4) save to disk
+            print(f"[bbox] Saving floor-aligned 3D bboxes for video {video_id}...")
             results_dictionary = {
                 "video_id": video_id,
                 "frames": out_frames,
@@ -1279,7 +1316,6 @@ class BBox3DGenerator:
                 pickle.dump(results_dictionary, f, protocol=pickle.HIGHEST_PROTOCOL)
             print(f"[bbox] saved floor-aligned 3D bboxes (multiscale + fused KF + RTS) to {out_path}")
         finally:
-            # aggressive cleanup: drop everything large in any case
             _del_and_collect(
                 results_dictionary if 'results_dictionary' in locals() else None,
                 out_frames if 'out_frames' in locals() else None,
@@ -1293,6 +1329,12 @@ class BBox3DGenerator:
                 video_gdino_predictions if 'video_gdino_predictions' in locals() else None,
                 video_gt_annotations if 'video_gt_annotations' in locals() else None,
             )
+            if hasattr(self, "pipeline"):
+                try:
+                    self._clear_pipeline_state()
+                except Exception:
+                    pass
+            print(f"[bbox] Cleared all files")
 
     # ------------------------------------------------------------------
     # 1) MULTISCALE BLOCK (per-frame, per-label, keep all scales)
@@ -1838,9 +1880,14 @@ class BBox3DGenerator:
         for data in tqdm(dataloader):
             video_id = data['video_id']
             if get_video_belongs_to_split(video_id) == split:
+                out_path = self.bbox_3d_root_dir / f"{video_id[:-4]}.pkl"
+                if out_path.exists():
+                    print(f"[bbox] floor-aligned 3D bboxes already exist for video {video_id}, skipping...")
+                    continue
                 video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
                 video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
                 try:
+                    print(f"[bbox] processing video {video_id}...")
                     self.generate_video_bb_annotations(
                         video_id,
                         video_id_gt_annotations,
@@ -1849,6 +1896,8 @@ class BBox3DGenerator:
                     )
                 except Exception as e:
                     print(f"[bbox] failed to process video {video_id}: {e}")
+            else:
+                print(f"[bbox] video {video_id} does not belong to split {split}, skipping...")
 
     def generate_sample_gt_world_bb_annotations(self, video_id: str) -> None:
         video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
@@ -2150,9 +2199,10 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
         output_human_dir_path=args.output_human_dir_path,
     )
-    video_id = "DEY6U.mp4"
+    video_id = "LR6RZ.mp4"
     bbox_3d_generator.generate_sample_gt_world_bb_annotations(video_id=video_id)
 
 
 if __name__ == "__main__":
-    main_sample()
+    # main_sample()
+    main()

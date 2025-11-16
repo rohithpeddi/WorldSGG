@@ -178,7 +178,10 @@ def checkerboard_geometry(
     vert_colors = []
     faces = []
     face_colors = []
+    print(f"Generating checkerboard with {num_rows} rows and {num_cols} cols")
+    time_start = cv2.getTickCount()
     for i in range(num_rows):
+        it_time_start = cv2.getTickCount()
         for j in range(num_cols):
             u0, v0 = j * tile_width - radius, i * tile_width - radius
             us = np.array([u0, u0, u0 + tile_width, u0 + tile_width])
@@ -205,6 +208,11 @@ def checkerboard_geometry(
             faces.append(cur_faces)
             vert_colors.append(cur_colors)
             face_colors.append(cur_colors)
+        it_time_end = cv2.getTickCount()
+        print("  Tile (%d, %d) generation time: %.2f ms" % (i, j, ((it_time_end - it_time_start) / cv2.getTickFrequency() * 1000.0)))
+
+    time_end = cv2.getTickCount()
+    print("Checkerboard generation time: %.2f ms" % ((time_end - time_start) / cv2.getTickFrequency() * 1000.0))
 
     vertices = np.concatenate(vertices, axis=0).astype(np.float32)
     vert_colors = np.concatenate(vert_colors, axis=0).astype(np.float32)
