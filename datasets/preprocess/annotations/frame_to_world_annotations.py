@@ -43,8 +43,8 @@ class FrameToWorldAnnotations:
             ag_root_directory,
             dynamic_scene_dir_path,
     ):
-        self.ag_root_directory = ag_root_directory
-        self.dynamic_scene_dir_path = dynamic_scene_dir_path
+        self.ag_root_directory = Path(ag_root_directory)
+        self.dynamic_scene_dir_path = Path(dynamic_scene_dir_path)
         self.dataset_classnames = [
             '__background__', 'person', 'bag', 'bed', 'blanket', 'book', 'box', 'broom', 'chair',
             'closet/cabinet', 'clothes', 'cup/glass/bottle', 'dish', 'door', 'doorknob', 'doorway',
@@ -186,7 +186,7 @@ class FrameToWorldAnnotations:
     def get_video_3d_annotations(self, video_id: str):
         out_path = self.bbox_3d_root_dir / f"{video_id[:-4]}.pkl"
         if not out_path.exists():
-            raise FileNotFoundError(f"3D bbox annotations file not found: {out_path}")
+            return None
 
         with open(out_path, "rb") as f:
             video_3d_annotations = pickle.load(f)
@@ -506,6 +506,83 @@ class FrameToWorldAnnotations:
             nz = np.linalg.norm(pts, axis=-1) > 1e-12
         return good & nz
 
+    def check_2d_3d_annotation_consistency(
+            self,
+            video_id: str,
+            video_id_gt_annotations: Dict,
+            video_id_3d_bbox_predictions: Dict
+    ) -> int:
+        # First check the total number of frames in both gt_2D annotations and the gt_3D annotations
+        gt_2d_frames = set()
+        for frame_items in video_id_gt_annotations:
+            frame_name = frame_items[0]["frame"].split("/")[-1]
+            gt_2d_frames.add(frame_name)
+
+        gt_3d_frames = set(video_id_3d_bbox_predictions["frames"].keys())
+        # Filter out the frames in 3D that have zero or invalid bboxes
+        valid_3d_frames = set()
+        for frame_name, frame_data in video_id_3d_bbox_predictions["frames"].items():
+            bboxes_3d = frame_data.get("bboxes_3d", [])
+            if bboxes_3d:
+                valid_3d_frames.add(frame_name)
+
+        # Check the total number of mismatched instances.
+        mismatched_frames = gt_2d_frames.symmetric_difference(valid_3d_frames)
+        return len(mismatched_frames)
+
+    def estimate_mismatched_annotations(self, train_dataloader: DataLoader, test_dataloader: DataLoader) -> None:
+        def _estimate_dataset_mismatches(dataloader: DataLoader) -> Dict[str, int]:
+            mismatch_count_map = {}
+            missing_3D_annotations = 0
+            for data in tqdm(dataloader, desc="Estimating mismatched annotations"):
+                video_id = data['video_id']
+                video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
+                video_id_3d_bbox_predictions = self.get_video_3d_annotations(video_id)
+
+                if video_id_3d_bbox_predictions is None:
+                    missing_3D_annotations += 1
+                    continue
+
+                mismatched_count = self.check_2d_3d_annotation_consistency(
+                    video_id,
+                    video_id_gt_annotations,
+                    video_id_3d_bbox_predictions
+                )
+                mismatch_count_map[mismatched_count] = mismatch_count_map.get(mismatched_count, 0) + 1
+            return mismatch_count_map, missing_3D_annotations
+
+        print("Estimating mismatched annotations in training dataset...")
+        train_mismatch_count_map, train_missing_3D = _estimate_dataset_mismatches(train_dataloader)
+
+        print("Estimating mismatched annotations in testing dataset...")
+        test_mismatch_count_map, test_missing_3D = _estimate_dataset_mismatches(test_dataloader)
+
+        # Create plots to display a histogram of mismatched counts
+        import matplotlib.pyplot as plt
+        def plot_mismatch_histogram(mismatch_count_map: Dict[int, int], title: str, output_path: str) -> None:
+            counts = list(mismatch_count_map.keys())
+            frequencies = [mismatch_count_map[k] for k in counts]
+            plt.figure(figsize=(10, 6))
+            plt.bar(counts, frequencies, width=0.8, color='skyblue', edgecolor='black')
+            plt.xlabel('Number of Mismatched Frames')
+            plt.ylabel('Number of Videos')
+            plt.title(title)
+            plt.xticks(counts)
+            plt.grid(axis='y')
+            plt.savefig(output_path)
+            plt.close()
+
+        plot_mismatch_histogram(
+            train_mismatch_count_map,
+            "Training Dataset Mismatched Annotations",
+            self.world_annotations_root_dir / "train_mismatched_annotations_histogram.png"
+        )
+        plot_mismatch_histogram(
+            test_mismatch_count_map,
+            "Testing Dataset Mismatched Annotations",
+            self.world_annotations_root_dir / "test_mismatched_annotations_histogram.png"
+        )
+
     def generate_sample_gt_world_4D_annotations(self, video_id: str) -> None:
         video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
         video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
@@ -593,7 +670,21 @@ def main_sample():
     video_id = "0DJ6R.mp4"
     frame_to_world_generator.generate_sample_gt_world_4D_annotations(video_id=video_id)
 
+def main_estimate_mismatches():
+    args = parse_args()
+
+    frame_to_world_generator = FrameToWorldAnnotations(
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
+        ag_root_directory=args.ag_root_directory,
+    )
+    train_dataset, test_dataset, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
+    frame_to_world_generator.estimate_mismatched_annotations(
+        train_dataloader=dataloader_train,
+        test_dataloader=dataloader_test
+    )
+
 
 if __name__ == "__main__":
     # main()
-    main_sample()
+    # main_sample()
+    main_estimate_mismatches()

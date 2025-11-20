@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-import rerun as rr
+# import rerun as rr
 import torch
 from scipy.spatial.transform import Rotation as SciRot
 
