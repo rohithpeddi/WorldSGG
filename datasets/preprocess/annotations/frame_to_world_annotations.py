@@ -188,48 +188,333 @@ class FrameToWorldAnnotations:
         if not out_path.exists():
             raise FileNotFoundError(f"3D bbox annotations file not found: {out_path}")
 
-        # Load 3D bbox annotations
         with open(out_path, "rb") as f:
             video_3d_annotations = pickle.load(f)
         return video_3d_annotations
-
-    def get_video_dynamic_predictions(self, video_id: str):
-        video_dynamic_gdino_prediction_file_path = self.dynamic_scene_dir_path / f"{video_id}_10" / "predictions.npz"
-        video_dynamic_predictions = _npz_open(video_dynamic_gdino_prediction_file_path)
-        return video_dynamic_predictions
 
     def generate_video_bb_annotations(
             self,
             video_id: str,
             video_id_gt_annotations: Dict,
             video_id_gdino_annotations: Dict,
-            video_id_3d_annotations: Optional[Dict] = None,
-            video_id_dynamic_predictions: Optional[Dict] = None,
+            video_id_3d_bbox_predictions: Dict,
             visualize: bool = False
     ) -> None:
-        print(f"[{video_id}] Generating world SGG annotations for")
+        """
+        Video_id_3D_bbox_predictions: {
+            "video_id": video_id,
+            "frames": out_frames,
+            "per_frame_sims": per_frame_sims,
+            "global_floor_sim": {
+                "s": float(s_avg),
+                "R": R_avg,
+                "t": t_avg,
+            },
+            "primary_track_id_0": primary_track_id_0,
+            "frame_bbox_meshes": frame_bbox_meshes,
+            "gv": gv,
+            "gf": gf,
+            "gc": gc
+        }
+        """
 
-        # 1. Combine GT frame-wise 2D annotations with GT 3D bbox annotations
+        print(f"[{video_id}] Generating world SGG annotations")
 
-        # 2. Check for the change in camera_poses and judge if there is any camera motion or not.
-        # If there is no camera motion, then object changes are most likely due to dynamic objects or occlusions or missing objects.
-        # Determine a strategy to filter out each such case.
+        # Load 3D points for the video from dynamic scene predictions
+        try:
+            P = self._load_points_for_video(video_id)
+            points_S = P["points"]  # (S,H,W,3)
+            conf_S = P["conf"]  # (S,H,W) or None
+            stems_S = P["frame_stems"]  # list of frame stems
+            colors = P["colors"]  # (S,H,W,3)
+            camera_poses = P["camera_poses"]  # (S,4,4)
+            S, H, W, _ = points_S.shape
+        except Exception as e:
+            print(f"[{video_id}] Failed to load 3D points: {e}")
+            return
 
-        # 3. Begin the process of creating the 4D world annotations.
-        # a. Identify all the unique objects in the video based on some tracking id.
-        # b. If an object does not appear in a frame, we add the bounding box corresponding to the last seen frame or the next seen frame.
-        # This ensures that each object has a bounding box in every frame of the video.
-        # c. Save the world scene graph annotations in a pkl file.
+        stem_to_idx = {stems_S[i]: i for i in range(S)}
 
-        pass
+        # Create label-wise masks map for segmentation
+        video_to_frame_to_label_mask, all_static_labels, all_dynamic_labels = self._create_label_wise_masks_map(
+            video_id=video_id,
+            gt_annotations=video_id_gt_annotations
+        )
+
+        # Output structure for storing frame annotations
+        out_frames: Dict[str, Dict[str, Any]] = {}
+
+        # Save to disk
+        out_path = self.bbox_4d_root_dir / f"{video_id[:-4]}.pkl"
+        with open(out_path, "wb") as f:
+            pickle.dump({
+                "video_id": video_id,
+                "frames": out_frames
+            }, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        print(f"[{video_id}] Saved 4D world annotations to {out_path}")
+
+    def _load_points_for_video(self, video_id: str) -> Dict[str, Any]:
+        """Load 3D points from dynamic scene predictions."""
+        video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
+        video_dynamic_predictions = _npz_open(video_dynamic_3d_scene_path)
+
+        points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
+        imgs_f32 = video_dynamic_predictions["images"]
+        camera_poses = video_dynamic_predictions["camera_poses"]
+        colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
+
+        conf = None
+        if "conf" in video_dynamic_predictions:
+            conf = video_dynamic_predictions["conf"]
+            if conf.ndim == 4 and conf.shape[-1] == 1:
+                conf = conf[..., 0]
+
+        S, H, W, _ = points.shape
+
+        # Get frame mapping
+        video_frames_annotated_dir_path = self.frame_annotated_dir_path / video_id
+        annotated_frame_id_list = [f for f in os.listdir(video_frames_annotated_dir_path) if f.endswith('.png')]
+        annotated_frame_id_list.sort(key=lambda x: int(x[:-4]))
+        annotated_first_frame_id = int(annotated_frame_id_list[0][:-4])
+        annotated_last_frame_id = int(annotated_frame_id_list[-1][:-4])
+
+        video_sampled_frames_npy_path = self.sampled_frames_idx_root_dir / f"{video_id[:-4]}.npy"
+        video_sampled_frame_id_list = np.load(video_sampled_frames_npy_path).tolist()
+
+        an_first_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_first_frame_id)
+        an_last_id_in_vid_sam_frame_id_list = video_sampled_frame_id_list.index(annotated_last_frame_id)
+        sample_idx = list(range(an_first_id_in_vid_sam_frame_id_list, an_last_id_in_vid_sam_frame_id_list + 1))
+
+        assert S == len(sample_idx)
+
+        sampled_idx_frame_name_map = {}
+        frame_name_sampled_idx_map = {}
+        for idx_in_s, frame_idx in enumerate(sample_idx):
+            frame_name = f"{video_sampled_frame_id_list[frame_idx]:06d}.png"
+            sampled_idx_frame_name_map[idx_in_s] = frame_name
+            frame_name_sampled_idx_map[frame_name] = idx_in_s
+
+        annotated_idx_in_sampled_idx = []
+        for frame_name in annotated_frame_id_list:
+            if frame_name in frame_name_sampled_idx_map:
+                annotated_idx_in_sampled_idx.append(frame_name_sampled_idx_map[frame_name])
+
+        points_sub = points[annotated_idx_in_sampled_idx]
+        conf_sub = conf[annotated_idx_in_sampled_idx] if conf is not None else None
+        stems_sub = [sampled_idx_frame_name_map[idx][:-4] for idx in annotated_idx_in_sampled_idx]
+        colors_sub = colors[annotated_idx_in_sampled_idx]
+        camera_poses_sub = camera_poses[annotated_idx_in_sampled_idx]
+
+        return {
+            "points": points_sub,
+            "conf": conf_sub,
+            "frame_stems": stems_sub,
+            "colors": colors_sub,
+            "camera_poses": camera_poses_sub
+        }
+
+    def _create_label_wise_masks_map(
+            self,
+            video_id: str,
+            gt_annotations
+    ) -> Tuple[Dict[str, Dict[str, Dict[str, np.ndarray]]], set, set]:
+        """Create label-wise masks for the video."""
+        video_to_frame_to_label_mask: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
+
+        frame_stems = []
+        for frame_items in gt_annotations:
+            frame_name = frame_items[0]["frame"].split("/")[-1]
+            stem = Path(frame_name).stem
+            frame_stems.append(stem)
+
+        frame_map: Dict[str, Dict[str, np.ndarray]] = {}
+        frame_map, all_static_labels = self._update_frame_map(
+            frame_stems=frame_stems,
+            video_id=video_id,
+            frame_map=frame_map,
+            is_static=True
+        )
+        frame_map, all_dynamic_labels = self._update_frame_map(
+            frame_stems=frame_stems,
+            video_id=video_id,
+            frame_map=frame_map,
+            is_static=False
+        )
+
+        if frame_map:
+            video_to_frame_to_label_mask[video_id] = frame_map
+
+        return video_to_frame_to_label_mask, all_static_labels, all_dynamic_labels
+
+    def _update_frame_map(
+            self,
+            frame_stems: List[str],
+            video_id: str,
+            frame_map: Dict[str, Dict[str, np.ndarray]],
+            is_static: bool
+    ) -> Tuple[Dict[str, Dict[str, np.ndarray]], set]:
+        """Update frame map with masks from image-based and video-based segmentation."""
+        all_labels = set()
+        for stem in frame_stems:
+            lbls = self._labels_for_frame(video_id, stem, is_static)
+            if not lbls:
+                continue
+            all_labels.update(lbls)
+            if stem not in frame_map:
+                frame_map[stem] = {}
+            for lbl in lbls:
+                m = self._get_union_mask(video_id, stem, lbl, is_static)
+                if m is not None:
+                    frame_map[stem][lbl] = m
+        return frame_map, all_labels
+
+    def _labels_for_frame(self, video_id: str, stem: str, is_static: bool) -> List[str]:
+        """Get labels for a specific frame from mask files."""
+        lbls = set()
+        if is_static:
+            image_root_dir_list = [self.static_masks_im_dir_path, self.static_masks_vid_dir_path]
+        else:
+            image_root_dir_list = [self.dynamic_masks_im_dir_path, self.dynamic_masks_vid_dir_path]
+
+        for root in image_root_dir_list:
+            vdir = root / video_id
+            if not vdir.exists():
+                continue
+            for fn in os.listdir(vdir):
+                if not fn.endswith(".png"):
+                    continue
+                if "__" in fn:
+                    st, lbl = fn.split("__", 1)
+                    lbl = lbl.rsplit(".png", 1)[0]
+                    if st == stem:
+                        lbls.add(lbl)
+        return sorted(lbls)
+
+    def _get_union_mask(self, video_id: str, stem: str, label: str, is_static: bool) -> Optional[np.ndarray]:
+        """Get union of image-based and video-based masks for a label."""
+        if is_static:
+            im_p = self.static_masks_im_dir_path / video_id / f"{stem}__{label}.png"
+            vd_p = self.static_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
+        else:
+            im_p = self.dynamic_masks_im_dir_path / video_id / f"{stem}__{label}.png"
+            vd_p = self.dynamic_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
+
+        m_im = cv2.imread(str(im_p), cv2.IMREAD_GRAYSCALE) if im_p.exists() else None
+        m_vd = cv2.imread(str(vd_p), cv2.IMREAD_GRAYSCALE) if vd_p.exists() else None
+
+        if m_im is None and m_vd is None:
+            return None
+        if m_im is None:
+            m = (m_vd > 127)
+        elif m_vd is None:
+            m = (m_im > 127)
+        else:
+            m = (m_im > 127) | (m_vd > 127)
+        return m.astype(bool)
+
+    def _match_gdino_to_gt(
+            self,
+            gt_label: str,
+            gt_xyxy: List[float],
+            gd_boxes: List[List[float]],
+            gd_labels: List[str],
+            gd_scores: List[float],
+            iou_thr: float = 0.3,
+    ) -> List[float]:
+        """Match GDINO detections to GT boxes using IoU."""
+        candidates = [
+            (b, s) for b, l, s in zip(gd_boxes, gd_labels, gd_scores)
+            if (l == gt_label)
+        ]
+        if not candidates:
+            return gt_xyxy
+
+        # Keep boxes with IoU >= iou_thr (or top-1 if none pass)
+        passing = [b for (b, s) in candidates if self._iou_xyxy(b, gt_xyxy) >= iou_thr]
+        if passing:
+            box = self._union_boxes_xyxy(passing)
+            return box if box is not None else gt_xyxy
+
+        # No IoU pass -> pick highest-score of same label
+        best = max(candidates, key=lambda t: t[1])[0]
+        return best
+
+    @staticmethod
+    def _xywh_to_xyxy(b):
+        """Convert [x,y,w,h] to [x1,y1,x2,y2]."""
+        x, y, w, h = [float(v) for v in b]
+        return [x, y, x + w, y + h]
+
+    @staticmethod
+    def _area_xyxy(b):
+        """Calculate area of a bounding box in xyxy format."""
+        x1, y1, x2, y2 = b
+        return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+    @staticmethod
+    def _iou_xyxy(a, b) -> float:
+        """Calculate IoU between two boxes in xyxy format."""
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        ua = FrameToWorldAnnotations._area_xyxy(a) + FrameToWorldAnnotations._area_xyxy(b) - inter
+        return inter / max(ua, 1e-8)
+
+    @staticmethod
+    def _union_boxes_xyxy(boxes: List[List[float]]) -> Optional[List[float]]:
+        """Compute union of multiple boxes."""
+        if not boxes:
+            return None
+        x1 = min(b[0] for b in boxes)
+        y1 = min(b[1] for b in boxes)
+        x2 = max(b[2] for b in boxes)
+        y2 = max(b[3] for b in boxes)
+        return [x1, y1, x2, y2]
+
+    @staticmethod
+    def _mask_from_bbox(h: int, w: int, xyxy: List[float]) -> np.ndarray:
+        """Create a binary mask from a bounding box."""
+        m = np.zeros((h, w), dtype=bool)
+        x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
+        x1, y1 = max(x1, 0), max(y1, 0)
+        x2, y2 = min(x2, w), min(y2, h)
+        if x2 > x1 and y2 > y1:
+            m[y1:y2, x1:x2] = True
+        return m
+
+    @staticmethod
+    def _resize_mask_to(mask: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
+        """Resize a mask to target dimensions."""
+        th, tw = target_hw
+        if mask.shape == (th, tw):
+            return mask.astype(bool)
+        return cv2.resize(mask.astype(np.uint8), (tw, th), interpolation=cv2.INTER_NEAREST).astype(bool)
+
+    @staticmethod
+    def _finite_and_nonzero(pts: np.ndarray) -> np.ndarray:
+        """Identify finite and non-zero points."""
+        good = np.isfinite(pts).all(axis=-1)
+        if pts.ndim == 2:  # (N,3)
+            nz = np.linalg.norm(pts, axis=-1) > 1e-12
+        else:  # (H,W,3)
+            nz = np.linalg.norm(pts, axis=-1) > 1e-12
+        return good & nz
 
     def generate_sample_gt_world_4D_annotations(self, video_id: str) -> None:
         video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
         video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
+        video_id_3d_bbox_predictions = self.get_video_3d_annotations(video_id)
         self.generate_video_bb_annotations(
             video_id,
             video_id_gt_annotations,
             video_id_gdino_annotations,
+            video_id_3d_bbox_predictions,
             visualize=True
         )
 
