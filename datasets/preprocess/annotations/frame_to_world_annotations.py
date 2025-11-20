@@ -30,6 +30,11 @@ sys.path.insert(0, os.path.dirname(__file__) + '/..')
 from dataloader.standard.action_genome.ag_dataset import StandardAG
 from dataloader.base_ag_dataset import BaseAG
 
+from annotation_utils import get_video_belongs_to_split, _load_pkl_if_exists, _npz_open, _torch_inference_ctx, \
+    _del_and_collect, _lift_2d_to_3d, _find_actor_index_in_frame, _choose_primary_actor, _build_frame_to_kps_map, \
+    _robust_similarity_ransac, _faces_u32, _resize_mask_to, _mask_from_bbox, _resize_bbox_to, _xywh_to_xyxy, \
+    _average_sims_robust, _finite_and_nonzero, _pinhole_from_fov, _is_empty_array
+
 
 class FrameToWorldAnnotations:
 
@@ -39,6 +44,7 @@ class FrameToWorldAnnotations:
             dynamic_scene_dir_path,
     ):
         self.ag_root_directory = ag_root_directory
+        self.dynamic_scene_dir_path = dynamic_scene_dir_path
         self.dataset_classnames = [
             '__background__', 'person', 'bag', 'bed', 'blanket', 'book', 'box', 'broom', 'chair',
             'closet/cabinet', 'clothes', 'cup/glass/bottle', 'dish', 'door', 'doorknob', 'doorway',
@@ -60,6 +66,9 @@ class FrameToWorldAnnotations:
 
         self.world_annotations_root_dir = self.ag_root_directory / "world_annotations"
         self.bbox_3d_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d"
+        self.bbox_4d_root_dir = self.world_annotations_root_dir / "bbox_annotations_4d"
+        os.makedirs(self.bbox_4d_root_dir, exist_ok=True)
+
         self.gt_annotations_root_dir = self.ag_root_directory / "gt_annotations"
 
         self.dynamic_masked_frames_im_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'image_based'
@@ -75,10 +84,120 @@ class FrameToWorldAnnotations:
         self.static_masks_vid_dir_path = self.ag_root_directory / "segmentation_static" / 'masks' / 'video_based'
         self.static_masks_combined_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "combined"
 
-        os.makedirs(self.bbox_3d_root_dir, exist_ok=True)
+    def get_video_gt_annotations(self, video_id):
+        video_gt_annotations_json_path = self.gt_annotations_root_dir / video_id / "gt_annotations.json"
+        if not video_gt_annotations_json_path.exists():
+            raise FileNotFoundError(f"GT annotations file not found: {video_gt_annotations_json_path}")
+
+        with open(video_gt_annotations_json_path, "r") as f:
+            video_gt_annotations = json.load(f)
+
+        video_gt_bboxes = {}
+        for frame_idx, frame_items in enumerate(video_gt_annotations):
+            frame_name = frame_items[0]["frame"].split("/")[-1]
+            boxes = []
+            labels = []
+            for item in frame_items:
+                if 'person_bbox' in item:
+                    boxes.append(item['person_bbox'][0])
+                    labels.append('person')
+                    continue
+                category_id = item['class']
+                category_name = self.catid_to_name_map[category_id]
+                if category_name:
+                    if category_name == "closet/cabinet":
+                        category_name = "closet"
+                    elif category_name == "cup/glass/bottle":
+                        category_name = "cup"
+                    elif category_name == "paper/notebook":
+                        category_name = "paper"
+                    elif category_name == "sofa/couch":
+                        category_name = "sofa"
+                    elif category_name == "phone/camera":
+                        category_name = "phone"
+                    boxes.append(item['bbox'])
+                    labels.append(category_name)
+            if boxes:
+                video_gt_bboxes[frame_name] = {
+                    'boxes': boxes,
+                    'labels': labels
+                }
+
+        return video_gt_bboxes, video_gt_annotations
+
+    def get_video_gdino_annotations(self, video_id):
+        video_dynamic_gdino_prediction_file_path = self.dynamic_detections_root_path / f"{video_id}.pkl"
+        video_dynamic_predictions = _load_pkl_if_exists(video_dynamic_gdino_prediction_file_path)
+
+        video_static_gdino_prediction_file_path = self.static_detections_root_path / f"{video_id}.pkl"
+        video_static_predictions = _load_pkl_if_exists(video_static_gdino_prediction_file_path)
+
+        if video_dynamic_predictions is None:
+            video_dynamic_predictions = {}
+        if video_static_predictions is None:
+            video_static_predictions = {}
+
+        if not video_dynamic_predictions and not video_static_predictions:
+            raise ValueError(
+                f"No GDINO predictions found for video {video_id}"
+            )
+
+        all_frame_names = set(video_dynamic_predictions.keys()) | set(video_static_predictions.keys())
+        combined_gdino_predictions = {}
+        for frame_name in all_frame_names:
+            dyn_pred = video_dynamic_predictions.get(frame_name, None)
+            stat_pred = video_static_predictions.get(frame_name, None)
+            if dyn_pred is None:
+                dyn_pred = {"boxes": [], "labels": [], "scores": []}
+            if stat_pred is None:
+                stat_pred = {"boxes": [], "labels": [], "scores": []}
+
+            if _is_empty_array(dyn_pred["boxes"]) and _is_empty_array(stat_pred["boxes"]):
+                combined_gdino_predictions[frame_name] = {
+                    "boxes": [],
+                    "labels": [],
+                    "scores": [],
+                }
+                continue
+
+            combined_boxes = []
+            combined_labels = []
+            combined_scores = []
+
+            if not _is_empty_array(dyn_pred["boxes"]):
+                combined_boxes += list(dyn_pred["boxes"])
+                combined_labels += list(dyn_pred["labels"])
+                combined_scores += list(dyn_pred["scores"])
+
+            if not _is_empty_array(stat_pred["boxes"]):
+                combined_boxes += list(stat_pred["boxes"])
+                combined_labels += list(stat_pred["labels"])
+                combined_scores += list(stat_pred["scores"])
+
+            final_pred = {
+                "boxes": combined_boxes,
+                "labels": combined_labels,
+                "scores": combined_scores,
+            }
+
+            combined_gdino_predictions[frame_name] = final_pred
+        return combined_gdino_predictions
+
+
+
+    def generate_sample_gt_world_4D_annotations(self, video_id: str) -> None:
+        video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
+        video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
+        self.generate_video_bb_annotations(
+            video_id,
+            video_id_gt_annotations,
+            video_id_gdino_annotations,
+            visualize=True
+        )
 
 
 def load_dataset(ag_root_directory: str):
+
     train_dataset = StandardAG(
         phase="train",
         mode="sgdet",
@@ -128,6 +247,7 @@ def parse_args():
                         help="use dense correspondences for human aligner")
     return parser.parse_args()
 
+
 def main():
     args = parse_args()
 
@@ -148,18 +268,9 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
     )
     video_id = "0DJ6R.mp4"
-    frame_to_world_generator.generate_sample_gt_world_bb_annotations(video_id=video_id)
+    frame_to_world_generator.generate_sample_gt_world_4D_annotations(video_id=video_id)
 
 
-def main():
-    ag_root_directory = "/data/rohith/ag/"
-    dataset = BaseAG(
-        phase="test",
-        mode="sgdet",
-        datasize="large",
-        data_path=ag_root_directory,
-        filter_nonperson_box_frame=True,
-        filter_small_box=False,
-        enable_coco_gt=True,
-    )
-    print(f"Dataset loaded with {len(dataset)} videos")
+if __name__ == "__main__":
+    # main()
+    main_sample()
