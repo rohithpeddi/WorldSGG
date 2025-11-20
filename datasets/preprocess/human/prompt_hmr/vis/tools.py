@@ -179,6 +179,10 @@ def checkerboard_geometry(
     faces = []
     face_colors = []
     print(f"Generating checkerboard with {num_rows} rows and {num_cols} cols")
+
+    if num_cols > 10000 or num_rows > 10000:
+        raise ValueError("Too many tiles requested in checkerboard_geometry.")
+
     time_start = cv2.getTickCount()
     for i in range(num_rows):
         it_time_start = cv2.getTickCount()
