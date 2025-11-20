@@ -2180,7 +2180,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-
     bbox_3d_generator = BBox3DGenerator(
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
         ag_root_directory=args.ag_root_directory,
