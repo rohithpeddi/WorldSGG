@@ -1,11 +1,8 @@
-import argparse
 import contextlib
 import gc
-import json
 import os
 import pickle
 import sys
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -14,27 +11,8 @@ import numpy as np
 import rerun as rr
 import torch
 from scipy.spatial.transform import Rotation as SciRot
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(__file__) + '/..')
-
-# from AG / human pipeline codebase
-from dataloader.standard.action_genome.ag_dataset import StandardAG
-
-from datasets.preprocess.human.pipeline.ag_pipeline import AgPipeline
-from datasets.preprocess.human.data_config import SMPLX_PATH
-from datasets.preprocess.human.prompt_hmr.smpl_family import SMPLX as SMPLX_Layer
-from datasets.preprocess.human.prompt_hmr.utils.rotation_conversions import axis_angle_to_matrix
-from datasets.preprocess.human.prompt_hmr.vis.traj import (
-    get_floor_mesh,
-)
-from datasets.preprocess.human.pipeline.kp_utils import (
-    get_openpose_joint_names,
-    get_smpl_joint_names,
-)
-
-
 
 # =====================================================================
 # COMMON HELPERS

@@ -183,7 +183,31 @@ class FrameToWorldAnnotations:
             combined_gdino_predictions[frame_name] = final_pred
         return combined_gdino_predictions
 
+    def get_video_3d_annotations(self, video_id: str):
+        out_path = self.bbox_3d_root_dir / f"{video_id[:-4]}.pkl"
+        if not out_path.exists():
+            raise FileNotFoundError(f"3D bbox annotations file not found: {out_path}")
 
+        # Load 3D bbox annotations
+        with open(out_path, "rb") as f:
+            video_3d_annotations = pickle.load(f)
+        return video_3d_annotations
+
+    def get_video_dynamic_predictions(self, video_id: str):
+        video_dynamic_gdino_prediction_file_path = self.dynamic_scene_dir_path / f"{video_id}_10" / "predictions.npz"
+        video_dynamic_predictions = _npz_open(video_dynamic_gdino_prediction_file_path)
+        return video_dynamic_predictions
+
+    def generate_video_bb_annotations(
+            self,
+            video_id: str,
+            video_id_gt_annotations: Dict,
+            video_id_gdino_annotations: Dict,
+            video_id_3d_annotations: Optional[Dict] = None,
+            video_id_dynamic_predictions: Optional[Dict] = None,
+            visualize: bool = False
+    ) -> None:
+        pass
 
     def generate_sample_gt_world_4D_annotations(self, video_id: str) -> None:
         video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
