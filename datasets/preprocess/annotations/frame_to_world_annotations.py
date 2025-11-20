@@ -207,6 +207,20 @@ class FrameToWorldAnnotations:
             video_id_dynamic_predictions: Optional[Dict] = None,
             visualize: bool = False
     ) -> None:
+        print(f"[{video_id}] Generating world SGG annotations for")
+
+        # 1. Combine GT frame-wise 2D annotations with GT 3D bbox annotations
+
+        # 2. Check for the change in camera_poses and judge if there is any camera motion or not.
+        # If there is no camera motion, then object changes are most likely due to dynamic objects or occlusions or missing objects.
+        # Determine a strategy to filter out each such case.
+
+        # 3. Begin the process of creating the 4D world annotations.
+        # a. Identify all the unique objects in the video based on some tracking id.
+        # b. If an object does not appear in a frame, we add the bounding box corresponding to the last seen frame or the next seen frame.
+        # This ensures that each object has a bounding box in every frame of the video.
+        # c. Save the world scene graph annotations in a pkl file.
+
         pass
 
     def generate_sample_gt_world_4D_annotations(self, video_id: str) -> None:
