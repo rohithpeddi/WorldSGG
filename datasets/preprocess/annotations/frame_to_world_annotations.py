@@ -329,34 +329,32 @@ class FrameToWorldAnnotations:
         print(f"[{video_id}] Estimating camera motion...")
         return has_motion, avg_motion
 
+    def _count_videos_with_camera_motion(self, split, dataloader: DataLoader) -> int:
+        motion_count = 0
+        total_count = 0
+        avg_motion_list = []
+        for data in tqdm(dataloader, desc="Estimating camera motion"):
+            video_id = data['video_id']
+            if get_video_belongs_to_split(video_id) != split:
+                continue
+            video_dynamic_predictions = self._load_points_for_video(video_id)
+            if video_dynamic_predictions is None:
+                continue
+            has_motion, avg_motion = self.estimate_camera_motion_for_video(video_id, video_dynamic_predictions)
+            if has_motion:
+                motion_count += 1
+            total_count += 1
+            avg_motion_list.append(avg_motion)
+
+        motion_buckets = self.construct_avg_motion_buckets(avg_motion_list)
+        return motion_count, total_count, motion_buckets
+
     def estimate_camera_motion_in_dataset(self, train_dataloader, test_dataloader) -> Tuple[int, int]:
-        def _count_videos_with_camera_motion(dataloader: DataLoader) -> int:
-            motion_count = 0
-            total_count = 0
-            avg_motion_list = []
-            for data in tqdm(dataloader, desc="Estimating camera motion"):
-                video_id = data['video_id']
-                video_dynamic_predictions = self._load_points_for_video(video_id)
-                if video_dynamic_predictions is None:
-                    continue
-                has_motion, avg_motion = self.estimate_camera_motion_for_video(video_id, video_dynamic_predictions)
-                if has_motion:
-                    motion_count += 1
-                total_count += 1
-                avg_motion_list.append(avg_motion)
-
-            motion_buckets = self.construct_avg_motion_buckets(avg_motion_list)
-            return motion_count, total_count, motion_buckets
-
         print("Estimating camera motion in training dataset...")
-        train_motion_count, train_video_count, train_motion_buckets = _count_videos_with_camera_motion(
-            train_dataloader
-        )
+        train_motion_count, train_video_count, train_motion_buckets = self._count_videos_with_camera_motion(train_dataloader)
 
         print("Estimating camera motion in testing dataset...")
-        test_motion_count, test_video_count, test_motion_buckets = _count_videos_with_camera_motion(
-            test_dataloader
-        )
+        test_motion_count, test_video_count, test_motion_buckets = self._count_videos_with_camera_motion(test_dataloader)
 
         print(f"Training dataset: {train_motion_count}/{train_video_count} videos with camera motion.")
         print(f"Testing dataset: {test_motion_count}/{test_video_count} videos with camera motion.")
