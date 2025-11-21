@@ -192,6 +192,192 @@ class FrameToWorldAnnotations:
             video_3d_annotations = pickle.load(f)
         return video_3d_annotations
 
+    def get_video_dynamic_predictions(self, video_id: str):
+        video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
+        if not video_dynamic_3d_scene_path.exists():
+            return None
+
+        video_dynamic_predictions = _npz_open(video_dynamic_3d_scene_path)
+        return video_dynamic_predictions
+
+    # -----------------------------------------------------------------------------------------------------
+    # -------------------------------------------- DATA CHECKS --------------------------------------------
+    # -----------------------------------------------------------------------------------------------------
+
+    def check_2d_3d_annotation_consistency(self, video_id: str,
+                                           video_id_gt_annotations: Dict, video_id_3d_bbox_predictions: Dict
+    ) -> int:
+        # First check the total number of frames in both gt_2D annotations and the gt_3D annotations
+        gt_2d_frames = set()
+        for frame_items in video_id_gt_annotations:
+            frame_name = frame_items[0]["frame"].split("/")[-1]
+            gt_2d_frames.add(frame_name)
+
+        gt_3d_frames = set(video_id_3d_bbox_predictions["frames"].keys())
+        # Filter out the frames in 3D that have zero or invalid bboxes
+        valid_3d_frames = set()
+        for frame_name, frame_data in video_id_3d_bbox_predictions["frames"].items():
+            objects_3d = frame_data.get("objects", [])
+            if len(objects_3d) > 0:
+                valid_3d_frames.add(frame_name)
+        # Check the total number of mismatched instances.
+        mismatched_frames = gt_2d_frames.symmetric_difference(valid_3d_frames)
+        return len(mismatched_frames)
+
+    def estimate_mismatched_annotations(self, train_dataloader: DataLoader, test_dataloader: DataLoader) -> None:
+        def _estimate_dataset_mismatches(dataloader: DataLoader) -> Dict[str, int]:
+            mismatch_count_map = {}
+            missing_3D_annotations = 0
+            for data in tqdm(dataloader, desc="Estimating mismatched annotations"):
+                video_id = data['video_id']
+                video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
+                video_id_3d_bbox_predictions = self.get_video_3d_annotations(video_id)
+
+                if video_id_3d_bbox_predictions is None:
+                    missing_3D_annotations += 1
+                    continue
+
+                mismatched_count = self.check_2d_3d_annotation_consistency(
+                    video_id,
+                    video_id_gt_annotations,
+                    video_id_3d_bbox_predictions
+                )
+                mismatch_count_map[mismatched_count] = mismatch_count_map.get(mismatched_count, 0) + 1
+            return mismatch_count_map, missing_3D_annotations
+
+        print("Estimating mismatched annotations in training dataset...")
+        train_mismatch_count_map, train_missing_3D = _estimate_dataset_mismatches(train_dataloader)
+
+        print("Estimating mismatched annotations in testing dataset...")
+        test_mismatch_count_map, test_missing_3D = _estimate_dataset_mismatches(test_dataloader)
+
+        # Create plots to display a histogram of mismatched counts
+        import matplotlib.pyplot as plt
+        def plot_mismatch_histogram(mismatch_count_map: Dict[int, int], title: str, output_path: str) -> None:
+            counts = list(mismatch_count_map.keys())
+            frequencies = [mismatch_count_map[k] for k in counts]
+            plt.figure(figsize=(10, 6))
+            plt.bar(counts, frequencies, width=0.8, color='skyblue', edgecolor='black')
+            plt.xlabel('Number of Mismatched Frames')
+            plt.ylabel('Number of Videos')
+            plt.title(title)
+            plt.xticks(counts)
+            plt.grid(axis='y')
+            plt.savefig(output_path)
+            plt.close()
+
+        plot_mismatch_histogram(
+            train_mismatch_count_map,
+            "Training Dataset Mismatched Annotations",
+            self.world_annotations_root_dir / "train_mismatched_annotations_histogram.png"
+        )
+        plot_mismatch_histogram(
+            test_mismatch_count_map,
+            "Testing Dataset Mismatched Annotations",
+            self.world_annotations_root_dir / "test_mismatched_annotations_histogram.png"
+        )
+        print(f"Training dataset missing 3D annotations for {train_missing_3D} videos.")
+        print(f"Testing dataset missing 3D annotations for {test_missing_3D} videos.")
+
+    # -------------------- Camera Motion Estimation --------------------
+    # Check the number of videos in train and test datasets that have visible camera motion.
+    def construct_avg_motion_buckets(self, motion_magnitudes: List[float]) -> Dict[str, int]:
+        motion_buckets = {
+            "0.0-0.01": 0,
+            "0.01-0.05": 0,
+            "0.05-0.1": 0,
+            "0.1-0.5": 0,
+            "0.5+": 0
+        }
+        for motion in motion_magnitudes:
+            if motion < 0.01:
+                motion_buckets["0.0-0.01"] += 1
+            elif motion < 0.05:
+                motion_buckets["0.01-0.05"] += 1
+            elif motion < 0.1:
+                motion_buckets["0.05-0.1"] += 1
+            elif motion < 0.5:
+                motion_buckets["0.1-0.5"] += 1
+            else:
+                motion_buckets["0.5+"] += 1
+        return motion_buckets
+
+    def estimate_camera_motion_for_video(self, video_dynamic_predictions) -> bool:
+        video_camera_poses = video_dynamic_predictions["camera_poses"]
+        num_frames = len(video_camera_poses)
+        motion_magnitudes = []
+        for i in range(1, num_frames):
+            pose_prev = video_camera_poses[i - 1]
+            pose_curr = video_camera_poses[i]
+            translation_prev = pose_prev[:3, 3]
+            translation_curr = pose_curr[:3, 3]
+            translation_diff = np.linalg.norm(translation_curr - translation_prev)
+            motion_magnitudes.append(translation_diff)
+        avg_motion = np.mean(motion_magnitudes)
+
+        motion_threshold = 0.01  # Define a threshold for significant motion
+        has_motion = avg_motion > motion_threshold
+        return has_motion, avg_motion
+
+    def estimate_camera_motion_in_dataset(self, train_dataloader, test_dataloader) -> Tuple[int, int]:
+        def _count_videos_with_camera_motion(dataloader: DataLoader) -> int:
+            motion_count = 0
+            total_count = 0
+            avg_motion_list = []
+            for data in tqdm(dataloader, desc="Estimating camera motion"):
+                video_id = data['video_id']
+                video_dynamic_predictions = self._load_points_for_video(video_id)
+                if video_dynamic_predictions is None:
+                    continue
+                has_motion, avg_motion = self.estimate_camera_motion_for_video(video_dynamic_predictions)
+                if has_motion:
+                    motion_count += 1
+                total_count += 1
+                avg_motion_list.append(avg_motion)
+
+            motion_buckets = self.construct_avg_motion_buckets(avg_motion_list)
+            return motion_count, total_count, motion_buckets
+
+        print("Estimating camera motion in training dataset...")
+        train_motion_count, train_video_count, train_motion_buckets = _count_videos_with_camera_motion(train_dataloader)
+
+        print("Estimating camera motion in testing dataset...")
+        test_motion_count, test_video_count, test_motion_buckets = _count_videos_with_camera_motion(test_dataloader)
+
+        print(f"Training dataset: {train_motion_count}/{train_video_count} videos with camera motion.")
+        print(f"Testing dataset: {test_motion_count}/{test_video_count} videos with camera motion.")
+
+        # Plot the motion buckets
+        import matplotlib.pyplot as plt
+        def plot_motion_buckets(motion_buckets: Dict[str, int], title: str, output_path: str) -> None:
+            labels = list(motion_buckets.keys())
+            counts = [motion_buckets[label] for label in labels]
+            plt.figure(figsize=(10, 6))
+            plt.bar(labels, counts, width=0.6, color='lightgreen', edgecolor='black')
+            plt.xlabel('Average Camera Motion Magnitude Buckets')
+            plt.ylabel('Number of Videos')
+            plt.title(title)
+            plt.grid(axis='y')
+            plt.savefig(output_path)
+            plt.close()
+
+        plot_motion_buckets(
+            train_motion_buckets,
+            "Training Dataset Camera Motion Buckets",
+            self.world_annotations_root_dir / "train_camera_motion_buckets.png"
+        )
+        plot_motion_buckets(
+            test_motion_buckets,
+            "Testing Dataset Camera Motion Buckets",
+            self.world_annotations_root_dir / "test_camera_motion_buckets.png"
+        )
+
+        return train_motion_count, test_motion_count
+
+    # -----------------------------------------------------------------------------------------------------
+    # -------------------------------------------- DATA GENERATION --------------------------------------------
+    # -----------------------------------------------------------------------------------------------------
+
     def generate_video_bb_annotations(
             self,
             video_id: str,
@@ -314,275 +500,6 @@ class FrameToWorldAnnotations:
             "camera_poses": camera_poses_sub
         }
 
-    def _create_label_wise_masks_map(
-            self,
-            video_id: str,
-            gt_annotations
-    ) -> Tuple[Dict[str, Dict[str, Dict[str, np.ndarray]]], set, set]:
-        """Create label-wise masks for the video."""
-        video_to_frame_to_label_mask: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
-
-        frame_stems = []
-        for frame_items in gt_annotations:
-            frame_name = frame_items[0]["frame"].split("/")[-1]
-            stem = Path(frame_name).stem
-            frame_stems.append(stem)
-
-        frame_map: Dict[str, Dict[str, np.ndarray]] = {}
-        frame_map, all_static_labels = self._update_frame_map(
-            frame_stems=frame_stems,
-            video_id=video_id,
-            frame_map=frame_map,
-            is_static=True
-        )
-        frame_map, all_dynamic_labels = self._update_frame_map(
-            frame_stems=frame_stems,
-            video_id=video_id,
-            frame_map=frame_map,
-            is_static=False
-        )
-
-        if frame_map:
-            video_to_frame_to_label_mask[video_id] = frame_map
-
-        return video_to_frame_to_label_mask, all_static_labels, all_dynamic_labels
-
-    def _update_frame_map(
-            self,
-            frame_stems: List[str],
-            video_id: str,
-            frame_map: Dict[str, Dict[str, np.ndarray]],
-            is_static: bool
-    ) -> Tuple[Dict[str, Dict[str, np.ndarray]], set]:
-        """Update frame map with masks from image-based and video-based segmentation."""
-        all_labels = set()
-        for stem in frame_stems:
-            lbls = self._labels_for_frame(video_id, stem, is_static)
-            if not lbls:
-                continue
-            all_labels.update(lbls)
-            if stem not in frame_map:
-                frame_map[stem] = {}
-            for lbl in lbls:
-                m = self._get_union_mask(video_id, stem, lbl, is_static)
-                if m is not None:
-                    frame_map[stem][lbl] = m
-        return frame_map, all_labels
-
-    def _labels_for_frame(self, video_id: str, stem: str, is_static: bool) -> List[str]:
-        """Get labels for a specific frame from mask files."""
-        lbls = set()
-        if is_static:
-            image_root_dir_list = [self.static_masks_im_dir_path, self.static_masks_vid_dir_path]
-        else:
-            image_root_dir_list = [self.dynamic_masks_im_dir_path, self.dynamic_masks_vid_dir_path]
-
-        for root in image_root_dir_list:
-            vdir = root / video_id
-            if not vdir.exists():
-                continue
-            for fn in os.listdir(vdir):
-                if not fn.endswith(".png"):
-                    continue
-                if "__" in fn:
-                    st, lbl = fn.split("__", 1)
-                    lbl = lbl.rsplit(".png", 1)[0]
-                    if st == stem:
-                        lbls.add(lbl)
-        return sorted(lbls)
-
-    def _get_union_mask(self, video_id: str, stem: str, label: str, is_static: bool) -> Optional[np.ndarray]:
-        """Get union of image-based and video-based masks for a label."""
-        if is_static:
-            im_p = self.static_masks_im_dir_path / video_id / f"{stem}__{label}.png"
-            vd_p = self.static_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
-        else:
-            im_p = self.dynamic_masks_im_dir_path / video_id / f"{stem}__{label}.png"
-            vd_p = self.dynamic_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
-
-        m_im = cv2.imread(str(im_p), cv2.IMREAD_GRAYSCALE) if im_p.exists() else None
-        m_vd = cv2.imread(str(vd_p), cv2.IMREAD_GRAYSCALE) if vd_p.exists() else None
-
-        if m_im is None and m_vd is None:
-            return None
-        if m_im is None:
-            m = (m_vd > 127)
-        elif m_vd is None:
-            m = (m_im > 127)
-        else:
-            m = (m_im > 127) | (m_vd > 127)
-        return m.astype(bool)
-
-    def _match_gdino_to_gt(
-            self,
-            gt_label: str,
-            gt_xyxy: List[float],
-            gd_boxes: List[List[float]],
-            gd_labels: List[str],
-            gd_scores: List[float],
-            iou_thr: float = 0.3,
-    ) -> List[float]:
-        """Match GDINO detections to GT boxes using IoU."""
-        candidates = [
-            (b, s) for b, l, s in zip(gd_boxes, gd_labels, gd_scores)
-            if (l == gt_label)
-        ]
-        if not candidates:
-            return gt_xyxy
-
-        # Keep boxes with IoU >= iou_thr (or top-1 if none pass)
-        passing = [b for (b, s) in candidates if self._iou_xyxy(b, gt_xyxy) >= iou_thr]
-        if passing:
-            box = self._union_boxes_xyxy(passing)
-            return box if box is not None else gt_xyxy
-
-        # No IoU pass -> pick highest-score of same label
-        best = max(candidates, key=lambda t: t[1])[0]
-        return best
-
-    @staticmethod
-    def _xywh_to_xyxy(b):
-        """Convert [x,y,w,h] to [x1,y1,x2,y2]."""
-        x, y, w, h = [float(v) for v in b]
-        return [x, y, x + w, y + h]
-
-    @staticmethod
-    def _area_xyxy(b):
-        """Calculate area of a bounding box in xyxy format."""
-        x1, y1, x2, y2 = b
-        return max(0.0, x2 - x1) * max(0.0, y2 - y1)
-
-    @staticmethod
-    def _iou_xyxy(a, b) -> float:
-        """Calculate IoU between two boxes in xyxy format."""
-        ax1, ay1, ax2, ay2 = a
-        bx1, by1, bx2, by2 = b
-        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-        inter = iw * ih
-        if inter <= 0:
-            return 0.0
-        ua = FrameToWorldAnnotations._area_xyxy(a) + FrameToWorldAnnotations._area_xyxy(b) - inter
-        return inter / max(ua, 1e-8)
-
-    @staticmethod
-    def _union_boxes_xyxy(boxes: List[List[float]]) -> Optional[List[float]]:
-        """Compute union of multiple boxes."""
-        if not boxes:
-            return None
-        x1 = min(b[0] for b in boxes)
-        y1 = min(b[1] for b in boxes)
-        x2 = max(b[2] for b in boxes)
-        y2 = max(b[3] for b in boxes)
-        return [x1, y1, x2, y2]
-
-    @staticmethod
-    def _mask_from_bbox(h: int, w: int, xyxy: List[float]) -> np.ndarray:
-        """Create a binary mask from a bounding box."""
-        m = np.zeros((h, w), dtype=bool)
-        x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
-        x1, y1 = max(x1, 0), max(y1, 0)
-        x2, y2 = min(x2, w), min(y2, h)
-        if x2 > x1 and y2 > y1:
-            m[y1:y2, x1:x2] = True
-        return m
-
-    @staticmethod
-    def _resize_mask_to(mask: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
-        """Resize a mask to target dimensions."""
-        th, tw = target_hw
-        if mask.shape == (th, tw):
-            return mask.astype(bool)
-        return cv2.resize(mask.astype(np.uint8), (tw, th), interpolation=cv2.INTER_NEAREST).astype(bool)
-
-    @staticmethod
-    def _finite_and_nonzero(pts: np.ndarray) -> np.ndarray:
-        """Identify finite and non-zero points."""
-        good = np.isfinite(pts).all(axis=-1)
-        if pts.ndim == 2:  # (N,3)
-            nz = np.linalg.norm(pts, axis=-1) > 1e-12
-        else:  # (H,W,3)
-            nz = np.linalg.norm(pts, axis=-1) > 1e-12
-        return good & nz
-
-    def check_2d_3d_annotation_consistency(
-            self,
-            video_id: str,
-            video_id_gt_annotations: Dict,
-            video_id_3d_bbox_predictions: Dict
-    ) -> int:
-        # First check the total number of frames in both gt_2D annotations and the gt_3D annotations
-        gt_2d_frames = set()
-        for frame_items in video_id_gt_annotations:
-            frame_name = frame_items[0]["frame"].split("/")[-1]
-            gt_2d_frames.add(frame_name)
-
-        gt_3d_frames = set(video_id_3d_bbox_predictions["frames"].keys())
-        # Filter out the frames in 3D that have zero or invalid bboxes
-        valid_3d_frames = set()
-        for frame_name, frame_data in video_id_3d_bbox_predictions["frames"].items():
-            bboxes_3d = frame_data.get("bboxes_3d", [])
-            if bboxes_3d:
-                valid_3d_frames.add(frame_name)
-
-        # Check the total number of mismatched instances.
-        mismatched_frames = gt_2d_frames.symmetric_difference(valid_3d_frames)
-        return len(mismatched_frames)
-
-    def estimate_mismatched_annotations(self, train_dataloader: DataLoader, test_dataloader: DataLoader) -> None:
-        def _estimate_dataset_mismatches(dataloader: DataLoader) -> Dict[str, int]:
-            mismatch_count_map = {}
-            missing_3D_annotations = 0
-            for data in tqdm(dataloader, desc="Estimating mismatched annotations"):
-                video_id = data['video_id']
-                video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
-                video_id_3d_bbox_predictions = self.get_video_3d_annotations(video_id)
-
-                if video_id_3d_bbox_predictions is None:
-                    missing_3D_annotations += 1
-                    continue
-
-                mismatched_count = self.check_2d_3d_annotation_consistency(
-                    video_id,
-                    video_id_gt_annotations,
-                    video_id_3d_bbox_predictions
-                )
-                mismatch_count_map[mismatched_count] = mismatch_count_map.get(mismatched_count, 0) + 1
-            return mismatch_count_map, missing_3D_annotations
-
-        print("Estimating mismatched annotations in training dataset...")
-        train_mismatch_count_map, train_missing_3D = _estimate_dataset_mismatches(train_dataloader)
-
-        print("Estimating mismatched annotations in testing dataset...")
-        test_mismatch_count_map, test_missing_3D = _estimate_dataset_mismatches(test_dataloader)
-
-        # Create plots to display a histogram of mismatched counts
-        import matplotlib.pyplot as plt
-        def plot_mismatch_histogram(mismatch_count_map: Dict[int, int], title: str, output_path: str) -> None:
-            counts = list(mismatch_count_map.keys())
-            frequencies = [mismatch_count_map[k] for k in counts]
-            plt.figure(figsize=(10, 6))
-            plt.bar(counts, frequencies, width=0.8, color='skyblue', edgecolor='black')
-            plt.xlabel('Number of Mismatched Frames')
-            plt.ylabel('Number of Videos')
-            plt.title(title)
-            plt.xticks(counts)
-            plt.grid(axis='y')
-            plt.savefig(output_path)
-            plt.close()
-
-        plot_mismatch_histogram(
-            train_mismatch_count_map,
-            "Training Dataset Mismatched Annotations",
-            self.world_annotations_root_dir / "train_mismatched_annotations_histogram.png"
-        )
-        plot_mismatch_histogram(
-            test_mismatch_count_map,
-            "Testing Dataset Mismatched Annotations",
-            self.world_annotations_root_dir / "test_mismatched_annotations_histogram.png"
-        )
-
     def generate_sample_gt_world_4D_annotations(self, video_id: str) -> None:
         video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
         video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
@@ -683,8 +600,22 @@ def main_estimate_mismatches():
         test_dataloader=dataloader_test
     )
 
+def main_estimate_camera_motion():
+    args = parse_args()
+
+    frame_to_world_generator = FrameToWorldAnnotations(
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
+        ag_root_directory=args.ag_root_directory,
+    )
+    train_dataset, test_dataset, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
+    frame_to_world_generator.estimate_camera_motion_in_dataset(
+        train_dataloader=dataloader_train,
+        test_dataloader=dataloader_test
+    )
+
 
 if __name__ == "__main__":
     # main()
     # main_sample()
-    main_estimate_mismatches()
+    # main_estimate_mismatches()
+    main_estimate_camera_motion()
