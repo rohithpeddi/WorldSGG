@@ -34,6 +34,7 @@ from annotation_utils import get_video_belongs_to_split, _load_pkl_if_exists, _n
     _del_and_collect, _lift_2d_to_3d, _find_actor_index_in_frame, _choose_primary_actor, _build_frame_to_kps_map, \
     _robust_similarity_ransac, _faces_u32, _resize_mask_to, _mask_from_bbox, _resize_bbox_to, _xywh_to_xyxy, \
     _average_sims_robust, _finite_and_nonzero, _pinhole_from_fov, _is_empty_array
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class FrameToWorldAnnotations:
@@ -302,21 +303,30 @@ class FrameToWorldAnnotations:
                 motion_buckets["0.5+"] += 1
         return motion_buckets
 
-    def estimate_camera_motion_for_video(self, video_dynamic_predictions) -> bool:
+    def estimate_camera_motion_for_video(self, video_id, video_dynamic_predictions) -> Tuple[bool, float]:
         video_camera_poses = video_dynamic_predictions["camera_poses"]
-        num_frames = len(video_camera_poses)
-        motion_magnitudes = []
-        for i in range(1, num_frames):
-            pose_prev = video_camera_poses[i - 1]
-            pose_curr = video_camera_poses[i]
-            translation_prev = pose_prev[:3, 3]
-            translation_curr = pose_curr[:3, 3]
-            translation_diff = np.linalg.norm(translation_curr - translation_prev)
-            motion_magnitudes.append(translation_diff)
-        avg_motion = np.mean(motion_magnitudes)
 
-        motion_threshold = 0.01  # Define a threshold for significant motion
+        # Handle short sequences safely
+        num_frames = len(video_camera_poses)
+        if num_frames < 2:
+            return False, 0.0
+
+        # Vectorize over frames
+        poses = np.asarray(video_camera_poses, dtype=np.float32)  # (T, 4, 4)
+        translations = poses[:, :3, 3]                            # (T, 3)
+
+        # Differences between consecutive translations: (T-1, 3)
+        diffs = translations[1:] - translations[:-1]
+
+        # Per-frame translation magnitudes: (T-1,)
+        motion_magnitudes = np.linalg.norm(diffs, axis=-1)
+
+        # Average motion magnitude
+        avg_motion = float(motion_magnitudes.mean())
+
+        motion_threshold = 0.01  # threshold for significant motion
         has_motion = avg_motion > motion_threshold
+        print(f"[{video_id}] Estimating camera motion...")
         return has_motion, avg_motion
 
     def estimate_camera_motion_in_dataset(self, train_dataloader, test_dataloader) -> Tuple[int, int]:
@@ -329,7 +339,7 @@ class FrameToWorldAnnotations:
                 video_dynamic_predictions = self._load_points_for_video(video_id)
                 if video_dynamic_predictions is None:
                     continue
-                has_motion, avg_motion = self.estimate_camera_motion_for_video(video_dynamic_predictions)
+                has_motion, avg_motion = self.estimate_camera_motion_for_video(video_id, video_dynamic_predictions)
                 if has_motion:
                     motion_count += 1
                 total_count += 1
@@ -339,16 +349,21 @@ class FrameToWorldAnnotations:
             return motion_count, total_count, motion_buckets
 
         print("Estimating camera motion in training dataset...")
-        train_motion_count, train_video_count, train_motion_buckets = _count_videos_with_camera_motion(train_dataloader)
+        train_motion_count, train_video_count, train_motion_buckets = _count_videos_with_camera_motion(
+            train_dataloader
+        )
 
         print("Estimating camera motion in testing dataset...")
-        test_motion_count, test_video_count, test_motion_buckets = _count_videos_with_camera_motion(test_dataloader)
+        test_motion_count, test_video_count, test_motion_buckets = _count_videos_with_camera_motion(
+            test_dataloader
+        )
 
         print(f"Training dataset: {train_motion_count}/{train_video_count} videos with camera motion.")
         print(f"Testing dataset: {test_motion_count}/{test_video_count} videos with camera motion.")
 
         # Plot the motion buckets
         import matplotlib.pyplot as plt
+
         def plot_motion_buckets(motion_buckets: Dict[str, int], title: str, output_path: str) -> None:
             labels = list(motion_buckets.keys())
             counts = [motion_buckets[label] for label in labels]
@@ -443,7 +458,8 @@ class FrameToWorldAnnotations:
     def _load_points_for_video(self, video_id: str) -> Dict[str, Any]:
         """Load 3D points from dynamic scene predictions."""
         video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
-        video_dynamic_predictions = _npz_open(video_dynamic_3d_scene_path)
+        video_dynamic_predictions = np.load(video_dynamic_3d_scene_path, allow_pickle=True)
+        video_dynamic_predictions = {k: video_dynamic_predictions[k] for k in video_dynamic_predictions.files}
 
         points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
         imgs_f32 = video_dynamic_predictions["images"]
@@ -575,7 +591,6 @@ def main():
     train_dataset, test_dataset, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
     frame_to_world_generator.generate_gt_world_bb_annotations(dataloader=dataloader_train, split=args.split)
     frame_to_world_generator.generate_gt_world_bb_annotations(dataloader=dataloader_test, split=args.split)
-
 
 def main_sample():
     args = parse_args()
