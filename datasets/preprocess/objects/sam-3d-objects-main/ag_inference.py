@@ -78,6 +78,9 @@ class AgSam3DInference:
         self.bbox_3d_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d"
         os.makedirs(self.bbox_3d_root_dir, exist_ok=True)
 
+        self.sam3d_annotations_dir = self.world_annotations_root_dir / "sam3d_annotations"
+        os.makedirs(self.sam3d_annotations_dir, exist_ok=True)
+
         self.gt_annotations_root_dir = self.ag_root_directory / "gt_annotations"
 
         # segmentation dirs
@@ -319,12 +322,86 @@ class AgSam3DInference:
             "gif_path": video_frame_file_path,
         }
 
+    def get_all_labels_in_video(self, video_gt_annotations):
+        all_labels = set()
+        for frame_items in video_gt_annotations:
+            for item in frame_items:
+                category_id = item['class']
+                category_name = self.catid_to_name_map[category_id]
+                if category_name == "closet/cabinet":
+                    category_name = "closet"
+                elif category_name == "cup/glass/bottle":
+                    category_name = "cup"
+                elif category_name == "paper/notebook":
+                    category_name = "paper"
+                elif category_name == "sofa/couch":
+                    category_name = "sofa"
+                elif category_name == "phone/camera":
+                    category_name = "phone"
+                all_labels.add(category_name)
+        return all_labels
+
+    def select_frames_for_video(self, video_id, video_gt_annotations, video_to_frame_to_label_mask, all_labels):
+        # TODO:
+        # 1. We first construct a frame_id, label, bbox area_map
+        # 2. We select frames ranked such that - we minimize the number of frames while maximizing label coverage
+        # a. We pick frames with maximum labels present and in them rank them with maximum area coverage.
+        # b. We repeat until all labels are covered.
+        selected_frames = []
+
+        return selected_frames
+
     def process_video(self, video_id):
         video_gt_annotations = self.get_video_gt_annotations(video_id)[1]
         video_to_frame_to_label_mask, _, _ = self.create_label_wise_masks_map(
             video_id=video_id,
             gt_annotations=video_gt_annotations
         )
+
+        # 1. Frame selection logic
+        selected_frames = []
+        all_labels = self.get_all_labels_in_video(video_gt_annotations)
+        selected_frames = self.select_frames_for_video(
+            video_id,
+            video_gt_annotations,
+            video_to_frame_to_label_mask,
+            all_labels
+        )
+
+        # 2. Mask compilation per frame
+        frame_masks = {}
+        for frame_items in video_gt_annotations:
+            frame_name = frame_items[0]["frame"].split("/")[-1]
+            if frame_name not in selected_frames:
+                continue
+            stem = Path(frame_name).stem
+            if video_id not in video_to_frame_to_label_mask:
+                continue
+            if stem not in video_to_frame_to_label_mask[video_id]:
+                continue
+            label_to_mask_map = video_to_frame_to_label_mask[video_id][stem]
+            masks = []
+            for item in frame_items:
+                category_id = item['class']
+                category_name = self.catid_to_name_map[category_id]
+                if category_name == "closet/cabinet":
+                    category_name = "closet"
+                elif category_name == "cup/glass/bottle":
+                    category_name = "cup"
+                elif category_name == "paper/notebook":
+                    category_name = "paper"
+                elif category_name == "sofa/couch":
+                    category_name = "sofa"
+                elif category_name == "phone/camera":
+                    category_name = "phone"
+                if category_name in label_to_mask_map:
+                    masks.append(label_to_mask_map[category_name])
+            if masks:
+                frame_masks[frame_name] = masks
+
+        # 3. Processing the selected frames and saving outputs
+        video_output_dir = self.sam3d_annotations_dir / video_id / "sam3d_outputs"
+        os.makedirs(video_output_dir, exist_ok=True)
 
     def generate_sam3d_annotations(self, dataloader, split) -> None:
         for data in tqdm(dataloader):
@@ -417,5 +494,5 @@ def main_sample():
 
 
 if __name__ == "__main__":
-    # main_sample()
-    main()
+    main_sample()
+    # main()
