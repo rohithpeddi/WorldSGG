@@ -1,15 +1,44 @@
+import json
 import os
 import uuid
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
+import cv2
 import imageio
 import pickle
 
 import numpy as np
 from IPython.display import Image as ImageDisplay
+from tqdm import tqdm
 
 from notebook.inference import Inference, ready_gaussian_for_video_rendering, load_image, load_masks, display_image, make_scene, render_video, interactive_visualizer
+
+# =====================================================================
+# COMMON HELPERS
+# =====================================================================
+def get_video_belongs_to_split(video_id: str) -> Optional[str]:
+    stem = Path(video_id).stem
+    if not stem:
+        return None
+    first_letter = stem[0]
+    if first_letter.isdigit() and int(first_letter) < 5:
+        return "04"
+    elif first_letter.isdigit() and int(first_letter) >= 5:
+        return "59"
+    elif first_letter in "ABCD":
+        return "AD"
+    elif first_letter in "EFGH":
+        return "EH"
+    elif first_letter in "IJKL":
+        return "IL"
+    elif first_letter in "MNOP":
+        return "MP"
+    elif first_letter in "QRST":
+        return "QT"
+    elif first_letter in "UVWXYZ":
+        return "UZ"
+    return None
 
 
 class AgSam3DInference:
@@ -67,6 +96,137 @@ class AgSam3DInference:
         TAG = "hf"
         self.config_path = f"{PATH}/checkpoints/{TAG}/pipeline.yaml"
         self.inference = Inference(self.config_path, compile=False)
+
+    def get_video_gt_annotations(self, video_id):
+        video_gt_annotations_json_path = self.gt_annotations_root_dir / video_id / "gt_annotations.json"
+        if not video_gt_annotations_json_path.exists():
+            raise FileNotFoundError(f"GT annotations file not found: {video_gt_annotations_json_path}")
+
+        with open(video_gt_annotations_json_path, "r") as f:
+            video_gt_annotations = json.load(f)
+
+        video_gt_bboxes = {}
+        for frame_idx, frame_items in enumerate(video_gt_annotations):
+            frame_name = frame_items[0]["frame"].split("/")[-1]
+            boxes = []
+            labels = []
+            for item in frame_items:
+                if 'person_bbox' in item:
+                    boxes.append(item['person_bbox'][0])
+                    labels.append('person')
+                    continue
+                category_id = item['class']
+                category_name = self.catid_to_name_map[category_id]
+                if category_name:
+                    if category_name == "closet/cabinet":
+                        category_name = "closet"
+                    elif category_name == "cup/glass/bottle":
+                        category_name = "cup"
+                    elif category_name == "paper/notebook":
+                        category_name = "paper"
+                    elif category_name == "sofa/couch":
+                        category_name = "sofa"
+                    elif category_name == "phone/camera":
+                        category_name = "phone"
+                    boxes.append(item['bbox'])
+                    labels.append(category_name)
+            if boxes:
+                video_gt_bboxes[frame_name] = {
+                    'boxes': boxes,
+                    'labels': labels
+                }
+
+        return video_gt_bboxes, video_gt_annotations
+
+    def labels_for_frame(self, video_id: str, stem: str, is_static: bool) -> List[str]:
+        lbls = set()
+        if is_static:
+            image_root_dir_list = [self.static_masks_im_dir_path, self.static_masks_vid_dir_path]
+        else:
+            image_root_dir_list = [self.dynamic_masks_im_dir_path, self.dynamic_masks_vid_dir_path]
+        for root in image_root_dir_list:
+            vdir = root / video_id
+            if not vdir.exists():
+                continue
+            for fn in os.listdir(vdir):
+                if not fn.endswith(".png"):
+                    continue
+                if "__" in fn:
+                    st, lbl = fn.split("__", 1)
+                    lbl = lbl.rsplit(".png", 1)[0]
+                    if st == stem:
+                        lbls.add(lbl)
+        return sorted(lbls)
+
+    def get_union_mask(self, video_id: str, stem: str, label: str, is_static) -> Optional[np.ndarray]:
+        if is_static:
+            im_p = self.static_masks_im_dir_path / video_id / f"{stem}__{label}.png"
+            vd_p = self.static_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
+        else:
+            im_p = self.dynamic_masks_im_dir_path / video_id / f"{stem}__{label}.png"
+            vd_p = self.dynamic_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
+        m_im = cv2.imread(str(im_p), cv2.IMREAD_GRAYSCALE) if im_p.exists() else None
+        m_vd = cv2.imread(str(vd_p), cv2.IMREAD_GRAYSCALE) if vd_p.exists() else None
+        if m_im is None and m_vd is None:
+            return None
+        if m_im is None:
+            m = (m_vd > 127)
+        elif m_vd is None:
+            m = (m_im > 127)
+        else:
+            m = (m_im > 127) | (m_vd > 127)
+        return m.astype(bool)
+
+    def update_frame_map(
+            self,
+            frame_stems,
+            video_id,
+            frame_map: Dict[str, Dict[str, np.ndarray]],
+            is_static
+    ):
+        all_labels = set()
+        for stem in frame_stems:
+            lbls = self.labels_for_frame(video_id, stem, is_static)
+            if not lbls:
+                continue
+            all_labels.update(lbls)
+            if stem not in frame_map:
+                frame_map[stem] = {}
+            for lbl in lbls:
+                m = self.get_union_mask(video_id, stem, lbl, is_static)
+                if m is not None:
+                    frame_map[stem][lbl] = m
+        return frame_map, all_labels
+
+    def create_label_wise_masks_map(
+            self,
+            video_id,
+            gt_annotations
+    ) -> Tuple[Dict[str, Dict[str, Dict[str, np.ndarray]]], set, set]:
+        video_to_frame_to_label_mask: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
+        frame_stems = []
+        for frame_items in gt_annotations:
+            frame_name = frame_items[0]["frame"].split("/")[-1]
+            stem = Path(frame_name).stem
+            frame_stems.append(stem)
+
+        frame_map: Dict[str, Dict[str, np.ndarray]] = {}
+        frame_map, all_static_labels = self.update_frame_map(
+            frame_stems=frame_stems,
+            video_id=video_id,
+            frame_map=frame_map,
+            is_static=True
+        )
+        frame_map, all_dynamic_labels = self.update_frame_map(
+            frame_stems=frame_stems,
+            video_id=video_id,
+            frame_map=frame_map,
+            is_static=False
+        )
+        if frame_map:
+            video_to_frame_to_label_mask[video_id] = frame_map
+
+        return video_to_frame_to_label_mask, all_static_labels, all_dynamic_labels
 
     def process_frame(
             self,
@@ -155,4 +315,30 @@ class AgSam3DInference:
             "pickle_path": pkl_output_path,
             "gif_path": video_frame_file_path,
         }
+
+    def process_video(self, video_id):
+        video_gt_annotations = self.get_video_gt_annotations(video_id)[1]
+        video_to_frame_to_label_mask, _, _ = self.create_label_wise_masks_map(
+            video_id=video_id,
+            gt_annotations=video_gt_annotations
+        )
+
+    def generate_sam3d_annotations(self, dataloader, split) -> None:
+        for data in tqdm(dataloader):
+            video_id = data['video_id']
+            if get_video_belongs_to_split(video_id) == split:
+                out_path = self.bbox_3d_root_dir / f"{video_id[:-4]}.pkl"
+                if out_path.exists():
+                    print(f"[bbox] floor-aligned 3D bboxes already exist for video {video_id}, skipping...")
+                    continue
+                try:
+                    print(f"[bbox] processing video {video_id}...")
+                    self.process_video(video_id)
+                except Exception as e:
+                    print(f"[bbox] failed to process video {video_id}: {e}")
+            else:
+                print(f"[bbox] video {video_id} does not belong to split {split}, skipping...")
+
+    def generate_sample_gt_world_bb_annotations(self, video_id: str) -> None:
+        self.process_video(video_id)
 
