@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import uuid
@@ -10,8 +11,10 @@ import pickle
 
 import numpy as np
 from IPython.display import Image as ImageDisplay
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from dataloader.standard.action_genome.ag_dataset import StandardAG
 from notebook.inference import Inference, ready_gaussian_for_video_rendering, load_image, load_masks, display_image, make_scene, render_video, interactive_visualizer
 
 # =====================================================================
@@ -339,6 +342,80 @@ class AgSam3DInference:
             else:
                 print(f"[bbox] video {video_id} does not belong to split {split}, skipping...")
 
-    def generate_sample_gt_world_bb_annotations(self, video_id: str) -> None:
+    def generate_sample_sam3d_annotations(self, video_id: str) -> None:
         self.process_video(video_id)
 
+def load_dataset(ag_root_directory: str):
+    train_dataset = StandardAG(
+        phase="train",
+        mode="sgdet",
+        datasize="large",
+        data_path=ag_root_directory,
+        filter_nonperson_box_frame=True,
+        filter_small_box=False
+    )
+
+    test_dataset = StandardAG(
+        phase="test",
+        mode="sgdet",
+        datasize="large",
+        data_path=ag_root_directory,
+        filter_nonperson_box_frame=True,
+        filter_small_box=False
+    )
+
+    dataloader_train = DataLoader(
+        train_dataset,
+        shuffle=True,
+        collate_fn=lambda b: b[0],
+        pin_memory=False,
+        num_workers=0
+    )
+
+    dataloader_test = DataLoader(
+        test_dataset,
+        shuffle=False,
+        collate_fn=lambda b: b[0],
+        pin_memory=False
+    )
+
+    return train_dataset, test_dataset, dataloader_train, dataloader_test
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Combined: (a) floor-aligned 3D bbox generator + (b) SMPL↔PI3 human mesh aligner (sampled frames only)."
+    )
+    parser.add_argument("--ag_root_directory", type=str, default="/data/rohith/ag")
+    parser.add_argument("--dynamic_scene_dir_path", type=str,
+                        default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic")
+    parser.add_argument("--output_human_dir_path", type=str, default="/data/rohith/ag/ag4D/human/")
+    parser.add_argument("--split", type=str, default="04")
+    parser.add_argument("--include_dense", action="store_true",
+                        help="use dense correspondences for human aligner")
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+    bbox_3d_generator = AgSam3DInference(
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
+        ag_root_directory=args.ag_root_directory
+    )
+    train_dataset, test_dataset, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
+    bbox_3d_generator.generate_sam3d_annotations(dataloader=dataloader_train, split=args.split)
+    bbox_3d_generator.generate_sam3d_annotations(dataloader=dataloader_test, split=args.split)
+
+def main_sample():
+    args = parse_args()
+
+    bbox_3d_generator = AgSam3DInference(
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
+        ag_root_directory=args.ag_root_directory
+    )
+    video_id = "0DJ6R.mp4"
+    bbox_3d_generator.generate_sample_sam3d_annotations(video_id=video_id)
+
+
+if __name__ == "__main__":
+    # main_sample()
+    main()
