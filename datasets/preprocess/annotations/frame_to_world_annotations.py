@@ -1062,7 +1062,5 @@ if __name__ == "__main__":
     # main()
     # main_sample()
     # main_estimate_mismatches()
-    main_estimate_camera_motion()
-    # To run the combination step separately, comment out the line above
-    # and uncomment the line below, or run in a different script pass:
-    # main_combine_camera_motion_stats()
+    # main_estimate_camera_motion()
+    main_combine_camera_motion_stats()

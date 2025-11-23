@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataloader.standard.action_genome.ag_dataset import StandardAG
-from notebook.inference import Inference, ready_gaussian_for_video_rendering, load_image, load_masks, display_image, make_scene, render_video, interactive_visualizer
+from datasets.preprocess.objects.sam_3d.notebook.inference import Inference, ready_gaussian_for_video_rendering, load_image, load_masks, display_image, make_scene, render_video, interactive_visualizer
 
 # =====================================================================
 # COMMON HELPERS
@@ -52,6 +52,8 @@ class AgSam3DInference:
             ag_root_directory: Optional[str] = None,
     ):
         # -------------------- Data Folders --------------------
+        self.inference = None
+        self.config_path = None
         self.dynamic_scene_dir_path = Path(dynamic_scene_dir_path)
         self.ag_root_directory = Path(ag_root_directory)
 
@@ -96,7 +98,9 @@ class AgSam3DInference:
         self.static_masks_im_dir_path = self.ag_root_directory / "segmentation_static" / 'masks' / 'image_based'
         self.static_masks_vid_dir_path = self.ag_root_directory / "segmentation_static" / 'masks' / 'video_based'
         self.static_masks_combined_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "combined"
+        # self.setup_inference()
 
+    def setup_inference(self):
         # -------------------- Inference Setup --------------------
         PATH = os.getcwd()
         TAG = "hf"
@@ -326,30 +330,224 @@ class AgSam3DInference:
         all_labels = set()
         for frame_items in video_gt_annotations:
             for item in frame_items:
-                category_id = item['class']
-                category_name = self.catid_to_name_map[category_id]
-                if category_name == "closet/cabinet":
-                    category_name = "closet"
-                elif category_name == "cup/glass/bottle":
-                    category_name = "cup"
-                elif category_name == "paper/notebook":
-                    category_name = "paper"
-                elif category_name == "sofa/couch":
-                    category_name = "sofa"
-                elif category_name == "phone/camera":
-                    category_name = "phone"
+                if "class" not in item:
+                    category_name = "person"
+                else:
+                    category_id = item['class']
+                    category_name = self.catid_to_name_map[category_id]
+                    if category_name == "closet/cabinet":
+                        category_name = "closet"
+                    elif category_name == "cup/glass/bottle":
+                        category_name = "cup"
+                    elif category_name == "paper/notebook":
+                        category_name = "paper"
+                    elif category_name == "sofa/couch":
+                        category_name = "sofa"
+                    elif category_name == "phone/camera":
+                        category_name = "phone"
+
                 all_labels.add(category_name)
         return all_labels
 
-    def select_frames_for_video(self, video_id, video_gt_annotations, video_to_frame_to_label_mask, all_labels):
-        # TODO:
-        # 1. We first construct a frame_id, label, bbox area_map
-        # 2. We select frames ranked such that - we minimize the number of frames while maximizing label coverage
-        # a. We pick frames with maximum labels present and in them rank them with maximum area coverage.
-        # b. We repeat until all labels are covered.
-        selected_frames = []
+    def select_frames_for_video(self, video_id, video_gt_annotations, all_labels):
+        """
+        Greedy frame subsampling using *bbox area only* (no masks).
+        Strategy:
+        1. For each frame, compute:
+           - which labels are present (using GT annotations)
+           - total bbox area per label (sum of all bboxes of that label in the frame)
+        2. Greedy set-cover:
+           - At each step, pick the frame that covers the largest number of *new* labels.
+           - Break ties by choosing the frame with the largest total bbox area for those new labels.
+        3. Stop when no frame can cover any new labels.
+        Args:
+            video_id: str, e.g. "0DJ6R.mp4"
+            video_gt_annotations: list of per-frame annotation lists (raw JSON)
+            all_labels: set of label strings we want to cover
+        Returns:
+            selected_frames: list[str] of frame file names (e.g. "0DJ6R_000123.jpg")
+        """
 
-        return selected_frames
+        # ------------------------------------------------------------------
+        # Helpers
+        # ------------------------------------------------------------------
+        def _canonical_label_from_category_id(category_id: int) -> str:
+            """Match the remapping used everywhere else (closet/cabinet → closet, etc.)."""
+            category_name = self.catid_to_name_map[category_id]
+            if category_name == "closet/cabinet":
+                category_name = "closet"
+            elif category_name == "cup/glass/bottle":
+                category_name = "cup"
+            elif category_name == "paper/notebook":
+                category_name = "paper"
+            elif category_name == "sofa/couch":
+                category_name = "sofa"
+            elif category_name == "phone/camera":
+                category_name = "phone"
+            return category_name
+
+        def _xywh_to_xyxy(b):  # [x,y,w,h] -> [x1,y1,x2,y2]
+            x, y, w, h = [float(v) for v in b]
+            return [x, y, x + w, y + h]
+
+        def _bbox_area(box) -> float:
+            """
+            Compute area of a single bbox.
+            Assumes [x1, y1, x2, y2] format (adjust if your GT uses something else).
+            """
+            if box is None or len(box) != 4:
+                return 0.0
+            x1, y1, x2, y2 = box
+            w = max(0.0, float(x2) - float(x1))
+            h = max(0.0, float(y2) - float(y1))
+            return w * h
+
+        # ------------------------------------------------------------------
+        # 1) Build per-frame label and bbox-area maps
+        # ------------------------------------------------------------------
+        frame_labels: Dict[str, set] = {}
+        frame_label_area: Dict[str, Dict[str, float]] = {}
+        frame_order: Dict[str, int] = {}  # to optionally sort frames chronologically
+
+        for frame_idx, frame_items in enumerate(video_gt_annotations):
+            if not frame_items:
+                continue
+
+            frame_name = frame_items[0]["frame"].split("/")[-1]
+            frame_order[frame_name] = frame_idx
+
+            labels_here = set()
+            label_area_map: Dict[str, float] = {}
+
+            for item in frame_items:
+                # 1) Person bbox(es)
+                if "person_bbox" in item:
+                    label = "person"
+                    if all_labels and label not in all_labels:
+                        continue
+
+                    pb = item["person_bbox"]
+                    # pb can be a single bbox or list of bboxes
+                    if isinstance(pb, (list, tuple)) and pb and isinstance(pb[0], (int, float)):
+                        person_bboxes = [pb]
+                    else:
+                        person_bboxes = pb
+
+                    total_area = 0.0
+                    if person_bboxes is not None:
+                        for b in person_bboxes:
+                            xyxy_b = _xywh_to_xyxy(b)
+                            total_area += _bbox_area(xyxy_b)
+
+                    if total_area > 0.0:
+                        labels_here.add(label)
+                        label_area_map[label] = label_area_map.get(label, 0.0) + total_area
+                    continue
+
+                # 2) Object bbox
+                if "class" not in item or "bbox" not in item:
+                    continue
+
+                category_id = item["class"]
+                label = _canonical_label_from_category_id(category_id)
+                if all_labels and label not in all_labels:
+                    continue
+
+                bbox = item["bbox"]
+                # If bbox could be a list of multiple boxes, handle that too
+                if isinstance(bbox, (list, tuple)) and bbox and isinstance(bbox[0], (int, float)):
+                    bboxes = [bbox]
+                else:
+                    bboxes = bbox
+
+                total_area = 0.0
+                if bboxes is not None:
+                    if isinstance(bboxes, (list, tuple)) and bboxes and isinstance(bboxes[0], (list, tuple)):
+                        # list of boxes
+                        for b in bboxes:
+                            total_area += _bbox_area(b)
+                    else:
+                        # single box
+                        total_area += _bbox_area(bboxes)
+
+                if total_area > 0.0:
+                    labels_here.add(label)
+                    label_area_map[label] = label_area_map.get(label, 0.0) + total_area
+
+            # If nothing useful in this frame, skip it
+            if not labels_here:
+                continue
+
+            frame_labels[frame_name] = labels_here
+            frame_label_area[frame_name] = label_area_map
+
+        if not frame_labels:
+            print(f"[sam3d] No frames with usable bboxes for video {video_id}.")
+            return []
+
+        # ------------------------------------------------------------------
+        # 2) Universe of labels we can actually cover from bboxes
+        # ------------------------------------------------------------------
+        labels_universe = set()
+        for lbls in frame_labels.values():
+            labels_universe.update(lbls)
+
+        if all_labels:
+            labels_to_cover = labels_universe.intersection(all_labels)
+        else:
+            labels_to_cover = set(labels_universe)
+
+        if not labels_to_cover:
+            print(f"[sam3d] No overlap between GT labels and bbox labels for video {video_id}.")
+            return []
+
+        # ------------------------------------------------------------------
+        # 3) Greedy set-cover using bbox area
+        # ------------------------------------------------------------------
+        selected_frames: List[str] = []
+        remaining_labels = set(labels_to_cover)
+
+        while remaining_labels:
+            best_frame = None
+            best_new_labels_count = 0
+            best_new_labels_area = 0.0
+
+            for frame_name, labels_here in frame_labels.items():
+                if frame_name in selected_frames:
+                    continue
+
+                new_labels = labels_here & remaining_labels
+                if not new_labels:
+                    continue
+
+                # Total bbox area for just the new labels
+                new_area = sum(
+                    frame_label_area[frame_name].get(lbl, 0.0) for lbl in new_labels
+                )
+
+                # Primary key: number of new labels
+                # Secondary key: total area of those new labels
+                if (
+                    len(new_labels) > best_new_labels_count
+                    or (
+                        len(new_labels) == best_new_labels_count
+                        and new_area > best_new_labels_area
+                    )
+                ):
+                    best_frame = frame_name
+                    best_new_labels_count = len(new_labels)
+                    best_new_labels_area = new_area
+
+            if best_frame is None:
+                # No frame can cover any remaining labels
+                break
+
+            selected_frames.append(best_frame)
+            remaining_labels -= frame_labels[best_frame]
+
+        selected_frames_sorted = sorted(selected_frames, key=lambda fn: frame_order.get(fn, 0))
+        return selected_frames_sorted
+
 
     def process_video(self, video_id):
         video_gt_annotations = self.get_video_gt_annotations(video_id)[1]
@@ -361,12 +559,7 @@ class AgSam3DInference:
         # 1. Frame selection logic
         selected_frames = []
         all_labels = self.get_all_labels_in_video(video_gt_annotations)
-        selected_frames = self.select_frames_for_video(
-            video_id,
-            video_gt_annotations,
-            video_to_frame_to_label_mask,
-            all_labels
-        )
+        selected_frames = self.select_frames_for_video(video_id, video_gt_annotations, all_labels)
 
         # 2. Mask compilation per frame
         frame_masks = {}
