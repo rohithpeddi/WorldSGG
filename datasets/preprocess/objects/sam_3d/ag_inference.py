@@ -98,7 +98,7 @@ class AgSam3DInference:
         self.static_masks_im_dir_path = self.ag_root_directory / "segmentation_static" / 'masks' / 'image_based'
         self.static_masks_vid_dir_path = self.ag_root_directory / "segmentation_static" / 'masks' / 'video_based'
         self.static_masks_combined_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "combined"
-        # self.setup_inference()
+        self.setup_inference()
 
     def setup_inference(self):
         # -------------------- Inference Setup --------------------
@@ -548,34 +548,89 @@ class AgSam3DInference:
         selected_frames_sorted = sorted(selected_frames, key=lambda fn: frame_order.get(fn, 0))
         return selected_frames_sorted
 
-
     def process_video(self, video_id):
+        # ------------------------------------------------------------------
+        # 1) Load GT annotations + segmentation masks
+        # ------------------------------------------------------------------
         video_gt_annotations = self.get_video_gt_annotations(video_id)[1]
         video_to_frame_to_label_mask, _, _ = self.create_label_wise_masks_map(
             video_id=video_id,
-            gt_annotations=video_gt_annotations
+            gt_annotations=video_gt_annotations,
         )
 
-        # 1. Frame selection logic
-        selected_frames = []
+        # ------------------------------------------------------------------
+        # 2) Frame selection (bbox-area–based)
+        # ------------------------------------------------------------------
         all_labels = self.get_all_labels_in_video(video_gt_annotations)
-        selected_frames = self.select_frames_for_video(video_id, video_gt_annotations, all_labels)
+        selected_frames = self.select_frames_for_video(
+            video_id,
+            video_gt_annotations,
+            all_labels,
+        )
 
-        # 2. Mask compilation per frame
-        frame_masks = {}
+        if not selected_frames:
+            print(f"[sam3d] No selected frames for video {video_id}")
+            return
+
+        # ------------------------------------------------------------------
+        # 3) Build masks for each selected frame
+        # ------------------------------------------------------------------
+        frame_masks: Dict[str, List[np.ndarray]] = {}
+
         for frame_items in video_gt_annotations:
-            frame_name = frame_items[0]["frame"].split("/")[-1]
+            if not frame_items:
+                continue
+
+            frame_name = frame_items[0]["frame"].split("/")[-1]  # e.g. 0DJ6R_000123.jpg
             if frame_name not in selected_frames:
                 continue
-            stem = Path(frame_name).stem
-            if video_id not in video_to_frame_to_label_mask:
+
+            stem = Path(frame_name).stem  # e.g. 0DJ6R_000123
+
+            if (
+                video_id not in video_to_frame_to_label_mask
+                or stem not in video_to_frame_to_label_mask[video_id]
+            ):
                 continue
-            if stem not in video_to_frame_to_label_mask[video_id]:
-                continue
-            label_to_mask_map = video_to_frame_to_label_mask[video_id][stem]
-            masks = []
+
+            # --- segmentation masks: raw_label -> bool mask ---
+            raw_label_to_mask: Dict[str, np.ndarray] = video_to_frame_to_label_mask[video_id][stem]
+
+            # Canonicalise segmentation labels to match GT label remapping
+            # (closet/cabinet -> closet, cup/glass/bottle -> cup, etc.)
+            label_to_mask: Dict[str, np.ndarray] = {}
+            for lbl, m in raw_label_to_mask.items():
+                if lbl == "closet/cabinet":
+                    canon = "closet"
+                elif lbl == "cup/glass/bottle":
+                    canon = "cup"
+                elif lbl == "paper/notebook":
+                    canon = "paper"
+                elif lbl == "sofa/couch":
+                    canon = "sofa"
+                elif lbl == "phone/camera":
+                    canon = "phone"
+                else:
+                    canon = lbl
+
+                # if multiple raw labels map to same canonical label, union them
+                if canon in label_to_mask:
+                    label_to_mask[canon] = np.logical_or(label_to_mask[canon], m)
+                else:
+                    label_to_mask[canon] = m
+
+            # --- which labels do we actually need masks for in this frame? ---
+            needed_labels = set()
             for item in frame_items:
-                category_id = item['class']
+                # person annotations can come via 'person_bbox' and may not have 'class'
+                if "person_bbox" in item:
+                    needed_labels.add("person")
+                    continue
+
+                if "class" not in item:
+                    continue
+
+                category_id = item["class"]
                 category_name = self.catid_to_name_map[category_id]
                 if category_name == "closet/cabinet":
                     category_name = "closet"
@@ -587,30 +642,68 @@ class AgSam3DInference:
                     category_name = "sofa"
                 elif category_name == "phone/camera":
                     category_name = "phone"
-                if category_name in label_to_mask_map:
-                    masks.append(label_to_mask_map[category_name])
+
+                needed_labels.add(category_name)
+
+            # --- gather masks for those labels (one mask per label) ---
+            masks: List[np.ndarray] = []
+            for lbl in sorted(needed_labels):
+                if lbl in label_to_mask:
+                    masks.append(label_to_mask[lbl])
+
             if masks:
                 frame_masks[frame_name] = masks
 
-        # 3. Processing the selected frames and saving outputs
+        if not frame_masks:
+            print(f"[sam3d] No masks found for any selected frame in video {video_id}")
+            return
+
+        # ------------------------------------------------------------------
+        # 4) Run SAM3D on each selected frame and save outputs
+        # ------------------------------------------------------------------
         video_output_dir = self.sam3d_annotations_dir / video_id / "sam3d_outputs"
         os.makedirs(video_output_dir, exist_ok=True)
+
+        processed_count = 0
+
+        for frame_name, masks in frame_masks.items():
+            image_path = self.frame_annotated_dir_path / video_id / frame_name
+            if not image_path.exists():
+                print(f"[sam3d] Frame image not found: {image_path}, skipping")
+                continue
+
+            try:
+                # Use stem as frame_name for cleaner directory/file names
+                self.process_frame(
+                    frame_name=Path(frame_name).stem,
+                    image_path=str(image_path),
+                    masks=masks,
+                    video_output_dir=video_output_dir,
+                )
+                processed_count += 1
+            except Exception as e:
+                print(f"[sam3d] Failed to run SAM3D for {video_id}, frame {frame_name}: {e}")
+
+        print(
+            f"[sam3d] Finished video {video_id}: "
+            f"{processed_count}/{len(selected_frames)} selected frames processed."
+        )
 
     def generate_sam3d_annotations(self, dataloader, split) -> None:
         for data in tqdm(dataloader):
             video_id = data['video_id']
             if get_video_belongs_to_split(video_id) == split:
-                out_path = self.bbox_3d_root_dir / f"{video_id[:-4]}.pkl"
-                if out_path.exists():
-                    print(f"[bbox] floor-aligned 3D bboxes already exist for video {video_id}, skipping...")
+                out_path = self.sam3d_annotations_dir / video_id / "sam3d_outputs"
+                if out_path.exists() and len(os.listdir(out_path)) > 0:
+                    print(f"[sam3d] floor-aligned 3D bboxes already exist for video {video_id}, skipping...")
                     continue
                 try:
-                    print(f"[bbox] processing video {video_id}...")
+                    print(f"[sam3d] processing video {video_id}...")
                     self.process_video(video_id)
                 except Exception as e:
-                    print(f"[bbox] failed to process video {video_id}: {e}")
+                    print(f"[sam3d] failed to process video {video_id}: {e}")
             else:
-                print(f"[bbox] video {video_id} does not belong to split {split}, skipping...")
+                print(f"[sam3d] video {video_id} does not belong to split {split}, skipping...")
 
     def generate_sample_sam3d_annotations(self, video_id: str) -> None:
         self.process_video(video_id)
@@ -687,5 +780,5 @@ def main_sample():
 
 
 if __name__ == "__main__":
-    main_sample()
-    # main()
+    # main_sample()
+    main()
