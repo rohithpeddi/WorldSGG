@@ -101,10 +101,7 @@ class AgSam3DInference:
         self.setup_inference()
 
     def setup_inference(self):
-        # -------------------- Inference Setup --------------------
-        PATH = os.getcwd()
-        TAG = "hf"
-        self.config_path = f"{PATH}/checkpoints/{TAG}/pipeline.yaml"
+        self.config_path = "/home/rxp190007/CODE/Scene4Cast/datasets/preprocess/objects/sam_3d/checkpoints/hf/pipeline.yaml"
         self.inference = Inference(self.config_path, compile=False)
 
     def get_video_gt_annotations(self, video_id):
@@ -266,7 +263,7 @@ class AgSam3DInference:
         # 1) Load image & run inference per mask
         # ------------------------------------------------------------------
         image = load_image(image_path)
-        display_image(image, masks)
+        # display_image(image, masks)
 
         # Run SAM3D for each mask and collect outputs
         outputs = []
@@ -667,6 +664,10 @@ class AgSam3DInference:
         processed_count = 0
 
         for frame_name, masks in frame_masks.items():
+            print("--------------------------------------------------------------------")
+            print(f"Processing video [{video_id}] frame [{frame_name}]")
+            print("--------------------------------------------------------------------")
+
             image_path = self.frame_annotated_dir_path / video_id / frame_name
             if not image_path.exists():
                 print(f"[sam3d] Frame image not found: {image_path}, skipping")
@@ -684,6 +685,8 @@ class AgSam3DInference:
             except Exception as e:
                 print(f"[sam3d] Failed to run SAM3D for {video_id}, frame {frame_name}: {e}")
 
+
+            print("--------------------------------------------------------------------")
         print(
             f"[sam3d] Finished video {video_id}: "
             f"{processed_count}/{len(selected_frames)} selected frames processed."
