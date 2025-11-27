@@ -1,4 +1,5 @@
 import argparse
+import gzip
 import json
 import os
 import uuid
@@ -244,20 +245,30 @@ class AgSam3DInference:
             image_path: str,
             masks: List[np.ndarray],
             video_output_dir: Path,
+            save_gif: bool = False,
+            compress_pickle: bool = True,
     ) -> Dict[str, Any]:
         """
         Run SAM3D on a single frame, save all outputs for that frame, and return basic metadata.
 
         Saved artifacts (inside video_output_dir / frame_name):
-        - {frame_name}.gif                : rendered SAM3D turntable video
-        - {frame_name}_sam3d.pkl          : dict with image_path, masks, raw outputs, scene_gaussians, video_path
+
+        - {frame_name}_sam3d.pkl.gz      : gzip-compressed pickle with:
+            {
+                "frame_name": frame_name,
+                "outputs": outputs,          # list of per-mask SAM3D outputs
+                "scene_gaussians": scene_gs, # combined gaussian scene
+            }
+
+        Optionally (if save_gif=True):
+        - {frame_name}.gif               : rendered SAM3D turntable video
         """
 
         # ------------------------------------------------------------------
         # 0) Prepare per-frame directory
         # ------------------------------------------------------------------
         frame_output_dir = video_output_dir / frame_name
-        gaussians_dir = frame_output_dir / "gaussians"
+        gaussians_dir = frame_output_dir / "gaussians"  # kept for future use if needed
 
         os.makedirs(frame_output_dir, exist_ok=True)
         os.makedirs(gaussians_dir, exist_ok=True)
@@ -266,61 +277,50 @@ class AgSam3DInference:
         # 1) Load image & run inference per mask
         # ------------------------------------------------------------------
         image = load_image(image_path)
-        # display_image(image, masks)
 
-        # Run SAM3D for each mask and collect outputs
         outputs = []
         for mask in masks:
             out = self.inference(image, mask, seed=42)
             outputs.append(out)
 
         # ------------------------------------------------------------------
-        # 2) Build scene gaussians and render video
+        # 2) Build scene gaussians
         # ------------------------------------------------------------------
         scene_gs = make_scene(*outputs)
         scene_gs = ready_gaussian_for_video_rendering(scene_gs)
 
-        video = render_video(scene_gs, r=1, fov=60, resolution=512)["color"]
+        # ------------------------------------------------------------------
+        # 3) (Optional) render GIF video
+        # ------------------------------------------------------------------
+        video_frame_file_path = None
+        if save_gif:
+            video = render_video(scene_gs, r=1, fov=60, resolution=512)["color"]
+            video_frame_file_path = frame_output_dir / f"{frame_name}.gif"
+            imageio.mimsave(
+                video_frame_file_path,
+                video,
+                format="GIF",
+                duration=1000 / 30,  # assume 30fps
+                loop=0,  # 0 means loop indefinitely
+            )
 
         # ------------------------------------------------------------------
-        # 3) Save rendered video (GIF)
+        # 4) Save compressed pickle
         # ------------------------------------------------------------------
-        video_frame_file_path = frame_output_dir / f"{frame_name}.gif"
-        imageio.mimsave(
-            video_frame_file_path,
-            video,
-            format="GIF",
-            duration=1000 / 30,  # assume 30fps
-            loop=0,  # 0 means loop indefinitely
-        )
-
-        # ------------------------------------------------------------------
-        # 4) Save all outputs + gaussians in a single pickle
-        # ------------------------------------------------------------------
-        pkl_output_path = frame_output_dir / f"{frame_name}_sam3d.pkl"
-
-        # frame_dump: Dict[str, Any] = {
-        #     "frame_name": frame_name,
-        #     "image_path": str(image_path),
-        #     "masks": masks,
-        #     "outputs": outputs,  # list of per-mask SAM3D outputs
-        #     "scene_gaussians": scene_gs,  # combined gaussian scene
-        # }
-
         frame_dump: Dict[str, Any] = {
             "frame_name": frame_name,
             "outputs": outputs,
             "scene_gaussians": scene_gs,
         }
 
-        with open(pkl_output_path, "wb") as f:
-            pickle.dump(frame_dump, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-        # (Optional) if you want to also save gaussians separately per frame, you
-        # could add something like:
-        # gaussians_pkl_path = gaussians_dir / f"{frame_name}_scene_gaussians.pkl"
-        # with open(gaussians_pkl_path, "wb") as f:
-        #     pickle.dump(scene_gs, f, protocol=pickle.HIGHEST_PROTOCOL)
+        if compress_pickle:
+            pkl_output_path = frame_output_dir / f"{frame_name}_sam3d.pkl.gz"
+            with gzip.open(pkl_output_path, "wb") as f:
+                pickle.dump(frame_dump, f, protocol=pickle.HIGHEST_PROTOCOL)
+        else:
+            pkl_output_path = frame_output_dir / f"{frame_name}_sam3d.pkl"
+            with open(pkl_output_path, "wb") as f:
+                pickle.dump(frame_dump, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         # ------------------------------------------------------------------
         # 5) Return basic metadata (optional)
@@ -563,7 +563,7 @@ class AgSam3DInference:
         selected_frames_sorted = sorted(selected_frames, key=lambda fn: frame_order.get(fn, 0))
         return selected_frames_sorted
 
-    def process_video(self, video_id):
+    def process_video(self, video_id: str, save_gif: bool = True, compress_pickle: bool = True):
         # ------------------------------------------------------------------
         # 1) Load GT annotations + segmentation masks
         # ------------------------------------------------------------------
@@ -574,7 +574,7 @@ class AgSam3DInference:
         )
 
         # ------------------------------------------------------------------
-        # 2) Frame selection (bbox-area–based)
+        # 2) Frame selection (currently: all frames)
         # ------------------------------------------------------------------
         # all_labels = self.get_all_labels_in_video(video_gt_annotations)
         # selected_frames = self.select_frames_for_video(
@@ -675,7 +675,7 @@ class AgSam3DInference:
             return
 
         # ------------------------------------------------------------------
-        # 4) Run SAM3D on each selected frame and save outputs
+        # 4) Run SAM3D on each selected frame and save compressed outputs
         # ------------------------------------------------------------------
         video_output_dir = self.sam3d_annotations_dir / video_id / "sam3d_outputs"
         os.makedirs(video_output_dir, exist_ok=True)
@@ -699,16 +699,19 @@ class AgSam3DInference:
                     image_path=str(image_path),
                     masks=masks,
                     video_output_dir=video_output_dir,
+                    save_gif=save_gif,
+                    compress_pickle=compress_pickle,
                 )
                 processed_count += 1
             except Exception as e:
                 print(f"[sam3d] Failed to run SAM3D for {video_id}, frame {frame_name}: {e}")
 
-
             print("--------------------------------------------------------------------")
+
         print(
             f"[sam3d] Finished video {video_id}: "
-            f"{processed_count}/{len(selected_frames)} selected frames processed."
+            f"{processed_count}/{len(selected_frames)} selected frames processed "
+            f"(save_gif={save_gif}, compress_pickle={compress_pickle})."
         )
 
     def generate_sam3d_annotations(self, dataloader, split) -> None:
