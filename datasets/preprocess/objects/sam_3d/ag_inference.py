@@ -574,15 +574,20 @@ class AgSam3DInference:
         )
 
         # ------------------------------------------------------------------
-        # 2) Frame selection (currently: all frames)
+        # 2) Frame selection
+        #   - selected_frames: frames we run SAM3D on
+        #   - gif_frames: subset of frames we render GIFs for
         # ------------------------------------------------------------------
-        # all_labels = self.get_all_labels_in_video(video_gt_annotations)
-        # selected_frames = self.select_frames_for_video(
-        #     video_id,
-        #     video_gt_annotations,
-        #     all_labels,
-        # )
+        all_labels = self.get_all_labels_in_video(video_gt_annotations)
+        gif_frames = self.select_frames_for_video(
+            video_id,
+            video_gt_annotations,
+            all_labels,
+        )
         selected_frames = self.select_all_frames_for_video(video_id, video_gt_annotations)
+
+        # NEW: use stems for comparison, since process_frame uses stem names
+        gif_frame_stems = {Path(f).stem for f in gif_frames}
 
         if not selected_frames:
             print(f"[sam3d] No selected frames for video {video_id}")
@@ -692,14 +697,20 @@ class AgSam3DInference:
                 print(f"[sam3d] Frame image not found: {image_path}, skipping")
                 continue
 
+            frame_stem = Path(frame_name).stem
+
+            # NEW: only create GIFs for gif_frames
+            save_gif_for_this_frame = save_gif and (frame_stem in gif_frame_stems)
+            print(f"[sam3d] save_gif_for_this_frame={save_gif_for_this_frame}, frame_stem={frame_stem}")
+
             try:
                 # Use stem as frame_name for cleaner directory/file names
                 self.process_frame(
-                    frame_name=Path(frame_name).stem,
+                    frame_name=frame_stem,
                     image_path=str(image_path),
                     masks=masks,
                     video_output_dir=video_output_dir,
-                    save_gif=save_gif,
+                    save_gif=save_gif_for_this_frame,
                     compress_pickle=compress_pickle,
                 )
                 processed_count += 1
@@ -711,7 +722,8 @@ class AgSam3DInference:
         print(
             f"[sam3d] Finished video {video_id}: "
             f"{processed_count}/{len(selected_frames)} selected frames processed "
-            f"(save_gif={save_gif}, compress_pickle={compress_pickle})."
+            f"(save_gif={save_gif}, compress_pickle={compress_pickle}). "
+            f"GIFs created for {len(gif_frame_stems & {Path(f).stem for f in frame_masks.keys()})} frames."
         )
 
     def generate_sam3d_annotations(self, dataloader, split) -> None:
