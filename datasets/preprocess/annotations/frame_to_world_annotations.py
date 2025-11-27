@@ -1059,8 +1059,9 @@ def main_combine_camera_motion_stats():
 
 
 if __name__ == "__main__":
-    # main()
-    # main_sample()
     # main_estimate_mismatches()
     # main_estimate_camera_motion()
-    main_combine_camera_motion_stats()
+    # main_combine_camera_motion_stats()
+    # main()
+    main_sample()
+

@@ -50,12 +50,14 @@ class AgSam3DInference:
             self,
             dynamic_scene_dir_path: Optional[str] = None,
             ag_root_directory: Optional[str] = None,
+            output_directory: Optional[str] = None,
     ):
         # -------------------- Data Folders --------------------
         self.inference = None
         self.config_path = None
         self.dynamic_scene_dir_path = Path(dynamic_scene_dir_path)
         self.ag_root_directory = Path(ag_root_directory)
+        self.output_directory = Path(output_directory)
 
         self.dataset_classnames = [
             '__background__', 'person', 'bag', 'bed', 'blanket', 'book', 'box', 'broom', 'chair',
@@ -76,9 +78,10 @@ class AgSam3DInference:
         self.frame_annotated_dir_path = self.ag_root_directory / "frames_annotated"
         self.sampled_frames_idx_root_dir = self.ag_root_directory / "sampled_frames_idx"
 
-        self.world_annotations_root_dir = self.ag_root_directory / "world_annotations"
-        self.bbox_3d_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d"
-        os.makedirs(self.bbox_3d_root_dir, exist_ok=True)
+        # self.world_annotations_root_dir = self.ag_root_directory / "world_annotations"
+        # self.bbox_3d_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d"
+        # os.makedirs(self.bbox_3d_root_dir, exist_ok=True)
+        self.world_annotations_root_dir = self.output_directory
 
         self.sam3d_annotations_dir = self.world_annotations_root_dir / "sam3d_annotations"
         os.makedirs(self.sam3d_annotations_dir, exist_ok=True)
@@ -296,12 +299,18 @@ class AgSam3DInference:
         # ------------------------------------------------------------------
         pkl_output_path = frame_output_dir / f"{frame_name}_sam3d.pkl"
 
+        # frame_dump: Dict[str, Any] = {
+        #     "frame_name": frame_name,
+        #     "image_path": str(image_path),
+        #     "masks": masks,
+        #     "outputs": outputs,  # list of per-mask SAM3D outputs
+        #     "scene_gaussians": scene_gs,  # combined gaussian scene
+        # }
+
         frame_dump: Dict[str, Any] = {
             "frame_name": frame_name,
-            "image_path": str(image_path),
-            "masks": masks,
-            "outputs": outputs,  # list of per-mask SAM3D outputs
-            "scene_gaussians": scene_gs,  # combined gaussian scene
+            "outputs": outputs,
+            "scene_gaussians": scene_gs,
         }
 
         with open(pkl_output_path, "wb") as f:
@@ -345,6 +354,15 @@ class AgSam3DInference:
 
                 all_labels.add(category_name)
         return all_labels
+
+    def select_all_frames_for_video(self, video_id, video_gt_annotations):
+        selected_frames = []
+        for frame_items in video_gt_annotations:
+            if not frame_items:
+                continue
+            frame_name = frame_items[0]["frame"].split("/")[-1]
+            selected_frames.append(frame_name)
+        return selected_frames
 
     def select_frames_for_video(self, video_id, video_gt_annotations, all_labels):
         """
@@ -558,12 +576,13 @@ class AgSam3DInference:
         # ------------------------------------------------------------------
         # 2) Frame selection (bbox-area–based)
         # ------------------------------------------------------------------
-        all_labels = self.get_all_labels_in_video(video_gt_annotations)
-        selected_frames = self.select_frames_for_video(
-            video_id,
-            video_gt_annotations,
-            all_labels,
-        )
+        # all_labels = self.get_all_labels_in_video(video_gt_annotations)
+        # selected_frames = self.select_frames_for_video(
+        #     video_id,
+        #     video_gt_annotations,
+        #     all_labels,
+        # )
+        selected_frames = self.select_all_frames_for_video(video_id, video_gt_annotations)
 
         if not selected_frames:
             print(f"[sam3d] No selected frames for video {video_id}")
@@ -747,7 +766,6 @@ def load_dataset(ag_root_directory: str):
 
     return train_dataset, test_dataset, dataloader_train, dataloader_test
 
-
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Combined: (a) floor-aligned 3D bbox generator + (b) SMPL↔PI3 human mesh aligner (sampled frames only)."
@@ -755,17 +773,16 @@ def parse_args():
     parser.add_argument("--ag_root_directory", type=str, default="/data/rohith/ag")
     parser.add_argument("--dynamic_scene_dir_path", type=str,
                         default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic")
-    parser.add_argument("--output_human_dir_path", type=str, default="/data/rohith/ag/ag4D/human/")
+    parser.add_argument("--output_directory", type=str, default="/data2/rohith/ag/ag4D/world_annotations/")
     parser.add_argument("--split", type=str, default="04")
-    parser.add_argument("--include_dense", action="store_true",
-                        help="use dense correspondences for human aligner")
     return parser.parse_args()
 
 def main():
     args = parse_args()
     bbox_3d_generator = AgSam3DInference(
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
-        ag_root_directory=args.ag_root_directory
+        ag_root_directory=args.ag_root_directory,
+        output_directory=args.output_directory
     )
     train_dataset, test_dataset, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
     bbox_3d_generator.generate_sam3d_annotations(dataloader=dataloader_train, split=args.split)
@@ -776,12 +793,13 @@ def main_sample():
 
     bbox_3d_generator = AgSam3DInference(
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
-        ag_root_directory=args.ag_root_directory
+        ag_root_directory=args.ag_root_directory,
+        output_directory=args.output_directory
     )
     video_id = "0DJ6R.mp4"
     bbox_3d_generator.generate_sample_sam3d_annotations(video_id=video_id)
 
 
 if __name__ == "__main__":
-    # main_sample()
-    main()
+    main_sample()
+    # main()
