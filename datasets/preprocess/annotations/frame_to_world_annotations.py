@@ -43,7 +43,7 @@ def rerun_vis_world4d(
     points: np.ndarray,          # (S, H, W, 3)  -- Pi3 / dynamic coords
     colors: np.ndarray,          # (S, H, W, 3) uint8
     conf: Optional[np.ndarray],  # (S, H, W) or None
-    camera_poses: np.ndarray,    # (S, 4, 4)     -- Pi3 camera->world
+    camera_poses: np.ndarray,    # (S, 4, 4)     -- Pi3 camera->world (3x4 or 4x4)
     frame_bbox_meshes: Optional[Dict[int, List[Dict[str, Any]]]] = None,
     *,
     global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None,
@@ -55,20 +55,24 @@ def rerun_vis_world4d(
 ) -> None:
     """
     Visualize 4D world for a video with all geometry expressed in a common
-    world coordinate frame aligned with XYZ axes.
+    world coordinate frame tied to the XYZ axes.
 
-    - `global_floor_sim` is assumed to define the similarity transform
-      from the raw dynamic / Pi3 coordinates to this world frame:
+    We assume `global_floor_sim = (s, R, t)` defines a similarity transform from
+    the raw Pi3 coordinate frame into this world frame:
+
         p_world = s * (p_pi3 @ R^T) + t
 
     We apply this to:
-      - dynamic points
-      - camera poses
+      - dynamic 3D points
+      - floor mesh vertices
+      - 3D bbox mesh vertices (frame_bbox_meshes)
+      - camera poses (approximately; see note below)
 
-    and assume:
-      - floor vertices (`floor`) and
-      - frame_bbox_meshes vertices
-    are already in that world frame.
+    NOTE:
+      For cameras, we also apply the same transform to orientation and origin
+      so the frustum lives in the same world frame. Exact similarity-composition
+      of a scaled transform cannot be represented as a pure rigid transform, but
+      this approximation is sufficient for visualization and keeps axes aligned.
     """
 
     rr.init(app_id, spawn=True)
@@ -89,11 +93,10 @@ def rerun_vis_world4d(
         s_g, R_g, t_g = global_floor_sim
         s_g = float(s_g)
         R_g = np.asarray(R_g, dtype=np.float32)
-        t_g = np.asarray(t_g, dtype=np.float32).reshape(1, 3)
+        t_g = np.asarray(t_g, dtype=np.float32)  # shape (3,)
 
     # --------------------------------------------------------------------------
     # Floor mesh (optionally transformed by global floor similarity)
-    #   (If floor vertices are still in Pi3 coords, we map them too.)
     # --------------------------------------------------------------------------
     floor_vertices_tf = None
     floor_faces = None
@@ -104,7 +107,7 @@ def rerun_vis_world4d(
         floor_faces0 = _faces_u32(np.asarray(floor_faces0))
 
         if s_g is not None:
-            floor_vertices_tf = s_g * (floor_verts0 @ R_g.T) + t_g
+            floor_vertices_tf = s_g * (floor_verts0 @ R_g.T) + t_g[None, :]
         else:
             floor_vertices_tf = floor_verts0
 
@@ -160,7 +163,7 @@ def rerun_vis_world4d(
 
         # Map points to world-aligned XYZ frame if we have global sim
         if s_g is not None:
-            pts = s_g * (pts @ R_g.T) + t_g  # broadcast t_g over rows
+            pts = s_g * (pts @ R_g.T) + t_g[None, :]
 
         if conf is not None:
             cfs = conf[vis_t].reshape(-1)           # (N,)
@@ -169,7 +172,7 @@ def rerun_vis_world4d(
             if cfs_valid.size > 0:
                 med = np.median(cfs_valid)
                 p5 = np.percentile(cfs_valid, 5)
-                # conservative threshold: keep at least 95% of valid points
+                # conservative threshold: keep at least ~95% of valid points
                 thr = max(min_conf_default, p5)
                 print(
                     f"[{video_id}] frame {vis_t}: conf thr = {thr:.4f} "
@@ -196,10 +199,12 @@ def rerun_vis_world4d(
             )
 
         # ---------------------- per-frame cuboid bboxes ----------------------
-        # NOTE: We assume bbox vertices are already in the *world-aligned* frame.
+        # Transform bbox vertices by the same global similarity as points.
         if frame_bbox_meshes is not None and vis_t in frame_bbox_meshes:
             for bi, bbox_m in enumerate(frame_bbox_meshes[vis_t]):
-                verts_world = bbox_m["verts"].astype(np.float32)  # (8,3)
+                verts_world = np.asarray(bbox_m["verts"], dtype=np.float32)  # (8,3) in Pi3 coords
+                if s_g is not None:
+                    verts_world = s_g * (verts_world @ R_g.T) + t_g[None, :]
                 col = bbox_m.get("color", [255, 180, 0])
 
                 strips = []
@@ -215,17 +220,22 @@ def rerun_vis_world4d(
                 )
 
         # ---------------------- camera frustum + image ----------------------
-        cam_4x4 = np.asarray(camera_poses[vis_t], dtype=np.float32)  # (4,4)
-        R_wc = cam_4x4[:3, :3]   # Pi3 world-from-camera
-        t_wc = cam_4x4[:3, 3]    # Pi3 camera center in world coords
+        cam_4x4 = np.asarray(camera_poses[vis_t], dtype=np.float32)  # (4,4) or (3,4) padded
+        if cam_4x4.shape == (3, 4):
+            cam_4x4 = np.vstack(
+                [cam_4x4, np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)]
+            )
 
-        # Map camera pose into world-aligned frame if we have global sim
+        R_wc = cam_4x4[:3, :3]   # Pi3 world-from-camera rotation
+        t_wc = cam_4x4[:3, 3]    # Pi3 camera origin in world coords
+
+        # Map camera pose into world-aligned frame (approximate)
         if s_g is not None:
-            # p_world = s * (p_pi3 @ R^T) + t
-            # => new R_wc = R_wc @ R_g.T
-            #    new t_wc = s * (t_wc @ R_g.T) + t
+            # Rotate orientation by R_g (compose global->Pi3)
+            # Using column-vector convention: x' = R_g * x
             R_wc = R_wc @ R_g.T
-            t_wc = s_g * (t_wc @ R_g.T) + t_g.reshape(-1)
+            # Transform origin the same way we transform points
+            t_wc = s_g * (t_wc @ R_g.T) + t_g
 
         image = _get_image_for_time(vis_t)
         if image is not None:
@@ -615,20 +625,6 @@ class FrameToWorldAnnotations:
             R_avg = np.asarray(global_floor_sim_dict["R"], dtype=np.float32)
             t_avg = np.asarray(global_floor_sim_dict["t"], dtype=np.float32)
             global_floor_sim = (s_avg, R_avg, t_avg)
-
-        # frame_3dbb_map structure: {
-        #   "000000.png": [objects]
-        # }
-        # Objects structure: [
-        #   {
-        #       "label": ... or [...],
-        #       "gt_bbox_xyxy": [...],
-        #       "aabb_floor_aligned": [...],
-        #       "multi_scale_candidates": [...],
-        #       ...
-        #   },
-        #   ...
-        # ]
 
         # ------------------------------------------------------------------
         # 3) Visualization: points + 3D bboxes + camera frustum (per frame)
