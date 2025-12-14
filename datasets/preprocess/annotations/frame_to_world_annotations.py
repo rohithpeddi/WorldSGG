@@ -60,16 +60,17 @@ def rerun_vis_world4d(
         min_conf_default: float = 1e-6,  # floor for conf
 ):
     """
-    Visualize world4d with a floor-aligned world frame:
+    Visualize world4d with both:
+      (a) original meshes (after global_floor_sim, before floor-plane alignment), and
+      (b) transformed meshes aligned so the floor lies in the XY plane (z=0, normal=+Z).
 
-      1) Optionally apply `global_floor_sim = (s, R, t)` to map Pi3 coords to a base frame.
-      2) From the (possibly transformed) floor mesh, fit a plane and compute a
-         rotation + translation that sends this plane to z=0, normal=+Z.
-      3) Apply this same transform to:
-           - dynamic 3D points (Pi3 predictions)
-           - 3D bounding boxes (frame_bbox_meshes)
-           - camera extrinsics (world4d[frame_idx]["camera"])
-           - human meshes (via per_frame_sims & world4d) if vis_humans=True.
+    Meshes shown with original+aligned:
+      - floor mesh
+      - human meshes (if vis_humans=True and faces is provided)
+      - 3D bbox cuboids
+
+    Points and camera frustum are shown only in the aligned world to keep
+    visualization lighter.
     """
 
     faces_u32 = _faces_u32(faces) if faces is not None else None
@@ -116,7 +117,8 @@ def rerun_vis_world4d(
     # a plane-alignment transform so the floor lies in the XY plane (z=0),
     # with its normal pointing along +Z.
     # ----------------------------------------------------------------------
-    floor_vertices_final = None
+    floor_world_base = None          # floor in "original" base frame (after global_floor_sim)
+    floor_vertices_final = None      # floor aligned to XY plane
     floor_faces = None
     floor_kwargs = None
 
@@ -194,25 +196,28 @@ def rerun_vis_world4d(
         floor_faces = floor_faces0
 
     # ----------------------------------------------------------------------
-    # Helpers: Pi3 -> final world for points, bboxes, humans, camera
+    # Helpers: Pi3 -> base, then base -> final (aligned)
     # ----------------------------------------------------------------------
-    def _transform_points(pi3_pts: np.ndarray) -> np.ndarray:
-        """
-        (N, 3) Pi3 points -> final world coords with:
-           1) optional global_floor_sim
-           2) floor-plane alignment to XY (z=0)
-        """
+    def _to_base(pi3_pts: np.ndarray) -> np.ndarray:
+        """Pi3 -> base (apply only global_floor_sim)."""
         pts = np.asarray(pi3_pts, dtype=np.float32)
-
-        # Pi3 -> base
         if s_g is not None:
             pts = s_g * (pts @ R_g.T) + t_g[None, :]
+        return pts
 
-        # base -> final (floor plane -> XY)
+    def _to_final_from_base(base_pts: np.ndarray) -> np.ndarray:
+        """base -> final (apply only floor-plane alignment)."""
+        pts = np.asarray(base_pts, dtype=np.float32)
         if floor is not None and floor_vertices_final is not None:
             pts = (pts - center[None, :]) @ R_align.T
-
         return pts
+
+    def _transform_points(pi3_pts: np.ndarray) -> np.ndarray:
+        """Full transform: Pi3 -> base -> aligned."""
+        return _to_final_from_base(_to_base(pi3_pts))
+
+    def _transform_bbox_verts(verts_pi3: np.ndarray) -> np.ndarray:
+        return _transform_points(verts_pi3)
 
     def _transform_camera(R_wc_pi3: np.ndarray, t_wc_pi3: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -244,9 +249,6 @@ def rerun_vis_world4d(
         R_wc_final = R_pi3_to_final @ R_wc_pi3
 
         return R_wc_final, t_wc_final
-
-    def _transform_bbox_verts(verts_pi3: np.ndarray) -> np.ndarray:
-        return _transform_points(verts_pi3)
 
     def _get_image_for_time(i: int) -> Optional[np.ndarray]:
         if images is None:
@@ -287,7 +289,7 @@ def rerun_vis_world4d(
         rr.set_time_sequence("frame", vis_t)
         rr.log("/", rr.Clear(recursive=True))
 
-        # ---------------------- world axis gizmo ----------------------
+        # ---------------------- world axis gizmo (aligned frame) ----------------------
         axis_len = 0.5
         x_axis = np.array([[0.0, 0.0, 0.0],
                            [axis_len, 0.0, 0.0]], dtype=np.float32)
@@ -296,7 +298,7 @@ def rerun_vis_world4d(
         z_axis = np.array([[0.0, 0.0, 0.0],
                            [0.0, 0.0, axis_len]], dtype=np.float32)
         rr.log(
-            f"{BASE}/world_axes",
+            f"{BASE}/aligned/world_axes",
             rr.LineStrips3D(
                 strips=[x_axis, y_axis, z_axis],
                 colors=[
@@ -307,10 +309,21 @@ def rerun_vis_world4d(
             ),
         )
 
-        # ---------------------- floor ----------------------
-        if vis_floor and (floor_vertices_final is not None) and (floor_faces is not None):
+        # ---------------------- floor: original vs aligned ----------------------
+        if vis_floor and (floor_world_base is not None) and (floor_faces is not None):
+            # Original (base)
             rr.log(
-                f"{BASE}/floor",
+                f"{BASE}/orig/floor",
+                rr.Mesh3D(
+                    vertex_positions=floor_world_base.astype(np.float32),
+                    triangle_indices=floor_faces,
+                    **(floor_kwargs or {}),
+                ),
+            )
+        if vis_floor and (floor_vertices_final is not None) and (floor_faces is not None):
+            # Aligned
+            rr.log(
+                f"{BASE}/aligned/floor",
                 rr.Mesh3D(
                     vertex_positions=floor_vertices_final.astype(np.float32),
                     triangle_indices=floor_faces,
@@ -321,33 +334,45 @@ def rerun_vis_world4d(
         # ---------------------- frame data (for humans + camera) ----------------------
         frame_data = world4d.get(frame_idx, None)
         if frame_data is None:
-            # still allow points/bboxes if we don't have camera/humans
             frame_data = {}
 
-        # ---------------------- humans (SMPL meshes) ----------------------
+        # ---------------------- humans (SMPL meshes): original vs aligned ----------------------
         if vis_humans and faces_u32 is not None:
             track_ids = frame_data.get("track_id", [])
             verts_orig_list = frame_data.get("vertices_orig", [])
             if track_ids and verts_orig_list:
                 tid = int(track_ids[0])
                 verts_orig = np.asarray(verts_orig_list[0], dtype=np.float32)
-                verts_world = verts_orig
+                verts_world_pi3 = verts_orig
 
-                # SMPL -> world (Pi3/base) via per-frame similarity (if provided)
+                # SMPL -> world (Pi3) via per-frame similarity (if provided)
                 if per_frame_sims is not None and frame_idx in per_frame_sims:
                     s_i = float(per_frame_sims[frame_idx]["s"])
                     R_i = np.asarray(per_frame_sims[frame_idx]["R"], dtype=np.float32)
                     t_i = np.asarray(per_frame_sims[frame_idx]["t"], dtype=np.float32)
                     verts_flat = verts_orig.reshape(-1, 3)
                     verts_tf = s_i * (verts_flat @ R_i.T) + t_i
-                    verts_world = verts_tf.reshape(verts_orig.shape)
+                    verts_world_pi3 = verts_tf.reshape(verts_orig.shape)
 
-                # Apply floor-plane alignment + global sim to human verts too
-                verts_aligned = _transform_points(verts_world.reshape(-1, 3)).reshape(
-                    verts_world.shape
+                # Original mesh: in base frame (only global_floor_sim)
+                verts_base = _to_base(verts_world_pi3.reshape(-1, 3)).reshape(
+                    verts_world_pi3.shape
                 )
                 rr.log(
-                    f"{BASE}/humans_xform/h{tid}",
+                    f"{BASE}/orig/humans/h{tid}",
+                    rr.Mesh3D(
+                        vertex_positions=verts_base.astype(np.float32),
+                        triangle_indices=faces_u32,
+                        albedo_factor=[0, 200, 0],
+                    ),
+                )
+
+                # Aligned mesh: base -> final
+                verts_aligned = _to_final_from_base(
+                    verts_base.reshape(-1, 3)
+                ).reshape(verts_base.shape)
+                rr.log(
+                    f"{BASE}/aligned/humans/h{tid}",
                     rr.Mesh3D(
                         vertex_positions=verts_aligned.astype(np.float32),
                         triangle_indices=faces_u32,
@@ -355,7 +380,7 @@ def rerun_vis_world4d(
                     ),
                 )
 
-        # ---------------------- dynamic points: confidence-filtered ----------------------
+        # ---------------------- dynamic points: aligned only ----------------------
         pts_pi3 = points[sample_idx].reshape(-1, 3)    # (N,3)
         cols = colors[sample_idx].reshape(-1, 3)       # (N,3)
 
@@ -384,33 +409,46 @@ def rerun_vis_world4d(
         if pts_keep_pi3.shape[0] > 0:
             pts_keep_world = _transform_points(pts_keep_pi3)
             rr.log(
-                f"{BASE}/points",
+                f"{BASE}/aligned/points",
                 rr.Points3D(
                     pts_keep_world.astype(np.float32),
                     colors=cols_keep.astype(np.uint8),
                 ),
             )
 
-        # ---------------------- per-frame cuboid bboxes ----------------------
+        # ---------------------- per-frame cuboid bboxes: original vs aligned ----------------------
         if frame_bbox_meshes is not None and vis_t in frame_bbox_meshes:
             for bi, bbox_m in enumerate(frame_bbox_meshes[vis_t]):
                 verts_pi3 = bbox_m["verts"].astype(np.float32)
-                verts_world = _transform_bbox_verts(verts_pi3)
+
+                # Original: base frame
+                verts_base = _to_base(verts_pi3)
+                strips_orig = [
+                    verts_base[[e0, e1], :] for (e0, e1) in cuboid_edges
+                ]
                 col = bbox_m.get("color", [255, 180, 0])
-
-                strips = []
-                for e0, e1 in cuboid_edges:
-                    strips.append(verts_world[[e0, e1], :])
-
                 rr.log(
-                    f"{BASE}/bboxes/frame_{vis_t}/bbox_{bi}",
+                    f"{BASE}/orig/bboxes/frame_{vis_t}/bbox_{bi}",
                     rr.LineStrips3D(
-                        strips=strips,
-                        colors=[col] * len(strips),
+                        strips=strips_orig,
+                        colors=[col] * len(strips_orig),
                     ),
                 )
 
-        # ---------------------- camera ----------------------
+                # Aligned: final world frame
+                verts_world = _to_final_from_base(verts_base)
+                strips_aligned = [
+                    verts_world[[e0, e1], :] for (e0, e1) in cuboid_edges
+                ]
+                rr.log(
+                    f"{BASE}/aligned/bboxes/frame_{vis_t}/bbox_{bi}",
+                    rr.LineStrips3D(
+                        strips=strips_aligned,
+                        colors=[col] * len(strips_aligned),
+                    ),
+                )
+
+        # ---------------------- camera: aligned only ----------------------
         cam_3x4 = frame_data.get("camera", None)
         if cam_3x4 is not None:
             cam_3x4 = np.asarray(cam_3x4, dtype=np.float32)
@@ -422,7 +460,6 @@ def rerun_vis_world4d(
 
             R_wc_world, t_wc_world = _transform_camera(R_wc_pi3, t_wc_pi3)
         else:
-            # If no camera, skip frustum
             R_wc_world = None
             t_wc_world = None
 
@@ -437,7 +474,7 @@ def rerun_vis_world4d(
             fx, fy, cx, cy = _pinhole_from_fov(W_img, H_img, fov_y)
             quat_xyzw = SciRot.from_matrix(R_wc_world).as_quat().astype(np.float32)
 
-            frus_path = f"{BASE}/frustum"
+            frus_path = f"{BASE}/aligned/frustum"
             rr.log(
                 frus_path,
                 rr.Transform3D(
@@ -457,7 +494,6 @@ def rerun_vis_world4d(
                 rr.log(f"{frus_path}/image", rr.Image(image))
 
     print("Rerun visualization running. Scrub the 'frame' timeline.")
-
 
 # ======================================================================================
 # FrameToWorldAnnotations
