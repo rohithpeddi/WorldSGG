@@ -1,49 +1,23 @@
 #!/usr/bin/env python3
 import argparse
-import contextlib
-import gc
 import json
 import os
 import pickle
-import sys
-import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
-import cv2
 import numpy as np
-import torch
-from scipy.spatial.transform import Rotation as SciRot
 from torch.utils.data import DataLoader
-from tqdm import tqdm
-
-sys.path.insert(0, os.path.dirname(__file__) + "/..")
-
-from dataloader.standard.action_genome.ag_dataset import StandardAG
-from dataloader.base_ag_dataset import BaseAG
 
 from annotation_utils import (
-    get_video_belongs_to_split,
     _load_pkl_if_exists,
     _npz_open,
-    _torch_inference_ctx,
-    _del_and_collect,
-    _lift_2d_to_3d,
-    _find_actor_index_in_frame,
-    _choose_primary_actor,
-    _build_frame_to_kps_map,
-    _robust_similarity_ransac,
-    _faces_u32,
-    _resize_mask_to,
-    _mask_from_bbox,
-    _resize_bbox_to,
-    _xywh_to_xyxy,
-    _average_sims_robust,
-    _finite_and_nonzero,
-    _pinhole_from_fov,
     _is_empty_array,
 )
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataloader.standard.action_genome.ag_dataset import StandardAG
+
+
+# sys.path.insert(0, os.path.dirname(__file__) + "/..")
 
 
 class FrameToWorldAnnotations:
@@ -313,9 +287,9 @@ class FrameToWorldAnnotations:
     def generate_video_bb_annotations(
             self,
             video_id: str,
-            video_id_gt_annotations: Dict,
-            video_id_gdino_annotations: Dict,
-            video_id_3d_bbox_predictions: Dict,
+            video_id_gt_annotations,
+            video_id_gdino_annotations,
+            video_id_3d_bbox_predictions,
             visualize: bool = False,
     ) -> None:
         """
@@ -338,49 +312,59 @@ class FrameToWorldAnnotations:
         }
         """
 
-        print(f"[{video_id}] Generating world SGG annotations")
-
-        # Load 3D points for the video from dynamic scene predictions
-        try:
-            P = self._load_points_for_video(video_id)
-            points_S = P["points"]  # (S,H,W,3)
-            conf_S = P["conf"]  # (S,H,W) or None
-            stems_S = P["frame_stems"]  # list of frame stems
-            colors = P["colors"]  # (S,H,W,3)
-            camera_poses = P["camera_poses"]  # (S,4,4)
-            S, H, W, _ = points_S.shape
-        except Exception as e:
-            print(f"[{video_id}] Failed to load 3D points: {e}")
-            return
-
-        stem_to_idx = {stems_S[i]: i for i in range(S)}
-
-        # Create a label-wise masks map for segmentation
-        (
-            video_to_frame_to_label_mask,
-            all_static_labels,
-            all_dynamic_labels,
-        ) = self._create_label_wise_masks_map(
-            video_id=video_id, gt_annotations=video_id_gt_annotations
-        )
+        # print(f"[{video_id}] Generating world SGG annotations")
+        #
+        # # Load 3D points for the video from dynamic scene predictions
+        # try:
+        #     P = self._load_points_for_video(video_id)
+        #     points_S = P["points"]  # (S,H,W,3)
+        #     conf_S = P["conf"]  # (S,H,W) or None
+        #     stems_S = P["frame_stems"]  # list of frame stems
+        #     colors = P["colors"]  # (S,H,W,3)
+        #     camera_poses = P["camera_poses"]  # (S,4,4)
+        #     S, H, W, _ = points_S.shape
+        # except Exception as e:
+        #     print(f"[{video_id}] Failed to load 3D points: {e}")
+        #     return
+        #
+        # stem_to_idx = {stems_S[i]: i for i in range(S)}
+        #
+        # # Create a label-wise masks map for segmentation
+        # (
+        #     video_to_frame_to_label_mask,
+        #     all_static_labels,
+        #     all_dynamic_labels,
+        # ) = self._create_label_wise_masks_map(
+        #     video_id=video_id, gt_annotations=video_id_gt_annotations
+        # )
 
         # Output structure for storing frame annotations
-        out_frames: Dict[str, Dict[str, Any]] = {}
+        video_3dgt_path = self.bbox_3d_root_dir / f"{video_id[:-4]}.pkl"
+        if not video_3dgt_path.exists():
+            print(f"[{video_id}] 3D bbox annotations not found at {video_3dgt_path}")
+            return
 
-        # NOTE: Fill out_frames based on your 4D SGG logic (objects, tracks, interpolation, etc.)
+        # Load the pkl file with 3D bbox predictions
+        with open(video_3dgt_path, "rb") as f:
+            video_3dgt = pickle.load(f)
 
-        out_path = self.bbox_4d_root_dir / f"{video_id[:-4]}.pkl"
-        with open(out_path, "wb") as f:
-            pickle.dump(
-                {
-                    "video_id": video_id,
-                    "frames": out_frames,
-                },
-                f,
-                protocol=pickle.HIGHEST_PROTOCOL,
-            )
+        frame_3dbb_map = video_3dgt["frames"]
 
-        print(f"[{video_id}] Saved 4D world annotations to {out_path}")
+        # Map structure: {
+        #   "000000.png": objects
+        # }
+        # Objects structure: [
+        #   {
+        #       "label": [...],
+        #       "gt_bbox_xyxy": [...],
+        #       "aabb_floor_aligned": [...],
+        #       "multi_scale_candidates": [...],
+        #       ...
+        #   },
+        #   ...
+        # ]
+
+        print(f"[{video_id}] Saved 4D world annotations to {video_3dgt_path}")
 
     def _load_points_for_video(self, video_id: str) -> Dict[str, Any]:
         """Load 3D points from dynamic scene predictions (sampled to annotated frames)."""
@@ -465,16 +449,17 @@ class FrameToWorldAnnotations:
         }
 
     def generate_sample_gt_world_4D_annotations(self, video_id: str) -> None:
-        video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(
-            video_id
-        )
-        video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
-        video_id_3d_bbox_predictions = self.get_video_3d_annotations(video_id)
+        # video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(
+        #     video_id
+        # )
+        # video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
+        # video_id_3d_bbox_predictions = self.get_video_3d_annotations(video_id)
         self.generate_video_bb_annotations(
             video_id,
-            video_id_gt_annotations,
-            video_id_gdino_annotations,
-            video_id_3d_bbox_predictions,
+            None, None, None,
+            # video_id_gt_annotations,
+            # video_id_gdino_annotations,
+            # video_id_3d_bbox_predictions,
             visualize=True,
         )
 
@@ -589,52 +574,6 @@ def main_sample():
     frame_to_world_generator.generate_sample_gt_world_4D_annotations(video_id=video_id)
 
 
-def main_estimate_mismatches():
-    args = parse_args()
-
-    frame_to_world_generator = FrameToWorldAnnotations(
-        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
-        ag_root_directory=args.ag_root_directory,
-    )
-    train_dataset, test_dataset, dataloader_train, dataloader_test = load_dataset(
-        args.ag_root_directory
-    )
-    frame_to_world_generator.estimate_mismatched_annotations(
-        train_dataloader=dataloader_train, test_dataloader=dataloader_test
-    )
-
-
-def main_estimate_camera_motion():
-    args = parse_args()
-
-    frame_to_world_generator = FrameToWorldAnnotations(
-        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
-        ag_root_directory=args.ag_root_directory,
-    )
-    train_dataset, test_dataset, dataloader_train, dataloader_test = load_dataset(
-        args.ag_root_directory
-    )
-    frame_to_world_generator.estimate_camera_motion_in_dataset(
-        train_dataloader=dataloader_train,
-        test_dataloader=dataloader_test,
-        split=args.split,
-    )
-
-
-def main_combine_camera_motion_stats():
-    args = parse_args()
-
-    frame_to_world_generator = FrameToWorldAnnotations(
-        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
-        ag_root_directory=args.ag_root_directory,
-    )
-    frame_to_world_generator.combine_camera_motion_stats_all_splits()
-
-
 if __name__ == "__main__":
-    # main_estimate_mismatches()
-    # main_estimate_camera_motion()
-    # main_combine_camera_motion_stats()
     # main()
     main_sample()
-

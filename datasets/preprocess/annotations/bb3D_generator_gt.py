@@ -101,7 +101,6 @@ class BBox3DGenerator:
         self.erosion_kernel_sizes = list(range(0, 11))
         self.min_points_per_scale = 50
 
-
     def get_video_gt_annotations(self, video_id):
         video_gt_annotations_json_path = self.gt_annotations_root_dir / video_id / "gt_annotations.json"
         if not video_gt_annotations_json_path.exists():
@@ -735,7 +734,6 @@ class BBox3DGenerator:
                 except Exception:
                     pass
         print(f"[cleanup] pipeline state cleared, check: {torch.cuda.memory_summary()}")
-
 
     def generate_video_bb_annotations(
             self,
@@ -1418,15 +1416,15 @@ class BBox3DGenerator:
 
     # small helper to keep mesh creation outside
     def _make_box_mesh_from_corners(self, corners_world: np.ndarray):
-            faces = np.array([
-                [0, 1, 2], [1, 3, 2],
-                [4, 6, 5], [5, 6, 7],
-                [0, 4, 1], [1, 4, 5],
-                [2, 3, 6], [3, 7, 6],
-                [0, 2, 4], [2, 6, 4],
-                [1, 5, 3], [3, 5, 7],
-            ], dtype=np.uint32)
-            return corners_world.astype(np.float32), faces
+        faces = np.array([
+            [0, 1, 2], [1, 3, 2],
+            [4, 6, 5], [5, 6, 7],
+            [0, 4, 1], [1, 4, 5],
+            [2, 3, 6], [3, 7, 6],
+            [0, 2, 4], [2, 6, 4],
+            [1, 5, 3], [3, 5, 7],
+        ], dtype=np.uint32)
+        return corners_world.astype(np.float32), faces
 
     def generate_gt_world_bb_annotations(self, dataloader, split) -> None:
         for data in tqdm(dataloader):
@@ -1489,7 +1487,7 @@ def rerun_vis_world4d(
     video_dynamic_predictions = np.load(video_dynamic_prediction_path, allow_pickle=True)
     video_dynamic_predictions = {k: video_dynamic_predictions[k] for k in video_dynamic_predictions.files}
     points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
-    conf = video_dynamic_predictions["conf"].astype(np.float32)      # (S,H,W)
+    conf = video_dynamic_predictions["conf"].astype(np.float32)  # (S,H,W)
     imgs_f32 = video_dynamic_predictions["images"]
     colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
 
@@ -1600,9 +1598,9 @@ def rerun_vis_world4d(
 
         # --- dynamic points: confidence-filtered ---
         if sample_idx < points.shape[0]:
-            pts = points[sample_idx].reshape(-1, 3)            # (N,3)
-            cols = colors[sample_idx].reshape(-1, 3)           # (N,3)
-            cfs = conf[sample_idx].reshape(-1)                 # (N,)
+            pts = points[sample_idx].reshape(-1, 3)  # (N,3)
+            cols = colors[sample_idx].reshape(-1, 3)  # (N,3)
+            cfs = conf[sample_idx].reshape(-1)  # (N,)
 
             # adaptive threshold
             good = np.isfinite(cfs)
