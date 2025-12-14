@@ -146,6 +146,29 @@ def rerun_vis_world4d(
         rr.set_time_sequence("frame", vis_t)
         rr.log("/", rr.Clear(recursive=True))
 
+        # ---------------------- world axis visualizer ----------------------
+        # Draw small RGB axes at world origin:
+        # X = red, Y = green, Z = blue
+        axis_len = 0.5  # tweak as you like
+        x_axis = np.array([[0.0, 0.0, 0.0],
+                           [axis_len, 0.0, 0.0]], dtype=np.float32)
+        y_axis = np.array([[0.0, 0.0, 0.0],
+                           [0.0, axis_len, 0.0]], dtype=np.float32)
+        z_axis = np.array([[0.0, 0.0, 0.0],
+                           [0.0, 0.0, axis_len]], dtype=np.float32)
+
+        rr.log(
+            f"{BASE}/world_axes",
+            rr.LineStrips3D(
+                strips=[x_axis, y_axis, z_axis],
+                colors=[
+                    [255, 0, 0],   # X (red)
+                    [0, 255, 0],   # Y (green)
+                    [0, 0, 255],   # Z (blue)
+                ],
+            ),
+        )
+
         # ---------------------- floor ----------------------
         if vis_floor and (floor_vertices_tf is not None) and (floor_faces is not None):
             rr.log(
