@@ -40,10 +40,10 @@ from annotation_utils import (
 
 def rerun_vis_world4d(
     video_id: str,
-    points: np.ndarray,          # (S, H, W, 3)
+    points: np.ndarray,          # (S, H, W, 3)  -- Pi3 / dynamic coords
     colors: np.ndarray,          # (S, H, W, 3) uint8
     conf: Optional[np.ndarray],  # (S, H, W) or None
-    camera_poses: np.ndarray,    # (S, 4, 4)
+    camera_poses: np.ndarray,    # (S, 4, 4)     -- Pi3 camera->world
     frame_bbox_meshes: Optional[Dict[int, List[Dict[str, Any]]]] = None,
     *,
     global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None,
@@ -54,34 +54,21 @@ def rerun_vis_world4d(
     min_conf_default: float = 1e-6,  # floor for conf
 ) -> None:
     """
-    Visualize 4D world for a video:
+    Visualize 4D world for a video with all geometry expressed in a common
+    world coordinate frame aligned with XYZ axes.
 
-      - dynamic 3D points (confidence-filtered)
-      - floor mesh (optional)
-      - 3D cuboid bboxes for objects (frame_bbox_meshes)
-      - camera frustum + image per frame
+    - `global_floor_sim` is assumed to define the similarity transform
+      from the raw dynamic / Pi3 coordinates to this world frame:
+        p_world = s * (p_pi3 @ R^T) + t
 
-    Args
-    ----
-    video_id:
-        AG video id (e.g., "0DJ6R.mp4") – only used for logging.
-    points:
-        Sampled 3D points for the *annotated* frames: shape (S, H, W, 3).
-    colors:
-        RGB colors per point, uint8, shape (S, H, W, 3).
-    conf:
-        Optional confidence map, shape (S, H, W). If provided, we adaptively
-        threshold points per frame.
-    camera_poses:
-        Camera poses for each annotated frame, shape (S, 4, 4), world-from-camera.
-    frame_bbox_meshes:
-        Optional dict mapping vis_t (0..S-1) to list of bbox dicts with key
-          - "verts": (8, 3) world coordinates of cuboid corners
-          - "color": [r, g, b] (optional; default [255, 180, 0])
-    global_floor_sim:
-        Optional (s, R, t) similarity transform applied to floor vertices.
-    floor:
-        Optional floor mesh tuple (gv, gf, gc).
+    We apply this to:
+      - dynamic points
+      - camera poses
+
+    and assume:
+      - floor vertices (`floor`) and
+      - frame_bbox_meshes vertices
+    are already in that world frame.
     """
 
     rr.init(app_id, spawn=True)
@@ -92,7 +79,21 @@ def rerun_vis_world4d(
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
 
     # --------------------------------------------------------------------------
+    # Unpack global floor similarity, if provided
+    #   p_world = s_g * (p_pi3 @ R_g.T) + t_g
+    # --------------------------------------------------------------------------
+    s_g: Optional[float] = None
+    R_g: Optional[np.ndarray] = None
+    t_g: Optional[np.ndarray] = None
+    if global_floor_sim is not None:
+        s_g, R_g, t_g = global_floor_sim
+        s_g = float(s_g)
+        R_g = np.asarray(R_g, dtype=np.float32)
+        t_g = np.asarray(t_g, dtype=np.float32).reshape(1, 3)
+
+    # --------------------------------------------------------------------------
     # Floor mesh (optionally transformed by global floor similarity)
+    #   (If floor vertices are still in Pi3 coords, we map them too.)
     # --------------------------------------------------------------------------
     floor_vertices_tf = None
     floor_faces = None
@@ -101,8 +102,8 @@ def rerun_vis_world4d(
         floor_verts0, floor_faces0, floor_colors0 = floor
         floor_verts0 = np.asarray(floor_verts0, dtype=np.float32)
         floor_faces0 = _faces_u32(np.asarray(floor_faces0))
-        if global_floor_sim is not None:
-            s_g, R_g, t_g = global_floor_sim
+
+        if s_g is not None:
             floor_vertices_tf = s_g * (floor_verts0 @ R_g.T) + t_g
         else:
             floor_vertices_tf = floor_verts0
@@ -154,8 +155,12 @@ def rerun_vis_world4d(
             )
 
         # ---------------------- dynamic points ----------------------
-        pts = points[vis_t].reshape(-1, 3)          # (N,3)
+        pts = points[vis_t].reshape(-1, 3)          # (N,3) in Pi3 coords
         cols = colors[vis_t].reshape(-1, 3)         # (N,3)
+
+        # Map points to world-aligned XYZ frame if we have global sim
+        if s_g is not None:
+            pts = s_g * (pts @ R_g.T) + t_g  # broadcast t_g over rows
 
         if conf is not None:
             cfs = conf[vis_t].reshape(-1)           # (N,)
@@ -191,9 +196,10 @@ def rerun_vis_world4d(
             )
 
         # ---------------------- per-frame cuboid bboxes ----------------------
+        # NOTE: We assume bbox vertices are already in the *world-aligned* frame.
         if frame_bbox_meshes is not None and vis_t in frame_bbox_meshes:
             for bi, bbox_m in enumerate(frame_bbox_meshes[vis_t]):
-                verts_world = bbox_m["verts"].astype(np.float32)  # (8,3) typically
+                verts_world = bbox_m["verts"].astype(np.float32)  # (8,3)
                 col = bbox_m.get("color", [255, 180, 0])
 
                 strips = []
@@ -210,8 +216,16 @@ def rerun_vis_world4d(
 
         # ---------------------- camera frustum + image ----------------------
         cam_4x4 = np.asarray(camera_poses[vis_t], dtype=np.float32)  # (4,4)
-        R_wc = cam_4x4[:3, :3]
-        t_wc = cam_4x4[:3, 3]
+        R_wc = cam_4x4[:3, :3]   # Pi3 world-from-camera
+        t_wc = cam_4x4[:3, 3]    # Pi3 camera center in world coords
+
+        # Map camera pose into world-aligned frame if we have global sim
+        if s_g is not None:
+            # p_world = s * (p_pi3 @ R^T) + t
+            # => new R_wc = R_wc @ R_g.T
+            #    new t_wc = s * (t_wc @ R_g.T) + t
+            R_wc = R_wc @ R_g.T
+            t_wc = s_g * (t_wc @ R_g.T) + t_g.reshape(-1)
 
         image = _get_image_for_time(vis_t)
         if image is not None:
