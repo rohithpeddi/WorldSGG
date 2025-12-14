@@ -43,7 +43,7 @@ def rerun_vis_world4d(
     points: np.ndarray,          # (S, H, W, 3)  -- Pi3 / dynamic coords
     colors: np.ndarray,          # (S, H, W, 3) uint8
     conf: Optional[np.ndarray],  # (S, H, W) or None
-    camera_poses: np.ndarray,    # (S, 4, 4)     -- Pi3 camera->world (3x4 or 4x4)
+    camera_poses: np.ndarray,    # (S, 4, 4)     -- Pi3 camera->world
     frame_bbox_meshes: Optional[Dict[int, List[Dict[str, Any]]]] = None,
     *,
     global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None,
@@ -54,25 +54,16 @@ def rerun_vis_world4d(
     min_conf_default: float = 1e-6,  # floor for conf
 ) -> None:
     """
-    Visualize 4D world for a video with all geometry expressed in a common
-    world coordinate frame tied to the XYZ axes.
+    Visualize 4D world for a video in a world frame where the floor lies in the XY plane.
 
-    We assume `global_floor_sim = (s, R, t)` defines a similarity transform from
-    the raw Pi3 coordinate frame into this world frame:
-
-        p_world = s * (p_pi3 @ R^T) + t
-
-    We apply this to:
-      - dynamic 3D points
-      - floor mesh vertices
-      - 3D bbox mesh vertices (frame_bbox_meshes)
-      - camera poses (approximately; see note below)
-
-    NOTE:
-      For cameras, we also apply the same transform to orientation and origin
-      so the frustum lives in the same world frame. Exact similarity-composition
-      of a scaled transform cannot be represented as a pure rigid transform, but
-      this approximation is sufficient for visualization and keeps axes aligned.
+    Steps:
+      1) Optionally apply `global_floor_sim = (s, R, t)` to map Pi3 coords to a common base frame.
+      2) If a floor mesh is provided, fit a plane to its vertices, make that plane z=0 (XY plane),
+         and define a rotation so its normal becomes +Z.
+      3) Apply the same composed transform to:
+           - dynamic points
+           - 3D bbox vertices
+           - camera poses (frustums)
     """
 
     rr.init(app_id, spawn=True)
@@ -83,8 +74,7 @@ def rerun_vis_world4d(
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
 
     # --------------------------------------------------------------------------
-    # Unpack global floor similarity, if provided
-    #   p_world = s_g * (p_pi3 @ R_g.T) + t_g
+    # 0. Unpack global_floor_sim (Pi3 -> base frame)
     # --------------------------------------------------------------------------
     s_g: Optional[float] = None
     R_g: Optional[np.ndarray] = None
@@ -93,34 +83,140 @@ def rerun_vis_world4d(
         s_g, R_g, t_g = global_floor_sim
         s_g = float(s_g)
         R_g = np.asarray(R_g, dtype=np.float32)
-        t_g = np.asarray(t_g, dtype=np.float32)  # shape (3,)
+        t_g = np.asarray(t_g, dtype=np.float32)  # (3,)
 
     # --------------------------------------------------------------------------
-    # Floor mesh (optionally transformed by global floor similarity)
+    # 1. Floor: bring into base frame, then align its plane to XY (z = 0)
     # --------------------------------------------------------------------------
-    floor_vertices_tf = None
+    floor_vertices_tf: Optional[np.ndarray] = None
     floor_faces = None
     floor_kwargs = None
+
+    # alignment transform: base -> final world
+    R_align = np.eye(3, dtype=np.float32)
+    center = np.zeros(3, dtype=np.float32)  # point on floor plane (in base frame)
+
     if floor is not None:
         floor_verts0, floor_faces0, floor_colors0 = floor
         floor_verts0 = np.asarray(floor_verts0, dtype=np.float32)
-        floor_faces0 = _faces_u32(np.asarray(floor_faces0))
+        floor_faces = _faces_u32(np.asarray(floor_faces0))
 
+        # First: apply global_floor_sim to floor verts (Pi3 -> base), if available
         if s_g is not None:
-            floor_vertices_tf = s_g * (floor_verts0 @ R_g.T) + t_g[None, :]
+            floor_world_base = s_g * (floor_verts0 @ R_g.T) + t_g[None, :]
         else:
-            floor_vertices_tf = floor_verts0
+            floor_world_base = floor_verts0
 
+        if floor_world_base.shape[0] >= 3:
+            # Fit a plane: normal is the smallest singular vector of centered points
+            center = floor_world_base.mean(axis=0)
+            centered = floor_world_base - center[None, :]
+
+            _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+            normal = Vt[-1]
+            norm = np.linalg.norm(normal)
+            if norm < 1e-6:
+                normal = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+            else:
+                normal = normal / norm
+
+            # Orient normal to point "up" (positive z) to avoid flips
+            if normal[2] < 0:
+                normal = -normal
+
+            # Rotation that maps 'normal' to +Z
+            z_axis = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+            if np.allclose(normal, z_axis, atol=1e-4):
+                R_align = np.eye(3, dtype=np.float32)
+            elif np.allclose(normal, -z_axis, atol=1e-4):
+                # 180° flip around X axis
+                R_align = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
+            else:
+                v = np.cross(normal, z_axis)
+                s = np.linalg.norm(v)
+                c = float(np.dot(normal, z_axis))
+                vx = np.array(
+                    [
+                        [0.0, -v[2], v[1]],
+                        [v[2], 0.0, -v[0]],
+                        [-v[1], v[0], 0.0],
+                    ],
+                    dtype=np.float32,
+                )
+                R_align = (
+                    np.eye(3, dtype=np.float32)
+                    + vx
+                    + vx @ vx * ((1.0 - c) / (s**2 + 1e-8))
+                )
+
+            # Floor vertices in final world frame: floor is now at z=0
+            floor_vertices_tf = (floor_world_base - center[None, :]) @ R_align.T
+        else:
+            # Not enough vertices to robustly fit a plane; just use base frame
+            floor_vertices_tf = floor_world_base
+
+        # color or albedo
         floor_kwargs = {}
         if floor_colors0 is not None:
             floor_colors0 = np.asarray(floor_colors0, dtype=np.uint8)
             floor_kwargs["vertex_colors"] = floor_colors0
         else:
             floor_kwargs["albedo_factor"] = [160, 160, 160]
-        floor_faces = floor_faces0
 
     # --------------------------------------------------------------------------
-    # Utility: get 2D image for a given frame index (using colors)
+    # 2. Helpers: Pi3 -> final world for points, bboxes, and camera poses
+    # --------------------------------------------------------------------------
+    def _transform_points(pi3_pts: np.ndarray) -> np.ndarray:
+        """
+        (N, 3) Pi3 points -> final world coords with:
+           1) optional global_floor_sim
+           2) floor-plane alignment to XY
+        """
+        pts = np.asarray(pi3_pts, dtype=np.float32)
+        # Pi3 -> base
+        if s_g is not None:
+            pts = s_g * (pts @ R_g.T) + t_g[None, :]
+        # base -> final
+        if floor is not None and floor_vertices_tf is not None:
+            pts = (pts - center[None, :]) @ R_align.T
+        return pts
+
+    def _transform_camera(R_wc_pi3: np.ndarray, t_wc_pi3: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Camera pose in Pi3 coords -> final world coords.
+
+        For orientation, we compose rotations (no scaling).
+        For translation, we treat the camera origin as a point and use _transform_points.
+        """
+        R_wc_pi3 = np.asarray(R_wc_pi3, dtype=np.float32)
+        t_wc_pi3 = np.asarray(t_wc_pi3, dtype=np.float32)
+
+        # Camera origin: just transform as a point
+        t_wc_final = _transform_points(t_wc_pi3[None, :])[0]
+
+        # Orientation:
+        # Pi3 -> base rotation
+        if R_g is not None:
+            R_pi3_to_base = R_g
+        else:
+            R_pi3_to_base = np.eye(3, dtype=np.float32)
+
+        # base -> final rotation
+        if floor is not None and floor_vertices_tf is not None:
+            R_base_to_final = R_align
+        else:
+            R_base_to_final = np.eye(3, dtype=np.float32)
+
+        R_pi3_to_final = R_base_to_final @ R_pi3_to_base
+        R_wc_final = R_pi3_to_final @ R_wc_pi3
+
+        return R_wc_final, t_wc_final
+
+    def _transform_bbox_verts(verts_pi3: np.ndarray) -> np.ndarray:
+        return _transform_points(verts_pi3)
+
+    # --------------------------------------------------------------------------
+    # 3. Utility: get 2D image for a given frame index (using colors)
     # --------------------------------------------------------------------------
     def _get_image_for_time(idx: int) -> Optional[np.ndarray]:
         if idx < 0 or idx >= S:
@@ -140,16 +236,14 @@ def rerun_vis_world4d(
     ]
 
     # --------------------------------------------------------------------------
-    # Iterate through frames (S = number of annotated frames)
+    # 4. Iterate through frames (S = number of annotated frames)
     # --------------------------------------------------------------------------
     for vis_t in range(S):
         rr.set_time_sequence("frame", vis_t)
         rr.log("/", rr.Clear(recursive=True))
 
         # ---------------------- world axis visualizer ----------------------
-        # Draw small RGB axes at world origin:
-        # X = red, Y = green, Z = blue
-        axis_len = 0.5  # tweak as you like
+        axis_len = 0.5  # adjust to taste
         x_axis = np.array([[0.0, 0.0, 0.0],
                            [axis_len, 0.0, 0.0]], dtype=np.float32)
         y_axis = np.array([[0.0, 0.0, 0.0],
@@ -162,9 +256,9 @@ def rerun_vis_world4d(
             rr.LineStrips3D(
                 strips=[x_axis, y_axis, z_axis],
                 colors=[
-                    [255, 0, 0],   # X (red)
-                    [0, 255, 0],   # Y (green)
-                    [0, 0, 255],   # Z (blue)
+                    [255,   0,   0],  # X (red)
+                    [  0, 255,   0],  # Y (green)
+                    [  0,   0, 255],  # Z (blue)
                 ],
             ),
         )
@@ -181,21 +275,18 @@ def rerun_vis_world4d(
             )
 
         # ---------------------- dynamic points ----------------------
-        pts = points[vis_t].reshape(-1, 3)          # (N,3) in Pi3 coords
-        cols = colors[vis_t].reshape(-1, 3)         # (N,3)
+        pts_pi3 = points[vis_t].reshape(-1, 3)          # (N,3) in Pi3 coords
+        cols = colors[vis_t].reshape(-1, 3)             # (N,3)
 
-        # Map points to world-aligned XYZ frame if we have global sim
-        if s_g is not None:
-            pts = s_g * (pts @ R_g.T) + t_g[None, :]
+        pts_world = _transform_points(pts_pi3)
 
         if conf is not None:
-            cfs = conf[vis_t].reshape(-1)           # (N,)
+            cfs = conf[vis_t].reshape(-1)               # (N,)
             good = np.isfinite(cfs)
             cfs_valid = cfs[good]
             if cfs_valid.size > 0:
                 med = np.median(cfs_valid)
                 p5 = np.percentile(cfs_valid, 5)
-                # conservative threshold: keep at least ~95% of valid points
                 thr = max(min_conf_default, p5)
                 print(
                     f"[{video_id}] frame {vis_t}: conf thr = {thr:.4f} "
@@ -204,12 +295,11 @@ def rerun_vis_world4d(
             else:
                 thr = min_conf_default
 
-            keep = (cfs >= thr) & np.isfinite(pts).all(axis=1)
+            keep = (cfs >= thr) & np.isfinite(pts_world).all(axis=1)
         else:
-            # no confidence provided, just keep finite points
-            keep = np.isfinite(pts).all(axis=1)
+            keep = np.isfinite(pts_world).all(axis=1)
 
-        pts_keep = pts[keep]
+        pts_keep = pts_world[keep]
         cols_keep = cols[keep]
 
         if pts_keep.shape[0] > 0:
@@ -222,12 +312,10 @@ def rerun_vis_world4d(
             )
 
         # ---------------------- per-frame cuboid bboxes ----------------------
-        # Transform bbox vertices by the same global similarity as points.
         if frame_bbox_meshes is not None and vis_t in frame_bbox_meshes:
             for bi, bbox_m in enumerate(frame_bbox_meshes[vis_t]):
-                verts_world = np.asarray(bbox_m["verts"], dtype=np.float32)  # (8,3) in Pi3 coords
-                if s_g is not None:
-                    verts_world = s_g * (verts_world @ R_g.T) + t_g[None, :]
+                verts_pi3 = np.asarray(bbox_m["verts"], dtype=np.float32)  # (8,3)
+                verts_world = _transform_bbox_verts(verts_pi3)
                 col = bbox_m.get("color", [255, 180, 0])
 
                 strips = []
@@ -243,22 +331,16 @@ def rerun_vis_world4d(
                 )
 
         # ---------------------- camera frustum + image ----------------------
-        cam_4x4 = np.asarray(camera_poses[vis_t], dtype=np.float32)  # (4,4) or (3,4) padded
+        cam_4x4 = np.asarray(camera_poses[vis_t], dtype=np.float32)
         if cam_4x4.shape == (3, 4):
             cam_4x4 = np.vstack(
                 [cam_4x4, np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)]
             )
 
-        R_wc = cam_4x4[:3, :3]   # Pi3 world-from-camera rotation
-        t_wc = cam_4x4[:3, 3]    # Pi3 camera origin in world coords
+        R_wc_pi3 = cam_4x4[:3, :3]
+        t_wc_pi3 = cam_4x4[:3, 3]
 
-        # Map camera pose into world-aligned frame (approximate)
-        if s_g is not None:
-            # Rotate orientation by R_g (compose global->Pi3)
-            # Using column-vector convention: x' = R_g * x
-            R_wc = R_wc @ R_g.T
-            # Transform origin the same way we transform points
-            t_wc = s_g * (t_wc @ R_g.T) + t_g
+        R_wc_world, t_wc_world = _transform_camera(R_wc_pi3, t_wc_pi3)
 
         image = _get_image_for_time(vis_t)
         if image is not None:
@@ -268,13 +350,13 @@ def rerun_vis_world4d(
 
         fov_y = 0.96
         fx, fy, cx, cy = _pinhole_from_fov(W_img, H_img, fov_y)
-        quat_xyzw = SciRot.from_matrix(R_wc).as_quat().astype(np.float32)
+        quat_xyzw = SciRot.from_matrix(R_wc_world).as_quat().astype(np.float32)
 
         frus_path = f"{BASE}/frustum"
         rr.log(
             frus_path,
             rr.Transform3D(
-                translation=t_wc.astype(np.float32),
+                translation=t_wc_world.astype(np.float32),
                 rotation=rr.Quaternion(xyzw=quat_xyzw),
             ),
         )
