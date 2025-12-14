@@ -30,7 +30,11 @@ from annotation_utils import (
 # --------------------------------------------------------------------------------------
 # Rerun visualization for ORIGINAL (Pi3) results
 #   - Shows original point clouds for annotated frames.
-#   - Now also shows the floor mesh (transformed to original/world coords).
+#   - Now also shows:
+#       * floor mesh (transformed to original/world coords).
+#       * world coordinate frame (World +X/+Y/+Z).
+#       * XYZ coordinate frame (X/Y/Z).
+#       * camera frustum + camera axes (Cam +X/+Y/+Z).
 # --------------------------------------------------------------------------------------
 
 
@@ -56,14 +60,19 @@ def rerun_vis_original_results(
       - conf_S:   (S,H,W) confidence (optional)
       - stems_S:  list of "000123"-style frame stems for each slice in points_S
       - colors_S: (S,H,W,3) uint8 colors (optional)
-      - camera_poses_S: (S,4,4) or (S,3,4) camera extrinsics (currently NOT used)
+      - camera_poses_S: (S,4,4) or (S,3,4) camera extrinsics (optional)
 
     Additionally:
       - If `floor` (gv, gf, gc) plus `global_floor_sim` (s,R,t) are provided,
         we transform the floor mesh into the same world/original coordinate
         frame as the points and render it as a Mesh3D.
 
-    For now, we **only draw point clouds + floor mesh** (no bboxes, no cameras).
+      - We draw:
+          * world coordinate frame (World +X/+Y/+Z) as labeled arrows.
+          * XYZ coordinate frame (X/Y/Z) as labeled arrows.
+          * camera frustum (via rr.Pinhole) + camera axes (Cam +X/+Y/+Z).
+
+    For now, we **only draw point clouds + floor mesh + frames + camera**.
     """
 
     rr.init(app_id, spawn=True)
@@ -71,6 +80,57 @@ def rerun_vis_original_results(
 
     BASE = "world/original"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
+
+    # Predefine static world & XYZ coordinate frames as Arrows3D with labels.
+    axis_len_world = 0.5
+    world_axes = rr.Arrows3D(
+        origins=[[0.0, 0.0, 0.0]] * 3,
+        vectors=[
+            [axis_len_world, 0.0, 0.0],
+            [0.0, axis_len_world, 0.0],
+            [0.0, 0.0, axis_len_world],
+        ],
+        colors=[
+            [255, 0, 0],   # X - red
+            [0, 255, 0],   # Y - green
+            [0, 0, 255],   # Z - blue
+        ],
+        labels=["World +X", "World +Y", "World +Z"],
+    )
+
+    axis_len_xyz = 1.0
+    # Slightly offset XYZ frame so it's visually distinct if you want; here kept at origin.
+    xyz_axes = rr.Arrows3D(
+        origins=[[0.0, 0.0, 0.0]] * 3,
+        vectors=[
+            [axis_len_xyz, 0.0, 0.0],
+            [0.0, axis_len_xyz, 0.0],
+            [0.0, 0.0, axis_len_xyz],
+        ],
+        colors=[
+            [255, 128, 128],
+            [128, 255, 128],
+            [128, 128, 255],
+        ],
+        labels=["X", "Y", "Z"],
+    )
+
+    def _log_static_frames() -> None:
+        """
+        Log the world & XYZ coordinate frames for the current timestep.
+        Called once per frame after `rr.Clear` since Clear wipes everything.
+        """
+        rr.log(f"{BASE}/world_axes", world_axes)
+        rr.log(f"{BASE}/xyz_axes", xyz_axes)
+
+        # Optional: a small text reminder in a TextLog view.
+        rr.log(
+            f"{BASE}/info",
+            rr.TextLog(
+                f"World coordinate frame = RUB; showing World +X/+Y/+Z and XYZ axes, "
+                f"plus camera frustum & axes for video {video_id}."
+            ),
+        )
 
     # ----------------------------------------------------
     # Floor mesh: transform to world/original coordinates
@@ -116,7 +176,7 @@ def rerun_vis_original_results(
             )
         return img
 
-    S = points_S.shape[0]
+    S, H_grid, W_grid, _ = points_S.shape
 
     for vis_t in range(S):
         stem = stems_S[vis_t]
@@ -124,7 +184,10 @@ def rerun_vis_original_results(
         rr.set_time_sequence("frame", vis_t)
         rr.log("/", rr.Clear(recursive=True))
 
-        # --- Floor mesh (static) ---
+        # --- Static coordinate frames (world +XYZ) ---
+        _log_static_frames()
+
+        # --- Floor mesh (static geometry in world/original coords) ---
         if floor_vertices_world is not None and floor_faces is not None:
             rr.log(
                 f"{BASE}/floor",
@@ -135,7 +198,64 @@ def rerun_vis_original_results(
                 ),
             )
 
-        # --- Points ---
+        # --- Camera frustum + camera axes (if available) ---
+        if camera_poses_S is not None and vis_t < camera_poses_S.shape[0]:
+            cam_pose = camera_poses_S[vis_t]
+
+            # Normalize pose shape to 4x4
+            if cam_pose.shape == (3, 4):
+                T = np.eye(4, dtype=np.float32)
+                T[:3, :4] = cam_pose
+            elif cam_pose.shape == (4, 4):
+                T = cam_pose.astype(np.float32)
+            else:
+                # Fallback: identity if format unexpected
+                T = np.eye(4, dtype=np.float32)
+
+            cam_origin = T[:3, 3]
+            R_cam = T[:3, :3]
+
+            # Camera axes drawn from the camera center, with labels.
+            axis_len_cam = 0.4
+            cam_axes_vectors = np.stack(
+                [
+                    R_cam[:, 0] * axis_len_cam,  # Cam X
+                    R_cam[:, 1] * axis_len_cam,  # Cam Y
+                    R_cam[:, 2] * axis_len_cam,  # Cam Z
+                ],
+                axis=0,
+            )
+            origins_cam = np.repeat(cam_origin[None, :], 3, axis=0)
+
+            rr.log(
+                f"{BASE}/camera_axes",
+                rr.Arrows3D(
+                    origins=origins_cam,
+                    vectors=cam_axes_vectors,
+                    colors=[
+                        [255, 0, 0],
+                        [0, 255, 0],
+                        [0, 0, 255],
+                    ],
+                    labels=["Cam +X", "Cam +Y", "Cam +Z"],
+                ),
+            )
+
+            # Camera frustum: simple perspective pinhole with labeled entity path.
+            rr.log(
+                f"{BASE}/camera/frustum",
+                rr.Pinhole(
+                    fov_y=0.7853982,  # ~45 degrees
+                    aspect_ratio=float(W_grid) / float(H_grid),
+                    camera_xyz=rr.ViewCoordinates.RUB,
+                    image_plane_distance=0.1,
+                    color=[255, 128, 0],
+                    line_width=0.003,
+                ),
+                rr.Transform3D(translation=cam_origin.tolist()),
+            )
+
+        # --- Points (original Pi3 point cloud) ---
         pts = points_S[vis_t].reshape(-1, 3)  # (N,3)
         cols = (
             colors_S[vis_t].reshape(-1, 3) if colors_S is not None else None
@@ -184,7 +304,7 @@ def rerun_vis_original_results(
             rr.log(f"{BASE}/image", rr.Image(img))
 
     print(
-        "[orig-pts] Original points + floor visualization running for "
+        "[orig-pts] Original points + floor + frames + camera visualization running for "
         f"{video_id}. Scrub the 'frame' timeline in Rerun."
     )
 
@@ -637,6 +757,8 @@ class FrameToWorldAnnotations:
         by `visualize_original_results`, and currently draws:
           - original point clouds
           - floor mesh
+          - world + XYZ coordinate frames
+          - camera frustum + camera axes
         """
         print(f"[world4d][{video_id}] Generating world SGG annotations (skeleton)")
 
@@ -687,7 +809,9 @@ class FrameToWorldAnnotations:
           2) Loads floor mesh + global_floor_sim from the 3D bbox .pkl (if present).
           3) Launches a Rerun viewer that shows:
              - original point clouds
-             - floor mesh in the same world/original coordinates.
+             - floor mesh
+             - world & XYZ coordinate frames
+             - camera frustum + camera axes.
         """
         P = self._load_original_points_for_video(video_id)
 
@@ -730,7 +854,7 @@ class FrameToWorldAnnotations:
         Right now:
           - loads GT / GDINO / 3D bboxes;
           - calls generate_video_bb_annotations (skeleton stats);
-          - visualizes original Pi3 point clouds + floor mesh.
+          - visualizes original Pi3 point clouds + floor mesh + frames + camera.
         """
         video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(
             video_id
@@ -746,7 +870,7 @@ class FrameToWorldAnnotations:
             visualize=False,
         )
 
-        # Now show the original Pi3-space outputs (points + floor)
+        # Now show the original Pi3-space outputs (points + floor + frames + camera)
         self.visualize_original_results(video_id=video_id)
 
     def generate_gt_world_bb_annotations(
@@ -830,7 +954,8 @@ def parse_args():
         description=(
             "World4D GT helper: "
             "(a) inspect 3D bbox annotations, "
-            "(b) visualize original Pi3 outputs (points + floor) for annotated frames."
+            "(b) visualize original Pi3 outputs (points + floor + frames + camera) "
+            "for annotated frames."
         )
     )
     parser.add_argument("--ag_root_directory", type=str, default="/data/rohith/ag")
@@ -864,7 +989,8 @@ def main():
 def main_sample():
     """
     Simple entry point to visualize original Pi3 point clouds + floor mesh
-    for a single video. Adjust `video_id` as needed.
+    + coordinate frames + camera frustum for a single video.
+    Adjust `video_id` as needed.
     """
     args = parse_args()
 
