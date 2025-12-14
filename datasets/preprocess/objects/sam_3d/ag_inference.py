@@ -15,6 +15,11 @@ from IPython.display import Image as ImageDisplay
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+
+import gc
+import torch
+
+
 from dataloader.standard.action_genome.ag_dataset import StandardAG
 from datasets.preprocess.objects.sam_3d.notebook.inference import Inference, ready_gaussian_for_video_rendering, load_image, load_masks, display_image, make_scene, render_video, interactive_visualizer
 
@@ -726,6 +731,28 @@ class AgSam3DInference:
             f"GIFs created for {len(gif_frame_stems & {Path(f).stem for f in frame_masks.keys()})} frames."
         )
 
+        # ------------------------------------------------------------------
+        # 5) Explicit memory cleanup for this video
+        # ------------------------------------------------------------------
+        try:
+            # Drop big per-video structures explicitly
+            del video_gt_annotations
+            del video_to_frame_to_label_mask
+            del frame_masks
+            del gif_frames
+            del selected_frames
+            del gif_frame_stems
+        except NameError:
+            # In case early returns happened and some names don't exist
+            pass
+
+        # Python GC
+        gc.collect()
+
+        # CUDA cache (if GPU is used)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def generate_sam3d_annotations(self, dataloader, split) -> None:
         for data in tqdm(dataloader):
             video_id = data['video_id']
@@ -800,8 +827,8 @@ def main():
         output_directory=args.output_directory
     )
     train_dataset, test_dataset, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
-    bbox_3d_generator.generate_sam3d_annotations(dataloader=dataloader_train, split=args.split)
     bbox_3d_generator.generate_sam3d_annotations(dataloader=dataloader_test, split=args.split)
+    # bbox_3d_generator.generate_sam3d_annotations(dataloader=dataloader_train, split=args.split)
 
 def main_sample():
     args = parse_args()
@@ -816,5 +843,5 @@ def main_sample():
 
 
 if __name__ == "__main__":
-    main_sample()
-    # main()
+    # main_sample()
+    main()

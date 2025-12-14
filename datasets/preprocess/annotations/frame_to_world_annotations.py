@@ -16,7 +16,6 @@ from annotation_utils import (
 )
 from dataloader.standard.action_genome.ag_dataset import StandardAG
 
-
 # sys.path.insert(0, os.path.dirname(__file__) + "/..")
 
 
@@ -312,31 +311,31 @@ class FrameToWorldAnnotations:
         }
         """
 
-        # print(f"[{video_id}] Generating world SGG annotations")
-        #
-        # # Load 3D points for the video from dynamic scene predictions
-        # try:
-        #     P = self._load_points_for_video(video_id)
-        #     points_S = P["points"]  # (S,H,W,3)
-        #     conf_S = P["conf"]  # (S,H,W) or None
-        #     stems_S = P["frame_stems"]  # list of frame stems
-        #     colors = P["colors"]  # (S,H,W,3)
-        #     camera_poses = P["camera_poses"]  # (S,4,4)
-        #     S, H, W, _ = points_S.shape
-        # except Exception as e:
-        #     print(f"[{video_id}] Failed to load 3D points: {e}")
-        #     return
-        #
-        # stem_to_idx = {stems_S[i]: i for i in range(S)}
-        #
-        # # Create a label-wise masks map for segmentation
-        # (
-        #     video_to_frame_to_label_mask,
-        #     all_static_labels,
-        #     all_dynamic_labels,
-        # ) = self._create_label_wise_masks_map(
-        #     video_id=video_id, gt_annotations=video_id_gt_annotations
-        # )
+        print(f"[{video_id}] Generating world SGG annotations")
+
+        # Load 3D points for the video from dynamic scene predictions
+        try:
+            P = self._load_points_for_video(video_id)
+            points_S = P["points"]  # (S,H,W,3)
+            conf_S = P["conf"]  # (S,H,W) or None
+            stems_S = P["frame_stems"]  # list of frame stems
+            colors = P["colors"]  # (S,H,W,3)
+            camera_poses = P["camera_poses"]  # (S,4,4)
+            S, H, W, _ = points_S.shape
+        except Exception as e:
+            print(f"[{video_id}] Failed to load 3D points: {e}")
+            return
+
+        stem_to_idx = {stems_S[i]: i for i in range(S)}
+
+        # Create a label-wise masks map for segmentation
+        (
+            video_to_frame_to_label_mask,
+            all_static_labels,
+            all_dynamic_labels,
+        ) = self._create_label_wise_masks_map(
+            video_id=video_id, gt_annotations=video_id_gt_annotations
+        )
 
         # Output structure for storing frame annotations
         video_3dgt_path = self.bbox_3d_root_dir / f"{video_id[:-4]}.pkl"
@@ -349,8 +348,15 @@ class FrameToWorldAnnotations:
             video_3dgt = pickle.load(f)
 
         frame_3dbb_map = video_3dgt["frames"]
+        per_frame_sims = video_3dgt["per_frame_sims"]
+        global_floor_sim = video_3dgt["global_floor_sim"]
+        primary_track_id_0 = video_3dgt["primary_track_id_0"]
+        frame_bbox_meshes = video_3dgt["frame_bbox_meshes"]
+        gv = video_3dgt["gv"]
+        gf = video_3dgt["gf"]
+        gc = video_3dgt["gc"]
 
-        # Map structure: {
+        # frame_3dbb_map structure: {
         #   "000000.png": objects
         # }
         # Objects structure: [
@@ -449,17 +455,17 @@ class FrameToWorldAnnotations:
         }
 
     def generate_sample_gt_world_4D_annotations(self, video_id: str) -> None:
-        # video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(
-        #     video_id
-        # )
-        # video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
-        # video_id_3d_bbox_predictions = self.get_video_3d_annotations(video_id)
+        video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(
+            video_id
+        )
+        video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
+        video_id_3d_bbox_predictions = self.get_video_3d_annotations(video_id)
         self.generate_video_bb_annotations(
             video_id,
-            None, None, None,
-            # video_id_gt_annotations,
-            # video_id_gdino_annotations,
-            # video_id_3d_bbox_predictions,
+            # None, None, None,
+            video_id_gt_annotations,
+            video_id_gdino_annotations,
+            video_id_3d_bbox_predictions,
             visualize=True,
         )
 
