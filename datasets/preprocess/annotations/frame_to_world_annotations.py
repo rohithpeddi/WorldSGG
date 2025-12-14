@@ -44,8 +44,8 @@ def rerun_vis_world4d(
     colors: np.ndarray,          # (S, H, W, 3) uint8
     conf: Optional[np.ndarray],  # (S, H, W) or None
     camera_poses: np.ndarray,    # (S, 4, 4)     -- Pi3 camera->world
-    frame_bbox_meshes: Optional[Dict[int, List[Dict[str, Any]]]] = None,
     *,
+    frame_bbox_meshes: Optional[Dict[int, List[Dict[str, Any]]]] = None,
     global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None,
     floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None,
     img_maxsize: int = 320,
@@ -88,7 +88,7 @@ def rerun_vis_world4d(
     # --------------------------------------------------------------------------
     # 1. Floor: bring into base frame, then align its plane to XY (z = 0)
     # --------------------------------------------------------------------------
-    floor_vertices_tf: Optional[np.ndarray] = None
+    floor_vertices_final: Optional[np.ndarray] = None
     floor_faces = None
     floor_kwargs = None
 
@@ -99,7 +99,7 @@ def rerun_vis_world4d(
     if floor is not None:
         floor_verts0, floor_faces0, floor_colors0 = floor
         floor_verts0 = np.asarray(floor_verts0, dtype=np.float32)
-        floor_faces = _faces_u32(np.asarray(floor_faces0))
+        floor_faces0 = _faces_u32(np.asarray(floor_faces0))
 
         # First: apply global_floor_sim to floor verts (Pi3 -> base), if available
         if s_g is not None:
@@ -150,10 +150,10 @@ def rerun_vis_world4d(
                 )
 
             # Floor vertices in final world frame: floor is now at z=0
-            floor_vertices_tf = (floor_world_base - center[None, :]) @ R_align.T
+            floor_vertices_final = (floor_world_base - center[None, :]) @ R_align.T
         else:
             # Not enough vertices to robustly fit a plane; just use base frame
-            floor_vertices_tf = floor_world_base
+            floor_vertices_final = floor_world_base
 
         # color or albedo
         floor_kwargs = {}
@@ -162,6 +162,7 @@ def rerun_vis_world4d(
             floor_kwargs["vertex_colors"] = floor_colors0
         else:
             floor_kwargs["albedo_factor"] = [160, 160, 160]
+        floor_faces = floor_faces0
 
     # --------------------------------------------------------------------------
     # 2. Helpers: Pi3 -> final world for points, bboxes, and camera poses
@@ -175,9 +176,9 @@ def rerun_vis_world4d(
         pts = np.asarray(pi3_pts, dtype=np.float32)
         # Pi3 -> base
         if s_g is not None:
-            pts = s_g * (pts @ R_g.T) + t_g[None, :]
+            pts = s_g * (pts @ (R_g.T)) + t_g[None, :]
         # base -> final
-        if floor is not None and floor_vertices_tf is not None:
+        if floor is not None and floor_vertices_final is not None:
             pts = (pts - center[None, :]) @ R_align.T
         return pts
 
@@ -202,7 +203,7 @@ def rerun_vis_world4d(
             R_pi3_to_base = np.eye(3, dtype=np.float32)
 
         # base -> final rotation
-        if floor is not None and floor_vertices_tf is not None:
+        if floor is not None and floor_vertices_final is not None:
             R_base_to_final = R_align
         else:
             R_base_to_final = np.eye(3, dtype=np.float32)
@@ -264,11 +265,11 @@ def rerun_vis_world4d(
         )
 
         # ---------------------- floor ----------------------
-        if vis_floor and (floor_vertices_tf is not None) and (floor_faces is not None):
+        if vis_floor and (floor_vertices_final is not None) and (floor_faces is not None):
             rr.log(
                 f"{BASE}/floor",
                 rr.Mesh3D(
-                    vertex_positions=floor_vertices_tf.astype(np.float32),
+                    vertex_positions=floor_vertices_final.astype(np.float32),
                     triangle_indices=floor_faces,
                     **(floor_kwargs or {}),
                 ),
@@ -663,7 +664,7 @@ class FrameToWorldAnnotations:
 
                 {
                     "video_id": video_id,
-                    "frames": out_frames,
+                    "frames": frame_3dbb_map,
                     "per_frame_sims": per_frame_sims,
                     "global_floor_sim": {
                         "s": float(s_avg),
@@ -699,7 +700,8 @@ class FrameToWorldAnnotations:
             print(f"[{video_id}] Failed to load 3D points: {e}")
             return
 
-        stem_to_idx = {stems_S[i]: i for i in range(S)}
+        # Optional: map from stem to index (not used further here, but may be useful)
+        _stem_to_idx = {stems_S[i]: i for i in range(S)}
 
         # ------------------------------------------------------------------
         # 2) Load the 3D bbox annotations for this video (from arg or disk)
@@ -733,6 +735,7 @@ class FrameToWorldAnnotations:
 
         # ------------------------------------------------------------------
         # 3) Visualization: points + 3D bboxes + camera frustum (per frame)
+        #     with floor plane aligned to the XY plane.
         # ------------------------------------------------------------------
         if visualize:
             rerun_vis_world4d(
@@ -746,7 +749,7 @@ class FrameToWorldAnnotations:
                 floor=(gv, gf, gc) if gv is not None else None,
                 img_maxsize=480,
                 app_id="World4D-Combined",
-                vis_floor=False,  # toggle as you like
+                vis_floor=True,
             )
 
             print("Visualization running. Press Ctrl+C to stop.")
@@ -1039,9 +1042,8 @@ def load_dataset(ag_root_directory: str):
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Combined: "
-            "(a) floor-aligned 3D bbox generator + "
-            "(b) SMPL↔PI3 human mesh aligner (sampled frames only)."
+            "World4D: floor-aligned 3D bbox visualizer + "
+            "frame-wise missing-object stats generator."
         )
     )
     parser.add_argument("--ag_root_directory", type=str, default="/data/rohith/ag")
@@ -1059,7 +1061,7 @@ def parse_args():
     parser.add_argument(
         "--include_dense",
         action="store_true",
-        help="use dense correspondences for human aligner",
+        help="(placeholder flag, not used here)",
     )
     return parser.parse_args()
 
