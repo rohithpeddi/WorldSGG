@@ -54,35 +54,44 @@ def rerun_vis_original_results(
     min_conf_default: float = 1e-6,
 ) -> None:
     """
-    Visualize the ORIGINAL Pi3 outputs:
+    Visualize ORIGINAL Pi3 outputs with BEFORE/AFTER comparison.
 
-      - points_S: (S,H,W,3) points in original Pi3 space
-      - conf_S:   (S,H,W) confidence (optional)
-      - stems_S:  list of "000123"-style frame stems for each slice in points_S
-      - colors_S: (S,H,W,3) uint8 colors (optional)
-      - camera_poses_S: (S,4,4) or (S,3,4) camera extrinsics (optional)
+    BEFORE:
+      - Floor mesh, floor axes, camera poses, and points in original/world coords.
+      - Points are shown as dark gray.
 
-    Additionally:
-      - Floor mesh (gv, gf, gc) transformed with global_floor_sim (s,R,t).
-      - World coordinate frame (World +X/+Y/+Z).
-      - XYZ coordinate frame (X/Y/Z).
-      - Floor-attached frame:
-          * Floor lies in XY plane of this frame
-          * Floor +Z is the mesh normal
-      - Camera frustum + camera axes (Cam +X/+Y/+Z).
+    AFTER:
+      - Floor mesh, floor axes, camera poses, and points transformed into a frame
+        where the floor lies in the XY plane and Z is the floor normal.
+      - Points are shown with their original RGB colors.
 
-    Coordinate conventions:
-      - Viewer is set to RUB (X=Right, Y=Up, Z=Back) at the root.
+    Args:
+        video_id: video identifier (e.g., "0DJ6R.mp4")
+        points_S: (S,H,W,3) Pi3/world points
+        conf_S: (S,H,W) confidence (optional)
+        stems_S: list of "000123" frame stems
+        colors_S: (S,H,W,3) uint8 colors (optional)
+        camera_poses_S: (S,4,4) or (S,3,4) camera extrinsics (optional)
+        frame_annotated_dir_path: root dir for annotated PNG frames
+        floor: (gv, gf, gc) floor mesh vertices/faces/colors (optional)
+        global_floor_sim: (s,R,t) scaling+rotation+translation for floor
+        img_maxsize: max image size for RGB frames
+        app_id: Rerun app id
+        min_conf_default: fallback confidence threshold
     """
 
     rr.init(app_id, spawn=True)
     rr.log("/", rr.ViewCoordinates.RUB)
 
-    BASE = "world/original"
+    BASE = "world"
+    BASE_BEFORE = f"{BASE}/before"
+    BASE_AFTER = f"{BASE}/after"
+
+    # Ensure both branches share the same coordinate convention
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
 
     # -------------------------------------------------------------------------
-    # Static world & XYZ frames (at origin, in RUB world coordinates)
+    # Static world & XYZ axes (common; drawn at origin of aligned coords)
     # -------------------------------------------------------------------------
     axis_len_world = 0.5
     world_axes = rr.Arrows3D(
@@ -93,9 +102,9 @@ def rerun_vis_original_results(
             [0.0, 0.0, axis_len_world],  # +Z
         ],
         colors=[
-            [255, 0, 0],   # X - red
-            [0, 255, 0],   # Y - green
-            [0, 0, 255],   # Z - blue
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
         ],
         labels=["World +X", "World +Y", "World +Z"],
     )
@@ -104,9 +113,9 @@ def rerun_vis_original_results(
     xyz_axes = rr.Arrows3D(
         origins=[[0.0, 0.0, 0.0]] * 3,
         vectors=[
-            [axis_len_xyz, 0.0, 0.0],    # +X
-            [0.0, axis_len_xyz, 0.0],    # +Y
-            [0.0, 0.0, axis_len_xyz],    # +Z
+            [axis_len_xyz, 0.0, 0.0],
+            [0.0, axis_len_xyz, 0.0],
+            [0.0, 0.0, axis_len_xyz],
         ],
         colors=[
             [255, 128, 128],
@@ -117,17 +126,18 @@ def rerun_vis_original_results(
     )
 
     # -------------------------------------------------------------------------
-    # Floor mesh: transform to world/original coordinates
-    # + floor-attached frame (Floor +X/+Y/+Z)
-    #   - canonical floor is XZ plane with Y as normal
-    #   - we build a frame where floor lies in XY and Z is the normal
+    # Floor mesh and floor-frame axes: BEFORE & AFTER
     # -------------------------------------------------------------------------
-    floor_vertices_world = None
+    floor_vertices_before = None
+    floor_vertices_after = None
     floor_faces = None
     floor_kwargs: Optional[Dict[str, Any]] = None
 
-    floor_frame_origin: Optional[np.ndarray] = None
-    floor_axes_vectors: Optional[np.ndarray] = None  # (3,3): X,Y,Z
+    floor_origin_world = None
+    floor_axes_before = None      # (3,3)
+    floor_axes_after = None       # (3,3) in aligned frame
+
+    R_align: Optional[np.ndarray] = None  # world -> aligned
 
     if floor is not None:
         floor_verts0, floor_faces0, floor_colors0 = floor
@@ -139,47 +149,45 @@ def rerun_vis_original_results(
             R_g = np.asarray(R_g, dtype=np.float32)
             t_g = np.asarray(t_g, dtype=np.float32)
 
-            # Transform floor vertices into world/original coordinates
-            floor_vertices_world = s_g * (floor_verts0 @ R_g.T) + t_g
+            # BEFORE: floor in original/world coords
+            floor_vertices_before = s_g * (floor_verts0 @ R_g.T) + t_g
 
-            # -----------------------------------------------------------------
-            # Floor-attached frame:
-            #
-            # Canonical floor (before sim) is assumed to lie in the XZ plane:
-            #   - in-plane tangent axes:  e1 = +X, e2 = +Z
-            #   - normal:                 n  = +Y
-            #
-            # After applying R_g, we get world-space axes:
-            #   t1 = R_g[:, 0]  (former +X, in-plane)
-            #   t2 = R_g[:, 2]  (former +Z, in-plane)
-            #   n  = R_g[:, 1]  (former +Y, normal)
-            #
-            # We want a *floor frame* where:
-            #   - floor lies in XY plane of that frame
-            #   - Z axis is the mesh normal
-            # So we define:
-            #   Floor +X := t1
-            #   Floor +Y := t2
-            #   Floor +Z := n
-            # -----------------------------------------------------------------
-            floor_frame_origin = t_g
+            # Canonical floor frame: XZ plane, Y normal
+            t1 = R_g[:, 0]  # in-plane
+            t2 = R_g[:, 2]  # in-plane
+            n  = R_g[:, 1]  # normal
+
+            floor_origin_world = t_g.astype(np.float32)
             axis_len_floor = float(s_g) * 0.5 if s_g is not None else 0.5
 
-            t1 = R_g[:, 0]                 # in-plane axis
-            t2 = R_g[:, 2]                 # in-plane axis
-            n  = R_g[:, 1]                 # normal
-
-            floor_axes_vectors = np.stack(
+            floor_axes_before = np.stack(
                 [
-                    t1 * axis_len_floor,   # Floor +X (in plane)
-                    t2 * axis_len_floor,   # Floor +Y (in plane)
-                    n  * axis_len_floor,   # Floor +Z (normal)
+                    t1 * axis_len_floor,
+                    t2 * axis_len_floor,
+                    n  * axis_len_floor,
                 ],
                 axis=0,
+            )  # each row = vector
+
+            # Build floor-frame basis F (columns), and rotation to aligned frame.
+            F = np.stack([t1, t2, n], axis=1)   # (3,3)
+            R_align = F.T.astype(np.float32)    # world -> aligned
+
+            # AFTER: floor in aligned coords (XY plane, Z normal)
+            v_centered = floor_vertices_before - floor_origin_world[None, :]
+            floor_vertices_after = v_centered @ R_align.T
+
+            floor_axes_after = np.array(
+                [
+                    [axis_len_floor, 0.0, 0.0],
+                    [0.0, axis_len_floor, 0.0],
+                    [0.0, 0.0, axis_len_floor],
+                ],
+                dtype=np.float32,
             )
         else:
-            # No global_floor_sim: just use raw verts; cannot define consistent floor frame.
-            floor_vertices_world = floor_verts0
+            # No global_floor_sim: we can only show "before", no aligned view
+            floor_vertices_before = floor_verts0
 
         floor_kwargs = {}
         if floor_colors0 is not None:
@@ -190,19 +198,58 @@ def rerun_vis_original_results(
 
         floor_faces = floor_faces0
 
+    # -------------------------------------------------------------------------
+    # Points & cameras: BEFORE & AFTER (use R_align if available)
+    # -------------------------------------------------------------------------
+    S_pts, H_grid, W_grid, _ = points_S.shape
+
+    points_before = points_S.astype(np.float32)
+    points_after = None
+    camera_before = camera_poses_S
+    camera_after = None
+
+    if R_align is not None and floor_origin_world is not None:
+        # Points AFTER
+        pts_flat = points_before.reshape(-1, 3)
+        v_centered_pts = pts_flat - floor_origin_world[None, :]
+        pts_flat_after = v_centered_pts @ R_align.T
+        points_after = pts_flat_after.reshape(S_pts, H_grid, W_grid, 3)
+
+        # Cameras AFTER
+        if camera_before is not None:
+            cam_aligned = []
+            for cam_pose in camera_before:
+                if cam_pose.shape == (3, 4):
+                    T = np.eye(4, dtype=np.float32)
+                    T[:3, :4] = cam_pose
+                elif cam_pose.shape == (4, 4):
+                    T = cam_pose.astype(np.float32)
+                else:
+                    T = np.eye(4, dtype=np.float32)
+
+                cam_origin_world = T[:3, 3]
+                R_cam_world = T[:3, :3]
+
+                cam_origin_centered = cam_origin_world - floor_origin_world
+                cam_origin_aligned = R_align @ cam_origin_centered
+                R_cam_aligned = R_align @ R_cam_world
+
+                T_new = np.eye(4, dtype=np.float32)
+                T_new[:3, :3] = R_cam_aligned
+                T_new[:3, 3] = cam_origin_aligned
+                cam_aligned.append(T_new)
+
+            camera_after = np.stack(cam_aligned, axis=0)
+
     def _log_static_frames() -> None:
-        """
-        Log the world & XYZ coordinate frames for the current timestep.
-        Called once per frame after `rr.Clear` since Clear wipes everything.
-        """
         rr.log(f"{BASE}/world_axes", world_axes)
         rr.log(f"{BASE}/xyz_axes", xyz_axes)
-
         rr.log(
             f"{BASE}/info",
             rr.TextLog(
-                f"World frame = RUB; showing World +X/+Y/+Z, XYZ axes, "
-                f"floor-attached frame (XY plane + floor normal), and camera frustum for {video_id}."
+                f"[{video_id}] BEFORE: original Pi3/world frame. "
+                f"AFTER: frame where floor is in XY plane and Z is floor normal "
+                f"(when global_floor_sim is available)."
             ),
         )
 
@@ -221,7 +268,7 @@ def rerun_vis_original_results(
             )
         return img
 
-    S, H_grid, W_grid, _ = points_S.shape
+    S = points_before.shape[0]
 
     for vis_t in range(S):
         stem = stems_S[vis_t]
@@ -229,96 +276,185 @@ def rerun_vis_original_results(
         rr.set_time_sequence("frame", vis_t)
         rr.log("/", rr.Clear(recursive=True))
 
-        # --- Static world & XYZ frames ---
         _log_static_frames()
 
-        # --- Floor mesh ---
-        if floor_vertices_world is not None and floor_faces is not None:
+        # ---------------------------------------------------------------------
+        # FLOOR MESH: BEFORE / AFTER
+        # ---------------------------------------------------------------------
+        if floor_vertices_before is not None and floor_faces is not None:
             rr.log(
-                f"{BASE}/floor",
+                f"{BASE_BEFORE}/floor",
                 rr.Mesh3D(
-                    vertex_positions=floor_vertices_world.astype(np.float32),
+                    vertex_positions=floor_vertices_before.astype(np.float32),
                     triangle_indices=floor_faces,
                     **(floor_kwargs or {}),
                 ),
             )
 
-        # --- Floor-attached frame (Floor +X/+Y/+Z) ---
-        if floor_frame_origin is not None and floor_axes_vectors is not None:
-            origins_floor = np.repeat(floor_frame_origin[None, :], 3, axis=0)
+        if floor_vertices_after is not None and floor_faces is not None:
             rr.log(
-                f"{BASE}/floor_frame",
-                rr.Arrows3D(
-                    origins=origins_floor,
-                    vectors=floor_axes_vectors,
-                    colors=[
-                        [255, 200, 0],   # Floor X
-                        [0, 200, 255],   # Floor Y
-                        [200, 0, 255],   # Floor Z (normal)
-                    ],
-                    labels=["Floor +X", "Floor +Y", "Floor +Z"],
+                f"{BASE_AFTER}/floor",
+                rr.Mesh3D(
+                    vertex_positions=floor_vertices_after.astype(np.float32),
+                    triangle_indices=floor_faces,
+                    **(floor_kwargs or {}),
                 ),
             )
 
-        # --- Camera frustum + camera axes (if available) ---
-        if camera_poses_S is not None and vis_t < camera_poses_S.shape[0]:
-            cam_pose = camera_poses_S[vis_t]
+        # ---------------------------------------------------------------------
+        # FLOOR AXES: BEFORE / AFTER
+        # ---------------------------------------------------------------------
+        if floor_origin_world is not None and floor_axes_before is not None:
+            origins_floor_before = np.repeat(
+                floor_origin_world[None, :], 3, axis=0
+            )
+            rr.log(
+                f"{BASE_BEFORE}/floor_frame",
+                rr.Arrows3D(
+                    origins=origins_floor_before,
+                    vectors=floor_axes_before,
+                    colors=[
+                        [200, 200, 0],
+                        [0, 200, 200],
+                        [200, 0, 200],
+                    ],
+                    labels=["Floor(Before) +X", "Floor(Before) +Y", "Floor(Before) +Z"],
+                ),
+            )
 
-            # Normalize pose shape to 4x4
-            if cam_pose.shape == (3, 4):
-                T = np.eye(4, dtype=np.float32)
-                T[:3, :4] = cam_pose
-            elif cam_pose.shape == (4, 4):
-                T = cam_pose.astype(np.float32)
+        if floor_axes_after is not None:
+            origins_floor_after = np.repeat(
+                np.zeros((1, 3), dtype=np.float32), 3, axis=0
+            )
+            rr.log(
+                f"{BASE_AFTER}/floor_frame",
+                rr.Arrows3D(
+                    origins=origins_floor_after,
+                    vectors=floor_axes_after,
+                    colors=[
+                        [255, 200, 0],
+                        [0, 255, 255],
+                        [255, 0, 255],
+                    ],
+                    labels=["Floor(After) +X", "Floor(After) +Y", "Floor(After) +Z"],
+                ),
+            )
+
+        # ---------------------------------------------------------------------
+        # CAMERAS: BEFORE / AFTER
+        # ---------------------------------------------------------------------
+        if camera_before is not None and vis_t < camera_before.shape[0]:
+            cam_pose_b = camera_before[vis_t]
+            if cam_pose_b.shape == (3, 4):
+                T_b = np.eye(4, dtype=np.float32)
+                T_b[:3, :4] = cam_pose_b
+            elif cam_pose_b.shape == (4, 4):
+                T_b = cam_pose_b.astype(np.float32)
             else:
-                T = np.eye(4, dtype=np.float32)
+                T_b = np.eye(4, dtype=np.float32)
 
-            cam_origin = T[:3, 3]
-            R_cam = T[:3, :3]
+            cam_origin_b = T_b[:3, 3]
+            R_cam_b = T_b[:3, :3]
 
             axis_len_cam = 0.4
-            cam_axes_vectors = np.stack(
+            cam_axes_vec_b = np.stack(
                 [
-                    R_cam[:, 0] * axis_len_cam,  # Cam X
-                    R_cam[:, 1] * axis_len_cam,  # Cam Y
-                    R_cam[:, 2] * axis_len_cam,  # Cam Z
+                    R_cam_b[:, 0] * axis_len_cam,
+                    R_cam_b[:, 1] * axis_len_cam,
+                    R_cam_b[:, 2] * axis_len_cam,
                 ],
                 axis=0,
             )
-            origins_cam = np.repeat(cam_origin[None, :], 3, axis=0)
+            origins_cam_b = np.repeat(cam_origin_b[None, :], 3, axis=0)
 
             rr.log(
-                f"{BASE}/camera_axes",
+                f"{BASE_BEFORE}/camera_axes",
                 rr.Arrows3D(
-                    origins=origins_cam,
-                    vectors=cam_axes_vectors,
+                    origins=origins_cam_b,
+                    vectors=cam_axes_vec_b,
+                    colors=[
+                        [180, 0, 0],
+                        [0, 180, 0],
+                        [0, 0, 180],
+                    ],
+                    labels=["Cam(Before) +X", "Cam(Before) +Y", "Cam(Before) +Z"],
+                ),
+            )
+
+            rr.log(
+                f"{BASE_BEFORE}/camera/frustum",
+                rr.Pinhole(
+                    fov_y=0.7853982,
+                    aspect_ratio=float(W_grid) / float(H_grid),
+                    camera_xyz=rr.ViewCoordinates.RUB,
+                    image_plane_distance=0.1,
+                ),
+                rr.Transform3D(
+                    translation=cam_origin_b.tolist(),
+                    mat3x3=R_cam_b,
+                ),
+            )
+
+        if camera_after is not None and vis_t < camera_after.shape[0]:
+            cam_pose_a = camera_after[vis_t]
+            T_a = cam_pose_a.astype(np.float32)
+
+            cam_origin_a = T_a[:3, 3]
+            R_cam_a = T_a[:3, :3]
+
+            axis_len_cam = 0.4
+            cam_axes_vec_a = np.stack(
+                [
+                    R_cam_a[:, 0] * axis_len_cam,
+                    R_cam_a[:, 1] * axis_len_cam,
+                    R_cam_a[:, 2] * axis_len_cam,
+                ],
+                axis=0,
+            )
+            origins_cam_a = np.repeat(cam_origin_a[None, :], 3, axis=0)
+
+            rr.log(
+                f"{BASE_AFTER}/camera_axes",
+                rr.Arrows3D(
+                    origins=origins_cam_a,
+                    vectors=cam_axes_vec_a,
                     colors=[
                         [255, 0, 0],
                         [0, 255, 0],
                         [0, 0, 255],
                     ],
-                    labels=["Cam +X", "Cam +Y", "Cam +Z"],
+                    labels=["Cam(After) +X", "Cam(After) +Y", "Cam(After) +Z"],
                 ),
             )
 
             rr.log(
-                f"{BASE}/camera/frustum",
+                f"{BASE_AFTER}/camera/frustum",
                 rr.Pinhole(
-                    fov_y=0.7853982,  # ~45 degrees
+                    fov_y=0.7853982,
                     aspect_ratio=float(W_grid) / float(H_grid),
                     camera_xyz=rr.ViewCoordinates.RUB,
                     image_plane_distance=0.1,
-                    color=[255, 128, 0],
-                    line_width=0.003,
                 ),
-                rr.Transform3D(translation=cam_origin.tolist()),
+                rr.Transform3D(
+                    translation=cam_origin_a.tolist(),
+                    mat3x3=R_cam_a,
+                ),
             )
 
-        # --- Points (original Pi3 point cloud) ---
-        pts = points_S[vis_t].reshape(-1, 3)
-        cols = (
+        # ---------------------------------------------------------------------
+        # POINTS: BEFORE (dark) / AFTER (colorful)
+        # ---------------------------------------------------------------------
+        pts_before = points_before[vis_t].reshape(-1, 3)  # (N,3)
+        pts_after = (
+            points_after[vis_t].reshape(-1, 3)
+            if points_after is not None
+            else None
+        )
+
+        cols_after = (
             colors_S[vis_t].reshape(-1, 3) if colors_S is not None else None
         )
+
         conf_flat = (
             conf_S[vis_t].reshape(-1) if conf_S is not None else None
         )
@@ -336,34 +472,53 @@ def rerun_vis_original_results(
                 )
             else:
                 thr = min_conf_default
-            keep = (conf_flat >= thr) & np.isfinite(pts).all(axis=1)
+            keep = (conf_flat >= thr) & np.isfinite(pts_before).all(axis=1)
         else:
             thr = None
-            keep = np.isfinite(pts).all(axis=1)
+            keep = np.isfinite(pts_before).all(axis=1)
 
-        pts_keep = pts[keep]
-        if cols is not None:
-            cols_keep = cols[keep].astype(np.uint8)
-        else:
-            cols_keep = None
-
-        if pts_keep.shape[0] > 0:
-            kwargs: Dict[str, Any] = {}
-            if cols_keep is not None:
-                kwargs["colors"] = cols_keep
+        # BEFORE: dark gray points
+        pts_b_keep = pts_before[keep]
+        if pts_b_keep.shape[0] > 0:
             rr.log(
-                f"{BASE}/points",
-                rr.Points3D(pts_keep.astype(np.float32), **kwargs),
+                f"{BASE_BEFORE}/points",
+                rr.Points3D(
+                    pts_b_keep.astype(np.float32),
+                    colors=np.array([[60, 60, 60]], dtype=np.uint8),
+                ),
             )
 
-        # --- Optional: original RGB frame ---
+        # AFTER: colorful points
+        if pts_after is not None:
+            pts_a_keep = pts_after[keep]
+            if cols_after is not None:
+                cols_a_keep = cols_after[keep].astype(np.uint8)
+            else:
+                cols_a_keep = None
+
+            if pts_a_keep.shape[0] > 0:
+                kwargs_pts: Dict[str, Any] = {}
+                if cols_a_keep is not None:
+                    kwargs_pts["colors"] = cols_a_keep
+                rr.log(
+                    f"{BASE_AFTER}/points",
+                    rr.Points3D(
+                        pts_a_keep.astype(np.float32),
+                        **kwargs_pts,
+                    ),
+                )
+
+        # ---------------------------------------------------------------------
+        # ORIGINAL RGB FRAME (single copy, not transformed)
+        # ---------------------------------------------------------------------
         img = _get_image_for_stem(stem)
         if img is not None:
             rr.log(f"{BASE}/image", rr.Image(img))
 
     print(
-        "[orig-pts] Original points + floor + world/XYZ frames + floor frame "
-        f"+ camera visualization running for {video_id}. Scrub the 'frame' timeline in Rerun."
+        "[orig-pts] BEFORE/AFTER visualization running for "
+        f"{video_id}. BEFORE = original frame, AFTER = floor-aligned frame. "
+        "Scrub the 'frame' timeline in Rerun and toggle entities in the UI."
     )
 
 
