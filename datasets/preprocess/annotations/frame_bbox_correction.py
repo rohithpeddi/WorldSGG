@@ -3,14 +3,13 @@ import argparse
 import json
 import os
 import pickle
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
 import rerun as rr
-from scipy.spatial.transform import Rotation as SciRot
 from torch.utils.data import DataLoader
 
 from dataloader.standard.action_genome.ag_dataset import StandardAG
@@ -18,542 +17,20 @@ from annotation_utils import (
     get_video_belongs_to_split,
     _load_pkl_if_exists,
     _npz_open,
-    _torch_inference_ctx,
-    _del_and_collect,
-    _lift_2d_to_3d,
-    _find_actor_index_in_frame,
-    _choose_primary_actor,
-    _build_frame_to_kps_map,
-    _robust_similarity_ransac,
     _faces_u32,
     _resize_mask_to,
     _mask_from_bbox,
     _resize_bbox_to,
     _xywh_to_xyxy,
-    _average_sims_robust,
     _finite_and_nonzero,
     _pinhole_from_fov,
     _is_empty_array,
 )
 
-# ======================================================================================
-# Rerun visualization with floor aligned to XY plane
-# and both original + transformed versions visualized.
-# ======================================================================================
-def rerun_vis_world4d(
-        video_id: str,
-        images: List[Optional[np.ndarray]],
-        world4d: Dict[int, dict],
-        faces: np.ndarray,
-        *,
-        annotated_frame_idx_in_sample_idx: List[int],
-        sampled_indices: List[int],
-        dynamic_prediction_path: str,
-        per_frame_sims: Optional[Dict[int, Dict[str, Any]]] = None,
-        global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None,
-        floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None,
-        img_maxsize: int = 320,
-        app_id: str = "World4D",
-        frame_bbox_meshes: Optional[Dict[int, List[Dict[str, Any]]]] = None,
-        vis_floor: bool = True,
-        vis_humans: bool = True,
-        min_conf_default: float = 1e-6,  # floor for conf
-):
-    """
-    Visualize world4d with:
-
-      - Original versions (after global_floor_sim only) under: world/orig/...
-      - Transformed versions (floor aligned to XY plane, Z up) under: world/aligned/...
-
-    Objects shown in both original + aligned frames:
-      - floor mesh
-      - human meshes (if vis_humans=True and faces is provided)
-      - 3D bounding boxes
-      - 3D point cloud
-      - camera frustum
-
-    Visual distinction:
-      - Original: gray-ish / grayscale colors
-      - Aligned: colored (image colors for points, green floor/humans, original bbox colors)
-    """
-
-    faces_u32 = _faces_u32(faces) if faces is not None and faces.size > 0 else None
-
-    rr.init(app_id, spawn=True)
-    rr.log("/", rr.ViewCoordinates.RUB)
-
-    # ----------------------------------------------------------------------
-    # Load dynamic scene predictions
-    # ----------------------------------------------------------------------
-    video_dynamic_prediction_path = os.path.join(
-        dynamic_prediction_path, f"{video_id[:-4]}_10", "predictions.npz"
-    )
-    video_dynamic_predictions = np.load(video_dynamic_prediction_path, allow_pickle=True)
-    video_dynamic_predictions = {
-        k: video_dynamic_predictions[k] for k in video_dynamic_predictions.files
-    }
-    points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
-    conf = video_dynamic_predictions.get("conf", None)
-    if conf is not None:
-        conf = conf.astype(np.float32)
-    imgs_f32 = video_dynamic_predictions["images"]
-    colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
-
-    BASE = "world"
-    rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
-
-    S = points.shape[0]
-
-    # ----------------------------------------------------------------------
-    # Global similarity (Pi3 -> base) from global_floor_sim, if provided
-    # ----------------------------------------------------------------------
-    s_g: Optional[float] = None
-    R_g: Optional[np.ndarray] = None
-    t_g: Optional[np.ndarray] = None
-    if global_floor_sim is not None:
-        s_g, R_g, t_g = global_floor_sim
-        s_g = float(s_g)
-        R_g = np.asarray(R_g, dtype=np.float32)
-        t_g = np.asarray(t_g, dtype=np.float32)  # (3,)
-
-    # ----------------------------------------------------------------------
-    # Floor: bring into base frame (via global_floor_sim), then compute
-    # a plane-alignment transform so the floor lies in the XY plane (z=0),
-    # with its normal pointing along +Z.
-    # ----------------------------------------------------------------------
-    floor_world_base = None          # floor in "original" base frame (after global_floor_sim)
-    floor_vertices_final = None      # floor aligned to XY plane
-    floor_faces = None
-    # Separate kwargs for visual distinction
-    floor_kwargs_orig = {"albedo_factor": [120, 120, 120]}
-    floor_kwargs_aligned = {"albedo_factor": [0, 255, 0]}
-
-    # Alignment transform: base -> final world
-    R_align = np.eye(3, dtype=np.float32)
-    center = np.zeros(3, dtype=np.float32)  # point on the floor plane (base frame)
-
-    if floor is not None:
-        floor_verts0, floor_faces0, _floor_colors0 = floor
-        floor_verts0 = np.asarray(floor_verts0, dtype=np.float32)
-        floor_faces0 = _faces_u32(np.asarray(floor_faces0))
-
-        # Step 1: Pi3 -> base using global_floor_sim (if available)
-        if s_g is not None:
-            floor_world_base = s_g * (floor_verts0 @ R_g.T) + t_g[None, :]
-        else:
-            floor_world_base = floor_verts0
-
-        # Step 2: fit plane & compute rotation to XY
-        if floor_world_base.shape[0] >= 3:
-            center = floor_world_base.mean(axis=0)
-            centered = floor_world_base - center[None, :]
-
-            # Plane normal via SVD (smallest singular vector)
-            _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-            normal = Vt[-1]
-            norm = np.linalg.norm(normal)
-            if norm < 1e-6:
-                normal = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-            else:
-                normal = normal / norm
-
-            # Make normal point "up" (positive z)
-            if normal[2] < 0:
-                normal = -normal
-
-            z_axis = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-            if np.allclose(normal, z_axis, atol=1e-4):
-                R_align = np.eye(3, dtype=np.float32)
-            elif np.allclose(normal, -z_axis, atol=1e-4):
-                # 180-degree flip around X axis
-                R_align = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
-            else:
-                # Rodrigues' formula: rotation taking 'normal' -> z_axis
-                v = np.cross(normal, z_axis)
-                s = np.linalg.norm(v)
-                c = float(np.dot(normal, z_axis))
-                vx = np.array(
-                    [
-                        [0.0, -v[2], v[1]],
-                        [v[2], 0.0, -v[0]],
-                        [-v[1], v[0], 0.0],
-                    ],
-                    dtype=np.float32,
-                )
-                R_align = (
-                    np.eye(3, dtype=np.float32)
-                    + vx
-                    + vx @ vx * ((1.0 - c) / (s**2 + 1e-8))
-                )
-
-            # Step 3: floor vertices in final world frame (z=0 plane)
-            floor_vertices_final = (floor_world_base - center[None, :]) @ R_align.T
-        else:
-            # Not enough verts to fit a plane; just keep them as-is in base frame
-            floor_vertices_final = floor_world_base
-
-        floor_faces = floor_faces0
-
-    # ----------------------------------------------------------------------
-    # Helpers: Pi3 -> base, then base -> final (aligned)
-    # ----------------------------------------------------------------------
-    def _to_base(pi3_pts: np.ndarray) -> np.ndarray:
-        """Pi3 -> base (apply only global_floor_sim)."""
-        pts = np.asarray(pi3_pts, dtype=np.float32)
-        if s_g is not None:
-            pts = s_g * (pts @ R_g.T) + t_g[None, :]
-        return pts
-
-    def _to_final_from_base(base_pts: np.ndarray) -> np.ndarray:
-        """base -> final (apply only floor-plane alignment)."""
-        pts = np.asarray(base_pts, dtype=np.float32)
-        if floor is not None and floor_vertices_final is not None:
-            pts = (pts - center[None, :]) @ R_align.T
-        return pts
-
-    def _transform_points(pi3_pts: np.ndarray) -> np.ndarray:
-        """Full transform: Pi3 -> base -> aligned."""
-        return _to_final_from_base(_to_base(pi3_pts))
-
-    def _camera_to_base(
-        R_wc_pi3: np.ndarray, t_wc_pi3: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Camera pose in Pi3 -> base (global_floor_sim only)."""
-        R_wc_pi3 = np.asarray(R_wc_pi3, dtype=np.float32)
-        t_wc_pi3 = np.asarray(t_wc_pi3, dtype=np.float32)
-
-        # Camera origin to base frame
-        t_wc_base = _to_base(t_wc_pi3[None, :])[0]
-
-        # Orientation
-        if R_g is not None:
-            R_pi3_to_base = R_g
-        else:
-            R_pi3_to_base = np.eye(3, dtype=np.float32)
-
-        R_wc_base = R_pi3_to_base @ R_wc_pi3
-        return R_wc_base, t_wc_base
-
-    def _transform_camera(
-        R_wc_pi3: np.ndarray, t_wc_pi3: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Camera pose in Pi3 coords -> final world coords (aligned).
-
-        Composition:
-          Pi3 --(global_floor_sim)--> base --(R_align, center)--> aligned
-        """
-        R_wc_base, t_wc_base = _camera_to_base(R_wc_pi3, t_wc_pi3)
-
-        # Apply floor-plane alignment to camera origin
-        t_wc_world = _to_final_from_base(t_wc_base[None, :])[0]
-
-        # Orientation: base -> aligned
-        if floor is not None and floor_vertices_final is not None:
-            R_base_to_final = R_align
-        else:
-            R_base_to_final = np.eye(3, dtype=np.float32)
-
-        R_wc_world = R_base_to_final @ R_wc_base
-        return R_wc_world, t_wc_world
-
-    def _get_image_for_time(i: int) -> Optional[np.ndarray]:
-        if images is None:
-            return None
-        if i < 0 or i >= len(images):
-            return None
-        img = images[i]
-        if img is None:
-            return None
-        H, W = img.shape[:2]
-        if max(H, W) > img_maxsize:
-            scale = float(img_maxsize) / float(max(H, W))
-            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        return img
-
-    # edges for a cuboid (8 vertices)
-    cuboid_edges = [
-        (0, 1), (1, 3), (3, 2), (2, 0),
-        (4, 5), (5, 7), (7, 6), (6, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
-    ]
-
-    # frames to iterate
-    if annotated_frame_idx_in_sample_idx:
-        iter_indices = annotated_frame_idx_in_sample_idx
-    else:
-        iter_indices = list(range(len(sampled_indices)))
-
-    for vis_t, sample_idx in enumerate(iter_indices):
-        # sample_idx is index into points axis and sampled_indices
-        if sample_idx < 0 or sample_idx >= len(sampled_indices):
-            continue
-        if sample_idx >= points.shape[0]:
-            continue
-
-        frame_idx = int(sampled_indices[sample_idx])
-
-        rr.set_time_sequence("frame", vis_t)
-        rr.log("/", rr.Clear(recursive=True))
-
-        # ---------------------- world axis gizmo (aligned frame) ----------------------
-        axis_len = 0.5
-        x_axis = np.array([[0.0, 0.0, 0.0],
-                           [axis_len, 0.0, 0.0]], dtype=np.float32)
-        y_axis = np.array([[0.0, 0.0, 0.0],
-                           [0.0, axis_len, 0.0]], dtype=np.float32)
-        z_axis = np.array([[0.0, 0.0, 0.0],
-                           [0.0, 0.0, axis_len]], dtype=np.float32)
-        rr.log(
-            f"{BASE}/aligned/world_axes",
-            rr.LineStrips3D(
-                strips=[x_axis, y_axis, z_axis],
-                colors=[
-                    [255,   0,   0],  # X = red
-                    [  0, 255,   0],  # Y = green
-                    [  0,   0, 255],  # Z = blue
-                ],
-            ),
-        )
-
-        # ---------------------- floor: original vs aligned ----------------------
-        if vis_floor and (floor_world_base is not None) and (floor_faces is not None):
-            # Original (base frame)
-            rr.log(
-                f"{BASE}/orig/floor",
-                rr.Mesh3D(
-                    vertex_positions=floor_world_base.astype(np.float32),
-                    triangle_indices=floor_faces,
-                    **floor_kwargs_orig,
-                ),
-            )
-        if vis_floor and (floor_vertices_final is not None) and (floor_faces is not None):
-            # Aligned (XY plane)
-            rr.log(
-                f"{BASE}/aligned/floor",
-                rr.Mesh3D(
-                    vertex_positions=floor_vertices_final.astype(np.float32),
-                    triangle_indices=floor_faces,
-                    **floor_kwargs_aligned,
-                ),
-            )
-
-        # ---------------------- frame data (for humans + camera) ----------------------
-        frame_data = world4d.get(frame_idx, None)
-        if frame_data is None:
-            frame_data = {}
-
-        # ---------------------- humans (SMPL meshes): original vs aligned ----------------------
-        if vis_humans and faces_u32 is not None:
-            track_ids = frame_data.get("track_id", [])
-            verts_orig_list = frame_data.get("vertices_orig", [])
-            if track_ids and verts_orig_list:
-                tid = int(track_ids[0])
-                verts_orig = np.asarray(verts_orig_list[0], dtype=np.float32)
-                verts_world_pi3 = verts_orig
-
-                # SMPL -> world (Pi3) via per-frame similarity (if provided)
-                if per_frame_sims is not None and frame_idx in per_frame_sims:
-                    s_i = float(per_frame_sims[frame_idx]["s"])
-                    R_i = np.asarray(per_frame_sims[frame_idx]["R"], dtype=np.float32)
-                    t_i = np.asarray(per_frame_sims[frame_idx]["t"], dtype=np.float32)
-                    verts_flat = verts_orig.reshape(-1, 3)
-                    verts_tf = s_i * (verts_flat @ R_i.T) + t_i
-                    verts_world_pi3 = verts_tf.reshape(verts_orig.shape)
-
-                # Original mesh in base frame
-                verts_base = _to_base(verts_world_pi3.reshape(-1, 3)).reshape(
-                    verts_world_pi3.shape
-                )
-                rr.log(
-                    f"{BASE}/orig/humans/h{tid}",
-                    rr.Mesh3D(
-                        vertex_positions=verts_base.astype(np.float32),
-                        triangle_indices=faces_u32,
-                        albedo_factor=[200, 200, 200],
-                    ),
-                )
-
-                # Aligned mesh
-                verts_aligned = _to_final_from_base(
-                    verts_base.reshape(-1, 3)
-                ).reshape(verts_base.shape)
-                rr.log(
-                    f"{BASE}/aligned/humans/h{tid}",
-                    rr.Mesh3D(
-                        vertex_positions=verts_aligned.astype(np.float32),
-                        triangle_indices=faces_u32,
-                        albedo_factor=[0, 255, 0],
-                    ),
-                )
-
-        # ---------------------- dynamic points: original (base) vs aligned ----------------------
-        pts_pi3 = points[sample_idx].reshape(-1, 3)    # (N,3)
-        cols = colors[sample_idx].reshape(-1, 3)       # (N,3)
-
-        if conf is not None:
-            cfs = conf[sample_idx].reshape(-1)
-            good = np.isfinite(cfs)
-            cfs_valid = cfs[good]
-            if cfs_valid.size > 0:
-                med = np.median(cfs_valid)
-                p5 = np.percentile(cfs_valid, 5)
-                thr = max(min_conf_default, p5)
-                print(
-                    f"[{video_id}] frame {frame_idx}: conf thr = {thr:.4f} "
-                    f"(med={med:.4f}, n_valid={cfs_valid.size})"
-                )
-            else:
-                thr = min_conf_default
-
-            keep = (cfs >= thr) & np.isfinite(pts_pi3).all(axis=1)
-        else:
-            keep = np.isfinite(pts_pi3).all(axis=1)
-
-        pts_keep_pi3 = pts_pi3[keep]
-        cols_keep = cols[keep]
-
-        if pts_keep_pi3.shape[0] > 0:
-            # Original in base frame
-            pts_base = _to_base(pts_keep_pi3)
-
-            # Grayscale for original points
-            cols_f = cols_keep.astype(np.float32)
-            gray = (
-                0.299 * cols_f[:, 0] + 0.587 * cols_f[:, 1] + 0.114 * cols_f[:, 2]
-            ).astype(np.uint8)
-            cols_gray = np.stack([gray, gray, gray], axis=1)
-
-            rr.log(
-                f"{BASE}/orig/points",
-                rr.Points3D(
-                    pts_base.astype(np.float32),
-                    colors=cols_gray.astype(np.uint8),
-                ),
-            )
-
-            # Aligned
-            pts_keep_world = _to_final_from_base(pts_base)
-            rr.log(
-                f"{BASE}/aligned/points",
-                rr.Points3D(
-                    pts_keep_world.astype(np.float32),
-                    colors=cols_keep.astype(np.uint8),
-                ),
-            )
-
-        # ---------------------- per-frame cuboid bboxes: original vs aligned ----------------------
-        if frame_bbox_meshes is not None and vis_t in frame_bbox_meshes:
-            for bi, bbox_m in enumerate(frame_bbox_meshes[vis_t]):
-                verts_pi3 = bbox_m["verts"].astype(np.float32)
-
-                # Original: base frame
-                verts_base = _to_base(verts_pi3)
-                strips_orig = [
-                    verts_base[[e0, e1], :] for (e0, e1) in cuboid_edges
-                ]
-                col_orig = [180, 180, 180]  # gray for original
-                rr.log(
-                    f"{BASE}/orig/bboxes/frame_{vis_t}/bbox_{bi}",
-                    rr.LineStrips3D(
-                        strips=strips_orig,
-                        colors=[col_orig] * len(strips_orig),
-                    ),
-                )
-
-                # Aligned: final world frame
-                verts_world = _to_final_from_base(verts_base)
-                strips_aligned = [
-                    verts_world[[e0, e1], :] for (e0, e1) in cuboid_edges
-                ]
-                col_aligned = bbox_m.get("color", [255, 180, 0])
-                rr.log(
-                    f"{BASE}/aligned/bboxes/frame_{vis_t}/bbox_{bi}",
-                    rr.LineStrips3D(
-                        strips=strips_aligned,
-                        colors=[col_aligned] * len(strips_aligned),
-                    ),
-                )
-
-        # ---------------------- camera: original (base) vs aligned ----------------------
-        cam_3x4 = frame_data.get("camera", None)
-        R_wc_base = None
-        t_wc_base = None
-        R_wc_world = None
-        t_wc_world = None
-
-        if cam_3x4 is not None:
-            cam_3x4 = np.asarray(cam_3x4, dtype=np.float32)
-            if cam_3x4.shape == (4, 4):
-                cam_3x4 = cam_3x4[:3, :4]
-
-            R_wc_pi3 = cam_3x4[:3, :3]
-            t_wc_pi3 = cam_3x4[:3, 3]
-
-            # Original in base frame
-            R_wc_base, t_wc_base = _camera_to_base(R_wc_pi3, t_wc_pi3)
-
-            # Aligned
-            R_wc_world, t_wc_world = _transform_camera(R_wc_pi3, t_wc_pi3)
-
-        image = _get_image_for_time(frame_idx)
-
-        # Intrinsics (same for both)
-        if image is not None:
-            H_img, W_img = image.shape[:2]
-        else:
-            H_img, W_img = 480, 640
-        fov_y = 0.96
-        fx, fy, cx, cy = _pinhole_from_fov(W_img, H_img, fov_y)
-
-        # Original frustum in base frame
-        if R_wc_base is not None and t_wc_base is not None:
-            quat_xyzw_base = SciRot.from_matrix(R_wc_base).as_quat().astype(np.float32)
-            frus_path_orig = f"{BASE}/orig/frustum"
-            rr.log(
-                frus_path_orig,
-                rr.Transform3D(
-                    translation=t_wc_base.astype(np.float32),
-                    rotation=rr.Quaternion(xyzw=quat_xyzw_base),
-                ),
-            )
-            rr.log(
-                f"{frus_path_orig}/camera",
-                rr.Pinhole(
-                    focal_length=(fx, fy),
-                    principal_point=(cx, cy),
-                    resolution=(W_img, H_img),
-                ),
-            )
-
-        # Aligned frustum
-        if R_wc_world is not None and t_wc_world is not None:
-            quat_xyzw_world = SciRot.from_matrix(R_wc_world).as_quat().astype(np.float32)
-            frus_path_aligned = f"{BASE}/aligned/frustum"
-            rr.log(
-                frus_path_aligned,
-                rr.Transform3D(
-                    translation=t_wc_world.astype(np.float32),
-                    rotation=rr.Quaternion(xyzw=quat_xyzw_world),
-                ),
-            )
-            rr.log(
-                f"{frus_path_aligned}/camera",
-                rr.Pinhole(
-                    focal_length=(fx, fy),
-                    principal_point=(cx, cy),
-                    resolution=(W_img, H_img),
-                ),
-            )
-            # Attach the image only to the aligned camera (to avoid duplication)
-            if image is not None:
-                rr.log(f"{frus_path_aligned}/image", rr.Image(image))
-
-    print("Rerun visualization running. Scrub the 'frame' timeline.")
-
 # --------------------------------------------------------------------------------------
 # Rerun visualization for ORIGINAL (Pi3) results
-# For now: only shows original point clouds for annotated frames.
+#   - Shows original point clouds for annotated frames.
+#   - Now also shows the floor mesh (transformed to original/world coords).
 # --------------------------------------------------------------------------------------
 
 
@@ -566,6 +43,8 @@ def rerun_vis_original_results(
     camera_poses_S: Optional[np.ndarray],
     frame_annotated_dir_path: Path,
     *,
+    floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None,
+    global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None,
     img_maxsize: int = 320,
     app_id: str = "World4D-Original",
     min_conf_default: float = 1e-6,
@@ -579,9 +58,12 @@ def rerun_vis_original_results(
       - colors_S: (S,H,W,3) uint8 colors (optional)
       - camera_poses_S: (S,4,4) or (S,3,4) camera extrinsics (currently NOT used)
 
-    For now, we **only draw the point clouds** (no bboxes, no cameras),
-    per your request. This function is structured so we can easily extend it
-    later to add original 3D bboxes and camera frusta.
+    Additionally:
+      - If `floor` (gv, gf, gc) plus `global_floor_sim` (s,R,t) are provided,
+        we transform the floor mesh into the same world/original coordinate
+        frame as the points and render it as a Mesh3D.
+
+    For now, we **only draw point clouds + floor mesh** (no bboxes, no cameras).
     """
 
     rr.init(app_id, spawn=True)
@@ -589,6 +71,35 @@ def rerun_vis_original_results(
 
     BASE = "world/original"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
+
+    # ----------------------------------------------------
+    # Floor mesh: transform to world/original coordinates
+    # ----------------------------------------------------
+    floor_vertices_world = None
+    floor_faces = None
+    floor_kwargs: Optional[Dict[str, Any]] = None
+
+    if floor is not None:
+        floor_verts0, floor_faces0, floor_colors0 = floor
+        floor_verts0 = np.asarray(floor_verts0, dtype=np.float32)
+        floor_faces0 = _faces_u32(np.asarray(floor_faces0))
+
+        if global_floor_sim is not None:
+            s_g, R_g, t_g = global_floor_sim  # s: float, R: (3,3), t: (3,)
+            R_g = np.asarray(R_g, dtype=np.float32)
+            t_g = np.asarray(t_g, dtype=np.float32)
+            floor_vertices_world = s_g * (floor_verts0 @ R_g.T) + t_g
+        else:
+            floor_vertices_world = floor_verts0
+
+        floor_kwargs = {}
+        if floor_colors0 is not None:
+            floor_colors0 = np.asarray(floor_colors0, dtype=np.uint8)
+            floor_kwargs["vertex_colors"] = floor_colors0
+        else:
+            floor_kwargs["albedo_factor"] = [160, 160, 160]
+
+        floor_faces = floor_faces0
 
     def _get_image_for_stem(stem: str) -> Optional[np.ndarray]:
         img_path = frame_annotated_dir_path / video_id / f"{stem}.png"
@@ -612,6 +123,17 @@ def rerun_vis_original_results(
 
         rr.set_time_sequence("frame", vis_t)
         rr.log("/", rr.Clear(recursive=True))
+
+        # --- Floor mesh (static) ---
+        if floor_vertices_world is not None and floor_faces is not None:
+            rr.log(
+                f"{BASE}/floor",
+                rr.Mesh3D(
+                    vertex_positions=floor_vertices_world.astype(np.float32),
+                    triangle_indices=floor_faces,
+                    **(floor_kwargs or {}),
+                ),
+            )
 
         # --- Points ---
         pts = points_S[vis_t].reshape(-1, 3)  # (N,3)
@@ -662,16 +184,15 @@ def rerun_vis_original_results(
             rr.log(f"{BASE}/image", rr.Image(img))
 
     print(
-        "[orig-pts] Original points visualization running for "
+        "[orig-pts] Original points + floor visualization running for "
         f"{video_id}. Scrub the 'frame' timeline in Rerun."
     )
-
 
 
 # --------------------------------------------------------------------------------------
 # FrameToWorldAnnotations
 #   - loads 3D bbox annotations (.pkl produced by BBox3DGenerator)
-#   - can visualize ORIGINAL Pi3 points for annotated frames
+#   - can visualize ORIGINAL Pi3 points + floor mesh for annotated frames
 # --------------------------------------------------------------------------------------
 
 
@@ -947,7 +468,7 @@ class FrameToWorldAnnotations:
         """
         Replica of BBox3DGenerator.idx_to_frame_idx_path, so that
         the points we load here match exactly the subset used
-        when constructing the bbox_3d .pkl files.
+        when constructing the bbox_3D .pkl files.
         """
         video_frames_annotated_dir_path = self.frame_annotated_dir_path / video_id
         annotated_frame_id_list = [
@@ -1112,9 +633,10 @@ class FrameToWorldAnnotations:
           - loads the 3D bbox predictions (if not already passed);
           - prints some basic statistics over the 3D objects.
 
-        Visualization of ORIGINAL results (points/bboxes/cameras) is handled
-        by a separate function (`visualize_original_results`), and currently
-        only draws the original point clouds.
+        Visualization of ORIGINAL results (points/bboxes/cameras/floor) is handled
+        by `visualize_original_results`, and currently draws:
+          - original point clouds
+          - floor mesh
         """
         print(f"[world4d][{video_id}] Generating world SGG annotations (skeleton)")
 
@@ -1152,29 +674,41 @@ class FrameToWorldAnnotations:
             f"unique_labels={sorted(all_labels)}"
         )
 
-        # TODO: (later)
-        #   - use points + 3D bboxes + camera poses to construct world-4D GT SGG
-        #   - save 4D annotations under self.bbox_4d_root_dir
-
         if visualize:
-            # For now, we do NOT hook visualization here.
-            # Use `visualize_original_results(video_id)` to inspect original Pi3 space.
             print(
                 f"[world4d][{video_id}] visualize=True requested, "
-                "but world-4D vis is not implemented in this skeleton."
+                "but world-4D bbox visualization is not yet implemented here."
             )
 
     def visualize_original_results(self, video_id: str) -> None:
         """
         Convenience wrapper:
           1) Loads original Pi3 points using the same slicing logic as bbox_3D construction.
-          2) Launches a Rerun viewer that shows only the original point clouds (per annotated frame).
-
-        Later we can extend this to also visualize:
-          - original 3D bboxes (from the .pkl)
-          - original camera frusta (from camera_poses).
+          2) Loads floor mesh + global_floor_sim from the 3D bbox .pkl (if present).
+          3) Launches a Rerun viewer that shows:
+             - original point clouds
+             - floor mesh in the same world/original coordinates.
         """
         P = self._load_original_points_for_video(video_id)
+
+        # Optional floor mesh + similarity transform from bbox_3d pkl
+        floor = None
+        global_floor_sim = None
+        video_3dgt = self.get_video_3d_annotations(video_id)
+        if video_3dgt is not None:
+            gv = video_3dgt.get("gv", None)
+            gf = video_3dgt.get("gf", None)
+            gc = video_3dgt.get("gc", None)
+            if gv is not None and gf is not None:
+                floor = (gv, gf, gc)
+
+            gfs = video_3dgt.get("global_floor_sim", None)
+            if gfs is not None:
+                s_g = float(gfs["s"])
+                R_g = np.asarray(gfs["R"], dtype=np.float32)
+                t_g = np.asarray(gfs["t"], dtype=np.float32)
+                global_floor_sim = (s_g, R_g, t_g)
+
         rerun_vis_original_results(
             video_id=video_id,
             points_S=P["points"],
@@ -1183,6 +717,8 @@ class FrameToWorldAnnotations:
             colors_S=P["colors"],
             camera_poses_S=P["camera_poses"],
             frame_annotated_dir_path=self.frame_annotated_dir_path,
+            floor=floor,
+            global_floor_sim=global_floor_sim,
             img_maxsize=480,
             app_id="World4D-Original",
         )
@@ -1194,7 +730,7 @@ class FrameToWorldAnnotations:
         Right now:
           - loads GT / GDINO / 3D bboxes;
           - calls generate_video_bb_annotations (skeleton stats);
-          - visualizes original Pi3 point clouds.
+          - visualizes original Pi3 point clouds + floor mesh.
         """
         video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(
             video_id
@@ -1210,7 +746,7 @@ class FrameToWorldAnnotations:
             visualize=False,
         )
 
-        # Now show the original Pi3-space outputs (points only for now)
+        # Now show the original Pi3-space outputs (points + floor)
         self.visualize_original_results(video_id=video_id)
 
     def generate_gt_world_bb_annotations(
@@ -1294,7 +830,7 @@ def parse_args():
         description=(
             "World4D GT helper: "
             "(a) inspect 3D bbox annotations, "
-            "(b) visualize original Pi3 outputs for annotated frames."
+            "(b) visualize original Pi3 outputs (points + floor) for annotated frames."
         )
     )
     parser.add_argument("--ag_root_directory", type=str, default="/data/rohith/ag")
@@ -1327,8 +863,8 @@ def main():
 
 def main_sample():
     """
-    Simple entry point to visualize original Pi3 point clouds for a single video.
-    Adjust `video_id` as needed.
+    Simple entry point to visualize original Pi3 point clouds + floor mesh
+    for a single video. Adjust `video_id` as needed.
     """
     args = parse_args()
 
