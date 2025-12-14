@@ -63,16 +63,16 @@ def rerun_vis_original_results(
       - camera_poses_S: (S,4,4) or (S,3,4) camera extrinsics (optional)
 
     Additionally:
-      - If `floor` (gv, gf, gc) plus `global_floor_sim` (s,R,t) are provided,
-        we transform the floor mesh into the same world/original coordinate
-        frame as the points and render it as a Mesh3D.
+      - Floor mesh (gv, gf, gc) transformed with global_floor_sim (s,R,t).
+      - World coordinate frame (World +X/+Y/+Z).
+      - XYZ coordinate frame (X/Y/Z).
+      - Floor-attached frame:
+          * Floor lies in XY plane of this frame
+          * Floor +Z is the mesh normal
+      - Camera frustum + camera axes (Cam +X/+Y/+Z).
 
-      - We draw:
-          * world coordinate frame (World +X/+Y/+Z) as labeled arrows.
-          * XYZ coordinate frame (X/Y/Z) as labeled arrows.
-          * camera frustum (via rr.Pinhole) + camera axes (Cam +X/+Y/+Z).
-
-    For now, we **only draw point clouds + floor mesh + frames + camera**.
+    Coordinate conventions:
+      - Viewer is set to RUB (X=Right, Y=Up, Z=Back) at the root.
     """
 
     rr.init(app_id, spawn=True)
@@ -81,14 +81,16 @@ def rerun_vis_original_results(
     BASE = "world/original"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
 
-    # Predefine static world & XYZ coordinate frames as Arrows3D with labels.
+    # -------------------------------------------------------------------------
+    # Static world & XYZ frames (at origin, in RUB world coordinates)
+    # -------------------------------------------------------------------------
     axis_len_world = 0.5
     world_axes = rr.Arrows3D(
         origins=[[0.0, 0.0, 0.0]] * 3,
         vectors=[
-            [axis_len_world, 0.0, 0.0],
-            [0.0, axis_len_world, 0.0],
-            [0.0, 0.0, axis_len_world],
+            [axis_len_world, 0.0, 0.0],  # +X
+            [0.0, axis_len_world, 0.0],  # +Y
+            [0.0, 0.0, axis_len_world],  # +Z
         ],
         colors=[
             [255, 0, 0],   # X - red
@@ -98,14 +100,13 @@ def rerun_vis_original_results(
         labels=["World +X", "World +Y", "World +Z"],
     )
 
-    axis_len_xyz = 1.0
-    # Slightly offset XYZ frame so it's visually distinct if you want; here kept at origin.
+    axis_len_xyz = 0.4
     xyz_axes = rr.Arrows3D(
         origins=[[0.0, 0.0, 0.0]] * 3,
         vectors=[
-            [axis_len_xyz, 0.0, 0.0],
-            [0.0, axis_len_xyz, 0.0],
-            [0.0, 0.0, axis_len_xyz],
+            [axis_len_xyz, 0.0, 0.0],    # +X
+            [0.0, axis_len_xyz, 0.0],    # +Y
+            [0.0, 0.0, axis_len_xyz],    # +Z
         ],
         colors=[
             [255, 128, 128],
@@ -115,29 +116,18 @@ def rerun_vis_original_results(
         labels=["X", "Y", "Z"],
     )
 
-    def _log_static_frames() -> None:
-        """
-        Log the world & XYZ coordinate frames for the current timestep.
-        Called once per frame after `rr.Clear` since Clear wipes everything.
-        """
-        rr.log(f"{BASE}/world_axes", world_axes)
-        rr.log(f"{BASE}/xyz_axes", xyz_axes)
-
-        # Optional: a small text reminder in a TextLog view.
-        rr.log(
-            f"{BASE}/info",
-            rr.TextLog(
-                f"World coordinate frame = RUB; showing World +X/+Y/+Z and XYZ axes, "
-                f"plus camera frustum & axes for video {video_id}."
-            ),
-        )
-
-    # ----------------------------------------------------
+    # -------------------------------------------------------------------------
     # Floor mesh: transform to world/original coordinates
-    # ----------------------------------------------------
+    # + floor-attached frame (Floor +X/+Y/+Z)
+    #   - canonical floor is XZ plane with Y as normal
+    #   - we build a frame where floor lies in XY and Z is the normal
+    # -------------------------------------------------------------------------
     floor_vertices_world = None
     floor_faces = None
     floor_kwargs: Optional[Dict[str, Any]] = None
+
+    floor_frame_origin: Optional[np.ndarray] = None
+    floor_axes_vectors: Optional[np.ndarray] = None  # (3,3): X,Y,Z
 
     if floor is not None:
         floor_verts0, floor_faces0, floor_colors0 = floor
@@ -148,8 +138,47 @@ def rerun_vis_original_results(
             s_g, R_g, t_g = global_floor_sim  # s: float, R: (3,3), t: (3,)
             R_g = np.asarray(R_g, dtype=np.float32)
             t_g = np.asarray(t_g, dtype=np.float32)
+
+            # Transform floor vertices into world/original coordinates
             floor_vertices_world = s_g * (floor_verts0 @ R_g.T) + t_g
+
+            # -----------------------------------------------------------------
+            # Floor-attached frame:
+            #
+            # Canonical floor (before sim) is assumed to lie in the XZ plane:
+            #   - in-plane tangent axes:  e1 = +X, e2 = +Z
+            #   - normal:                 n  = +Y
+            #
+            # After applying R_g, we get world-space axes:
+            #   t1 = R_g[:, 0]  (former +X, in-plane)
+            #   t2 = R_g[:, 2]  (former +Z, in-plane)
+            #   n  = R_g[:, 1]  (former +Y, normal)
+            #
+            # We want a *floor frame* where:
+            #   - floor lies in XY plane of that frame
+            #   - Z axis is the mesh normal
+            # So we define:
+            #   Floor +X := t1
+            #   Floor +Y := t2
+            #   Floor +Z := n
+            # -----------------------------------------------------------------
+            floor_frame_origin = t_g
+            axis_len_floor = float(s_g) * 0.5 if s_g is not None else 0.5
+
+            t1 = R_g[:, 0]                 # in-plane axis
+            t2 = R_g[:, 2]                 # in-plane axis
+            n  = R_g[:, 1]                 # normal
+
+            floor_axes_vectors = np.stack(
+                [
+                    t1 * axis_len_floor,   # Floor +X (in plane)
+                    t2 * axis_len_floor,   # Floor +Y (in plane)
+                    n  * axis_len_floor,   # Floor +Z (normal)
+                ],
+                axis=0,
+            )
         else:
+            # No global_floor_sim: just use raw verts; cannot define consistent floor frame.
             floor_vertices_world = floor_verts0
 
         floor_kwargs = {}
@@ -160,6 +189,22 @@ def rerun_vis_original_results(
             floor_kwargs["albedo_factor"] = [160, 160, 160]
 
         floor_faces = floor_faces0
+
+    def _log_static_frames() -> None:
+        """
+        Log the world & XYZ coordinate frames for the current timestep.
+        Called once per frame after `rr.Clear` since Clear wipes everything.
+        """
+        rr.log(f"{BASE}/world_axes", world_axes)
+        rr.log(f"{BASE}/xyz_axes", xyz_axes)
+
+        rr.log(
+            f"{BASE}/info",
+            rr.TextLog(
+                f"World frame = RUB; showing World +X/+Y/+Z, XYZ axes, "
+                f"floor-attached frame (XY plane + floor normal), and camera frustum for {video_id}."
+            ),
+        )
 
     def _get_image_for_stem(stem: str) -> Optional[np.ndarray]:
         img_path = frame_annotated_dir_path / video_id / f"{stem}.png"
@@ -184,10 +229,10 @@ def rerun_vis_original_results(
         rr.set_time_sequence("frame", vis_t)
         rr.log("/", rr.Clear(recursive=True))
 
-        # --- Static coordinate frames (world +XYZ) ---
+        # --- Static world & XYZ frames ---
         _log_static_frames()
 
-        # --- Floor mesh (static geometry in world/original coords) ---
+        # --- Floor mesh ---
         if floor_vertices_world is not None and floor_faces is not None:
             rr.log(
                 f"{BASE}/floor",
@@ -195,6 +240,23 @@ def rerun_vis_original_results(
                     vertex_positions=floor_vertices_world.astype(np.float32),
                     triangle_indices=floor_faces,
                     **(floor_kwargs or {}),
+                ),
+            )
+
+        # --- Floor-attached frame (Floor +X/+Y/+Z) ---
+        if floor_frame_origin is not None and floor_axes_vectors is not None:
+            origins_floor = np.repeat(floor_frame_origin[None, :], 3, axis=0)
+            rr.log(
+                f"{BASE}/floor_frame",
+                rr.Arrows3D(
+                    origins=origins_floor,
+                    vectors=floor_axes_vectors,
+                    colors=[
+                        [255, 200, 0],   # Floor X
+                        [0, 200, 255],   # Floor Y
+                        [200, 0, 255],   # Floor Z (normal)
+                    ],
+                    labels=["Floor +X", "Floor +Y", "Floor +Z"],
                 ),
             )
 
@@ -209,13 +271,11 @@ def rerun_vis_original_results(
             elif cam_pose.shape == (4, 4):
                 T = cam_pose.astype(np.float32)
             else:
-                # Fallback: identity if format unexpected
                 T = np.eye(4, dtype=np.float32)
 
             cam_origin = T[:3, 3]
             R_cam = T[:3, :3]
 
-            # Camera axes drawn from the camera center, with labels.
             axis_len_cam = 0.4
             cam_axes_vectors = np.stack(
                 [
@@ -241,7 +301,6 @@ def rerun_vis_original_results(
                 ),
             )
 
-            # Camera frustum: simple perspective pinhole with labeled entity path.
             rr.log(
                 f"{BASE}/camera/frustum",
                 rr.Pinhole(
@@ -256,7 +315,7 @@ def rerun_vis_original_results(
             )
 
         # --- Points (original Pi3 point cloud) ---
-        pts = points_S[vis_t].reshape(-1, 3)  # (N,3)
+        pts = points_S[vis_t].reshape(-1, 3)
         cols = (
             colors_S[vis_t].reshape(-1, 3) if colors_S is not None else None
         )
@@ -264,7 +323,6 @@ def rerun_vis_original_results(
             conf_S[vis_t].reshape(-1) if conf_S is not None else None
         )
 
-        # Confidence-based filtering (similar style to your other viewers)
         if conf_flat is not None:
             good = np.isfinite(conf_flat)
             cfs_valid = conf_flat[good]
@@ -304,8 +362,8 @@ def rerun_vis_original_results(
             rr.log(f"{BASE}/image", rr.Image(img))
 
     print(
-        "[orig-pts] Original points + floor + frames + camera visualization running for "
-        f"{video_id}. Scrub the 'frame' timeline in Rerun."
+        "[orig-pts] Original points + floor + world/XYZ frames + floor frame "
+        f"+ camera visualization running for {video_id}. Scrub the 'frame' timeline in Rerun."
     )
 
 
