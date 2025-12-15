@@ -27,6 +27,172 @@ from annotation_utils import (
     _is_empty_array,
 )
 
+def compute_final_world_transform(
+    floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]],
+    global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]],
+    *,
+    apply_mirror: bool = True,
+) -> Dict[str, np.ndarray]:
+    """
+    Compute the world -> final transform used in the visualization code.
+
+    Pipeline:
+        1) Apply global floor similarity (s_g, R_g, t_g) to the floor mesh.
+        2) Build a floor-aligned frame where:
+               - X, Z axes lie in the floor plane
+               - Y is the floor normal
+           This gives a rotation R_align that maps WORLD -> FLOOR frame,
+           with origin at floor_origin_world = t_g.
+        3) Optionally apply a mirror across the ZY plane in the FLOOR frame
+           (i.e., x -> -x).
+
+    The final transform is:
+        x_final = R_final @ x_world + t_final
+
+    Returns a dict with:
+        - R_world_to_floor   : (3,3)  rotation WORLD -> FLOOR
+        - t_world_to_floor   : (3,)   translation WORLD -> FLOOR
+        - T_world_to_floor   : (4,4)  homogeneous transform
+
+        - R_world_to_final   : (3,3)  WORLD -> FINAL (floor (+ mirror))
+        - t_world_to_final   : (3,)   translation WORLD -> FINAL
+        - T_world_to_final   : (4,4)  homogeneous transform
+
+        - floor_origin_world : (3,)   origin used for floor frame
+
+    Coordinate conventions:
+        - All R, t are in column-vector form:
+              x_out = R @ x_in + t
+
+    How to use:
+
+        POINTS (shape (..., 3), world coords):
+            pts_flat = points.reshape(-1, 3)
+            pts_final = (R_world_to_final @ pts_flat.T).T + t_world_to_final[None, :]
+            pts_final = pts_final.reshape(points.shape)
+
+        3D BBOX CORNERS (shape (8,3), world coords):
+            corners_final = (R_world_to_final @ corners_world.T).T + t_world_to_final[None, :]
+
+        CAMERAS (world_from_cam extrinsics T_wc, shape (4,4)):
+            Let:
+                R_wc = T_wc[:3, :3]
+                t_wc = T_wc[:3, 3]
+
+            Then final extrinsics T_fc (FINAL-from-CAMERA) are:
+                R_fc = R_world_to_final @ R_wc
+                t_fc = R_world_to_final @ t_wc + t_world_to_final
+
+                T_fc = np.eye(4, dtype=np.float32)
+                T_fc[:3, :3] = R_fc
+                T_fc[:3, 3]  = t_fc
+
+    If floor or global_floor_sim is None, this function returns an IDENTITY transform.
+    """
+
+    # -------------------------------------------------------------------------
+    # Default: identity transform (no-op)
+    # -------------------------------------------------------------------------
+    R_identity = np.eye(3, dtype=np.float32)
+    t_zero = np.zeros(3, dtype=np.float32)
+
+    result = {
+        "R_world_to_floor": R_identity.copy(),
+        "t_world_to_floor": t_zero.copy(),
+        "T_world_to_floor": np.eye(4, dtype=np.float32),
+
+        "R_world_to_final": R_identity.copy(),
+        "t_world_to_final": t_zero.copy(),
+        "T_world_to_final": np.eye(4, dtype=np.float32),
+
+        "floor_origin_world": t_zero.copy(),
+    }
+
+    if floor is None or global_floor_sim is None:
+        # Nothing to do; no floor alignment available
+        return result
+
+    # -------------------------------------------------------------------------
+    # Unpack inputs
+    # -------------------------------------------------------------------------
+    floor_verts0, floor_faces0, floor_colors0 = floor
+    s_g, R_g, t_g = global_floor_sim
+
+    R_g = np.asarray(R_g, dtype=np.float32)      # (3,3)
+    t_g = np.asarray(t_g, dtype=np.float32)      # (3,)
+    s_g = float(s_g)
+
+    # This is the world-space origin of the floor frame
+    floor_origin_world = t_g.astype(np.float32)
+
+    # -------------------------------------------------------------------------
+    # Build floor-aligned basis and R_align (WORLD -> FLOOR)
+    # -------------------------------------------------------------------------
+    # t1, t2: in-plane directions; n: floor normal
+    t1 = R_g[:, 0]  # in-plane
+    t2 = R_g[:, 2]  # in-plane
+    n  = R_g[:, 1]  # normal
+
+    # Basis matrix with columns = basis vectors expressed in WORLD coords
+    F = np.stack([t1, t2, n], axis=1)  # (3,3)
+
+    # Rotation WORLD -> FLOOR (column-vector convention):
+    #    x_floor = R_align @ (x_world - floor_origin_world)
+    R_align = F.T.astype(np.float32)
+
+    # Translation WORLD -> FLOOR:
+    #    x_floor = R_align @ x_world + t_floor
+    # where t_floor = -R_align @ floor_origin_world
+    t_align = -R_align @ floor_origin_world
+
+    # 4x4 homogeneous transform WORLD -> FLOOR
+    T_world_to_floor = np.eye(4, dtype=np.float32)
+    T_world_to_floor[:3, :3] = R_align
+    T_world_to_floor[:3, 3] = t_align
+
+    # -------------------------------------------------------------------------
+    # Optional mirror across ZY plane in FLOOR frame (x -> -x)
+    # -------------------------------------------------------------------------
+    if apply_mirror:
+        # Mirror in FLOOR coords:
+        #   x_final = M_mirror @ x_floor  (no extra translation)
+        M_mirror = np.diag([-1.0, 1.0, 1.0]).astype(np.float32)
+
+        # Combine:
+        #   x_final = M_mirror @ x_floor
+        #           = M_mirror @ (R_align @ x_world + t_align)
+        #           = (M_mirror @ R_align) @ x_world + (M_mirror @ t_align)
+        R_final = M_mirror @ R_align
+        t_final = M_mirror @ t_align
+
+        T_world_to_final = np.eye(4, dtype=np.float32)
+        T_world_to_final[:3, :3] = R_final
+        T_world_to_final[:3, 3] = t_final
+    else:
+        # FINAL == FLOOR
+        R_final = R_align
+        t_final = t_align
+        T_world_to_final = T_world_to_floor.copy()
+
+    # -------------------------------------------------------------------------
+    # Pack results
+    # -------------------------------------------------------------------------
+    result.update(
+        {
+            "R_world_to_floor": R_align,
+            "t_world_to_floor": t_align,
+            "T_world_to_floor": T_world_to_floor,
+
+            "R_world_to_final": R_final,
+            "t_world_to_final": t_final,
+            "T_world_to_final": T_world_to_final,
+
+            "floor_origin_world": floor_origin_world,
+        }
+    )
+
+    return result
+
 # --------------------------------------------------------------------------------------
 # Rerun visualization for ORIGINAL (Pi3) results
 #   - Shows original point clouds for annotated frames.
@@ -38,7 +204,6 @@ from annotation_utils import (
 #       * original 3D bounding boxes (BEFORE).
 #       * transformed 3D bounding boxes (AFTER floor-alignment).
 # --------------------------------------------------------------------------------------
-
 
 def rerun_frame_vis_results(
     video_id: str,
@@ -693,7 +858,6 @@ def rerun_frame_vis_results(
         f"vis_mode='{vis_mode}'. Scrub the 'frame' timeline in Rerun and "
         "toggle entities in the UI."
     )
-
 
 # --------------------------------------------------------------------------------------
 # FrameToWorldAnnotations
