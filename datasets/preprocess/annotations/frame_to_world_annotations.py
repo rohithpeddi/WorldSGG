@@ -51,6 +51,7 @@ def rerun_vis_original_results(
     *,
     floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None,
     global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None,
+    frame_3dbb_map: Optional[Dict[Any, List[Dict[str, Any]]]] = None,
     frame_bbox_meshes:  Optional[Dict[int, List[Dict[str, Any]]]] = None,
     img_maxsize: int = 320,
     app_id: str = "World4D-Original",
@@ -82,6 +83,7 @@ def rerun_vis_original_results(
         frame_annotated_dir_path: root dir for annotated PNG frames
         floor: (gv, gf, gc) floor mesh vertices/faces/colors (optional)
         global_floor_sim: (s,R,t) scaling+rotation+translation for floor
+        frame_3dbb_map: dict mapping frame name -> 3D bbox annotations
         frame_bbox_meshes: dict mapping frame idx -> list of bbox meshes
         img_maxsize: max image size for RGB frames
         app_id: Rerun app id
@@ -532,53 +534,46 @@ def rerun_vis_original_results(
         # -----------------------------------------------------------------------------
         # 3D BOUNDING BOXES: BEFORE (world coords) / AFTER (floor-aligned coords)
         # -----------------------------------------------------------------------------
-        if frame_bbox_meshes is not None and vis_t in frame_bbox_meshes:
-            for bi, bbox_m in enumerate(frame_bbox_meshes[vis_t]):
-                verts_world = np.asarray(bbox_m["verts"], dtype=np.float32)  # (8,3) in Pi3 coords
+        if frame_3dbb_map is not None:
+            frame_name = f"{stem}.png"
+            if frame_name in frame_3dbb_map:
+                frame_objects = frame_3dbb_map[frame_name]["objects"]
+                for bi, obj in enumerate(frame_objects):
+                    label = obj["label"]
+                    bbox_3d = obj["aabb_floor_aligned"]
+                    corners_world = np.asarray(bbox_3d["corners_world"], dtype=np.float32)  # (8,3)
 
-                # Bring bbox verts into the same world space as floor/points
-                if global_floor_sim is not None:
-                    s_g, R_g, t_g = global_floor_sim
-                    R_g = np.asarray(R_g, dtype=np.float32)
-                    t_g = np.asarray(t_g, dtype=np.float32)
-                    verts_world = s_g * (verts_world @ R_g.T) + t_g[None, :]
+                    col = obj.get("color", [255, 180, 0])
 
-                col = bbox_m.get("color", [255, 180, 0])
-
-                # BEFORE: world coords
-                strips = []
-                for e0, e1 in cuboid_edges:
-                    strips.append(verts_world[[e0, e1], :])
-
-                rr.log(
-                    f"{BASE_BEFORE}/bboxes/frame_{vis_t}/bbox_{bi}",
-                    rr.LineStrips3D(
-                        strips=strips,
-                        colors=[col] * len(strips),
-                    ),
-                )
-
-                # AFTER: floor-aligned coords (same transform as floor/points)
-                if R_align is not None and floor_origin_world is not None:
-                    verts_centered = verts_world - floor_origin_world[None, :]
-                    verts_after = verts_centered @ R_align.T  # world -> aligned
-
-                    strips_after = []
+                    # BEFORE: world coords
+                    strips = []
                     for e0, e1 in cuboid_edges:
-                        strips_after.append(verts_after[[e0, e1], :])
+                        strips.append(corners_world[[e0, e1], :])
 
                     rr.log(
-                        f"{BASE_AFTER}/bboxes/frame_{vis_t}/bbox_{bi}",
+                        f"{BASE_BEFORE}/bboxes/frame_{vis_t}/bbox_{bi}",
                         rr.LineStrips3D(
-                            strips=strips_after,
-                            colors=[[255, 200, 0]] * len(strips_after),
+                            strips=strips,
+                            colors=[col] * len(strips),
                         ),
                     )
-        else:
-            print(
-                f"[orig-pts][{video_id}] frame {stem}: "
-                "no 3D bbox annotations available for this frame."
-            )
+
+                    # AFTER: floor-aligned coords (same transform as floor/points)
+                    if R_align is not None and floor_origin_world is not None:
+                        verts_centered = corners_world - floor_origin_world[None, :]
+                        verts_after = verts_centered @ R_align.T  # world -> aligned
+
+                        strips_after = []
+                        for e0, e1 in cuboid_edges:
+                            strips_after.append(verts_after[[e0, e1], :])
+
+                        rr.log(
+                            f"{BASE_AFTER}/bboxes/frame_{vis_t}/bbox_{bi}",
+                            rr.LineStrips3D(
+                                strips=strips_after,
+                                colors=[[255, 200, 0]] * len(strips_after),
+                            ),
+                        )
 
         # ---------------------------------------------------------------------
         # ORIGINAL RGB FRAME (single copy, not transformed)
@@ -1134,6 +1129,7 @@ class FrameToWorldAnnotations:
             frame_annotated_dir_path=self.frame_annotated_dir_path,
             floor=floor,
             global_floor_sim=global_floor_sim,
+            frame_3dbb_map=frame_3dbb_map,
             frame_bbox_meshes=video_3dgt.get("frame_bbox_meshes", None),
             img_maxsize=480,
             app_id="World4D-Original",
