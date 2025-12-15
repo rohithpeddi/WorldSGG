@@ -1000,29 +1000,44 @@ class FrameToWorldAnnotations:
         video_id_gt_annotations,
         video_id_gdino_annotations,
         video_id_3d_bbox_predictions,
-        visualize: bool = False,
+        visualize: bool = True,
     ) -> None:
         """
-        Placeholder skeleton for world 4D bbox annotations.
+        Generate world 4D bbox annotations for a single video.
 
-        Right now this:
-          - loads the 3D bbox predictions (if not already passed);
-          - prints some basic statistics over the 3D objects.
-
-        Visualization of ORIGINAL results (points/bboxes/cameras/floor) is handled
-        by `visualize_original_results`, and currently draws:
-          - original point clouds
-          - floor mesh
-          - world + XYZ coordinate frames
-          - camera frustum + camera axes
-          - original & transformed 3D bounding boxes
+        Steps:
+          1) Load 3D bbox predictions (.pkl) if not already provided.
+          2) Inspect per-frame 3D objects and collect stats.
+          3) Enforce object permanence: every label in `all_labels` is present
+             in every annotated frame. Missing instances are filled using:
+                 (a) last known bbox for that object if it exists;
+                 (b) otherwise the first known bbox for that object;
+                 (c) if neither exists, raise an error.
+          4) Compute WORLD -> FINAL transform (floor-aligned + optional mirror).
+          5) For each filled object, attach:
+                 - original `aabb_floor_aligned` (corners_world)
+                 - `aabb_final` (corners in FINAL coords)
+          6) Save the resulting 4D annotations to bbox_4d_root_dir.
+          7) Optionally visualize final 4D bboxes (wireframe only, no points).
         """
-        print(f"[world4d][{video_id}] Generating world SGG annotations (skeleton)")
+        print(f"[world4d][{video_id}] Generating world SGG annotations (4D bboxes)")
 
-        # Optional floor mesh + similarity transform from bbox_3d pkl
+        # ----------------------------------------------------------------------
+        # Load / validate 3D bbox annotations
+        # ----------------------------------------------------------------------
+        if video_id_3d_bbox_predictions is None:
+            video_3dgt = self.get_video_3d_annotations(video_id)
+        else:
+            video_3dgt = video_id_3d_bbox_predictions
+
+        if video_3dgt is None:
+            print(f"[world4d][{video_id}] No 3D bbox annotations found. Skipping.")
+            return
+
+        # Optional floor mesh & global floor similarity
         floor = None
-        global_floor_sim = None
-        frame_3dbb_map_world = None
+        global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None
+        frame_3dbb_map_world: Optional[Dict[str, Dict[str, Any]]] = None
         floor_vertices_before = None
         floor_vertices_after = None
         floor_axes_before = None
@@ -1031,59 +1046,59 @@ class FrameToWorldAnnotations:
         floor_faces = None
         floor_kwargs = None
 
-        video_3dgt = self.get_video_3d_annotations(video_id)
-        frame_3dbb_map = video_3dgt["frames"]
-        if video_3dgt is not None:
-            gv = video_3dgt.get("gv", None)
-            gf = video_3dgt.get("gf", None)
-            gc = video_3dgt.get("gc", None)
-            if gv is not None and gf is not None:
-                floor = (gv, gf, gc)
+        gv = video_3dgt.get("gv", None)
+        gf = video_3dgt.get("gf", None)
+        gc = video_3dgt.get("gc", None)
+        if gv is not None and gf is not None:
+            floor = (gv, gf, gc)
 
-            gfs = video_3dgt.get("global_floor_sim", None)
-            if gfs is not None:
-                s_g = float(gfs["s"])
-                R_g = np.asarray(gfs["R"], dtype=np.float32)
-                t_g = np.asarray(gfs["t"], dtype=np.float32)
-                global_floor_sim = (s_g, R_g, t_g)
+        gfs = video_3dgt.get("global_floor_sim", None)
+        if gfs is not None:
+            s_g = float(gfs["s"])
+            R_g = np.asarray(gfs["R"], dtype=np.float32)
+            t_g = np.asarray(gfs["t"], dtype=np.float32)
+            global_floor_sim = (s_g, R_g, t_g)
 
-            # 3D bboxes per frame
-            frame_3dbb_map_world = video_3dgt.get("frames", None)
+        # 3D bboxes per frame (WORLD coords)
+        frame_3dbb_map_world = video_3dgt.get("frames", None)
+        if frame_3dbb_map_world is None or not frame_3dbb_map_world:
+            print(f"[world4d][{video_id}] 3D bbox frames map is empty. Skipping.")
+            return
 
-            # Precompute floor mesh in WORLD coords
-            if floor is not None and global_floor_sim is not None:
-                floor_verts0 = np.asarray(gv, dtype=np.float32)
-                floor_faces0 = _faces_u32(np.asarray(gf))
-                floor_faces = floor_faces0
+        # Precompute floor mesh in WORLD coords (BEFORE)
+        if floor is not None and global_floor_sim is not None:
+            floor_verts0 = np.asarray(gv, dtype=np.float32)
+            floor_faces0 = _faces_u32(np.asarray(gf))
+            floor_faces = floor_faces0
 
-                s_g, R_g, t_g = global_floor_sim
-                R_g = np.asarray(R_g, dtype=np.float32)
-                t_g = np.asarray(t_g, dtype=np.float32)
+            s_g, R_g0, t_g0 = global_floor_sim
+            R_g0 = np.asarray(R_g0, dtype=np.float32)
+            t_g0 = np.asarray(t_g0, dtype=np.float32)
 
-                floor_vertices_before = s_g * (floor_verts0 @ R_g.T) + t_g
+            floor_vertices_before = s_g * (floor_verts0 @ R_g0.T) + t_g0
 
-                # Axes BEFORE (in world)
-                t1 = R_g[:, 0]  # in-plane
-                t2 = R_g[:, 2]  # in-plane
-                n  = R_g[:, 1]  # normal
+            # Axes BEFORE (in world)
+            t1 = R_g0[:, 0]  # in-plane
+            t2 = R_g0[:, 2]  # in-plane
+            n = R_g0[:, 1]   # normal
 
-                floor_origin_world = t_g.astype(np.float32)
-                axis_len_floor = float(s_g) * 0.5 if s_g is not None else 0.5
-                floor_axes_before = np.stack(
-                    [
-                        t1 * axis_len_floor,
-                        t2 * axis_len_floor,
-                        n  * axis_len_floor,
-                    ],
-                    axis=0,
-                )  # (3,3)
+            floor_origin_world = t_g0.astype(np.float32)
+            axis_len_floor = float(s_g) * 0.5 if s_g is not None else 0.5
+            floor_axes_before = np.stack(
+                [
+                    t1 * axis_len_floor,
+                    t2 * axis_len_floor,
+                    n * axis_len_floor,
+                ],
+                axis=0,
+            ).astype(np.float32)
 
-                # Floor colors
-                if gc is not None:
-                    gc = np.asarray(gc, dtype=np.uint8)
-                    floor_kwargs = {"vertex_colors": gc}
-                else:
-                    floor_kwargs = {"albedo_factor": [160, 160, 160]}
+            # Floor colors
+            if gc is not None:
+                gc_arr = np.asarray(gc, dtype=np.uint8)
+                floor_kwargs = {"vertex_colors": gc_arr}
+            else:
+                floor_kwargs = {"albedo_factor": [160, 160, 160]}
 
         # ----------------------------------------------------------------------
         # Compute WORLD -> FINAL transform using helper
@@ -1106,8 +1121,12 @@ class FrameToWorldAnnotations:
             # but we can be explicit:
             floor_origin_final = (R_final @ floor_origin_world_tf) + t_final
             # For visualization, we expect this to be ~[0,0,0].
-            # Axes AFTER: canonical basis in FINAL, scaled similarly
-            axis_len_floor = np.linalg.norm(floor_axes_before[0]) if floor_axes_before is not None else 0.5
+
+            axis_len_floor = (
+                np.linalg.norm(floor_axes_before[0])
+                if floor_axes_before is not None
+                else 0.5
+            )
             floor_axes_after = np.array(
                 [
                     [axis_len_floor, 0.0, 0.0],
@@ -1118,42 +1137,13 @@ class FrameToWorldAnnotations:
             )
 
         # ----------------------------------------------------------------------
-        # Transform 3D bounding boxes
-        #   - Add `aabb_final` with `corners_final` into a separate map
+        # Basic stats before 4D filling
         # ----------------------------------------------------------------------
-        frame_3dbb_map_final: Optional[Dict[str, Dict[str, Any]]] = None
-        if frame_3dbb_map_world is not None:
-            frame_3dbb_map_final = {}
-            for frame_name, frame_rec in frame_3dbb_map_world.items():
-                objects_world = frame_rec.get("objects", [])
-                objects_final = []
-                for obj in objects_world:
-                    bbox_3d = obj["aabb_floor_aligned"]
-                    corners_world = np.asarray(
-                        bbox_3d["corners_world"], dtype=np.float32
-                    )  # (8,3)
-
-                    corners_final = (R_final @ corners_world.T).T + t_final[None, :]
-
-                    obj_final = dict(obj)
-                    obj_final["aabb_final"] = {
-                        "corners_final": corners_final,
-                    }
-                    # Optional: separate color for AFTER
-                    obj_final["color_after"] = obj.get("color", [255, 230, 80])
-
-                    objects_final.append(obj_final)
-
-                frame_3dbb_map_final[frame_name] = {
-                    "objects": objects_final
-                }
-
-        # Basic dataset-level stats
         all_labels = set()
         num_frames_with_objects = 0
         num_total_objects = 0
 
-        for frame_name, frame_rec in frame_3dbb_map.items():
+        for frame_name, frame_rec in frame_3dbb_map_world.items():
             objects = frame_rec.get("objects", [])
             if not objects:
                 continue
@@ -1164,29 +1154,189 @@ class FrameToWorldAnnotations:
                 if lbl:
                     all_labels.add(lbl)
 
-        # Create a map of frame_id: [(obj_label, bbox_3d),  ...]
-        # Create the world SGG annotations such that:
-        # Every object in the all_labels is present in each frame; initialize empty bboxes for missing objects.
-        # We need to fill in the missing objects with bboxes based on object permanence logic.
-        # (a) Replace the empty bbox with the last known bbox for that object if it exists.
-        # (b) If no last known bbox exists, check for first known bbox and use that.
-        # (c) If neither exists, raise an error that the object cannot be filled in.
-        # This ensures that every object is represented in every frame, maintaining temporal consistency.
-
-        # Once the bboxes are filled in, we need to visualize the generated world 4D bboxes.
-        # Use the final 3D bboxes with their labels to create a new rerun visualization file.
-
         print(
             f"[world4d][{video_id}] frames_with_objects={num_frames_with_objects}, "
             f"total_objects={num_total_objects}, "
             f"unique_labels={sorted(all_labels)}"
         )
 
+        if not all_labels:
+            print(f"[world4d][{video_id}] No object labels found. Skipping 4D generation.")
+            return
+
+        # ----------------------------------------------------------------------
+        # Create world-4D annotations with object permanence
+        # ----------------------------------------------------------------------
+        # Sort frames chronologically by frame index (000123.png -> 123)
+        frame_names_sorted = sorted(
+            frame_3dbb_map_world.keys(),
+            key=lambda fn: int(Path(fn).stem)
+            if Path(fn).stem.isdigit()
+            else Path(fn).stem,
+        )
+
+        # First known bbox per label: label -> (source_frame_name, obj_dict)
+        label_first_source: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+        for fname in frame_names_sorted:
+            objects = frame_3dbb_map_world[fname].get("objects", [])
+            for obj in objects:
+                lbl = obj.get("label", None)
+                if not lbl:
+                    continue
+                if lbl not in label_first_source:
+                    label_first_source[lbl] = (fname, obj)
+
+        # Safety check: every label must appear at least once
+        for lbl in all_labels:
+            if lbl not in label_first_source:
+                raise ValueError(
+                    f"[world4d][{video_id}] Label '{lbl}' in all_labels "
+                    "has no actual bbox in any frame."
+                )
+
+        # Helper to clone an object and attach 4D metadata
+        def _clone_with_meta(
+            base_obj: Dict[str, Any],
+            *,
+            filled: bool,
+            source_frame: str,
+            target_frame: str,
+        ) -> Dict[str, Any]:
+            new_obj = dict(base_obj)  # shallow copy is enough; we don't mutate nested dicts
+            new_obj["world4d_filled"] = bool(filled)
+            new_obj["world4d_source_frame"] = source_frame
+            new_obj["world4d_frame"] = target_frame
+            return new_obj
+
+        # last known bbox per label on/before current frame
+        last_seen: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+        frames_filled_world: Dict[str, Dict[str, Any]] = {}
+
+        for fname in frame_names_sorted:
+            frame_rec = frame_3dbb_map_world.get(fname, {})
+            objects = frame_rec.get("objects", [])
+
+            # Map label -> object for this frame (if present)
+            label_to_obj_current: Dict[str, Dict[str, Any]] = {}
+            for obj in objects:
+                lbl = obj.get("label", None)
+                if not lbl:
+                    continue
+                # If multiple instances of the same label exist, we keep the first.
+                if lbl not in label_to_obj_current:
+                    label_to_obj_current[lbl] = obj
+
+            filled_objects: List[Dict[str, Any]] = []
+
+            for lbl in sorted(all_labels):
+                if lbl in label_to_obj_current:
+                    base_obj = label_to_obj_current[lbl]
+                    last_seen[lbl] = (fname, base_obj)
+                    filled_obj = _clone_with_meta(
+                        base_obj,
+                        filled=False,
+                        source_frame=fname,
+                        target_frame=fname,
+                    )
+                else:
+                    # Use last known bbox if available; otherwise use first known bbox
+                    if lbl in last_seen:
+                        src_frame, base_obj = last_seen[lbl]
+                    else:
+                        src_frame, base_obj = label_first_source[lbl]
+
+                    filled_obj = _clone_with_meta(
+                        base_obj,
+                        filled=True,
+                        source_frame=src_frame,
+                        target_frame=fname,
+                    )
+
+                # Ensure label is consistent
+                filled_obj["label"] = lbl
+
+                # Attach FINAL-coords bbox (aabb_final) from WORLD corners
+                if "aabb_floor_aligned" in filled_obj:
+                    bbox_3d = filled_obj["aabb_floor_aligned"]
+                    corners_world = np.asarray(
+                        bbox_3d.get("corners_world", []), dtype=np.float32
+                    )
+                    if corners_world.size == 0:
+                        corners_final = corners_world
+                    else:
+                        corners_final = (R_final @ corners_world.T).T + t_final[None, :]
+
+                    filled_obj["aabb_final"] = {
+                        "corners_final": corners_final,
+                    }
+
+                # Choose a default color for AFTER visualization if not present
+                if "color_after" not in filled_obj:
+                    filled_obj["color_after"] = filled_obj.get("color", [255, 230, 80])
+
+                filled_objects.append(filled_obj)
+
+            frames_filled_world[fname] = {"objects": filled_objects}
+
+        # ----------------------------------------------------------------------
+        # Optional: visualize world-4D bboxes (wireframe only, no points)
+        # ----------------------------------------------------------------------
         if visualize:
+            stems_S = [Path(fn).stem for fn in frame_names_sorted]
+
             print(
-                f"[world4d][{video_id}] visualize=True requested, "
-                "but world-4D bbox visualization is not yet implemented here."
+                f"[world4d][{video_id}] visualize=True -> launching Rerun "
+                "(wireframe 4D bboxes only, FINAL coords)."
             )
+
+            rerun_frame_vis_results(
+                video_id=video_id,
+                stems_S=stems_S,
+                frame_annotated_dir_path=self.frame_annotated_dir_path,
+                # No points / cameras for this visualization
+                points_before=None,
+                conf_before=None,
+                colors_before=None,
+                cameras_before=None,
+                points_after=None,
+                colors_after=None,
+                cameras_after=None,
+                # Floor mesh / axes BEFORE + AFTER (if available)
+                floor_vertices_before=floor_vertices_before,
+                floor_axes_before=floor_axes_before,
+                floor_origin_before=floor_origin_world,
+                floor_vertices_after=floor_vertices_after,
+                floor_axes_after=floor_axes_after,
+                floor_origin_after=floor_origin_final,
+                # Use the *filled* 4D bboxes (FINAL coords via aabb_final)
+                frame_3dbb_before=None,
+                frame_3dbb_after=frames_filled_world,
+                floor_faces=floor_faces,
+                floor_kwargs=floor_kwargs,
+                img_maxsize=480,
+                app_id="World4D-BBoxesOnly",
+                vis_mode="after",  # only show FINAL frame
+            )
+
+        # ----------------------------------------------------------------------
+        # Save world-4D annotations
+        # ----------------------------------------------------------------------
+        out_4d_path = self.bbox_4d_root_dir / f"{video_id[:-4]}.pkl"
+        world4d_annotations = {
+            "video_id": video_id,
+            "frames": frames_filled_world,          # frame_name -> {objects: [...]}
+            "frame_names": frame_names_sorted,      # ordered list of frame_name strings
+            "all_labels": sorted(all_labels),
+            "meta": {
+                "num_frames": len(frame_names_sorted),
+                "labels": sorted(all_labels),
+            },
+        }
+
+        with open(out_4d_path, "wb") as f:
+            pickle.dump(world4d_annotations, f)
+
+        print(f"[world4d][{video_id}] Saved world-4D bbox annotations to {out_4d_path}")
 
     # ----------------------------------------------------------------------------------
     # NEW: centralized transform + visualization entry point
@@ -1428,7 +1578,7 @@ class FrameToWorldAnnotations:
             video_id_gt_annotations,
             video_id_gdino_annotations,
             video_id_3d_bbox_predictions,
-            visualize=False,
+            visualize=True,
         )
 
         # Now show the original Pi3-space outputs (points + floor + frames + camera + 3D boxes)
@@ -1562,7 +1712,7 @@ def main_sample():
         video_id_gt_annotations=frame_to_world_generator.get_video_gt_annotations(video_id)[1],
         video_id_gdino_annotations=frame_to_world_generator.get_video_gdino_annotations(video_id),
         video_id_3d_bbox_predictions=frame_to_world_generator.get_video_3d_annotations(video_id),
-        visualize=False,
+        visualize=True,
     )
 
 
