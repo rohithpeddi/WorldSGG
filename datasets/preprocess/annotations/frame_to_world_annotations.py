@@ -51,7 +51,7 @@ def rerun_vis_original_results(
     *,
     floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None,
     global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None,
-    frame_3dbb_map: Optional[Dict[str, Any]] = None,
+    frame_bbox_meshes:  Optional[Dict[int, List[Dict[str, Any]]]] = None,
     img_maxsize: int = 320,
     app_id: str = "World4D-Original",
     min_conf_default: float = 1e-6,
@@ -82,8 +82,7 @@ def rerun_vis_original_results(
         frame_annotated_dir_path: root dir for annotated PNG frames
         floor: (gv, gf, gc) floor mesh vertices/faces/colors (optional)
         global_floor_sim: (s,R,t) scaling+rotation+translation for floor
-        frame_3dbb_map: dict mapping "000123.png" -> {"objects": [...]}
-                        as stored in the bbox_3d .pkl
+        frame_bbox_meshes: dict mapping frame idx -> list of bbox meshes
         img_maxsize: max image size for RGB frames
         app_id: Rerun app id
         min_conf_default: fallback confidence threshold
@@ -286,152 +285,6 @@ def rerun_vis_original_results(
                 img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA
             )
         return img
-
-    # -------------------------------------------------------------------------
-    # Helpers for 3D bounding boxes
-    # -------------------------------------------------------------------------
-    def _extract_box_corners_world(obj: Dict[str, Any]) -> Optional[np.ndarray]:
-        """
-        Try to extract an (8,3) array of world-space box corners from
-        a bbox object record.
-
-        This is written to be tolerant to several common layouts:
-          - obj["corners_world"]  -> (8,3)
-          - obj["corners"]        -> (8,3)
-          - obj["bbox_3d_world"]  -> {"center"/"size"/"R"...}
-          - obj["bbox_3d"]        -> same as above
-        """
-        # Direct corners (preferred)
-        if "corners_world" in obj:
-            corners = np.asarray(obj["corners_world"], dtype=np.float32)
-            if corners.ndim == 2 and corners.shape[1] == 3:
-                return corners
-
-        if "corners" in obj:
-            corners = np.asarray(obj["corners"], dtype=np.float32)
-            if corners.ndim == 2 and corners.shape[1] == 3:
-                return corners
-
-        # Structured bbox layout
-        bbox = None
-        if "bbox_3d_world" in obj:
-            bbox = obj["bbox_3d_world"]
-        elif "bbox_3d" in obj:
-            bbox = obj["bbox_3d"]
-
-        if bbox is None:
-            # As a fallback, allow center/size directly on obj
-            if "center_world" in obj or "center" in obj:
-                center = np.asarray(
-                    obj.get("center_world", obj.get("center")),
-                    dtype=np.float32,
-                )
-                size = obj.get("size", obj.get("dims", None))
-                if size is None:
-                    return None
-                size = np.asarray(size, dtype=np.float32)
-                R_box = np.asarray(
-                    obj.get("R_world", obj.get("R", np.eye(3, dtype=np.float32))),
-                    dtype=np.float32,
-                )
-            else:
-                return None
-        else:
-            center = np.asarray(
-                bbox.get("center_world", bbox.get("center", None)),
-                dtype=np.float32,
-            )
-            if center is None:
-                return None
-            size = bbox.get("size", bbox.get("dims", None))
-            if size is None:
-                return None
-            size = np.asarray(size, dtype=np.float32)
-            R_box = np.asarray(
-                bbox.get("R_world", bbox.get("R", np.eye(3, dtype=np.float32))),
-                dtype=np.float32,
-            )
-
-        # Build 8 corners from center/size/rotation
-        half = 0.5 * size
-        signs = np.array(
-            [
-                [-1, -1, -1],
-                [ 1, -1, -1],
-                [ 1,  1, -1],
-                [-1,  1, -1],
-                [-1, -1,  1],
-                [ 1, -1,  1],
-                [ 1,  1,  1],
-                [-1,  1,  1],
-            ],
-            dtype=np.float32,
-        )
-        offsets_local = signs * half[None, :]
-        corners = center[None, :] + offsets_local @ R_box.T
-        return corners.astype(np.float32)
-
-    def _boxes_to_line_segments(
-        boxes: List[np.ndarray],
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Convert a list of boxes (each as (N,3) point sets) to 12 line segments per box.
-        For robustness, we build an axis-aligned box from the min/max of the points.
-        """
-        starts_list: List[List[float]] = []
-        ends_list: List[List[float]] = []
-
-        for c in boxes:
-            c = np.asarray(c, dtype=np.float32)
-            if c.size == 0:
-                continue
-            mins = c.min(axis=0)
-            maxs = c.max(axis=0)
-            x0, y0, z0 = mins
-            x1, y1, z1 = maxs
-
-            p000 = [x0, y0, z0]
-            p100 = [x1, y0, z0]
-            p110 = [x1, y1, z0]
-            p010 = [x0, y1, z0]
-
-            p001 = [x0, y0, z1]
-            p101 = [x1, y0, z1]
-            p111 = [x1, y1, z1]
-            p011 = [x0, y1, z1]
-
-            seg_pairs = [
-                # bottom loop
-                (p000, p100),
-                (p100, p110),
-                (p110, p010),
-                (p010, p000),
-                # top loop
-                (p001, p101),
-                (p101, p111),
-                (p111, p011),
-                (p011, p001),
-                # vertical edges
-                (p000, p001),
-                (p100, p101),
-                (p110, p111),
-                (p010, p011),
-            ]
-
-            for s, e in seg_pairs:
-                starts_list.append(s)
-                ends_list.append(e)
-
-        if not starts_list:
-            return (
-                np.empty((0, 3), dtype=np.float32),
-                np.empty((0, 3), dtype=np.float32),
-            )
-
-        return (
-            np.asarray(starts_list, dtype=np.float32),
-            np.asarray(ends_list, dtype=np.float32),
-        )
 
     # -------------------------------------------------------------------------
     # Main per-frame loop
@@ -679,60 +532,48 @@ def rerun_vis_original_results(
         # -----------------------------------------------------------------------------
         # 3D BOUNDING BOXES: BEFORE (world coords) / AFTER (floor-aligned coords)
         # -----------------------------------------------------------------------------
-        if frame_3dbb_map is not None:
-            frame_name = f"{stem}.png"
-            frame_rec = frame_3dbb_map.get(frame_name, None)
+        if frame_bbox_meshes is not None and vis_t in frame_bbox_meshes:
+            for bi, bbox_m in enumerate(frame_bbox_meshes[vis_t]):
+                verts_world = np.asarray(bbox_m["verts"], dtype=np.float32)  # (8,3) in Pi3 coords
 
-            if frame_rec is not None:
-                objects = frame_rec.get("objects", [])
+                # Bring bbox verts into the same world space as floor/points
+                if global_floor_sim is not None:
+                    s_g, R_g, t_g = global_floor_sim
+                    R_g = np.asarray(R_g, dtype=np.float32)
+                    t_g = np.asarray(t_g, dtype=np.float32)
+                    verts_world = s_g * (verts_world @ R_g.T) + t_g[None, :]
 
-                for bi, obj in enumerate(objects):
+                col = bbox_m.get("color", [255, 180, 0])
 
-                    # -----------------------------------------------------------
-                    # 1) Extract corners EXACTLY like rerun_vis_world4d:
-                    # -----------------------------------------------------------
-                    if "verts" in obj:
-                        corners_before = np.asarray(obj["verts"], dtype=np.float32)  # (8,3)
-                    else:
-                        # safety fallback
-                        continue
+                # BEFORE: world coords
+                strips = []
+                for e0, e1 in cuboid_edges:
+                    strips.append(verts_world[[e0, e1], :])
 
-                    # -----------------------------------------------------------
-                    # 2) BEFORE BOX (world/original coordinates)
-                    # -----------------------------------------------------------
-                    strips_before = []
+                rr.log(
+                    f"{BASE_BEFORE}/bboxes/frame_{vis_t}/bbox_{bi}",
+                    rr.LineStrips3D(
+                        strips=strips,
+                        colors=[col] * len(strips),
+                    ),
+                )
+
+                # AFTER: floor-aligned coords (same transform as floor/points)
+                if R_align is not None and floor_origin_world is not None:
+                    verts_centered = verts_world - floor_origin_world[None, :]
+                    verts_after = verts_centered @ R_align.T  # world -> aligned
+
+                    strips_after = []
                     for e0, e1 in cuboid_edges:
-                        strips_before.append(corners_before[[e0, e1], :])
+                        strips_after.append(verts_after[[e0, e1], :])
 
                     rr.log(
-                        f"{BASE_BEFORE}/bboxes/frame_{vis_t}/bbox_{bi}",
+                        f"{BASE_AFTER}/bboxes/frame_{vis_t}/bbox_{bi}",
                         rr.LineStrips3D(
-                            strips=strips_before,
-                            colors=[[255, 255, 255]] * len(strips_before),
+                            strips=strips_after,
+                            colors=[[255, 200, 0]] * len(strips_after),
                         ),
                     )
-
-                    # -----------------------------------------------------------
-                    # 3) AFTER BOX (floor-aligned transform)
-                    # -----------------------------------------------------------
-                    if R_align is not None and floor_origin_world is not None:
-
-                        # shift → rotate
-                        centered = corners_before - floor_origin_world[None, :]
-                        corners_after = centered @ R_align.T
-
-                        strips_after = []
-                        for e0, e1 in cuboid_edges:
-                            strips_after.append(corners_after[[e0, e1], :])
-
-                        rr.log(
-                            f"{BASE_AFTER}/bboxes/frame_{vis_t}/bbox_{bi}",
-                            rr.LineStrips3D(
-                                strips=strips_after,
-                                colors=[[255, 200, 0]] * len(strips_after),
-                            ),
-                        )
-
         else:
             print(
                 f"[orig-pts][{video_id}] frame {stem}: "
@@ -1293,7 +1134,7 @@ class FrameToWorldAnnotations:
             frame_annotated_dir_path=self.frame_annotated_dir_path,
             floor=floor,
             global_floor_sim=global_floor_sim,
-            frame_3dbb_map=frame_3dbb_map,
+            frame_bbox_meshes=video_3dgt.get("frame_bbox_meshes", None),
             img_maxsize=480,
             app_id="World4D-Original",
         )
