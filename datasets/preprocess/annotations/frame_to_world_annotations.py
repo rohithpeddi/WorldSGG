@@ -40,7 +40,7 @@ from annotation_utils import (
 # --------------------------------------------------------------------------------------
 
 
-def rerun_vis_original_results(
+def rerun_frame_vis_results(
     video_id: str,
     points_S: np.ndarray,
     conf_S: Optional[np.ndarray],
@@ -56,6 +56,7 @@ def rerun_vis_original_results(
     img_maxsize: int = 320,
     app_id: str = "World4D-Original",
     min_conf_default: float = 1e-6,
+    vis_mode: str = "both",  # "before", "after", or "both"
 ) -> None:
     """
     Visualize ORIGINAL Pi3 outputs with BEFORE/AFTER comparison.
@@ -73,6 +74,15 @@ def rerun_vis_original_results(
       - Points are shown with their original RGB colors.
       - 3D boxes are shown as yellow line segments.
 
+    AFTER_MIRROR:
+      - Mirror image (about the ZY plane, i.e., x -> -x) of the AFTER points,
+        3D bounding boxes, and cameras, logged under `world/after_mirror/...`.
+
+    vis_mode:
+        "before" -> only show original/world frame
+        "after"  -> only show floor-aligned frame (plus its mirror branch)
+        "both"   -> show both BEFORE and AFTER branches (plus mirror for AFTER)
+
     Args:
         video_id: video identifier (e.g., "0DJ6R.mp4")
         points_S: (S,H,W,3) Pi3/world points
@@ -88,7 +98,19 @@ def rerun_vis_original_results(
         img_maxsize: max image size for RGB frames
         app_id: Rerun app id
         min_conf_default: fallback confidence threshold
+        vis_mode: visualization mode ("before", "after", or "both")
     """
+
+    # -------------------------------------------------------------------------
+    # Normalize vis_mode + convenience flags
+    # -------------------------------------------------------------------------
+    vis_mode = (vis_mode or "both").lower()
+    if vis_mode not in {"before", "after", "both"}:
+        print(f"[orig-pts][{video_id}] Unknown vis_mode={vis_mode!r}, defaulting to 'both'.")
+        vis_mode = "both"
+
+    show_before = vis_mode in {"before", "both"}
+    show_after  = vis_mode in {"after", "both"}
 
     rr.init(app_id, spawn=True)
     rr.log("/", rr.ViewCoordinates.RUB)
@@ -96,6 +118,7 @@ def rerun_vis_original_results(
     BASE = "world"
     BASE_BEFORE = f"{BASE}/before"
     BASE_AFTER = f"{BASE}/after"
+    BASE_AFTER_MIRROR = f"{BASE}/after_mirror"
 
     # Ensure both branches share the same coordinate convention
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
@@ -106,6 +129,9 @@ def rerun_vis_original_results(
         (4, 5), (5, 7), (7, 6), (6, 4),
         (0, 4), (1, 5), (2, 6), (3, 7),
     ]
+
+    # Mirror transform about ZY plane (x -> -x) in the aligned frame
+    M_mirror = np.diag([-1.0, 1.0, 1.0]).astype(np.float32)
 
     # -------------------------------------------------------------------------
     # Static world & XYZ axes (common; drawn at origin of aligned coords)
@@ -144,6 +170,7 @@ def rerun_vis_original_results(
 
     # -------------------------------------------------------------------------
     # Floor mesh and floor-frame axes: BEFORE & AFTER
+    # (mirror not requested for floor, so left as-is)
     # -------------------------------------------------------------------------
     floor_vertices_before = None
     floor_vertices_after = None
@@ -225,7 +252,7 @@ def rerun_vis_original_results(
     camera_before = camera_poses_S
     camera_after = None
 
-    if R_align is not None and floor_origin_world is not None:
+    if R_align is not None and floor_origin_world is not None and show_after:
         # Points AFTER
         pts_flat = points_before.reshape(-1, 3)
         v_centered_pts = pts_flat - floor_origin_world[None, :]
@@ -269,7 +296,9 @@ def rerun_vis_original_results(
             rr.TextLog(
                 f"[{video_id}] BEFORE: original Pi3/world frame. "
                 f"AFTER: frame where floor is in XY plane and Z is floor normal "
-                f"(when global_floor_sim is available)."
+                f"(when global_floor_sim is available). "
+                f"AFTER_MIRROR: AFTER mirrored about ZY plane (x -> -x). "
+                f"vis_mode='{vis_mode}' (before/after/both)."
             ),
         )
 
@@ -304,7 +333,7 @@ def rerun_vis_original_results(
         # ---------------------------------------------------------------------
         # FLOOR MESH: BEFORE / AFTER
         # ---------------------------------------------------------------------
-        if floor_vertices_before is not None and floor_faces is not None:
+        if show_before and floor_vertices_before is not None and floor_faces is not None:
             rr.log(
                 f"{BASE_BEFORE}/floor",
                 rr.Mesh3D(
@@ -314,7 +343,7 @@ def rerun_vis_original_results(
                 ),
             )
 
-        if floor_vertices_after is not None and floor_faces is not None:
+        if show_after and floor_vertices_after is not None and floor_faces is not None:
             rr.log(
                 f"{BASE_AFTER}/floor",
                 rr.Mesh3D(
@@ -327,7 +356,7 @@ def rerun_vis_original_results(
         # ---------------------------------------------------------------------
         # FLOOR AXES: BEFORE / AFTER
         # ---------------------------------------------------------------------
-        if floor_origin_world is not None and floor_axes_before is not None:
+        if show_before and floor_origin_world is not None and floor_axes_before is not None:
             origins_floor_before = np.repeat(
                 floor_origin_world[None, :], 3, axis=0
             )
@@ -345,7 +374,7 @@ def rerun_vis_original_results(
                 ),
             )
 
-        if floor_axes_after is not None:
+        if show_after and floor_axes_after is not None:
             origins_floor_after = np.repeat(
                 np.zeros((1, 3), dtype=np.float32), 3, axis=0
             )
@@ -364,9 +393,9 @@ def rerun_vis_original_results(
             )
 
         # ---------------------------------------------------------------------
-        # CAMERAS: BEFORE / AFTER
+        # CAMERAS: BEFORE / AFTER + MIRROR
         # ---------------------------------------------------------------------
-        if camera_before is not None and vis_t < camera_before.shape[0]:
+        if show_before and camera_before is not None and vis_t < camera_before.shape[0]:
             cam_pose_b = camera_before[vis_t]
             if cam_pose_b.shape == (3, 4):
                 T_b = np.eye(4, dtype=np.float32)
@@ -418,7 +447,7 @@ def rerun_vis_original_results(
                 ),
             )
 
-        if camera_after is not None and vis_t < camera_after.shape[0]:
+        if show_after and camera_after is not None and vis_t < camera_after.shape[0]:
             cam_pose_a = camera_after[vis_t]
             T_a = cam_pose_a.astype(np.float32)
 
@@ -436,22 +465,69 @@ def rerun_vis_original_results(
             )
             origins_cam_a = np.repeat(cam_origin_a[None, :], 3, axis=0)
 
+            # AFTER (aligned) camera
+            # rr.log(
+            #     f"{BASE_AFTER}/camera_axes",
+            #     rr.Arrows3D(
+            #         origins=origins_cam_a,
+            #         vectors=cam_axes_vec_a,
+            #         colors=[
+            #             [255, 0, 0],
+            #             [0, 255, 0],
+            #             [0, 0, 255],
+            #         ],
+            #         labels=["Cam(After) +X", "Cam(After) +Y", "Cam(After) +Z"],
+            #     ),
+            # )
+            #
+            # rr.log(
+            #     f"{BASE_AFTER}/camera/frustum",
+            #     rr.Pinhole(
+            #         fov_y=0.7853982,
+            #         aspect_ratio=float(W_grid) / float(H_grid),
+            #         camera_xyz=rr.ViewCoordinates.RUB,
+            #         image_plane_distance=0.1,
+            #     ),
+            #     rr.Transform3D(
+            #         translation=cam_origin_a.tolist(),
+            #         mat3x3=R_cam_a,
+            #     ),
+            # )
+
+            # AFTER_MIRROR: mirror about ZY plane (x -> -x)
+            cam_origin_m = (M_mirror @ cam_origin_a).astype(np.float32)
+            R_cam_m = M_mirror @ R_cam_a
+
+            cam_axes_vec_m = np.stack(
+                [
+                    R_cam_m[:, 0] * axis_len_cam,
+                    R_cam_m[:, 1] * axis_len_cam,
+                    R_cam_m[:, 2] * axis_len_cam,
+                ],
+                axis=0,
+            )
+            origins_cam_m = np.repeat(cam_origin_m[None, :], 3, axis=0)
+
             rr.log(
-                f"{BASE_AFTER}/camera_axes",
+                f"{BASE_AFTER_MIRROR}/camera_axes",
                 rr.Arrows3D(
-                    origins=origins_cam_a,
-                    vectors=cam_axes_vec_a,
+                    origins=origins_cam_m,
+                    vectors=cam_axes_vec_m,
                     colors=[
-                        [255, 0, 0],
-                        [0, 255, 0],
-                        [0, 0, 255],
+                        [255, 64, 64],
+                        [64, 255, 64],
+                        [64, 64, 255],
                     ],
-                    labels=["Cam(After) +X", "Cam(After) +Y", "Cam(After) +Z"],
+                    labels=[
+                        "Cam(Mirror) +X",
+                        "Cam(Mirror) +Y",
+                        "Cam(Mirror) +Z",
+                    ],
                 ),
             )
 
             rr.log(
-                f"{BASE_AFTER}/camera/frustum",
+                f"{BASE_AFTER_MIRROR}/camera/frustum",
                 rr.Pinhole(
                     fov_y=0.7853982,
                     aspect_ratio=float(W_grid) / float(H_grid),
@@ -459,18 +535,18 @@ def rerun_vis_original_results(
                     image_plane_distance=0.1,
                 ),
                 rr.Transform3D(
-                    translation=cam_origin_a.tolist(),
-                    mat3x3=R_cam_a,
+                    translation=cam_origin_m.tolist(),
+                    mat3x3=R_cam_m,
                 ),
             )
 
         # ---------------------------------------------------------------------
-        # POINTS: BEFORE (dark) / AFTER (colorful)
+        # POINTS: BEFORE (dark) / AFTER (colorful) / AFTER_MIRROR
         # ---------------------------------------------------------------------
         pts_before = points_before[vis_t].reshape(-1, 3)  # (N,3)
         pts_after = (
             points_after[vis_t].reshape(-1, 3)
-            if points_after is not None
+            if (show_after and points_after is not None)
             else None
         )
 
@@ -501,18 +577,19 @@ def rerun_vis_original_results(
             keep = np.isfinite(pts_before).all(axis=1)
 
         # BEFORE: dark gray points
-        pts_b_keep = pts_before[keep]
-        if pts_b_keep.shape[0] > 0:
-            rr.log(
-                f"{BASE_BEFORE}/points",
-                rr.Points3D(
-                    pts_b_keep.astype(np.float32),
-                    colors=np.array([[60, 60, 60]], dtype=np.uint8),
-                ),
-            )
+        if show_before:
+            pts_b_keep = pts_before[keep]
+            if pts_b_keep.shape[0] > 0:
+                rr.log(
+                    f"{BASE_BEFORE}/points",
+                    rr.Points3D(
+                        pts_b_keep.astype(np.float32),
+                        colors=np.array([[60, 60, 60]], dtype=np.uint8),
+                    ),
+                )
 
         # AFTER: colorful points
-        if pts_after is not None:
+        if show_after and pts_after is not None:
             pts_a_keep = pts_after[keep]
             if cols_after is not None:
                 cols_a_keep = cols_after[keep].astype(np.uint8)
@@ -523,16 +600,26 @@ def rerun_vis_original_results(
                 kwargs_pts: Dict[str, Any] = {}
                 if cols_a_keep is not None:
                     kwargs_pts["colors"] = cols_a_keep
+                # rr.log(
+                #     f"{BASE_AFTER}/points",
+                #     rr.Points3D(
+                #         pts_a_keep.astype(np.float32),
+                #         **kwargs_pts,
+                #     ),
+                # )
+
+                # AFTER_MIRROR: mirror about ZY plane (x -> -x)
+                pts_m_keep = (pts_a_keep @ M_mirror.T).astype(np.float32)
                 rr.log(
-                    f"{BASE_AFTER}/points",
+                    f"{BASE_AFTER_MIRROR}/points",
                     rr.Points3D(
-                        pts_a_keep.astype(np.float32),
-                        **kwargs_pts,
+                        pts_m_keep,
+                        **kwargs_pts,  # same colors as AFTER
                     ),
                 )
 
         # -----------------------------------------------------------------------------
-        # 3D BOUNDING BOXES: BEFORE (world coords) / AFTER (floor-aligned coords)
+        # 3D BOUNDING BOXES: BEFORE / AFTER / AFTER_MIRROR
         # -----------------------------------------------------------------------------
         if frame_3dbb_map is not None:
             frame_name = f"{stem}.png"
@@ -541,25 +628,28 @@ def rerun_vis_original_results(
                 for bi, obj in enumerate(frame_objects):
                     label = obj["label"]
                     bbox_3d = obj["aabb_floor_aligned"]
-                    corners_world = np.asarray(bbox_3d["corners_world"], dtype=np.float32)  # (8,3)
+                    corners_world = np.asarray(
+                        bbox_3d["corners_world"], dtype=np.float32
+                    )  # (8,3)
 
                     col = obj.get("color", [255, 180, 0])
 
                     # BEFORE: world coords
-                    strips = []
-                    for e0, e1 in cuboid_edges:
-                        strips.append(corners_world[[e0, e1], :])
+                    if show_before:
+                        strips = []
+                        for e0, e1 in cuboid_edges:
+                            strips.append(corners_world[[e0, e1], :])
 
-                    rr.log(
-                        f"{BASE_BEFORE}/bboxes/frame_{vis_t}/bbox_{bi}",
-                        rr.LineStrips3D(
-                            strips=strips,
-                            colors=[col] * len(strips),
-                        ),
-                    )
+                        rr.log(
+                            f"{BASE_BEFORE}/bboxes/frame_{vis_t}/bbox_{bi}",
+                            rr.LineStrips3D(
+                                strips=strips,
+                                colors=[col] * len(strips),
+                            ),
+                        )
 
                     # AFTER: floor-aligned coords (same transform as floor/points)
-                    if R_align is not None and floor_origin_world is not None:
+                    if show_after and R_align is not None and floor_origin_world is not None:
                         verts_centered = corners_world - floor_origin_world[None, :]
                         verts_after = verts_centered @ R_align.T  # world -> aligned
 
@@ -567,11 +657,25 @@ def rerun_vis_original_results(
                         for e0, e1 in cuboid_edges:
                             strips_after.append(verts_after[[e0, e1], :])
 
+                        # rr.log(
+                        #     f"{BASE_AFTER}/bboxes/frame_{vis_t}/bbox_{bi}",
+                        #     rr.LineStrips3D(
+                        #         strips=strips_after,
+                        #         colors=[[255, 200, 0]] * len(strips_after),
+                        #     ),
+                        # )
+
+                        # AFTER_MIRROR: mirror about ZY plane (x -> -x)
+                        verts_mirror = (verts_after @ M_mirror.T).astype(np.float32)
+                        strips_mirror = []
+                        for e0, e1 in cuboid_edges:
+                            strips_mirror.append(verts_mirror[[e0, e1], :])
+
                         rr.log(
-                            f"{BASE_AFTER}/bboxes/frame_{vis_t}/bbox_{bi}",
+                            f"{BASE_AFTER_MIRROR}/bboxes/frame_{vis_t}/bbox_{bi}",
                             rr.LineStrips3D(
-                                strips=strips_after,
-                                colors=[[255, 200, 0]] * len(strips_after),
+                                strips=strips_mirror,
+                                colors=[[255, 230, 80]] * len(strips_mirror),
                             ),
                         )
 
@@ -584,8 +688,10 @@ def rerun_vis_original_results(
 
     print(
         "[orig-pts] BEFORE/AFTER visualization running for "
-        f"{video_id}. BEFORE = original frame, AFTER = floor-aligned frame. "
-        "Scrub the 'frame' timeline in Rerun and toggle entities in the UI."
+        f"{video_id}. BEFORE = original frame, AFTER = floor-aligned frame, "
+        "AFTER_MIRROR = mirror of AFTER about ZY plane (x -> -x). "
+        f"vis_mode='{vis_mode}'. Scrub the 'frame' timeline in Rerun and "
+        "toggle entities in the UI."
     )
 
 
@@ -1119,7 +1225,7 @@ class FrameToWorldAnnotations:
             # 3D bboxes per frame
             frame_3dbb_map = video_3dgt.get("frames", None)
 
-        rerun_vis_original_results(
+        rerun_frame_vis_results(
             video_id=video_id,
             points_S=P["points"],
             conf_S=P["conf"],
@@ -1133,6 +1239,7 @@ class FrameToWorldAnnotations:
             frame_bbox_meshes=video_3dgt.get("frame_bbox_meshes", None),
             img_maxsize=480,
             app_id="World4D-Original",
+            vis_mode="after",
         )
 
     def generate_sample_gt_world_4D_annotations(self, video_id: str) -> None:
