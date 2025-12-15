@@ -1130,9 +1130,7 @@ class FrameToWorldAnnotations:
     # Indexing helper — mirror BBox3DGenerator.idx_to_frame_idx_path
     # ----------------------------------------------------------------------------------
 
-    def _bbox_idx_to_frame_idx_path(
-        self, video_id: str
-    ) -> Tuple[
+    def _bbox_idx_to_frame_idx_path(self, video_id: str) -> Tuple[
         Dict[int, str], List[int], List[int], List[str], List[int]
     ]:
         """
@@ -1228,9 +1226,7 @@ class FrameToWorldAnnotations:
 
             camera_poses = None
             if "camera_poses" in video_dynamic_predictions:
-                camera_poses = video_dynamic_predictions["camera_poses"].astype(
-                    np.float32
-                )
+                camera_poses = video_dynamic_predictions["camera_poses"].astype(np.float32)
 
             S, H, W, _ = points.shape
 
@@ -1415,9 +1411,7 @@ class FrameToWorldAnnotations:
           - calls generate_video_bb_annotations (skeleton stats);
           - visualizes original Pi3 point clouds + floor mesh + frames + camera + 3D boxes.
         """
-        video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(
-            video_id
-        )
+        video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
         video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
         video_id_3d_bbox_predictions = self.get_video_3d_annotations(video_id)
 
