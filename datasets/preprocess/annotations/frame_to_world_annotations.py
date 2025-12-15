@@ -994,7 +994,7 @@ class FrameToWorldAnnotations:
     # World 4D bbox annotations (skeleton) + ORIGINAL-results visualization
     # ----------------------------------------------------------------------------------
 
-    def generate_video_bb_annotations(
+    def generate_video_world_bb_annotations(
         self,
         video_id: str,
         video_id_gt_annotations,
@@ -1019,17 +1019,134 @@ class FrameToWorldAnnotations:
         """
         print(f"[world4d][{video_id}] Generating world SGG annotations (skeleton)")
 
-        # Load 3D bboxes from disk if not provided
-        if video_id_3d_bbox_predictions is not None:
-            video_3dgt = video_id_3d_bbox_predictions
-        else:
-            video_3dgt = self.get_video_3d_annotations(video_id)
+        # Optional floor mesh + similarity transform from bbox_3d pkl
+        floor = None
+        global_floor_sim = None
+        frame_3dbb_map_world = None
+        floor_vertices_before = None
+        floor_vertices_after = None
+        floor_axes_before = None
+        floor_axes_after = None
+        floor_origin_world = None
+        floor_faces = None
+        floor_kwargs = None
 
-        if video_3dgt is None:
-            print(f"[world4d][{video_id}] No 3D bbox annotations available, skipping.")
-            return
-
+        video_3dgt = self.get_video_3d_annotations(video_id)
         frame_3dbb_map = video_3dgt["frames"]
+        if video_3dgt is not None:
+            gv = video_3dgt.get("gv", None)
+            gf = video_3dgt.get("gf", None)
+            gc = video_3dgt.get("gc", None)
+            if gv is not None and gf is not None:
+                floor = (gv, gf, gc)
+
+            gfs = video_3dgt.get("global_floor_sim", None)
+            if gfs is not None:
+                s_g = float(gfs["s"])
+                R_g = np.asarray(gfs["R"], dtype=np.float32)
+                t_g = np.asarray(gfs["t"], dtype=np.float32)
+                global_floor_sim = (s_g, R_g, t_g)
+
+            # 3D bboxes per frame
+            frame_3dbb_map_world = video_3dgt.get("frames", None)
+
+            # Precompute floor mesh in WORLD coords
+            if floor is not None and global_floor_sim is not None:
+                floor_verts0 = np.asarray(gv, dtype=np.float32)
+                floor_faces0 = _faces_u32(np.asarray(gf))
+                floor_faces = floor_faces0
+
+                s_g, R_g, t_g = global_floor_sim
+                R_g = np.asarray(R_g, dtype=np.float32)
+                t_g = np.asarray(t_g, dtype=np.float32)
+
+                floor_vertices_before = s_g * (floor_verts0 @ R_g.T) + t_g
+
+                # Axes BEFORE (in world)
+                t1 = R_g[:, 0]  # in-plane
+                t2 = R_g[:, 2]  # in-plane
+                n  = R_g[:, 1]  # normal
+
+                floor_origin_world = t_g.astype(np.float32)
+                axis_len_floor = float(s_g) * 0.5 if s_g is not None else 0.5
+                floor_axes_before = np.stack(
+                    [
+                        t1 * axis_len_floor,
+                        t2 * axis_len_floor,
+                        n  * axis_len_floor,
+                    ],
+                    axis=0,
+                )  # (3,3)
+
+                # Floor colors
+                if gc is not None:
+                    gc = np.asarray(gc, dtype=np.uint8)
+                    floor_kwargs = {"vertex_colors": gc}
+                else:
+                    floor_kwargs = {"albedo_factor": [160, 160, 160]}
+
+        # ----------------------------------------------------------------------
+        # Compute WORLD -> FINAL transform using helper
+        # ----------------------------------------------------------------------
+        tf = compute_final_world_transform(floor=floor, global_floor_sim=global_floor_sim)
+        R_final = tf["R_world_to_final"]        # (3,3)
+        t_final = tf["t_world_to_final"]        # (3,)
+        floor_origin_world_tf = tf["floor_origin_world"]  # (3,)
+
+        # ----------------------------------------------------------------------
+        # Transform floor mesh & axes to FINAL coords
+        # ----------------------------------------------------------------------
+        floor_origin_final = None
+        if floor_vertices_before is not None:
+            v_flat = floor_vertices_before.reshape(-1, 3)
+            v_final_flat = (R_final @ v_flat.T).T + t_final[None, :]
+            floor_vertices_after = v_final_flat.reshape(floor_vertices_before.shape)
+
+            # floor origin in world maps to origin in FINAL (by construction),
+            # but we can be explicit:
+            floor_origin_final = (R_final @ floor_origin_world_tf) + t_final
+            # For visualization, we expect this to be ~[0,0,0].
+            # Axes AFTER: canonical basis in FINAL, scaled similarly
+            axis_len_floor = np.linalg.norm(floor_axes_before[0]) if floor_axes_before is not None else 0.5
+            floor_axes_after = np.array(
+                [
+                    [axis_len_floor, 0.0, 0.0],
+                    [0.0, axis_len_floor, 0.0],
+                    [0.0, 0.0, axis_len_floor],
+                ],
+                dtype=np.float32,
+            )
+
+        # ----------------------------------------------------------------------
+        # Transform 3D bounding boxes
+        #   - Add `aabb_final` with `corners_final` into a separate map
+        # ----------------------------------------------------------------------
+        frame_3dbb_map_final: Optional[Dict[str, Dict[str, Any]]] = None
+        if frame_3dbb_map_world is not None:
+            frame_3dbb_map_final = {}
+            for frame_name, frame_rec in frame_3dbb_map_world.items():
+                objects_world = frame_rec.get("objects", [])
+                objects_final = []
+                for obj in objects_world:
+                    bbox_3d = obj["aabb_floor_aligned"]
+                    corners_world = np.asarray(
+                        bbox_3d["corners_world"], dtype=np.float32
+                    )  # (8,3)
+
+                    corners_final = (R_final @ corners_world.T).T + t_final[None, :]
+
+                    obj_final = dict(obj)
+                    obj_final["aabb_final"] = {
+                        "corners_final": corners_final,
+                    }
+                    # Optional: separate color for AFTER
+                    obj_final["color_after"] = obj.get("color", [255, 230, 80])
+
+                    objects_final.append(obj_final)
+
+                frame_3dbb_map_final[frame_name] = {
+                    "objects": objects_final
+                }
 
         # Basic dataset-level stats
         all_labels = set()
@@ -1046,6 +1163,18 @@ class FrameToWorldAnnotations:
                 lbl = obj.get("label", None)
                 if lbl:
                     all_labels.add(lbl)
+
+        # Create a map of frame_id: [(obj_label, bbox_3d),  ...]
+        # Create the world SGG annotations such that:
+        # Every object in the all_labels is present in each frame; initialize empty bboxes for missing objects.
+        # We need to fill in the missing objects with bboxes based on object permanence logic.
+        # (a) Replace the empty bbox with the last known bbox for that object if it exists.
+        # (b) If no last known bbox exists, check for first known bbox and use that.
+        # (c) If neither exists, raise an error that the object cannot be filled in.
+        # This ensures that every object is represented in every frame, maintaining temporal consistency.
+
+        # Once the bboxes are filled in, we need to visualize the generated world 4D bboxes.
+        # Use the final 3D bboxes with their labels to create a new rerun visualization file.
 
         print(
             f"[world4d][{video_id}] frames_with_objects={num_frames_with_objects}, "
@@ -1294,7 +1423,7 @@ class FrameToWorldAnnotations:
         video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
         video_id_3d_bbox_predictions = self.get_video_3d_annotations(video_id)
 
-        self.generate_video_bb_annotations(
+        self.generate_video_world_bb_annotations(
             video_id,
             video_id_gt_annotations,
             video_id_gdino_annotations,
@@ -1328,7 +1457,7 @@ class FrameToWorldAnnotations:
                 video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
                 video_id_3d_bbox_predictions = self.get_video_3d_annotations(video_id)
 
-                self.generate_video_bb_annotations(
+                self.generate_video_world_bb_annotations(
                     video_id,
                     video_id_gt_annotations,
                     video_id_gdino_annotations,
@@ -1423,10 +1552,17 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
     )
-    video_id = "0DJ6R.mp4"
-    frame_to_world_generator.visualize_original_results(
+    video_id = "00T1E.mp4"
+    # frame_to_world_generator.visualize_original_results(
+    #     video_id=video_id,
+    #     vis_mode="after",  # "before", "after", or "both"
+    # )
+    frame_to_world_generator.generate_video_world_bb_annotations(
         video_id=video_id,
-        vis_mode="after",  # "before", "after", or "both"
+        video_id_gt_annotations=frame_to_world_generator.get_video_gt_annotations(video_id)[1],
+        video_id_gdino_annotations=frame_to_world_generator.get_video_gdino_annotations(video_id),
+        video_id_3d_bbox_predictions=frame_to_world_generator.get_video_3d_annotations(video_id),
+        visualize=False,
     )
 
 
