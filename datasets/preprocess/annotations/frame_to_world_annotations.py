@@ -502,8 +502,56 @@ def rerun_frame_vis_results(
                 )
 
         # -----------------------------------------------------------------------------
-        # 3D BOUNDING BOXES: BEFORE / AFTER
+        # 3D BOUNDING BOXES: BEFORE / AFTER + LABELS
         # -----------------------------------------------------------------------------
+        def _log_bbox_with_label(
+            base_path: str,
+            frame_idx: int,
+            bbox_index: int,
+            corners: np.ndarray,
+            color: List[int],
+            label: Optional[str],
+        ) -> None:
+            """
+            Log a wireframe 3D box (LineStrips3D) and, if available, a point label
+            slightly above the box center.
+            """
+            # Wireframe edges
+            strips = []
+            for e0, e1 in cuboid_edges:
+                strips.append(corners[[e0, e1], :])
+
+            rr.log(
+                f"{base_path}/bboxes/frame_{frame_idx}/bbox_{bbox_index}",
+                rr.LineStrips3D(
+                    strips=strips,
+                    colors=[color] * len(strips),
+                ),
+            )
+
+            # Optional label above the box
+            if label is not None:
+                # Center of the box in 3D
+                center = corners.mean(axis=0)
+
+                # Use ~5% of the diagonal length as vertical offset; fall back to small constant
+                diag_len = np.linalg.norm(
+                    corners.max(axis=0) - corners.min(axis=0)
+                )
+                offset = 0.05 * diag_len if diag_len > 0 else 0.05
+
+                # Assume +Y is "up" in both BEFORE (world) and AFTER (final) frames
+                label_pos = center + np.array([0.0, offset, 0.0], dtype=np.float32)
+
+                rr.log(
+                    f"{base_path}/bboxes/frame_{frame_idx}/bbox_{bbox_index}_label",
+                    rr.Points3D(
+                        positions=label_pos[None, :].astype(np.float32),
+                        labels=[str(label)],
+                        colors=[color],
+                    ),
+                )
+
         if show_before and frame_3dbb_before is not None:
             frame_name = f"{stem}.png"
             if frame_name in frame_3dbb_before:
@@ -515,17 +563,15 @@ def rerun_frame_vis_results(
                     )  # (8,3)
 
                     col = obj.get("color", [255, 180, 0])
+                    label = obj.get("label", None)
 
-                    strips = []
-                    for e0, e1 in cuboid_edges:
-                        strips.append(corners_world[[e0, e1], :])
-
-                    rr.log(
-                        f"{BASE_BEFORE}/bboxes/frame_{vis_t}/bbox_{bi}",
-                        rr.LineStrips3D(
-                            strips=strips,
-                            colors=[col] * len(strips),
-                        ),
+                    _log_bbox_with_label(
+                        base_path=BASE_BEFORE,
+                        frame_idx=vis_t,
+                        bbox_index=bi,
+                        corners=corners_world,
+                        color=col,
+                        label=label,
                     )
 
         if show_after and frame_3dbb_after is not None:
@@ -539,17 +585,15 @@ def rerun_frame_vis_results(
                     )  # (8,3)
 
                     col = obj.get("color_after", [255, 230, 80])
+                    label = obj.get("label", None)
 
-                    strips_after = []
-                    for e0, e1 in cuboid_edges:
-                        strips_after.append(corners_final[[e0, e1], :])
-
-                    rr.log(
-                        f"{BASE_AFTER}/bboxes/frame_{vis_t}/bbox_{bi}",
-                        rr.LineStrips3D(
-                            strips=strips_after,
-                            colors=[col] * len(strips_after),
-                        ),
+                    _log_bbox_with_label(
+                        base_path=BASE_AFTER,
+                        frame_idx=vis_t,
+                        bbox_index=bi,
+                        corners=corners_final,
+                        color=col,
+                        label=label,
                     )
 
         # ---------------------------------------------------------------------
