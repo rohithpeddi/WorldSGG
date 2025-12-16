@@ -733,6 +733,43 @@ class FrameToWorldAnnotations:
             self.ag_root_directory / "segmentation_static" / "masks" / "combined"
         )
 
+        self.active_objects_b_annotations_path = self.ag_root_directory / 'active_objects' / 'annotations'
+        self.active_objects_b_reasoned_path = self.ag_root_directory / 'active_objects' / 'sampled_videos'
+
+        self.video_id_active_objects_annotations_map = {}
+        self.video_id_active_objects_b_reasoned_map = {}
+
+    def fetch_stored_active_objects_in_video(self, video_id):
+        video_id_object_reasoning_path = self.active_objects_b_reasoned_path / f"{video_id[:-4]}.txt"
+        video_id_object_annotations_path = self.active_objects_b_annotations_path / f"{video_id[:-4]}.txt"
+        if video_id_object_annotations_path.exists():
+            with open(video_id_object_annotations_path, "r") as f:
+                annotated_objects = [line.strip() for line in f if line.strip()]
+            self.video_id_active_objects_annotations_map[video_id] = sorted(annotated_objects)
+            if video_id_object_reasoning_path.exists():
+                with open(video_id_object_reasoning_path, "r") as f:
+                    video_reasoned_objects = [line.strip() for line in f if line.strip()]
+
+                # Ensure presence of "person", as it's always active
+                # If there is a television in annotated objects, add it to reasoned objects
+                # If there is a mirror in annotated objects, add it to reasoned objects
+                video_reasoned_objects = set(video_reasoned_objects)
+                video_reasoned_objects.add("person")
+
+                if "television" in annotated_objects:
+                    video_reasoned_objects.add("television")
+                if "mirror" in annotated_objects:
+                    video_reasoned_objects.add("mirror")
+                self.video_id_active_objects_b_reasoned_map[video_id] = sorted(list(video_reasoned_objects))
+            else:
+                print(f"Video {video_id} has no reasoned objects. Loading annotated objects instead.")
+                self.video_id_active_objects_b_reasoned_map[video_id] = sorted(annotated_objects)
+
+    def fetch_stored_active_objects_in_videos(self, dataloader):
+        for data in dataloader:
+            video_id = data['video_id']
+            self.fetch_stored_active_objects_in_video(video_id)
+
     # ----------------------------------------------------------------------------------
     # GT + GDINO + 3D annotations loaders
     # ----------------------------------------------------------------------------------
@@ -1061,8 +1098,10 @@ class FrameToWorldAnnotations:
           5) For each filled object, attach:
                  - original `aabb_floor_aligned` (corners_world)
                  - `aabb_final` (corners in FINAL coords)
-          6) Save the resulting 4D annotations to bbox_4d_root_dir.
-          7) Optionally visualize final 4D bboxes (wireframe only, no points).
+          6) For static labels, union bboxes **in FINAL coords** and overwrite
+             their `aabb_final` in all frames (world boxes unchanged).
+          7) Save the resulting 4D annotations to bbox_4d_root_dir.
+          8) Optionally visualize final 4D bboxes (wireframe only, no points).
         """
         print(f"[world4d][{video_id}] Generating world SGG annotations (4D bboxes)")
 
@@ -1323,6 +1362,124 @@ class FrameToWorldAnnotations:
             frames_filled_world[fname] = {"objects": filled_objects}
 
         # ----------------------------------------------------------------------
+        # Static-object union logic (UNION IN FINAL COORDS, WORLD UNCHANGED)
+        # ----------------------------------------------------------------------
+        # Loads object labels corresponding to active objects in the dataset
+        video_active_object_labels = self.video_id_active_objects_annotations_map[video_id]
+        video_reasoned_active_object_labels = self.video_id_active_objects_b_reasoned_map[video_id]
+
+        # Heuristic list of non-moving labels
+        non_moving_objects = ["floor", "sofa", "couch", "bed", "doorway", "table", "chair"]
+
+        video_dynamic_object_labels = [
+            obj for obj in video_reasoned_active_object_labels
+            if obj not in non_moving_objects
+        ]
+
+        # Objects active in the video but not classified as dynamic => treated as static
+        video_static_object_labels = [
+            obj for obj in video_active_object_labels
+            if obj not in video_dynamic_object_labels
+        ]
+
+        # Only consider static labels that actually have 3D boxes
+        static_labels_in_3d = [
+            lbl for lbl in video_static_object_labels
+            if lbl in all_labels
+        ]
+
+        print(
+            f"[world4d][{video_id}] static_labels_in_3d={sorted(static_labels_in_3d)} "
+            f"(from active={sorted(video_active_object_labels)})"
+        )
+
+        def _make_aabb_corners_from_minmax(min_xyz: np.ndarray,
+                                           max_xyz: np.ndarray) -> np.ndarray:
+            """
+            Build 8 axis-aligned cuboid corners from min/max in FINAL coords.
+
+            Corner indexing is consistent with a standard cuboid and works
+            with the existing `cuboid_edges` list in rerun_frame_vis_results.
+            """
+            x0, y0, z0 = min_xyz
+            x1, y1, z1 = max_xyz
+            return np.array(
+                [
+                    [x0, y0, z0],
+                    [x1, y0, z0],
+                    [x0, y0, z1],
+                    [x1, y0, z1],
+                    [x0, y1, z0],
+                    [x1, y1, z0],
+                    [x0, y1, z1],
+                    [x1, y1, z1],
+                ],
+                dtype=np.float32,
+            )
+
+        static_union_map_final: Dict[str, np.ndarray] = {}
+
+        # 1) Compute union bbox (FINAL coords) per static label
+        for lbl in static_labels_in_3d:
+            all_corners_list_final: List[np.ndarray] = []
+
+            for fname in frame_names_sorted:
+                frame_rec = frames_filled_world[fname]
+                for obj in frame_rec["objects"]:
+                    if obj.get("label") != lbl:
+                        continue
+
+                    aabb_final = obj.get("aabb_final", None)
+                    if not aabb_final:
+                        continue
+
+                    corners_final = np.asarray(
+                        aabb_final.get("corners_final", []), dtype=np.float32
+                    )
+                    if corners_final.size == 0:
+                        continue
+
+                    all_corners_list_final.append(corners_final)
+
+            if not all_corners_list_final:
+                print(
+                    f"[world4d][{video_id}] WARNING: static label '{lbl}' has no "
+                    "aabb_final corners available; skipping union."
+                )
+            else:
+                all_pts_final = np.concatenate(all_corners_list_final, axis=0)  # (N*8, 3)
+                min_xyz_f = all_pts_final.min(axis=0)
+                max_xyz_f = all_pts_final.max(axis=0)
+                union_corners_final = _make_aabb_corners_from_minmax(min_xyz_f, max_xyz_f)
+                static_union_map_final[lbl] = union_corners_final
+
+        # 2) Apply union bbox (FINAL coords) to all frames for those static labels
+        if static_union_map_final:
+            print(
+                f"[world4d][{video_id}] Applying static union bboxes in FINAL coords "
+                f"for {len(static_union_map_final)} labels."
+            )
+
+            for fname in frame_names_sorted:
+                frame_rec = frames_filled_world[fname]
+                for obj in frame_rec["objects"]:
+                    lbl = obj.get("label", None)
+                    if lbl not in static_union_map_final:
+                        continue
+
+                    union_corners_final = static_union_map_final[lbl]  # (8,3)
+
+                    # Ensure aabb_final exists, then overwrite only FINAL box
+                    if "aabb_final" not in obj:
+                        obj["aabb_final"] = {}
+
+                    obj["aabb_final"]["corners_final"] = union_corners_final
+
+                    # NOTE: we intentionally do NOT touch
+                    # obj["aabb_floor_aligned"]["corners_world"]
+                    # so WORLD-space boxes remain as originally constructed.
+
+        # ----------------------------------------------------------------------
         # Optional: visualize world-4D bboxes (wireframe only, no points)
         # ----------------------------------------------------------------------
         if visualize:
@@ -1381,6 +1538,7 @@ class FrameToWorldAnnotations:
             pickle.dump(world4d_annotations, f)
 
         print(f"[world4d][{video_id}] Saved world-4D bbox annotations to {out_4d_path}")
+
 
     # ----------------------------------------------------------------------------------
     # NEW: centralized transform + visualization entry point
@@ -1751,6 +1909,8 @@ def main_sample():
     #     video_id=video_id,
     #     vis_mode="after",  # "before", "after", or "both"
     # )
+
+    frame_to_world_generator.fetch_stored_active_objects_in_video(video_id)
     frame_to_world_generator.generate_video_world_bb_annotations(
         video_id=video_id,
         video_id_gt_annotations=frame_to_world_generator.get_video_gt_annotations(video_id)[1],
