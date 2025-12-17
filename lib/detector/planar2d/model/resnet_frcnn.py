@@ -1,10 +1,4 @@
-from pyexpat import features
-from typing import Dict, Union, List
-import sys
-import os
-import torch
 import torchvision
-import torch.nn as nn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
 def create_model(num_classes=37):
