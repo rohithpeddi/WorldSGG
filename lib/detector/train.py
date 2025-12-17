@@ -1,33 +1,24 @@
-import math
-import sys
-import time
-import numpy as np
-import pdb
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import pickle
-import cv2
-from tqdm import tqdm
-import wandb
 import argparse
 import os
 import warnings
+
+import numpy as np
+import torch
+import wandb
+from tqdm import tqdm
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
-from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
-from torch.optim import AdamW, SGD
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.optim.lr_scheduler import LinearLR, SequentialLR
 from torch.utils.data import DataLoader
-from constant import const
 # from dataloader.ag_dataset import ActionGenomeDataset,collate_fn
 # from dataloader.ag_dataset_letterbox import ActionGenomeDatasetLetterbox as ActionGenomeDataset, collate_fn
 from dataloader.ag_dataset_resize import ActionGenomeDatasetResize as ActionGenomeDataset, collate_fn
 from model.dinov2_torch import create_model
 
-from evaluate import evaluate_MAP_full,evaluate_predictions
+from evaluate import evaluate_MAP_full
 from torch.utils.data import Subset
-import torchvision.models.detection.mask_rcnn
 from torch_utils import utils
 #from torch_utils.coco_utils import get_coco_api_from_dataset
 from utils.json_logger import LocalLogger
