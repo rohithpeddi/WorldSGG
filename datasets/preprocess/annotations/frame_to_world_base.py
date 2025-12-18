@@ -322,19 +322,6 @@ class FrameToWorldBase:
 
         return combined_gdino_predictions
 
-    def get_video_3d_annotations(self, video_id: str):
-        """
-        Load the floor-aligned 3D bbox annotations created by BBox3DGenerator.
-        """
-        out_path = self.bbox_3d_root_dir / f"{video_id[:-4]}.pkl"
-        if not out_path.exists():
-            print(f"[world4d][{video_id}] 3D bbox annotations not found at {out_path}")
-            return None
-
-        with open(out_path, "rb") as f:
-            video_3d_annotations = pickle.load(f)
-        return video_3d_annotations
-
     def get_video_dynamic_predictions(self, video_id: str):
         """
         If you ever need full dynamic scene predictions (not restricted to annotated frames).

@@ -379,55 +379,353 @@ class CameraMotionStatsCombiner(FrameToWorldBase):
 
 class Missing3DBoxStatsEstimator(FrameToWorldBase):
 
-    def estimate_missing_3d_boxes(self, video_id) -> None:
-        video_3dgt = self.get_video_3d_annotations(video_id)
-        frame_3dbb_map_world = video_3dgt.get("frames", None)
+    def estimate_missing_3d_boxes(self, video_id: str) -> Dict[str, Any]:
+        """
+        Estimate missing 3D boxes (per-frame + per-video) using:
+          Level-1: GT-only signals
+          Level-2: GDINO detections to separate "GT missing annotation" vs "likely occlusion/out-of-view"
 
-        all_labels = set()
+        Returns a dict with frame_stats + totals. Also prints a concise summary.
+        """
+
+        # -----------------------
+        # helpers
+        # -----------------------
+        def _norm_label(lbl: Optional[str]) -> Optional[str]:
+            if lbl is None:
+                return None
+            lbl = str(lbl).strip().lower()
+
+            # normalize common aliases used elsewhere in your codebase
+            if lbl == "closet/cabinet":
+                return "closet"
+            if lbl == "cup/glass/bottle":
+                return "cup"
+            if lbl == "paper/notebook":
+                return "paper"
+            if lbl == "sofa/couch":
+                return "sofa"
+            if lbl == "phone/camera":
+                return "phone"
+
+            # additional practical aliases (often show up in detectors)
+            if lbl == "couch":
+                return "sofa"
+            return lbl
+
+        def _norm_frame_name(k: Any) -> str:
+            # Accept "000123.png", "000123", 123, etc.
+            if isinstance(k, int):
+                return f"{k:06d}.png"
+            s = str(k)
+            if s.endswith(".png"):
+                return s
+            # if looks numeric, pad to 6
+            stem = s
+            try:
+                v = int(stem)
+                return f"{v:06d}.png"
+            except Exception:
+                return s + ".png"
+
+        def _get_gt_labels_for_frame(video_gt_bboxes: Dict[str, Any], frame_name: str) -> List[str]:
+            # try exact match
+            rec = video_gt_bboxes.get(frame_name, None)
+            if rec is not None:
+                return rec.get("labels", []) or []
+
+            # try stem match
+            stem = frame_name[:-4] if frame_name.endswith(".png") else frame_name
+            rec = video_gt_bboxes.get(stem, None)
+            if rec is not None:
+                return rec.get("labels", []) or []
+
+            # try padded stem
+            try:
+                v = int(stem)
+                rec = video_gt_bboxes.get(f"{v:06d}.png", None)
+                if rec is not None:
+                    return rec.get("labels", []) or []
+            except Exception:
+                pass
+
+            return []
+
+        # -----------------------
+        # ensure active objects loaded
+        # -----------------------
+        if (
+            video_id not in self.video_id_active_objects_annotations_map
+            or video_id not in self.video_id_active_objects_b_reasoned_map
+        ):
+            # will populate maps if files exist; otherwise it prints and/or falls back
+            self.fetch_stored_active_objects_in_video(video_id)
+
+        # -----------------------
+        # load 3D annotations
+        # -----------------------
+        video_3dgt = self.get_video_3d_annotations(video_id)
+        if video_3dgt is None:
+            return {
+                "video_id": video_id,
+                "error": "3D bbox annotations not found",
+            }
+
+        frame_3dbb_map_world = video_3dgt.get("frames", None)
+        if frame_3dbb_map_world is None:
+            return {
+                "video_id": video_id,
+                "error": "3D bbox annotations file has no 'frames' key",
+            }
+
+        # normalize keys to "xxxxxx.png"
+        frame_3dbb_map_world_norm: Dict[str, Dict[str, Any]] = {}
+        for k, v in frame_3dbb_map_world.items():
+            frame_3dbb_map_world_norm[_norm_frame_name(k)] = v
+        frame_3dbb_map_world = frame_3dbb_map_world_norm
+
+        # -----------------------
+        # collect labels present in any 3D frame (universe for "missing in 3D")
+        # -----------------------
+        all_labels: set = set()
         num_frames_with_objects = 0
         num_total_objects = 0
 
         for frame_name, frame_rec in frame_3dbb_map_world.items():
-            objects = frame_rec.get("objects", [])
+            objects = frame_rec.get("objects", []) or []
             if not objects:
                 continue
             num_frames_with_objects += 1
             num_total_objects += len(objects)
             for obj in objects:
-                lbl = obj.get("label", None)
+                lbl = _norm_label(obj.get("label", None))
                 if lbl:
                     all_labels.add(lbl)
 
-        # --------------------------------------------------------------------------------
-        # Static and Dynamic objects label-wise
-        # --------------------------------------------------------------------------------
+        # -----------------------
+        # Static vs dynamic label sets (based on your active-object reasoning)
+        # -----------------------
+        video_active_object_labels = [
+            _norm_label(x) for x in self.video_id_active_objects_annotations_map.get(video_id, [])
+        ]
+        video_reasoned_active_object_labels = [
+            _norm_label(x) for x in self.video_id_active_objects_b_reasoned_map.get(video_id, [])
+        ]
+        video_active_object_labels = [x for x in video_active_object_labels if x]
+        video_reasoned_active_object_labels = [x for x in video_reasoned_active_object_labels if x]
 
-        # Loads object labels corresponding to active objects in the dataset
-        video_active_object_labels = self.video_id_active_objects_annotations_map[video_id]
-        video_reasoned_active_object_labels = self.video_id_active_objects_b_reasoned_map[video_id]
-
-        # Heuristic list of non-moving labels
         non_moving_objects = ["floor", "sofa", "couch", "bed", "doorway", "table", "chair"]
+        non_moving_objects = [_norm_label(x) for x in non_moving_objects]
 
         video_dynamic_object_labels = [
             obj for obj in video_reasoned_active_object_labels
             if obj not in non_moving_objects
         ]
-
-        # Objects active in the video but not classified as dynamic => treated as static
         video_static_object_labels = [
             obj for obj in video_active_object_labels
             if obj not in video_dynamic_object_labels
         ]
 
-        # Only consider static labels that actually have 3D boxes
-        static_labels_in_3d = [
-            lbl for lbl in video_static_object_labels
-            if lbl in all_labels
-        ]
+        # only static labels that actually appear at least once in 3D
+        static_labels_in_3d = [lbl for lbl in video_static_object_labels if lbl in all_labels]
 
-        pass
+        expected_all_3d = set(all_labels)
+        expected_static_3d = set(static_labels_in_3d)
+        expected_dynamic_3d = set([lbl for lbl in video_dynamic_object_labels if lbl in all_labels])
 
+        # -----------------------
+        # Load GT and GDINO
+        # -----------------------
+        video_gt_bboxes, _video_gt_raw = self.get_video_gt_annotations(video_id)
+        video_gdino = self.get_video_gdino_annotations(video_id)  # frame -> {boxes, labels, scores}
+
+        # normalize gdino keys/labels
+        video_gdino_norm: Dict[str, Dict[str, Any]] = {}
+        for k, v in video_gdino.items():
+            fn = _norm_frame_name(k)
+            labels = [ _norm_label(x) for x in (v.get("labels", []) or []) ]
+            labels = [x for x in labels if x]
+            video_gdino_norm[fn] = {
+                "boxes": v.get("boxes", []) or [],
+                "labels": labels,
+                "scores": v.get("scores", []) or [],
+            }
+        video_gdino = video_gdino_norm
+
+        # -----------------------
+        # Main loop: per-frame stats
+        # -----------------------
+        def _sorted_frame_keys(keys: List[str]) -> List[str]:
+            def _key_fn(s: str) -> int:
+                stem = s[:-4] if s.endswith(".png") else s
+                try:
+                    return int(stem)
+                except Exception:
+                    return 10**18
+            return sorted(keys, key=_key_fn)
+
+        frame_keys = _sorted_frame_keys(list(frame_3dbb_map_world.keys()))
+        frame_stats: Dict[str, Dict[str, Any]] = {}
+
+        # video-level totals
+        totals = {
+            "frames_total": len(frame_keys),
+            "frames_with_3d_objects": num_frames_with_objects,
+            "total_3d_objects": num_total_objects,
+            "all_3d_labels": sorted(list(expected_all_3d)),
+            "static_labels_in_3d": sorted(list(expected_static_3d)),
+            "dynamic_labels_in_3d": sorted(list(expected_dynamic_3d)),
+
+            # Level-1 (GT present but 3D missing)
+            "L1_missing_3d_but_gt_present": 0,
+            "L1_missing_static_3d_but_gt_present": 0,
+            "L1_missing_dynamic_3d_but_gt_present": 0,
+
+            # Level-2 (GT absent; use GDINO to split annotation-missing vs occlusion)
+            "L2_missing_gt_but_gdino_detected": 0,
+            "L2_missing_static_gt_but_gdino_detected": 0,
+            "L2_missing_dynamic_gt_but_gdino_detected": 0,
+
+            "L2_missing_gt_and_gdino_not_detected": 0,
+            "L2_missing_static_gt_and_gdino_not_detected": 0,
+            "L2_missing_dynamic_gt_and_gdino_not_detected": 0,
+
+            # overall missing in 3D relative to expected_all_3d
+            "missing_3d_total": 0,
+            "missing_static_3d_total": 0,
+            "missing_dynamic_3d_total": 0,
+
+            "missing_per_label": {},  # label -> count over frames
+        }
+
+        dynamic_set = set(video_dynamic_object_labels)
+
+        for frame_name in frame_keys:
+            rec_3d = frame_3dbb_map_world.get(frame_name, {}) or {}
+            objects_3d = rec_3d.get("objects", []) or []
+
+            labels_3d = set()
+            for obj in objects_3d:
+                lbl = _norm_label(obj.get("label", None))
+                if lbl:
+                    labels_3d.add(lbl)
+
+            gt_labels = [_norm_label(x) for x in _get_gt_labels_for_frame(video_gt_bboxes, frame_name)]
+            gt_labels = [x for x in gt_labels if x]
+            labels_gt = set(gt_labels)
+
+            det = video_gdino.get(frame_name, {"labels": []})
+            labels_det = set(det.get("labels", []) or [])
+
+            # missing in 3D relative to label universe from 3D
+            missing_all = expected_all_3d - labels_3d
+            missing_static = expected_static_3d - labels_3d
+            missing_dynamic = expected_dynamic_3d - labels_3d
+
+            # categorize missing labels (Level-1 / Level-2)
+            missing_by_reason = {
+                "L1_3d_missing_but_gt_present": [],
+                "L2_gt_missing_but_gdino_detected": [],
+                "L2_gt_and_gdino_not_detected": [],
+            }
+
+            for lbl in sorted(missing_all):
+                if lbl in labels_gt:
+                    missing_by_reason["L1_3d_missing_but_gt_present"].append(lbl)
+                elif lbl in labels_det:
+                    missing_by_reason["L2_gt_missing_but_gdino_detected"].append(lbl)
+                else:
+                    missing_by_reason["L2_gt_and_gdino_not_detected"].append(lbl)
+
+                totals["missing_per_label"][lbl] = totals["missing_per_label"].get(lbl, 0) + 1
+
+            # update totals
+            totals["missing_3d_total"] += len(missing_all)
+            totals["missing_static_3d_total"] += len(missing_static)
+            totals["missing_dynamic_3d_total"] += len(missing_dynamic)
+
+            # Level-1 totals
+            l1 = missing_by_reason["L1_3d_missing_but_gt_present"]
+            totals["L1_missing_3d_but_gt_present"] += len(l1)
+            totals["L1_missing_static_3d_but_gt_present"] += sum(1 for x in l1 if x not in dynamic_set)
+            totals["L1_missing_dynamic_3d_but_gt_present"] += sum(1 for x in l1 if x in dynamic_set)
+
+            # Level-2 totals (gdino detected)
+            l2a = missing_by_reason["L2_gt_missing_but_gdino_detected"]
+            totals["L2_missing_gt_but_gdino_detected"] += len(l2a)
+            totals["L2_missing_static_gt_but_gdino_detected"] += sum(1 for x in l2a if x not in dynamic_set)
+            totals["L2_missing_dynamic_gt_but_gdino_detected"] += sum(1 for x in l2a if x in dynamic_set)
+
+            # Level-2 totals (no gdino)
+            l2b = missing_by_reason["L2_gt_and_gdino_not_detected"]
+            totals["L2_missing_gt_and_gdino_not_detected"] += len(l2b)
+            totals["L2_missing_static_gt_and_gdino_not_detected"] += sum(1 for x in l2b if x not in dynamic_set)
+            totals["L2_missing_dynamic_gt_and_gdino_not_detected"] += sum(1 for x in l2b if x in dynamic_set)
+
+            frame_stats[frame_name] = {
+                "num_3d_objects": len(objects_3d),
+                "labels_3d": sorted(list(labels_3d)),
+                "labels_gt": sorted(list(labels_gt)),
+                "labels_gdino": sorted(list(labels_det)),
+
+                "missing_3d_all": sorted(list(missing_all)),
+                "missing_3d_static": sorted(list(missing_static)),
+                "missing_3d_dynamic": sorted(list(missing_dynamic)),
+
+                "missing_by_reason": missing_by_reason,
+                "counts": {
+                    "missing_3d_all": len(missing_all),
+                    "missing_3d_static": len(missing_static),
+                    "missing_3d_dynamic": len(missing_dynamic),
+                    "L1_3d_missing_but_gt_present": len(missing_by_reason["L1_3d_missing_but_gt_present"]),
+                    "L2_gt_missing_but_gdino_detected": len(missing_by_reason["L2_gt_missing_but_gdino_detected"]),
+                    "L2_gt_and_gdino_not_detected": len(missing_by_reason["L2_gt_and_gdino_not_detected"]),
+                },
+            }
+
+        # sort per-label map by count descending for readability
+        totals["missing_per_label"] = dict(
+            sorted(totals["missing_per_label"].items(), key=lambda kv: kv[1], reverse=True)
+        )
+
+        out = {
+            "video_id": video_id,
+            "frame_stats": frame_stats,
+            "totals": totals,
+            "sets": {
+                "expected_all_3d": sorted(list(expected_all_3d)),
+                "expected_static_3d": sorted(list(expected_static_3d)),
+                "expected_dynamic_3d": sorted(list(expected_dynamic_3d)),
+                "video_active_object_labels": sorted(list(set(video_active_object_labels))),
+                "video_reasoned_active_object_labels": sorted(list(set(video_reasoned_active_object_labels))),
+                "video_dynamic_object_labels": sorted(list(set(video_dynamic_object_labels))),
+                "video_static_object_labels": sorted(list(set(video_static_object_labels))),
+            },
+        }
+
+        # -----------------------
+        # print a compact summary
+        # -----------------------
+        print(f"\n[missing3d][{video_id}] frames={totals['frames_total']}, "
+              f"frames_with_3d_objs={totals['frames_with_3d_objects']}, total_3d_objs={totals['total_3d_objects']}")
+        print(f"[missing3d][{video_id}] |labels| all_3d={len(expected_all_3d)} "
+              f"static_in_3d={len(expected_static_3d)} dynamic_in_3d={len(expected_dynamic_3d)}")
+        print(f"[missing3d][{video_id}] missing_3d_total={totals['missing_3d_total']} "
+              f"(static={totals['missing_static_3d_total']}, dynamic={totals['missing_dynamic_3d_total']})")
+        print(f"[missing3d][{video_id}] L1(3d_missing & gt_present)={totals['L1_missing_3d_but_gt_present']} "
+              f"(static={totals['L1_missing_static_3d_but_gt_present']}, dynamic={totals['L1_missing_dynamic_3d_but_gt_present']})")
+        print(f"[missing3d][{video_id}] L2(gt_missing & gdino_detected)={totals['L2_missing_gt_but_gdino_detected']} "
+              f"(static={totals['L2_missing_static_gt_but_gdino_detected']}, dynamic={totals['L2_missing_dynamic_gt_but_gdino_detected']})")
+        print(f"[missing3d][{video_id}] L2(gt_missing & gdino_not_detected)={totals['L2_missing_gt_and_gdino_not_detected']} "
+              f"(static={totals['L2_missing_static_gt_and_gdino_not_detected']}, dynamic={totals['L2_missing_dynamic_gt_and_gdino_not_detected']})")
+
+        # top offenders
+        topk = list(totals["missing_per_label"].items())[:10]
+        if topk:
+            print(f"[missing3d][{video_id}] top-missing labels (label: #frames_missing): "
+                  + ", ".join([f"{k}:{v}" for k, v in topk]))
+
+        return out
 
 
 
@@ -469,6 +767,32 @@ def load_dataset(ag_root_directory: str):
         num_workers=0,
     )
     return train_dataset, test_dataset, dataloader_train, dataloader_test
+
+
+def main_missing3d_stats_sample():
+    args = parse_args()
+
+    stats_estimator = Missing3DBoxStatsEstimator(
+        ag_root_directory=args.ag_root_directory,
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
+    )
+
+    video_id = "00T1E.mp4"
+
+    # Load active objects (needed for static/dynamic split)
+    stats_estimator.fetch_stored_active_objects_in_video(video_id)
+
+    # Run stats
+    stats = stats_estimator.estimate_missing_3d_boxes(video_id)
+
+    # Optional: save to disk next to bbox_4d_root_dir (or anywhere you want)
+    out_dir = stats_estimator.bbox_4d_root_dir / "missing3d_stats"
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = out_dir / f"{video_id[:-4]}_missing3d_stats.json"
+    with open(out_path, "w") as f:
+        json.dump(stats, f, indent=2)
+
+    print(f"\n[missing3d] Saved stats to: {out_path}")
 
 
 def run_statistics_estimations(
@@ -580,5 +904,8 @@ def main():
         print(f"- {k}")
 
 
+# if __name__ == "__main__":
+#     main()
+
 if __name__ == "__main__":
-    main()
+    main_missing3d_stats_sample()
