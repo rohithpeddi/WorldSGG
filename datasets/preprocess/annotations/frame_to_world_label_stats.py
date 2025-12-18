@@ -426,6 +426,33 @@ class Missing3DBoxStatsEstimator(FrameToWorldBase):
                   f"L2det={totals['L2_missing_gt_but_gdino_detected']}, "
                   f"L2nodet={totals['L2_missing_gt_and_gdino_not_detected']}")
 
+            # Print detailed statistics
+            print("----------------------------------------------------------------------------")
+            for lbl, st in labelwise_video_stats_sorted.items():
+                if st["frames_missing_3d"] == 0:
+                    continue
+                print(f"  [label] {lbl}: missing_frames={st['frames_missing_3d']}, "
+                      f"L1={st['missing_L1_3d_missing_gt_present']}, "
+                      f"L2det={st['missing_L2_gt_missing_gdino_detected']}, "
+                      f"L2nodet={st['missing_L2_gt_missing_gdino_not_detected']}, "
+                      f"is_dynamic={st['is_dynamic']}")
+
+            # Optionally print per-frame stats
+            print("----------------------------------------------------------------------------")
+            for frame_name in frame_keys:
+                fr = frame_stats[frame_name]
+                print(f"  [frame] {frame_name}: num_3d_objects={fr['num_3d_objects']}, "
+                      f"missing_total={fr['counts']['missing_3d_all']}, "
+                      f"L1={fr['counts']['L1_3d_missing_but_gt_present']}, "
+                      f"L2det={fr['counts']['L2_gt_missing_but_gdino_detected']}, "
+                      f"L2nodet={fr['counts']['L2_gt_and_gdino_not_detected']}")
+                lfs = fr.get("labelwise_frame_stats", {})
+                for lbl, lfs_rec in lfs.items():
+                    if not lfs_rec["present_3d"]:
+                        print(f"    [label] {lbl}: present_gt={lfs_rec['present_gt']}, "
+                              f"present_gdino={lfs_rec['present_gdino']}, "
+                              f"reason={lfs_rec['reason']}")
+
         return out
 
 
@@ -783,8 +810,12 @@ def compile_missing3d_stats_for_split(
     videos: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
 
-    # ✅ crucial: dedupe (StandardAG is frame-level)
+    # crucial: dedupe (StandardAG is frame-level)
     video_ids = collect_unique_video_ids(source)
+
+    bbox_stats_root_dir = "/data/rohith/ag/world_annotations/bbox_stats_4d/missing3d_stats"
+    out_dir = Path(bbox_stats_root_dir) / split_name
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     for video_id in tqdm(video_ids, desc=f"[compile]{split_name}", total=len(video_ids)):
         try:
@@ -795,6 +826,14 @@ def compile_missing3d_stats_for_split(
                 store_frame_label_stats=store_frame_label_stats,
                 verbose=verbose_per_video,
             )
+
+            # Store the result
+            out_path =  out_dir / f"{_normalize_video_id(video_id)[:-4]}_missing3d_stats.json"
+            with open(out_path, "w") as f:
+                json.dump(out, f, indent=2)
+            print(f"\n[missing3d] Saved single-video stats to: {out_path}")
+
+
             videos[video_id] = out
         except Exception as e:
             msg = f"{type(e).__name__}: {e}"
@@ -862,7 +901,7 @@ def parse_args():
     p.add_argument("--no_plots", action="store_true", help="skip generating plots for train/test compilation")
 
     # output
-    p.add_argument("--out_dir", type=str, default="", help="override output dir (default: bbox_4d_root_dir/missing3d_stats)")
+    p.add_argument("--out_dir", type=str, default="/data/rohith/ag/world_annotations/bbox_stats_4d/", help="override output dir (default: bbox_4d_root_dir/missing3d_stats)")
     return p.parse_args()
 
 
@@ -880,13 +919,12 @@ def main_missing3d_stats_single_video(args) -> None:
         verbose=True,
     )
 
-    out_dir = Path(args.out_dir) if args.out_dir else (stats_estimator.bbox_4d_root_dir / "missing3d_stats")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{_normalize_video_id(video_id)[:-4]}_missing3d_stats.json"
-    with open(out_path, "w") as f:
-        json.dump(stats, f, indent=2)
-
-    print(f"\n[missing3d] Saved single-video stats to: {out_path}")
+    # out_dir = Path(args.out_dir) if args.out_dir else (stats_estimator.bbox_4d_root_dir / "missing3d_stats")
+    # out_dir.mkdir(parents=True, exist_ok=True)
+    # out_path = out_dir / f"{_normalize_video_id(video_id)[:-4]}_missing3d_stats.json"
+    # with open(out_path, "w") as f:
+    #     json.dump(stats, f, indent=2)
+    # print(f"\n[missing3d] Saved single-video stats to: {out_path}")
 
 
 def main_missing3d_stats_train_test(args) -> None:
@@ -906,7 +944,7 @@ def main_missing3d_stats_train_test(args) -> None:
         skip_errors=True,
     )
 
-    out_dir = Path(args.out_dir) if args.out_dir else (stats_estimator.bbox_4d_root_dir / "missing3d_stats")
+    out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     out_path = out_dir / "missing3d_compiled_train_test.json"

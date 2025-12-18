@@ -108,6 +108,9 @@ class FrameToWorldBase:
         self.bbox_4d_root_dir = self.world_annotations_root_dir / "bbox_annotations_4d"
         os.makedirs(self.bbox_4d_root_dir, exist_ok=True)
 
+        self.bbox_stats_root_dir = self.world_annotations_root_dir / "bbox_stats"
+        os.makedirs(self.bbox_stats_root_dir, exist_ok=True)
+
         # GT annotations
         self.gt_annotations_root_dir = self.ag_root_directory / "gt_annotations"
 
