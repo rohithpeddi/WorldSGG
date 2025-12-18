@@ -1,21 +1,27 @@
+#!/usr/bin/env python3
 import argparse
-
-import matplotlib.pyplot as plt
-
-
-import os
 import json
-import pickle
+import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 import numpy as np
 from tqdm import tqdm
 
-from datasets.preprocess.annotations.frame_to_world_base import FrameToWorldBase
-from dataloader.standard.action_genome.ag_dataset import StandardAG
+# Safe for headless runs (saving plots)
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 from torch.utils.data import DataLoader
 
+from datasets.preprocess.annotations.frame_to_world_base import FrameToWorldBase
+from dataloader.standard.action_genome.ag_dataset import StandardAG
+
+
+# ======================================================================================
+# Missing 3D Box Stats Estimator
+# ======================================================================================
 
 class Missing3DBoxStatsEstimator(FrameToWorldBase):
 
@@ -34,7 +40,7 @@ class Missing3DBoxStatsEstimator(FrameToWorldBase):
             - not_detected  => "likely occlusion/out-of-view"
 
         Adds:
-          - labelwise_frame_stats: per frame, per label reason/presence
+          - labelwise_frame_stats: per frame, per label reason/presence (optional)
           - labelwise_video_stats: per video, per label aggregated counts
 
         Returns a dict with frame_stats + totals + labelwise summaries.
@@ -106,6 +112,10 @@ class Missing3DBoxStatsEstimator(FrameToWorldBase):
                     return 10**18
             return sorted(keys, key=_key_fn)
 
+        # normalize video id
+        if not video_id.endswith(".mp4"):
+            video_id = video_id + ".mp4"
+
         # -----------------------
         # ensure active objects loaded
         # -----------------------
@@ -169,7 +179,6 @@ class Missing3DBoxStatsEstimator(FrameToWorldBase):
             obj for obj in video_reasoned_active_object_labels
             if obj not in non_moving_objects
         ]
-
         video_static_object_labels = [
             obj for obj in video_active_object_labels
             if obj not in video_dynamic_object_labels
@@ -178,7 +187,6 @@ class Missing3DBoxStatsEstimator(FrameToWorldBase):
         expected_all_3d = set(all_labels)
         expected_dynamic_3d = set([lbl for lbl in video_dynamic_object_labels if lbl in expected_all_3d])
 
-        # only static labels that actually appear at least once in 3D
         static_labels_in_3d = [lbl for lbl in video_static_object_labels if lbl in expected_all_3d]
         expected_static_3d = set(static_labels_in_3d)
 
@@ -284,7 +292,6 @@ class Missing3DBoxStatsEstimator(FrameToWorldBase):
                 "L2_gt_and_gdino_not_detected": [],
             }
 
-            # optional per-frame per-label stats (compact)
             labelwise_frame_stats = {} if store_frame_label_stats else None
 
             for lbl in expected_all_3d:
@@ -336,7 +343,6 @@ class Missing3DBoxStatsEstimator(FrameToWorldBase):
                             "reason": "present_3d",
                         }
 
-            # update totals
             totals["missing_3d_total"] += len(missing_all)
             totals["missing_static_3d_total"] += len(missing_static)
             totals["missing_dynamic_3d_total"] += len(missing_dynamic)
@@ -384,12 +390,10 @@ class Missing3DBoxStatsEstimator(FrameToWorldBase):
             if store_frame_label_stats:
                 frame_stats[frame_name]["labelwise_frame_stats"] = labelwise_frame_stats
 
-        # sort missing_per_label_frames for readability
         totals["missing_per_label_frames"] = dict(
             sorted(totals["missing_per_label_frames"].items(), key=lambda kv: kv[1], reverse=True)
         )
 
-        # also provide labelwise_video_stats sorted by total frames missing
         labelwise_video_stats_sorted = dict(
             sorted(
                 labelwise_video_stats.items(),
@@ -425,10 +429,11 @@ class Missing3DBoxStatsEstimator(FrameToWorldBase):
         return out
 
 
+# ======================================================================================
+# Plot helpers (operate on compiled split blobs)
+# ======================================================================================
+
 def _split_video_records(split_blob: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Convert compiled split {videos:{vid:out}} -> list of video-level record dicts.
-    """
     recs = []
     for vid, out in split_blob.get("videos", {}).items():
         if "totals" not in out:
@@ -437,7 +442,6 @@ def _split_video_records(split_blob: Dict[str, Any]) -> List[Dict[str, Any]]:
         sets = out.get("sets", {})
         recs.append({
             "video_id": vid,
-
             "frames_total": t.get("frames_total", 0),
 
             "expected_all": len(sets.get("expected_all_3d", [])),
@@ -456,9 +460,6 @@ def _split_video_records(split_blob: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _split_frame_records(split_blob: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Flatten frame_stats across all videos into frame-level records.
-    """
     recs = []
     for vid, out in split_blob.get("videos", {}).items():
         fstats = out.get("frame_stats", {})
@@ -478,12 +479,8 @@ def _split_frame_records(split_blob: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _aggregate_labelwise_over_split(split_blob: Dict[str, Any]) -> Dict[str, Dict[str, int]]:
-    """
-    Aggregate labelwise_video_stats across videos.
-    Returns: label -> aggregated counts
-    """
     agg: Dict[str, Dict[str, int]] = {}
-    for vid, out in split_blob.get("videos", {}).items():
+    for _vid, out in split_blob.get("videos", {}).items():
         lv = out.get("labelwise_video_stats", {}) or {}
         for lbl, st in lv.items():
             if lbl not in agg:
@@ -503,10 +500,6 @@ def _aggregate_labelwise_over_split(split_blob: Dict[str, Any]) -> Dict[str, Dic
             agg[lbl]["videos_seen"] += 1
     return agg
 
-
-# ---------------------------
-# Frame-wise plots
-# ---------------------------
 
 def plot_framewise_histograms(
     split_blob: Dict[str, Any],
@@ -530,7 +523,10 @@ def plot_framewise_histograms(
             Path(save_dir).mkdir(parents=True, exist_ok=True)
             out = Path(save_dir) / f"{split_name}_frame_hist_{key}.png"
             plt.savefig(out, dpi=200, bbox_inches="tight")
+            plt.close()
             print(f"[plot] saved {out}")
+        else:
+            plt.close()
 
     _hist("missing_total", f"{split_name}: frame-wise missing_total histogram")
     _hist("missing_static", f"{split_name}: frame-wise missing_static histogram")
@@ -539,10 +535,6 @@ def plot_framewise_histograms(
     _hist("L2_det", f"{split_name}: frame-wise L2_det histogram")
     _hist("L2_nodet", f"{split_name}: frame-wise L2_nodet histogram")
 
-
-# ---------------------------
-# Video-wise plots
-# ---------------------------
 
 def plot_videowise_histograms(
     split_blob: Dict[str, Any],
@@ -567,15 +559,20 @@ def plot_videowise_histograms(
             Path(save_dir).mkdir(parents=True, exist_ok=True)
             out = Path(save_dir) / f"{split_name}_video_hist_{key}.png"
             plt.savefig(out, dpi=200, bbox_inches="tight")
+            plt.close()
             print(f"[plot] saved {out}")
+        else:
+            plt.close()
 
     _hist("missing_total", f"{split_name}: video-wise missing_total histogram")
     _hist("missing_static", f"{split_name}: video-wise missing_static histogram")
     _hist("missing_dynamic", f"{split_name}: video-wise missing_dynamic histogram")
     _hist("expected_all", f"{split_name}: expected_all labels per video histogram")
 
-    # stacked bar over top-k worst videos by missing_total
     vids_sorted = sorted(vids, key=lambda r: r["missing_total"], reverse=True)[:topk]
+    if not vids_sorted:
+        return
+
     x = np.arange(len(vids_sorted))
     ms = np.array([r["missing_static"] for r in vids_sorted], dtype=np.int64)
     md = np.array([r["missing_dynamic"] for r in vids_sorted], dtype=np.int64)
@@ -592,9 +589,11 @@ def plot_videowise_histograms(
         Path(save_dir).mkdir(parents=True, exist_ok=True)
         out = Path(save_dir) / f"{split_name}_video_top{topk}_missing_static_dynamic_stacked.png"
         plt.savefig(out, dpi=200, bbox_inches="tight")
+        plt.close()
         print(f"[plot] saved {out}")
+    else:
+        plt.close()
 
-    # scatter: expected_all vs missing_total
     xa = [r["expected_all"] for r in vids]
     ya = [r["missing_total"] for r in vids]
     plt.figure()
@@ -605,12 +604,11 @@ def plot_videowise_histograms(
     if save_dir:
         out = Path(save_dir) / f"{split_name}_video_scatter_expected_all_vs_missing_total.png"
         plt.savefig(out, dpi=200, bbox_inches="tight")
+        plt.close()
         print(f"[plot] saved {out}")
+    else:
+        plt.close()
 
-
-# ---------------------------
-# Static / Dynamic / Total object-count plots (video-wise)
-# ---------------------------
 
 def plot_video_object_group_counts(
     split_blob: Dict[str, Any],
@@ -625,6 +623,9 @@ def plot_video_object_group_counts(
         return
 
     vids_sorted = sorted(vids, key=lambda r: r["expected_all"], reverse=True)[:topk]
+    if not vids_sorted:
+        return
+
     x = np.arange(len(vids_sorted))
     e_static = np.array([r["expected_static"] for r in vids_sorted], dtype=np.int64)
     e_dyn = np.array([r["expected_dynamic"] for r in vids_sorted], dtype=np.int64)
@@ -641,12 +642,11 @@ def plot_video_object_group_counts(
         Path(save_dir).mkdir(parents=True, exist_ok=True)
         out = Path(save_dir) / f"{split_name}_video_top{topk}_expected_static_dynamic_stacked.png"
         plt.savefig(out, dpi=200, bbox_inches="tight")
+        plt.close()
         print(f"[plot] saved {out}")
+    else:
+        plt.close()
 
-
-# ---------------------------
-# Label-wise plots
-# ---------------------------
 
 def plot_labelwise_topk(
     split_blob: Dict[str, Any],
@@ -676,35 +676,99 @@ def plot_labelwise_topk(
         Path(save_dir).mkdir(parents=True, exist_ok=True)
         out = Path(save_dir) / f"{split_name}_label_top{topk}_{metric}.png"
         plt.savefig(out, dpi=200, bbox_inches="tight")
+        plt.close()
         print(f"[plot] saved {out}")
+    else:
+        plt.close()
 
 
-from typing import Iterable, Union
-import traceback
+# ======================================================================================
+# Dataset loaders + compilation (FIXED: dedupe video_ids from frame-level loader)
+# ======================================================================================
+
+def load_dataset(ag_root_directory: str):
+    train_dataset = StandardAG(
+        phase="train",
+        mode="sgdet",
+        datasize="large",
+        data_path=ag_root_directory,
+        filter_nonperson_box_frame=True,
+        filter_small_box=False,
+    )
+    test_dataset = StandardAG(
+        phase="test",
+        mode="sgdet",
+        datasize="large",
+        data_path=ag_root_directory,
+        filter_nonperson_box_frame=True,
+        filter_small_box=False,
+    )
+
+    # IMPORTANT: StandardAG yields frame-level samples => many repeats per video_id.
+    # We set shuffle=False for stable ordering when extracting unique video ids.
+    dataloader_train = DataLoader(
+        train_dataset,
+        batch_size=1,
+        shuffle=False,
+        collate_fn=lambda b: b[0],
+        pin_memory=False,
+        num_workers=0,
+    )
+    dataloader_test = DataLoader(
+        test_dataset,
+        batch_size=1,
+        shuffle=False,
+        collate_fn=lambda b: b[0],
+        pin_memory=False,
+        num_workers=0,
+    )
+    return train_dataset, test_dataset, dataloader_train, dataloader_test
+
+
+def _normalize_video_id(vid: str) -> str:
+    vid = str(vid).strip()
+    if not vid.endswith(".mp4"):
+        vid = vid + ".mp4"
+    return vid
 
 
 def _iter_video_ids(source: Union[Iterable[str], Any]) -> Iterable[str]:
     """
     Accepts:
       - iterable of video_id strings, OR
-      - a DataLoader-like iterable yielding dicts containing 'video_id'
+      - DataLoader-like iterable yielding dicts containing video identifiers
     """
     for item in source:
         if isinstance(item, str):
-            yield item
-        elif isinstance(item, dict):
-            if "video_id" in item:
-                yield item["video_id"]
-            elif "video" in item:
-                yield item["video"]
+            yield _normalize_video_id(item)
+            continue
+
+        if isinstance(item, dict):
+            for k in ["video_id", "video", "video_name", "vid", "videoid"]:
+                if k in item:
+                    yield _normalize_video_id(item[k])
+                    break
             else:
-                raise KeyError("Dataloader item dict must contain 'video_id' (or 'video').")
-        else:
-            # try attribute access
-            vid = getattr(item, "video_id", None)
-            if vid is None:
-                raise TypeError(f"Unsupported item type from source: {type(item)}")
-            yield vid
+                raise KeyError(f"Cannot find video id key in item dict keys={list(item.keys())}")
+            continue
+
+        vid = getattr(item, "video_id", None)
+        if vid is not None:
+            yield _normalize_video_id(vid)
+            continue
+
+        raise TypeError(f"Unsupported item type from source: {type(item)}")
+
+
+def collect_unique_video_ids(source) -> List[str]:
+    seen = set()
+    uniq = []
+    for vid in _iter_video_ids(source):
+        if vid in seen:
+            continue
+        seen.add(vid)
+        uniq.append(vid)
+    return uniq
 
 
 def compile_missing3d_stats_for_split(
@@ -716,22 +780,14 @@ def compile_missing3d_stats_for_split(
     verbose_per_video: bool = False,
     skip_errors: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Runs estimator over all videos in a split source (dataloader or list of video_ids).
-    Returns:
-      {
-        "split": split_name,
-        "videos": {video_id: per_video_out},
-        "errors": {video_id: error_string},
-      }
-    """
     videos: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
 
-    video_ids = list(_iter_video_ids(source))
+    # ✅ crucial: dedupe (StandardAG is frame-level)
+    video_ids = collect_unique_video_ids(source)
+
     for video_id in tqdm(video_ids, desc=f"[compile]{split_name}", total=len(video_ids)):
         try:
-            # ensure active objects known
             estimator.fetch_stored_active_objects_in_video(video_id)
 
             out = estimator.estimate_missing_3d_boxes(
@@ -745,10 +801,8 @@ def compile_missing3d_stats_for_split(
             if not skip_errors:
                 raise
             errors[video_id] = msg
-            # optionally keep traceback for debugging
-            # errors[video_id] = traceback.format_exc()
 
-    return {"split": split_name, "videos": videos, "errors": errors}
+    return {"split": split_name, "videos": videos, "errors": errors, "num_videos": len(video_ids)}
 
 
 def compile_missing3d_stats_train_test(
@@ -787,88 +841,118 @@ def save_compiled_stats_json(compiled: Dict[str, Any], out_path: str) -> None:
     print(f"[compile] wrote: {out_path}")
 
 
-def load_dataset(ag_root_directory: str):
-    train_dataset = StandardAG(
-        phase="train",
-        mode="sgdet",
-        datasize="large",
-        data_path=ag_root_directory,
-        filter_nonperson_box_frame=True,
-        filter_small_box=False,
-    )
-    test_dataset = StandardAG(
-        phase="test",
-        mode="sgdet",
-        datasize="large",
-        data_path=ag_root_directory,
-        filter_nonperson_box_frame=True,
-        filter_small_box=False,
-    )
-
-    dataloader_train = DataLoader(
-        train_dataset,
-        shuffle=True,
-        collate_fn=lambda b: b[0],
-        pin_memory=False,
-        num_workers=0,
-    )
-    dataloader_test = DataLoader(
-        test_dataset,
-        shuffle=False,
-        collate_fn=lambda b: b[0],
-        pin_memory=False,
-        num_workers=0,
-    )
-    return train_dataset, test_dataset, dataloader_train, dataloader_test
-
+# ======================================================================================
+# CLI / mains
+# ======================================================================================
 
 def parse_args():
-    p = argparse.ArgumentParser(description="FrameToWorld stats estimators (refactored).")
+    p = argparse.ArgumentParser(description="Missing 3D box stats (frame + video, train/test compilation).")
     p.add_argument("--ag_root_directory", type=str, default="/data/rohith/ag")
     p.add_argument(
         "--dynamic_scene_dir_path",
         type=str,
         default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
     )
-    p.add_argument("--split", type=str, default="04")
 
-    # what to run
-    p.add_argument("--run_mismatch", action="store_true", help="run 2D/3D mismatch estimation")
-    p.add_argument("--run_camera_motion", action="store_true", help="run camera motion estimation for --split")
-    p.add_argument("--run_combine_camera_motion", action="store_true", help="combine camera motion stats across splits")
-    p.add_argument(
-        "--run_all",
-        action="store_true",
-        help="run mismatch + camera_motion + combine_camera_motion",
-    )
+    # run modes
+    p.add_argument("--run_single_video", action="store_true", help="run stats for one video_id")
+    p.add_argument("--video_id", type=str, default="00T1E.mp4", help="video id for --run_single_video")
+    p.add_argument("--run_train_test", action="store_true", help="compile stats over train+test splits")
+    p.add_argument("--store_frame_label_stats", action="store_true", help="store per-frame per-label stats (heavy)")
+    p.add_argument("--no_plots", action="store_true", help="skip generating plots for train/test compilation")
+
+    # output
+    p.add_argument("--out_dir", type=str, default="", help="override output dir (default: bbox_4d_root_dir/missing3d_stats)")
     return p.parse_args()
 
 
-def main_missing3d_stats_sample():
-    args = parse_args()
-
+def main_missing3d_stats_single_video(args) -> None:
     stats_estimator = Missing3DBoxStatsEstimator(
         ag_root_directory=args.ag_root_directory,
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
     )
 
-    video_id = "00T1E.mp4"
-
-    # Load active objects (needed for static/dynamic split)
+    video_id = args.video_id
     stats_estimator.fetch_stored_active_objects_in_video(video_id)
+    stats = stats_estimator.estimate_missing_3d_boxes(
+        video_id,
+        store_frame_label_stats=True,
+        verbose=True,
+    )
 
-    # Run stats
-    stats = stats_estimator.estimate_missing_3d_boxes(video_id)
-
-    # Optional: save to disk next to bbox_4d_root_dir (or anywhere you want)
-    out_dir = stats_estimator.bbox_4d_root_dir / "missing3d_stats"
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = out_dir / f"{video_id[:-4]}_missing3d_stats.json"
+    out_dir = Path(args.out_dir) if args.out_dir else (stats_estimator.bbox_4d_root_dir / "missing3d_stats")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{_normalize_video_id(video_id)[:-4]}_missing3d_stats.json"
     with open(out_path, "w") as f:
         json.dump(stats, f, indent=2)
 
-    print(f"\n[missing3d] Saved stats to: {out_path}")
+    print(f"\n[missing3d] Saved single-video stats to: {out_path}")
+
+
+def main_missing3d_stats_train_test(args) -> None:
+    stats_estimator = Missing3DBoxStatsEstimator(
+        ag_root_directory=args.ag_root_directory,
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
+    )
+
+    _, _, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
+
+    compiled = compile_missing3d_stats_train_test(
+        stats_estimator,
+        train_source=dataloader_train,
+        test_source=dataloader_test,
+        store_frame_label_stats=args.store_frame_label_stats,
+        verbose_per_video=False,
+        skip_errors=True,
+    )
+
+    out_dir = Path(args.out_dir) if args.out_dir else (stats_estimator.bbox_4d_root_dir / "missing3d_stats")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    out_path = out_dir / "missing3d_compiled_train_test.json"
+    save_compiled_stats_json(compiled, str(out_path))
+
+    if not args.no_plots:
+        plot_dir = out_dir / "plots"
+        plot_dir.mkdir(parents=True, exist_ok=True)
+
+        plot_framewise_histograms(compiled["train"], split_name="train", save_dir=str(plot_dir))
+        plot_framewise_histograms(compiled["test"], split_name="test", save_dir=str(plot_dir))
+
+        plot_videowise_histograms(compiled["train"], split_name="train", save_dir=str(plot_dir))
+        plot_videowise_histograms(compiled["test"], split_name="test", save_dir=str(plot_dir))
+
+        plot_video_object_group_counts(compiled["train"], split_name="train", save_dir=str(plot_dir))
+        plot_video_object_group_counts(compiled["test"], split_name="test", save_dir=str(plot_dir))
+
+        plot_labelwise_topk(compiled["train"], split_name="train", metric="frames_missing_3d", save_dir=str(plot_dir))
+        plot_labelwise_topk(compiled["test"], split_name="test", metric="frames_missing_3d", save_dir=str(plot_dir))
+
+        plot_labelwise_topk(compiled["train"], split_name="train", metric="missing_L1", save_dir=str(plot_dir))
+        plot_labelwise_topk(compiled["train"], split_name="train", metric="missing_L2_det", save_dir=str(plot_dir))
+        plot_labelwise_topk(compiled["train"], split_name="train", metric="missing_L2_nodet", save_dir=str(plot_dir))
+
+        plot_labelwise_topk(compiled["test"], split_name="test", metric="missing_L1", save_dir=str(plot_dir))
+        plot_labelwise_topk(compiled["test"], split_name="test", metric="missing_L2_det", save_dir=str(plot_dir))
+        plot_labelwise_topk(compiled["test"], split_name="test", metric="missing_L2_nodet", save_dir=str(plot_dir))
+
+        print(f"[missing3d] wrote plots to: {plot_dir}")
+
+    print(f"[missing3d] wrote compiled stats: {out_path}")
+
+
+def main():
+    args = parse_args()
+
+    if args.run_single_video:
+        main_missing3d_stats_single_video(args)
+
+    if args.run_train_test:
+        main_missing3d_stats_train_test(args)
+
+    if (not args.run_single_video) and (not args.run_train_test):
+        print("Nothing to run. Use --run_single_video and/or --run_train_test.")
 
 
 if __name__ == "__main__":
-    main_missing3d_stats_sample()
+    main()
