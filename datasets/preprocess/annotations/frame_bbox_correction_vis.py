@@ -1406,7 +1406,7 @@ class FrameToWorldAnnotations:
             vis_mode="after",
         )
 
-    def generate_sample_gt_world_4D_annotations(self, video_id: str) -> None:
+    def generate_sample_gt_world_3D_annotations(self, video_id: str) -> None:
         """
         Example/debug entry point for a single video.
 
@@ -1432,7 +1432,7 @@ class FrameToWorldAnnotations:
         # Now show the original Pi3-space outputs (points + floor + frames + camera + 3D boxes)
         self.visualize_original_results(video_id=video_id)
 
-    def generate_gt_world_bb_annotations(
+    def generate_gt_world_3D_bb_annotations(
         self, dataloader: DataLoader, split: str
     ) -> None:
         """
@@ -1537,10 +1537,10 @@ def main():
     _, _, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
 
     # Example: run over one split
-    frame_to_world_generator.generate_gt_world_bb_annotations(
+    frame_to_world_generator.generate_gt_world_3D_bb_annotations(
         dataloader=dataloader_train, split=args.split
     )
-    frame_to_world_generator.generate_gt_world_bb_annotations(
+    frame_to_world_generator.generate_gt_world_3D_bb_annotations(
         dataloader=dataloader_test, split=args.split
     )
 
@@ -1558,7 +1558,7 @@ def main_sample():
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
     )
     video_id = "0DJ6R.mp4"
-    frame_to_world_generator.generate_sample_gt_world_4D_annotations(video_id=video_id)
+    frame_to_world_generator.generate_sample_gt_world_3D_annotations(video_id=video_id)
 
 
 if __name__ == "__main__":
