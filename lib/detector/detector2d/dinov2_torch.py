@@ -193,8 +193,7 @@ class SimpleFeaturePyramid(nn.Module):
 
 class Dinov3ModelBackbone(nn.Module):
 
-    def __init__(self,
-                 model_name='facebook/dinov3-vitl16-pretrain-lvd1689m'):  # facebook/dinov3-vitb16-pretrain-lvd1689m , facebook/dinov2-base
+    def __init__(self, model_name='facebook/dinov3-vitl16-pretrain-lvd1689m'):  # facebook/dinov3-vitb16-pretrain-lvd1689m , facebook/dinov2-base
         super().__init__()  #facebook/dinov3-vith16plus-pretrain-lvd1689m
         self.model_name = model_name
         self.bck_model = AutoModel.from_pretrained(self.model_name)
