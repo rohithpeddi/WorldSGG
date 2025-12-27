@@ -3,7 +3,6 @@ import argparse
 import json
 import os
 import pickle
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -12,21 +11,14 @@ import numpy as np
 import rerun as rr
 from torch.utils.data import DataLoader
 
-from dataloader.standard.action_genome.ag_dataset import StandardAG
 from annotation_utils import (
     get_video_belongs_to_split,
     _load_pkl_if_exists,
     _npz_open,
     _faces_u32,
-    _resize_mask_to,
-    _mask_from_bbox,
-    _resize_bbox_to,
-    _xywh_to_xyxy,
-    _finite_and_nonzero,
-    _pinhole_from_fov,
     _is_empty_array,
 )
-
+from dataloader.standard.action_genome.ag_dataset import StandardAG
 
 
 # --------------------------------------------------------------------------------------
@@ -43,17 +35,12 @@ from annotation_utils import (
 
 def rerun_frame_vis_results(
     video_id: str,
-    points_S: np.ndarray,
-    conf_S: Optional[np.ndarray],
-    stems_S: List[str],
-    colors_S: Optional[np.ndarray],
-    camera_poses_S: Optional[np.ndarray],
+    frames_final: Dict[str, Any],
     frame_annotated_dir_path: Path,
     *,
     floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None,
     global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None,
     frame_3dbb_map: Optional[Dict[Any, List[Dict[str, Any]]]] = None,
-    frame_bbox_meshes:  Optional[Dict[int, List[Dict[str, Any]]]] = None,
     img_maxsize: int = 320,
     app_id: str = "World4D-Original",
     min_conf_default: float = 1e-6,
@@ -108,7 +95,6 @@ def rerun_frame_vis_results(
     rr.log("/", rr.ViewCoordinates.RUB)
 
     BASE = "world"
-    BASE_AFTER_MIRROR = f"{BASE}/after_mirror"
 
     # Ensure both branches share the same coordinate convention
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
@@ -120,8 +106,12 @@ def rerun_frame_vis_results(
         (0, 4), (1, 5), (2, 6), (3, 7),
     ]
 
-    # Mirror transform about ZY plane (x -> -x) in the aligned frame
-    M_mirror = np.diag([-1.0, 1.0, 1.0]).astype(np.float32)
+    stems_S = frames_final["frame_stems"]
+    points_S = frames_final.get("points", None)
+    colors_S = frames_final.get("colors", None)
+    conf_S = frames_final.get("conf", None)
+    camera_poses_S = frames_final.get("camera_poses", None)
+    bbox_frames = frames_final.get("bbox_frames", None)
 
     # -------------------------------------------------------------------------
     # Static world & XYZ axes (common; drawn at origin of aligned coords)
@@ -451,6 +441,7 @@ def rerun_frame_vis_results(
 
 
 class FrameToWorldAnnotations:
+
     def __init__(self, ag_root_directory: str, dynamic_scene_dir_path: str):
         self.ag_root_directory = Path(ag_root_directory)
         self.dynamic_scene_dir_path = Path(dynamic_scene_dir_path)
@@ -521,6 +512,7 @@ class FrameToWorldAnnotations:
         self.world_annotations_root_dir = self.ag_root_directory / "world_annotations"
         self.bbox_3d_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d"
         self.bbox_4d_root_dir = self.world_annotations_root_dir / "bbox_annotations_4d"
+        self.bbox_3d_final_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_final"
         os.makedirs(self.bbox_4d_root_dir, exist_ok=True)
 
         # GT annotations
@@ -562,6 +554,9 @@ class FrameToWorldAnnotations:
         self.static_masks_combined_dir_path = (
             self.ag_root_directory / "segmentation_static" / "masks" / "combined"
         )
+
+        # Mirror transform about ZY plane (x -> -x) in the aligned frame
+        M_mirror = np.diag([-1.0, 1.0, 1.0]).astype(np.float32)
 
     # ----------------------------------------------------------------------------------
     # GT + GDINO + 3D annotations loaders
@@ -716,9 +711,7 @@ class FrameToWorldAnnotations:
 
     def _bbox_idx_to_frame_idx_path(
         self, video_id: str
-    ) -> Tuple[
-        Dict[int, str], List[int], List[int], List[str], List[int]
-    ]:
+    ) -> Tuple[Dict[int, str], List[int], List[int], List[str], List[int]]:
         """
         Replica of BBox3DGenerator.idx_to_frame_idx_path, so that
         the points we load here match exactly the subset used
@@ -771,15 +764,14 @@ class FrameToWorldAnnotations:
             annotated_frame_idx_in_sample_idx,
         )
 
-    # ----------------------------------------------------------------------------------
-    # ORIGINAL POINTS LOADER – matches BBox3DGenerator._load_points_for_video
-    # ----------------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Load original points (annotated frames only)
+    # -------------------------------------------------------------------------
 
     def _load_original_points_for_video(self, video_id: str) -> Dict[str, Any]:
         """
-        Load the *original* Pi3 points, confidences, colors, and camera poses
-        for the **annotated frames only**, using exactly the same indexing
-        and slicing logic as BBox3DGenerator._load_points_for_video.
+        Load original Pi3 outputs for annotated frames only, using same slicing logic
+        as bbox generation.
 
         Returns:
             {
@@ -790,47 +782,39 @@ class FrameToWorldAnnotations:
                 "camera_poses": (S,4,4) or None
             }
         """
-        video_dynamic_3d_scene_path = (
-            self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
-        )
+        video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
         if not video_dynamic_3d_scene_path.exists():
-            raise FileNotFoundError(
-                f"[original-points] predictions.npz not found: {video_dynamic_3d_scene_path}"
-            )
+            raise FileNotFoundError(f"[original-points] predictions.npz not found: {video_dynamic_3d_scene_path}")
 
-        with _npz_open(video_dynamic_3d_scene_path) as video_dynamic_predictions:
-            points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
-            imgs_f32 = video_dynamic_predictions["images"]
+        with _npz_open(video_dynamic_3d_scene_path) as pred:
+            points = pred["points"].astype(np.float32)  # (S,H,W,3)
+
+            imgs_f32 = pred["images"]
             colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
 
             conf = None
-            if "conf" in video_dynamic_predictions:
-                conf = video_dynamic_predictions["conf"]
+            if "conf" in pred:
+                conf = pred["conf"]
                 if conf.ndim == 4 and conf.shape[-1] == 1:
                     conf = conf[..., 0]
                 conf = conf.astype(np.float32)
 
             camera_poses = None
-            if "camera_poses" in video_dynamic_predictions:
-                camera_poses = video_dynamic_predictions["camera_poses"].astype(
-                    np.float32
-                )
+            if "camera_poses" in pred:
+                camera_poses = pred["camera_poses"].astype(np.float32)
 
             S, H, W, _ = points.shape
 
             (
-                frame_idx_frame_path_map,
+                _frame_idx_frame_path_map,
                 sample_idx,
                 video_sampled_frame_id_list,
                 annotated_frame_id_list,
-                annotated_frame_idx_in_sample_idx,
+                _annotated_frame_idx_in_sample_idx,
             ) = self._bbox_idx_to_frame_idx_path(video_id)
 
-            assert S == len(
-                sample_idx
-            ), (
-                f"[original-points] points axis ({S}) != sample_idx range "
-                f"({len(sample_idx)}) for {video_id}"
+            assert S == len(sample_idx), (
+                f"[original-points] points axis ({S}) != sample_idx range ({len(sample_idx)}) for {video_id}"
             )
 
             sampled_idx_frame_name_map: Dict[int, str] = {}
@@ -843,22 +827,13 @@ class FrameToWorldAnnotations:
             annotated_idx_in_sampled_idx: List[int] = []
             for frame_name in annotated_frame_id_list:
                 if frame_name in frame_name_sampled_idx_map:
-                    annotated_idx_in_sampled_idx.append(
-                        frame_name_sampled_idx_map[frame_name]
-                    )
+                    annotated_idx_in_sampled_idx.append(frame_name_sampled_idx_map[frame_name])
 
             points_sub = points[annotated_idx_in_sampled_idx]
             colors_sub = colors[annotated_idx_in_sampled_idx]
             conf_sub = conf[annotated_idx_in_sampled_idx] if conf is not None else None
-            camera_poses_sub = (
-                camera_poses[annotated_idx_in_sampled_idx]
-                if camera_poses is not None
-                else None
-            )
-            stems_sub = [
-                sampled_idx_frame_name_map[idx][:-4]
-                for idx in annotated_idx_in_sampled_idx
-            ]
+            camera_poses_sub = camera_poses[annotated_idx_in_sampled_idx] if camera_poses is not None else None
+            stems_sub = [sampled_idx_frame_name_map[idx][:-4] for idx in annotated_idx_in_sampled_idx]
 
         return {
             "points": points_sub,
@@ -868,291 +843,275 @@ class FrameToWorldAnnotations:
             "camera_poses": camera_poses_sub,
         }
 
-    # ----------------------------------------------------------------------------------
-    # World 4D bbox annotations (skeleton) + ORIGINAL-results visualization
-    # ----------------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # WORLD -> FINAL transform computation + application
+    # -------------------------------------------------------------------------
 
-    def generate_video_bb_annotations(
-        self,
-        video_id: str,
-        video_id_gt_annotations,
-        video_id_gdino_annotations,
-        video_id_3d_bbox_predictions,
-        visualize: bool = False,
-    ) -> None:
+    def _compute_world_to_final(
+            self,
+            *,
+            global_floor_sim: Tuple[float, np.ndarray, np.ndarray]
+    ) -> Dict[str, np.ndarray]:
         """
-        Placeholder skeleton for world 4D bbox annotations.
+        Build WORLD->FINAL transform from global_floor_sim (s,R,t).
+        FINAL is floor-aligned (XY plane) with Z as normal, plus optional mirror in FINAL (x->-x).
 
-        Right now this:
-          - loads the 3D bbox predictions (if not already passed);
-          - prints some basic statistics over the 3D objects.
-
-        Visualization of ORIGINAL results (points/bboxes/cameras/floor) is handled
-        by `visualize_original_results`, and currently draws:
-          - original point clouds
-          - floor mesh
-          - world + XYZ coordinate frames
-          - camera frustum + camera axes
-          - original & transformed 3D bounding boxes
+        Returns:
+          origin_world: (3,)
+          R_align: (3,3) world->aligned (no mirror)
+          M_mirror: (3,3)
+          A_world_to_final: (3,3) such that:
+              p_final = A_world_to_final @ (p_world - origin_world)   (column-vector convention)
         """
-        print(f"[world4d][{video_id}] Generating world SGG annotations (skeleton)")
+        s_g, R_g, t_g = global_floor_sim
+        R_g = np.asarray(R_g, dtype=np.float32)
+        t_g = np.asarray(t_g, dtype=np.float32)
 
-        # Load 3D bboxes from disk if not provided
-        if video_id_3d_bbox_predictions is not None:
-            video_3dgt = video_id_3d_bbox_predictions
-        else:
-            video_3dgt = self.get_video_3d_annotations(video_id)
+        # floor basis in WORLD:
+        t1 = R_g[:, 0]  # in-plane
+        t2 = R_g[:, 2]  # in-plane
+        n = R_g[:, 1]  # normal
 
+        F = np.stack([t1, t2, n], axis=1)  # columns are basis vectors
+        R_align = F.T.astype(np.float32)  # world->aligned
+
+        M_mirror = np.diag([-1.0, 1.0, 1.0]).astype(np.float32)
+        A = (M_mirror @ R_align).astype(np.float32)
+
+        return {
+            "origin_world": t_g.astype(np.float32),
+            "R_align": R_align,
+            "M_mirror": M_mirror,
+            "A_world_to_final": A,
+        }
+
+    @staticmethod
+    def _apply_world_to_final_points_row(
+            pts_world: np.ndarray,
+            *,
+            origin_world: np.ndarray,
+            A_world_to_final: np.ndarray,
+    ) -> np.ndarray:
+        """
+        For row-vectors (...,3):
+          p_final_row = (p_world_row - origin_row) @ A.T
+        """
+        pts = np.asarray(pts_world, dtype=np.float32)
+        return (pts - origin_world[None, :]) @ A_world_to_final.T
+
+    @staticmethod
+    def _apply_world_to_final_camera_pose(
+            T_world: np.ndarray,
+            *,
+            origin_world: np.ndarray,
+            A_world_to_final: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Transform camera->world pose into camera->final pose:
+          R_final = A @ R_world
+          t_final = A @ (t_world - origin)
+        """
+        T = np.asarray(T_world, dtype=np.float32)
+        if T.shape == (3, 4):
+            T4 = np.eye(4, dtype=np.float32)
+            T4[:3, :4] = T
+            T = T4
+        elif T.shape != (4, 4):
+            T = np.eye(4, dtype=np.float32)
+
+        Rw = T[:3, :3]
+        tw = T[:3, 3]
+
+        Rf = A_world_to_final @ Rw
+        tf = A_world_to_final @ (tw - origin_world)
+
+        Tf = np.eye(4, dtype=np.float32)
+        Tf[:3, :3] = Rf
+        Tf[:3, 3] = tf
+        return Tf
+
+    # -------------------------------------------------------------------------
+    # Write updated PKL (separate directory)
+    # -------------------------------------------------------------------------
+
+    def save_video_3d_annotations_final(self, video_id: str, video_3dgt_updated: Dict[str, Any]) -> Path:
+        out_path = self.bbox_3d_final_root_dir / f"{video_id[:-4]}.pkl"
+        with open(out_path, "wb") as f:
+            pickle.dump(video_3dgt_updated, f, protocol=pickle.HIGHEST_PROTOCOL)
+        return out_path
+
+    # -------------------------------------------------------------------------
+    # Build frames_final and store in updated PKL
+    # -------------------------------------------------------------------------
+
+    def build_frames_final_and_store(
+            self,
+            video_id: str,
+            *,
+            overwrite: bool = False,
+            points_dtype: np.dtype = np.float32,
+    ) -> Optional[Path]:
+        """
+        Loads:
+          - original points/cameras for annotated frames
+          - bbox_annotations_3d PKL (video_3dgt)
+
+        Produces:
+          - video_3dgt_updated["frames_final"] with final points/cameras/bboxes/floor
+        Writes:
+          - to bbox_annotations_3d_final/<video_id[:-4]>.pkl
+        """
+        out_path = self.bbox_3d_final_root_dir / f"{video_id[:-4]}.pkl"
+        if out_path.exists() and not overwrite:
+            print(f"[frames_final][{video_id}] exists: {out_path} (overwrite=False). Skipping.")
+            return out_path
+
+        video_3dgt = self.get_video_3d_annotations(video_id)
         if video_3dgt is None:
-            print(f"[world4d][{video_id}] No 3D bbox annotations available, skipping.")
-            return
+            print(f"[frames_final][{video_id}] missing original bbox_annotations_3d PKL. Skipping.")
+            return None
 
-        frame_3dbb_map = video_3dgt["frames"]
+        gfs = video_3dgt.get("global_floor_sim", None)
+        if gfs is None:
+            print(f"[frames_final][{video_id}] global_floor_sim missing in PKL; cannot build FINAL. Skipping.")
+            return None
 
-        # Basic dataset-level stats
-        all_labels = set()
-        num_frames_with_objects = 0
-        num_total_objects = 0
+        global_floor_sim = (
+            float(gfs["s"]),
+            np.asarray(gfs["R"], dtype=np.float32),
+            np.asarray(gfs["t"], dtype=np.float32),
+        )
+        Tinfo = self._compute_world_to_final(global_floor_sim=global_floor_sim)
+        origin_world = Tinfo["origin_world"]
+        A = Tinfo["A_world_to_final"]
 
-        for frame_name, frame_rec in frame_3dbb_map.items():
-            objects = frame_rec.get("objects", [])
-            if not objects:
-                continue
-            num_frames_with_objects += 1
-            num_total_objects += len(objects)
-            for obj in objects:
-                lbl = obj.get("label", None)
-                if lbl:
-                    all_labels.add(lbl)
+        # Load original annotated-frame points/cameras
+        P = self._load_original_points_for_video(video_id)
+        points_world = np.asarray(P["points"], dtype=np.float32)  # (S,H,W,3)
+        stems = P["frame_stems"]
+        cams_world = P["camera_poses"]
 
-        print(
-            f"[world4d][{video_id}] frames_with_objects={num_frames_with_objects}, "
-            f"total_objects={num_total_objects}, "
-            f"unique_labels={sorted(all_labels)}"
+        S, H, W, _ = points_world.shape
+
+        # Points FINAL
+        pts_flat = points_world.reshape(-1, 3)
+        pts_final_flat = self._apply_world_to_final_points_row(pts_flat, origin_world=origin_world, A_world_to_final=A)
+        points_final = pts_final_flat.reshape(S, H, W, 3).astype(points_dtype, copy=False)
+
+        # Cameras FINAL
+        cams_final = None
+        if cams_world is not None:
+            cams_final_list = []
+            for i in range(min(S, cams_world.shape[0])):
+                cams_final_list.append(
+                    self._apply_world_to_final_camera_pose(
+                        cams_world[i],
+                        origin_world=origin_world,
+                        A_world_to_final=A,
+                    )
+                )
+            cams_final = np.stack(cams_final_list, axis=0).astype(np.float32)
+
+        # BBoxes FINAL (corners_world -> corners_final)
+        bbox_frames_final: Dict[str, Any] = {}
+        frames_map = video_3dgt.get("frames", None)
+        if frames_map is not None:
+            for frame_name, frame_rec in frames_map.items():
+                objs = frame_rec.get("objects", [])
+                if not objs:
+                    continue
+                out_objs = []
+                for obj in objs:
+                    bb = obj.get("aabb_floor_aligned", None)
+                    if bb is None or "corners_world" not in bb:
+                        continue
+                    corners_world = np.asarray(bb["corners_world"], dtype=np.float32)  # (8,3)
+                    corners_final = self._apply_world_to_final_points_row(
+                        corners_world, origin_world=origin_world, A_world_to_final=A
+                    ).astype(np.float32)
+
+                    out_obj = dict(obj)
+                    out_obj["corners_final"] = corners_final
+                    out_objs.append(out_obj)
+
+                if out_objs:
+                    bbox_frames_final[frame_name] = {"objects": out_objs}
+
+        # Floor FINAL (optional)
+        floor_final = None
+        gv = video_3dgt.get("gv", None)
+        gf = video_3dgt.get("gf", None)
+        gc = video_3dgt.get("gc", None)
+
+        if gv is not None and gf is not None:
+            gv0 = np.asarray(gv, dtype=np.float32)
+            gf0 = _faces_u32(np.asarray(gf))
+
+            # Move floor mesh into WORLD using global_floor_sim, then into FINAL
+            s_g, R_g, t_g = global_floor_sim
+            floor_world = s_g * (gv0 @ R_g.T) + t_g[None, :]
+            floor_final_v = self._apply_world_to_final_points_row(
+                floor_world, origin_world=origin_world, A_world_to_final=A
+            ).astype(np.float32)
+
+            floor_final = {"vertices": floor_final_v, "faces": gf0}
+            if gc is not None:
+                floor_final["colors"] = np.asarray(gc, dtype=np.uint8)
+
+        # Updated PKL: keep original content intact, add frames_final + world_to_final
+        video_3dgt_updated = dict(video_3dgt)
+        video_3dgt_updated["frames_final"] = {
+            "frame_stems": stems,
+            "camera_poses": cams_final,
+            "bbox_frames": bbox_frames_final,
+            "floor": floor_final,
+        }
+        video_3dgt_updated["world_to_final"] = {
+            "origin_world": origin_world,
+            "A_world_to_final": A,
+        }
+
+        saved_path = self.save_video_3d_annotations_final(video_id, video_3dgt_updated)
+        print(f"[frames_final][{video_id}] wrote: {saved_path}")
+        return saved_path
+
+    # -------------------------------------------------------------------------
+    # FINAL-only visualization entry
+    # -------------------------------------------------------------------------
+
+    def visualize_final_only(self, video_id: str, *, app_id: str = "World4D-FinalOnly") -> None:
+        final_pkl = self.bbox_3d_final_root_dir / f"{video_id[:-4]}.pkl"
+        if not final_pkl.exists():
+            raise FileNotFoundError(f"Final PKL not found: {final_pkl}")
+
+        with open(final_pkl, "rb") as f:
+            rec = pickle.load(f)
+
+        frames_final = rec.get("frames_final", None)
+        if frames_final is None:
+            raise ValueError(f"[final-only][{video_id}] frames_final missing in {final_pkl}")
+
+        rerun_frame_vis_results(
+            video_id,
+            frames_final=frames_final,
+            frame_annotated_dir_path=self.frame_annotated_dir_path,
+            app_id=app_id,
         )
 
-        if visualize:
-            print(
-                f"[world4d][{video_id}] visualize=True requested, "
-                "but world-4D bbox visualization is not yet implemented here."
-            )
-
-    def generate_video_world_3D_annotations(self, video_id: str) -> None:
-        """
-        Convenience wrapper:
-          1) Loads original Pi3 points using the same slicing logic as bbox_3D construction.
-          2) Loads floor mesh + global_floor_sim from the 3D bbox .pkl (if present).
-          3) Launches a Rerun viewer that shows:
-             - original point clouds
-             - floor mesh
-             - world & XYZ coordinate frames
-             - camera frustum + camera axes
-             - original & transformed 3D bounding boxes.
-        """
-        P = self._load_original_points_for_video(video_id)
-
-        # Optional floor mesh + similarity transform from bbox_3d pkl
-        floor = None
-        global_floor_sim = None
-        frame_3dbb_map = None
-        video_3dgt = self.get_video_3d_annotations(video_id)
-        if video_3dgt is not None:
-            gv = video_3dgt.get("gv", None)
-            gf = video_3dgt.get("gf", None)
-            gc = video_3dgt.get("gc", None)
-            if gv is not None and gf is not None:
-                floor = (gv, gf, gc)
-
-            gfs = video_3dgt.get("global_floor_sim", None)
-            if gfs is not None:
-                s_g = float(gfs["s"])
-                R_g = np.asarray(gfs["R"], dtype=np.float32)
-                t_g = np.asarray(gfs["t"], dtype=np.float32)
-                global_floor_sim = (s_g, R_g, t_g)
-
-            # 3D bboxes per frame
-            frame_3dbb_map = video_3dgt.get("frames", None)
-        else:
-            print(
-                f"[world4d][{video_id}] No 3D bbox annotations found; "
-                "skipping floor and bbox visualization."
-            )
-
-        points_S = P["points"]  # (S,H,W,3)
-        conf_S = P["conf"]      # (S,H,W) or None
-        stems_S = P["frame_stems"]  # List[str]
-        colors_S = P["colors"]  # (S,H,W,3) uint8
-        camera_poses_S = P["camera_poses"]  # (S,4,4) or None
-
-        # Cuboid edge list (same as rerun_vis_world4d)
-        cuboid_edges = [
-            (0, 1), (1, 3), (3, 2), (2, 0),
-            (4, 5), (5, 7), (7, 6), (6, 4),
-            (0, 4), (1, 5), (2, 6), (3, 7),
-        ]
-
-        # Mirror transform about ZY plane (x -> -x) in the aligned frame
-        M_mirror = np.diag([-1.0, 1.0, 1.0]).astype(np.float32)
-
-        # -------------------------------------------------------------------------
-        # Floor mesh and floor-frame axes: BEFORE & AFTER
-        # (mirror not requested for floor, so left as-is)
-        # -------------------------------------------------------------------------
-        floor_vertices_before = None
-        floor_vertices_after = None
-        floor_faces = None
-        floor_kwargs: Optional[Dict[str, Any]] = None
-
-        floor_origin_world = None
-        floor_axes_before = None  # (3,3)
-        floor_axes_after = None  # (3,3) in aligned frame
-
-        R_align: Optional[np.ndarray] = None  # world -> aligned
-
-        if floor is not None:
-            floor_verts0, floor_faces0, floor_colors0 = floor
-            floor_verts0 = np.asarray(floor_verts0, dtype=np.float32)
-            floor_faces0 = _faces_u32(np.asarray(floor_faces0))
-
-            if global_floor_sim is not None:
-                s_g, R_g, t_g = global_floor_sim  # s: float, R: (3,3), t: (3,)
-                R_g = np.asarray(R_g, dtype=np.float32)
-                t_g = np.asarray(t_g, dtype=np.float32)
-
-                # BEFORE: floor in original/world coords
-                floor_vertices_before = s_g * (floor_verts0 @ R_g.T) + t_g
-
-                # Canonical floor frame: XZ plane, Y normal
-                t1 = R_g[:, 0]  # in-plane
-                t2 = R_g[:, 2]  # in-plane
-                n = R_g[:, 1]  # normal
-
-                floor_origin_world = t_g.astype(np.float32)
-                axis_len_floor = float(s_g) * 0.5 if s_g is not None else 0.5
-
-                floor_axes_before = np.stack(
-                    [
-                        t1 * axis_len_floor,
-                        t2 * axis_len_floor,
-                        n * axis_len_floor,
-                    ],
-                    axis=0,
-                )  # each row = vector
-
-                # Build floor-frame basis F (columns), and rotation to aligned frame.
-                F = np.stack([t1, t2, n], axis=1)  # (3,3)
-                R_align = F.T.astype(np.float32)  # world -> aligned
-
-                # AFTER: floor in aligned coords (XY plane, Z normal)
-                v_centered = floor_vertices_before - floor_origin_world[None, :]
-                floor_vertices_after = v_centered @ R_align.T
-
-                floor_axes_after = np.array(
-                    [
-                        [axis_len_floor, 0.0, 0.0],
-                        [0.0, axis_len_floor, 0.0],
-                        [0.0, 0.0, axis_len_floor],
-                    ],
-                    dtype=np.float32,
-                )
-            else:
-                # No global_floor_sim: we can only show "before", no aligned view
-                floor_vertices_before = floor_verts0
-
-            floor_kwargs = {}
-            if floor_colors0 is not None:
-                floor_colors0 = np.asarray(floor_colors0, dtype=np.uint8)
-                floor_kwargs["vertex_colors"] = floor_colors0
-            else:
-                floor_kwargs["albedo_factor"] = [160, 160, 160]
-
-            floor_faces = floor_faces0
-
-            # -------------------------------------------------------------------------
-            # Points & cameras: BEFORE & AFTER (use R_align if available)
-            # -------------------------------------------------------------------------
-            S_pts, H_grid, W_grid, _ = points_S.shape
-
-            points_before = points_S.astype(np.float32)
-            points_after = None
-            camera_before = camera_poses_S
-            camera_after = None
-
-            if R_align is not None and floor_origin_world is not None:
-                # Points AFTER
-                pts_flat = points_before.reshape(-1, 3)
-                v_centered_pts = pts_flat - floor_origin_world[None, :]
-                pts_flat_after = v_centered_pts @ R_align.T
-                points_after = pts_flat_after.reshape(S_pts, H_grid, W_grid, 3)
-                points_after = (points_after @ M_mirror.T).astype(np.float32)
-
-                # Cameras AFTER
-                if camera_before is not None:
-                    cam_aligned = []
-                    for cam_pose in camera_before:
-                        if cam_pose.shape == (3, 4):
-                            T = np.eye(4, dtype=np.float32)
-                            T[:3, :4] = cam_pose
-                        elif cam_pose.shape == (4, 4):
-                            T = cam_pose.astype(np.float32)
-                        else:
-                            T = np.eye(4, dtype=np.float32)
-
-                        cam_origin_world = T[:3, 3]
-                        R_cam_world = T[:3, :3]
-
-                        cam_origin_centered = cam_origin_world - floor_origin_world
-                        cam_origin_aligned = R_align @ cam_origin_centered
-                        R_cam_aligned = R_align @ R_cam_world
-
-                        T_new = np.eye(4, dtype=np.float32)
-                        T_new[:3, :3] = R_cam_aligned
-                        T_new[:3, 3] = cam_origin_aligned
-                        cam_aligned.append(T_new)
-
-                    camera_after = np.stack(cam_aligned, axis=0)
-
-            S = points_after.shape[0]
-            for vis_t in range(S):
-                stem = stems_S[vis_t]
-                if frame_3dbb_map is not None:
-                    frame_name = f"{stem}.png"
-                    if frame_name in frame_3dbb_map:
-                        frame_objects = frame_3dbb_map[frame_name]["objects"]
-                        for bi, obj in enumerate(frame_objects):
-                            label = obj["label"]
-                            bbox_3d = obj["aabb_floor_aligned"]
-                            corners_world = np.asarray(
-                                bbox_3d["corners_world"], dtype=np.float32
-                            )  # (8,3)
-
-                            col = obj.get("color", [255, 180, 0])
-                            verts_centered = corners_world - floor_origin_world[None, :]
-                            verts_after = verts_centered @ R_align.T  # world -> aligned
-
-                            # AFTER_MIRROR: mirror about ZY plane (x -> -x)
-                            verts_after = (verts_after @ M_mirror.T).astype(np.float32)
-
-
-
-            # Create a pkl file that stores all the information together
-            # Include only the transformation files needed for visualization
-            # (no need to bloat the pkl with original points, colors, etc.)
-            # TODO: Construct 3DBB Map with floor-aligned boxes directly
-
-            # Update video_3dgt with final 3D bbox annotations information that includes things after transformation.
-            out_dict = {
-            }
+    # -------------------------------------------------------------------------
+    # Batch processing over a dataloader
+    # -------------------------------------------------------------------------
 
     def generate_gt_world_3D_bb_annotations(
-        self, dataloader: DataLoader, split: str
+            self,
+            dataloader: DataLoader,
+            split: str,
+            *,
+            overwrite: bool = False,
+            points_dtype: np.dtype = np.float32,
     ) -> None:
         """
-        Iterate over an AG dataloader and call generate_video_bb_annotations
-        for videos in the given AG split.
-
-        This is useful if/when you implement full world-4D GT generation
-        for all videos.
+        Iterate over an AG dataloader and build frames_final PKLs for videos in the given split.
         """
         for data in dataloader:
             video_id = data["video_id"]
@@ -1160,22 +1119,13 @@ class FrameToWorldAnnotations:
                 continue
 
             try:
-                print(f"[world4d] processing video {video_id}...")
-                video_id_gt_bboxes, video_id_gt_annotations = (
-                    self.get_video_gt_annotations(video_id)
-                )
-                video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
-                video_id_3d_bbox_predictions = self.get_video_3d_annotations(video_id)
-
-                self.generate_video_bb_annotations(
+                self.build_frames_final_and_store(
                     video_id,
-                    video_id_gt_annotations,
-                    video_id_gdino_annotations,
-                    video_id_3d_bbox_predictions,
-                    visualize=False,
+                    overwrite=overwrite,
+                    points_dtype=points_dtype,
                 )
             except Exception as e:
-                print(f"[world4d] failed to process video {video_id}: {e}")
+                print(f"[frames_final] failed video {video_id}: {e}")
 
 
 # --------------------------------------------------------------------------------------
