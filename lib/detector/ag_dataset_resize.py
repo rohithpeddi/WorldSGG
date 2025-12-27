@@ -8,7 +8,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 from transformers import AutoImageProcessor
 
-from constant import const
+from constants import Constants as const
 
 
 class ActionGenomeDatasetResize(Dataset):
@@ -20,13 +20,13 @@ class ActionGenomeDatasetResize(Dataset):
     """
 
     def __init__(
-        self,
-        data_path: str,
-        phase: str = 'train',
-        datasize: str = 'full',
-        filter_nonperson_box_frame: bool = True,
-        filter_small_box: bool = False,
-        target_size: int = 224,
+            self,
+            data_path: str,
+            phase: str = 'train',
+            datasize: str = 'full',
+            filter_nonperson_box_frame: bool = True,
+            filter_small_box: bool = False,
+            target_size: int = 224,
     ):
         self.data_path = data_path
         self.phase = phase
@@ -51,6 +51,8 @@ class ActionGenomeDatasetResize(Dataset):
         print(f"Dataset (Resize) initialized with {len(self.samples)} frames")
         print(f"Object classes: {len(self.object_classes)}")
 
+        self.world_3d_annotations = os.path.join(self.data_path, const.WORLD_ANNOTATIONS)
+
     def _fetch_object_classes(self):
         self.object_classes = [const.BACKGROUND]
         object_classes_path = os.path.join(self.data_path, const.ANNOTATIONS, const.OBJECT_CLASSES_FILE)
@@ -63,10 +65,11 @@ class ActionGenomeDatasetResize(Dataset):
         self.object_classes[24] = 'phone/camera'
         self.object_classes[31] = 'sofa/couch'
 
-    def _fetch_object_person_bboxes(self, filter_small_box: bool = False):
+    def _fetch_object_person_bboxes(self, filter_small_box=False):
         annotations_path = os.path.join(self.data_path, const.ANNOTATIONS)
         with open(os.path.join(annotations_path, const.PERSON_BOUNDING_BOX_PKL), 'rb') as f:
             person_bbox = pickle.load(f)
+        f.close()
         with open(os.path.join(annotations_path, const.OBJECT_BOUNDING_BOX_RELATIONSHIP_PKL), 'rb') as f:
             object_bbox = pickle.load(f)
         return person_bbox, object_bbox
@@ -94,6 +97,18 @@ class ActionGenomeDatasetResize(Dataset):
                 self.valid_nums += 1
         print(f"Built dataset with {self.valid_nums} valid frames\n")
         print(f"Removed {self.non_gt_human_nums} frames without person boxes\n")
+
+        # ------------ 3D Annotations ------------ #
+        # Loop through all samples to append the 3D annotations to the samples directory
+        for video_file in os.listdir(self.world_3d_annotations):
+            if not video_file.endswith('.pkl'):
+                continue
+            video_3d_annotations_path = os.path.join(self.world_3d_annotations, video_file)
+            with open(video_3d_annotations_path, 'rb') as f:
+                video_3d_data = pickle.load(f)
+            f.close()
+            for frame_name in video_3d_data.keys():
+                pass
 
     def __len__(self):
         return len(self.samples)

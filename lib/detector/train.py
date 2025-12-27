@@ -35,11 +35,6 @@ from torch_utils import utils
 from utils.json_logger import LocalLogger
 from lib.detector.evaluate import DetectionEvaluator
 
-# ============================
-# DetectionEvaluator (COCO-style 2D)
-# ============================
-from torchmetrics.detection.mean_ap import MeanAveragePrecision
-
 
 def clear_cuda_cache_for_current_process(sync: bool = True) -> None:
     gc.collect()
@@ -138,6 +133,7 @@ class TrainConfig:
 # Trainer Class
 # ============================
 class DinoAGTrainer:
+
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
         self.path_to_experiment = os.path.join(cfg.working_dir, cfg.experiment_name)
