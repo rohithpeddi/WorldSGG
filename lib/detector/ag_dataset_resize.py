@@ -49,7 +49,7 @@ class ActionGenomeDatasetResize(Dataset):
         self.image_mean: Tuple[float, float, float] = tuple(self.processor.image_mean)
         self.image_std: Tuple[float, float, float] = tuple(self.processor.image_std)
 
-        print(f"Dataset (Resize) initialized with {len(self.samples)} frames")
+        print(f"Dataset (Resize) initialized with {len(self)} frames")
         print(f"Object classes: {len(self.object_classes)}")
 
     def _fetch_object_classes(self):
@@ -68,22 +68,26 @@ class ActionGenomeDatasetResize(Dataset):
         annotations_path = os.path.join(self.data_path, const.ANNOTATIONS)
         with open(os.path.join(annotations_path, const.PERSON_BOUNDING_BOX_PKL), 'rb') as f:
             person_bbox = pickle.load(f)
-        f.close()
         with open(os.path.join(annotations_path, const.OBJECT_BOUNDING_BOX_RELATIONSHIP_PKL), 'rb') as f:
             object_bbox = pickle.load(f)
         return person_bbox, object_bbox
 
     def _build_dataset(self):
-        self.samples = {}
+        # self.samples: Dict[str, Dict]
+        self.samples: Dict[str, Dict] = {}
         self.valid_nums = 0
         self.non_gt_human_nums = 0
+
+        # ---------------- 2D boxes ---------------- #
         for frame_name in self.person_bbox.keys():
             if self.object_bbox[frame_name][0][const.METADATA][const.SET] != self.phase:
                 continue
+
             person_boxes = self.person_bbox[frame_name][const.BOUNDING_BOX]
             if self.filter_nonperson_box_frame and len(person_boxes) == 0:
                 self.non_gt_human_nums += 1
                 continue
+
             objects = []
             for obj in self.object_bbox[frame_name]:
                 if obj[const.VISIBLE] and obj[const.BOUNDING_BOX] is not None:
@@ -91,14 +95,15 @@ class ActionGenomeDatasetResize(Dataset):
                     bbox = obj[const.BOUNDING_BOX]
                     bbox_xyxy = np.array([bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]])
                     objects.append({'bbox': bbox_xyxy, 'class': class_idx})
+
             if len(objects) > 0 or len(person_boxes) > 0:
                 self.samples[frame_name] = {
                     'filename': frame_name,
                     'person_boxes': person_boxes,
-                    'objects': objects
+                    'objects': objects,
                 }
-
                 self.valid_nums += 1
+
         print(f"Built dataset with {self.valid_nums} valid frames\n")
         print(f"Removed {self.non_gt_human_nums} frames without person boxes\n")
 
@@ -110,32 +115,49 @@ class ActionGenomeDatasetResize(Dataset):
             video_3d_annotations_path = os.path.join(self.world_3d_annotations, video_file)
             with open(video_3d_annotations_path, 'rb') as f:
                 video_3d_data = pickle.load(f)
-            f.close()
+
             video_id = video_3d_data["video_id"]
-            for frame_id, frame_name in enumerate(video_3d_data["frames_final"]["bbox_frames"].keys()):
+            bbox_frames = video_3d_data["frames_final"]["bbox_frames"]
+
+            for frame_id, frame_name in enumerate(bbox_frames.keys()):
                 video_frame_name = f"{video_id}/{frame_name}"
-                frame_objects = video_3d_data["frames_final"]["bbox_frames"][frame_name]["objects"]
+                frame_objects = bbox_frames[frame_name]["objects"]
+
                 frame_person_3d_bboxes = None
                 frame_object_3d_bboxes = []
                 for frame_object in frame_objects:
                     label = frame_object["label"]
                     if label == "person":
-                        frame_person_3d_bboxes = np.array(frame_object["aabb_floor_aligned"]["corners_world"])
+                        frame_person_3d_bboxes = np.array(
+                            frame_object["aabb_floor_aligned"]["corners_world"], dtype=np.float32
+                        )
                     else:
+                        class_idx = self.object_classes.index(label)
                         frame_object_3d_bboxes.append({
-                            "class": label,
-                            "bbox_3d": np.array(frame_object["aabb_floor_aligned"]["corners_world"])
+                            "class": class_idx,
+                            "bbox_3d": np.array(
+                                frame_object["aabb_floor_aligned"]["corners_world"], dtype=np.float32
+                            ),
                         })
+
                 # Find the corresponding sample and append 3D boxes
                 if video_frame_name in self.samples:
                     self.samples[video_frame_name]['person_boxes_3d'] = frame_person_3d_bboxes
                     self.samples[video_frame_name]['object_boxes_3d'] = frame_object_3d_bboxes
 
+        # ---------- Build indexable list of frame names ---------- #
+        # This is what __len__ and __getitem__ will use.
+        self.frame_names: List[str] = sorted(self.samples.keys())
+
     def __len__(self):
-        return len(self.samples)
+        # Length is number of indexed frames
+        return len(self.frame_names)
 
     def __getitem__(self, idx: int):
-        sample = self.samples[idx]
+        # Map integer idx to frame_name, then to the sample dict
+        frame_name = self.frame_names[idx]
+        sample = self.samples[frame_name]
+
         img_path = os.path.join(self.frames_path, sample['filename'])
         pil_image = Image.open(img_path).convert('RGB')
         orig_w, orig_h = pil_image.size
@@ -187,6 +209,9 @@ class ActionGenomeDatasetResize(Dataset):
         target = {
             'boxes': torch.tensor(boxes, dtype=torch.float32) if boxes else torch.empty((0, 4), dtype=torch.float32),
             'labels': torch.tensor(labels, dtype=torch.int64) if labels else torch.empty((0,), dtype=torch.int64),
+            # (optional) could expose 3D boxes here later:
+            # 'person_boxes_3d': sample.get('person_boxes_3d', None),
+            # 'object_boxes_3d': sample.get('object_boxes_3d', []),
         }
 
         return img_chw, target

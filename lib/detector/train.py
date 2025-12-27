@@ -2,12 +2,15 @@
 """
 Train DINOv2 AG object detector (class-based) + COCO-style evaluation via DetectionEvaluator.
 
-Key change vs your original:
-- Replaces evaluate_MAP_full(...) with DetectionEvaluator.evaluate_2d_map_coco(...)
-- Logs COCO-style: map, map_50, map_75 (+ raw torchmetrics dict)
+Key changes for this version:
+- Adds a --distributed / --no_distributed CLI flag.
+- When --no_distributed (default), uses a DummyAccelerator that runs everything
+  in a single process / non-distributed way.
+- When --distributed, uses HuggingFace Accelerate as before.
 """
 
 import argparse
+import contextlib  # NEW
 import gc
 import os
 import warnings
@@ -44,6 +47,73 @@ def clear_cuda_cache_for_current_process(sync: bool = True) -> None:
     for dev in range(torch.cuda.device_count()):
         with torch.cuda.device(dev):
             torch.cuda.empty_cache()
+
+
+# ============================
+# DummyAccelerator (non-dist)
+# ============================
+class DummyAccelerator:
+    """
+    Minimal drop-in replacement for Accelerate's Accelerator when running
+    single-process / non-distributed training.
+
+    It implements only the methods/attributes used in this script.
+    """
+
+    def __init__(self):
+        self.num_processes = 1
+        self.is_main_process = True
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # API-compatible methods
+    def prepare(self, *args):
+        # No wrapping; just return arguments as-is.
+        return args
+
+    def accumulate(self, model):
+        # No gradient accumulation logic here; caller already divides
+        # the loss by gradient_accumulation_steps.
+        return contextlib.nullcontext()
+
+    def autocast(self):
+        if torch.cuda.is_available():
+            return torch.cuda.amp.autocast()
+        else:
+            return contextlib.nullcontext()
+
+    def backward(self, loss):
+        loss.backward()
+
+    def clip_grad_norm_(self, params, max_norm):
+        return torch.nn.utils.clip_grad_norm_(params, max_norm)
+
+    @property
+    def sync_gradients(self):
+        # Always "syncing" because we have only one process.
+        return True
+
+    def print(self, *args, **kwargs):
+        print(*args, **kwargs)
+
+    def wait_for_everyone(self):
+        # Single process: nothing to do.
+        pass
+
+    def unwrap_model(self, model):
+        # No wrapping in non-distributed mode.
+        return model
+
+    def register_for_checkpointing(self, *args, **kwargs):
+        # Nothing to register.
+        pass
+
+    def end_training(self):
+        # Nothing special to do.
+        pass
+
+    def init_trackers(self, *args, **kwargs):
+        # No-op; used only when wanted.
+        pass
 
 
 # ============================
@@ -92,6 +162,8 @@ def reduce_dict(input_dict, average=True):
     """
     Reduce the values in the dictionary from all processes so that all processes
     have the averaged results. Returns a dict with the same fields.
+
+    In non-distributed mode, this is effectively a no-op.
     """
     world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
     if world_size < 2:
@@ -118,9 +190,6 @@ def reduce_dict(input_dict, average=True):
 @dataclass
 class TrainConfig:
     experiment_name: str
-    # working_dir: str = "/home/cse/msr/csy227518/scratch/Projects/Active/Practice/ag_object_detection/train_data"
-    # data_path: str = "/home/cse/msr/csy227518/scratch/Datasets/action_genome"
-    # save_path: str = "/home/cse/msr/csy227518/scratch/Projects/Active/Practice/ag_object_detection/save_models"
     working_dir: str = "/data/rohith/ag/"
     data_path: str = "/data/rohith/ag/"
     save_path: str = "/data/rohith/ag/detector/"
@@ -136,6 +205,9 @@ class TrainConfig:
     use_collate: bool = True
     use_wandb: bool = True
 
+    # NEW: controls whether to use Accelerate (distributed) or not
+    use_accelerator: bool = False
+
     num_workers_train: int = 16
     num_workers_test: int = 16
     num_workers_test_subset: int = 32
@@ -147,7 +219,7 @@ class TrainConfig:
 
     # iteration logging & eval
     iter_log_every: int = 10000
-    eval_every_iters: int = 10_000_000  # keep your "effectively disabled" default
+    eval_every_iters: int = 10_000_000  # effectively disabled by default
 
     # plotting
     plot_each_epoch: bool = True
@@ -164,11 +236,16 @@ class DinoAGTrainer:
         self.cfg = cfg
         self.path_to_experiment = os.path.join(cfg.working_dir, cfg.experiment_name)
 
-        self.accelerator = Accelerator(
-            project_dir=self.path_to_experiment,
-            gradient_accumulation_steps=cfg.gradient_accumulation_steps,
-            log_with="wandb",
-        )
+        # Choose between real Accelerator and DummyAccelerator
+        if cfg.use_accelerator:
+            self.accelerator = Accelerator(
+                project_dir=self.path_to_experiment,
+                gradient_accumulation_steps=cfg.gradient_accumulation_steps,
+                log_with="wandb" if cfg.use_wandb else None,
+            )
+        else:
+            self.accelerator = DummyAccelerator()
+
         self.local_logger = LocalLogger(self.path_to_experiment)
 
         self.train_dataset = None
@@ -191,6 +268,7 @@ class DinoAGTrainer:
     # Setup
     # ----------------------------
     def init_trackers(self) -> None:
+        # You can call this from run() if you want tracker behavior enabled.
         experiment_config = {
             "epochs": self.cfg.epochs,
             "Effective_batch_size": self.cfg.batch_size * self.accelerator.num_processes,
@@ -632,7 +710,7 @@ class DinoAGTrainer:
     def run(self) -> None:
         os.makedirs(self.path_to_experiment, exist_ok=True)
 
-        # self.init_trackers()
+        # self.init_trackers()  # optional; keep commented if not needed
         self.build_datasets()
         self.build_dataloaders()
         self.build_model()
@@ -720,9 +798,23 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--gradient_accumulation_steps", type=int, default=TrainConfig.gradient_accumulation_steps)
     parser.add_argument("--max_grad_norm", type=float, default=TrainConfig.max_grad_norm)
 
-    # Keep your defaults
-    parser.set_defaults(use_wandb=True)
+    # NEW: flip between distributed (Accelerate) and non-distributed (DummyAccelerator)
+    parser.add_argument(
+        "--distributed",
+        action="store_true",
+        help="Use HuggingFace Accelerate for distributed/multi-GPU training.",
+    )
+    parser.add_argument(
+        "--no_distributed",
+        action="store_false",
+        dest="distributed",
+        help="Disable Accelerate and run in single-process mode (default).",
+    )
+
+    # Defaults
+    parser.set_defaults(use_wandb=False)
     parser.set_defaults(use_collate=True)
+    parser.set_defaults(distributed=False)  # default: NON-DISTRIBUTED
 
     args = parser.parse_args()
 
@@ -739,6 +831,7 @@ def parse_args() -> TrainConfig:
         max_grad_norm=args.max_grad_norm,
         use_wandb=args.use_wandb,
         use_collate=args.use_collate,
+        use_accelerator=args.distributed,
     )
 
 
