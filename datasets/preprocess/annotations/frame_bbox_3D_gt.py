@@ -21,212 +21,41 @@ from annotation_utils import (
 from dataloader.standard.action_genome.ag_dataset import StandardAG
 
 
-# --------------------------------------------------------------------------------------
-# Rerun visualization for ORIGINAL (Pi3) results
-#   - Shows original point clouds for annotated frames.
-#   - Now also shows:
-#       * floor mesh (transformed to original/world coords).
-#       * world coordinate frame (World +X/+Y/+Z).
-#       * XYZ coordinate frame (X/Y/Z).
-#       * camera frustum + camera axes (Cam +X/+Y/+Z).
-#       * original 3D bounding boxes (BEFORE).
-#       * transformed 3D bounding boxes (AFTER floor-alignment).
-# --------------------------------------------------------------------------------------
-
-def rerun_frame_vis_results(
+def rerun_frame_vis_final_only(
     video_id: str,
+    *,
     frames_final: Dict[str, Any],
     frame_annotated_dir_path: Path,
-    *,
-    floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None,
-    global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None,
-    frame_3dbb_map: Optional[Dict[Any, List[Dict[str, Any]]]] = None,
     img_maxsize: int = 320,
-    app_id: str = "World4D-Original",
+    app_id: str = "World4D-FinalOnly",
     min_conf_default: float = 1e-6,
 ) -> None:
     """
-    Visualize ORIGINAL Pi3 outputs with BEFORE/AFTER comparison.
+    FINAL-ONLY viewer:
+      - Assumes points/cameras/bboxes/floor are ALREADY in FINAL coords.
+      - Performs NO transformations internally.
 
-    BEFORE:
-      - Floor mesh, floor axes, camera poses, points, and 3D bounding boxes in
-        original/world coords.
-      - Points are shown as dark gray.
-      - 3D boxes are shown as white line segments.
-
-    AFTER:
-      - Floor mesh, floor axes, camera poses, points, and 3D bounding boxes
-        transformed into a frame where the floor lies in the XY plane and
-        Z is the floor normal.
-      - Points are shown with their original RGB colors.
-      - 3D boxes are shown as yellow line segments.
-
-    AFTER_MIRROR:
-      - Mirror image (about the ZY plane, i.e., x -> -x) of the AFTER points,
-        3D bounding boxes, and cameras, logged under `world/after_mirror/...`.
-
-    vis_mode:
-        "before" -> only show original/world frame
-        "after"  -> only show floor-aligned frame (plus its mirror branch)
-        "both"   -> show both BEFORE and AFTER branches (plus mirror for AFTER)
-
-    Args:
-        video_id: video identifier (e.g., "0DJ6R.mp4")
-        points_S: (S,H,W,3) Pi3/world points
-        conf_S: (S,H,W) confidence (optional)
-        stems_S: list of "000123" frame stems
-        colors_S: (S,H,W,3) uint8 colors (optional)
-        camera_poses_S: (S,4,4) or (S,3,4) camera extrinsics (optional)
-        frame_annotated_dir_path: root dir for annotated PNG frames
-        floor: (gv, gf, gc) floor mesh vertices/faces/colors (optional)
-        global_floor_sim: (s,R,t) scaling+rotation+translation for floor
-        frame_3dbb_map: dict mapping frame name -> 3D bbox annotations
-        frame_bbox_meshes: dict mapping frame idx -> list of bbox meshes
-        img_maxsize: max image size for RGB frames
-        app_id: Rerun app id
-        min_conf_default: fallback confidence threshold
-        vis_mode: visualization mode ("before", "after", or "both")
+    Expected frames_final schema (stored in updated video_3dgt):
+      frames_final = {
+        "frame_stems": List[str],
+        "points": (S,H,W,3) float32/float16,
+        "colors": (S,H,W,3) uint8 (optional),
+        "conf":   (S,H,W) float32 (optional),
+        "camera_poses": (S,4,4) float32 (optional),
+        "bbox_frames": Dict[str, {"objects": List[{label,color,corners_final,(...)}]}] (optional),
+        "floor": {"vertices": (V,3), "faces": (F,3), "colors": (V,3) optional} (optional)
+      }
     """
-
-    # -------------------------------------------------------------------------
-    # Normalize vis_mode + convenience flags
-    # -------------------------------------------------------------------------
     rr.init(app_id, spawn=True)
     rr.log("/", rr.ViewCoordinates.RUB)
-
-    BASE = "world"
-
-    # Ensure both branches share the same coordinate convention
+    BASE = "world_final"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
 
-    # Cuboid edge list (same as rerun_vis_world4d)
     cuboid_edges = [
         (0, 1), (1, 3), (3, 2), (2, 0),
         (4, 5), (5, 7), (7, 6), (6, 4),
         (0, 4), (1, 5), (2, 6), (3, 7),
     ]
-
-    stems_S = frames_final["frame_stems"]
-    points_S = frames_final.get("points", None)
-    colors_S = frames_final.get("colors", None)
-    conf_S = frames_final.get("conf", None)
-    camera_poses_S = frames_final.get("camera_poses", None)
-    bbox_frames = frames_final.get("bbox_frames", None)
-
-    # -------------------------------------------------------------------------
-    # Static world & XYZ axes (common; drawn at origin of aligned coords)
-    # -------------------------------------------------------------------------
-    axis_len_world = 0.5
-    world_axes = rr.Arrows3D(
-        origins=[[0.0, 0.0, 0.0]] * 3,
-        vectors=[
-            [axis_len_world, 0.0, 0.0],  # +X
-            [0.0, axis_len_world, 0.0],  # +Y
-            [0.0, 0.0, axis_len_world],  # +Z
-        ],
-        colors=[
-            [255, 0, 0],
-            [0, 255, 0],
-            [0, 0, 255],
-        ],
-        labels=["World +X", "World +Y", "World +Z"],
-    )
-
-    axis_len_xyz = 0.4
-    xyz_axes = rr.Arrows3D(
-        origins=[[0.0, 0.0, 0.0]] * 3,
-        vectors=[
-            [axis_len_xyz, 0.0, 0.0],
-            [0.0, axis_len_xyz, 0.0],
-            [0.0, 0.0, axis_len_xyz],
-        ],
-        colors=[
-            [255, 128, 128],
-            [128, 255, 128],
-            [128, 128, 255],
-        ],
-        labels=["X", "Y", "Z"],
-    )
-
-    # -------------------------------------------------------------------------
-    # Floor mesh and floor-frame axes: BEFORE & AFTER
-    # (mirror not requested for floor, so left as-is)
-    # -------------------------------------------------------------------------
-    floor_vertices = None
-    floor_faces = None
-    floor_kwargs: Optional[Dict[str, Any]] = None
-    floor_origin_world = None
-    floor_axes = None      # (3,3)
-
-    R_align: Optional[np.ndarray] = None  # world -> aligned
-
-    if floor is not None:
-        floor_verts0, floor_faces0, floor_colors0 = floor
-        floor_verts0 = np.asarray(floor_verts0, dtype=np.float32)
-        floor_faces0 = _faces_u32(np.asarray(floor_faces0))
-
-        if global_floor_sim is not None:
-            s_g, R_g, t_g = global_floor_sim  # s: float, R: (3,3), t: (3,)
-            R_g = np.asarray(R_g, dtype=np.float32)
-            t_g = np.asarray(t_g, dtype=np.float32)
-
-            # BEFORE: floor in original/world coords
-            floor_vertices = s_g * (floor_verts0 @ R_g.T) + t_g
-
-            # Canonical floor frame: XZ plane, Y normal
-            t1 = R_g[:, 0]  # in-plane
-            t2 = R_g[:, 2]  # in-plane
-            n  = R_g[:, 1]  # normal
-
-            floor_origin_world = t_g.astype(np.float32)
-            axis_len_floor = float(s_g) * 0.5 if s_g is not None else 0.5
-
-            floor_axes = np.stack(
-                [
-                    t1 * axis_len_floor,
-                    t2 * axis_len_floor,
-                    n  * axis_len_floor,
-                ],
-                axis=0,
-            )  # each row = vector
-
-            # Build floor-frame basis F (columns), and rotation to aligned frame.
-            F = np.stack([t1, t2, n], axis=1)   # (3,3)
-            R_align = F.T.astype(np.float32)    # world -> aligned
-
-
-        floor_kwargs = {}
-        if floor_colors0 is not None:
-            floor_colors0 = np.asarray(floor_colors0, dtype=np.uint8)
-            floor_kwargs["vertex_colors"] = floor_colors0
-        else:
-            floor_kwargs["albedo_factor"] = [160, 160, 160]
-
-        floor_faces = floor_faces0
-
-    # -------------------------------------------------------------------------
-    # Points & cameras: BEFORE & AFTER (use R_align if available)
-    # -------------------------------------------------------------------------
-    S_pts, H_grid, W_grid, _ = points_S.shape
-
-    points = points_S.astype(np.float32)
-    camera = camera_poses_S
-
-    # -------------------------------------------------------------------------
-    # Helpers for static logging and images
-    # -------------------------------------------------------------------------
-    def _log_static_frames() -> None:
-        rr.log(f"{BASE}/world_axes", world_axes)
-        rr.log(f"{BASE}/xyz_axes", xyz_axes)
-        rr.log(
-            f"{BASE}/info",
-            rr.TextLog(
-                f"[{video_id}] BEFORE: original Pi3/world frame. "
-                f"AFTER: frame where floor is in XY plane and Z is floor normal "
-                f"(when global_floor_sim is available). "
-                f"AFTER_MIRROR: AFTER mirrored about ZY plane (x -> -x). "
-            ),
-        )
 
     def _get_image_for_stem(stem: str) -> Optional[np.ndarray]:
         img_path = frame_annotated_dir_path / video_id / f"{stem}.png"
@@ -238,96 +67,78 @@ def rerun_frame_vis_results(
         H, W = img.shape[:2]
         if max(H, W) > img_maxsize:
             scale = float(img_maxsize) / float(max(H, W))
-            img = cv2.resize(
-                img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA
-            )
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         return img
 
-    # -------------------------------------------------------------------------
-    # Main per-frame loop
-    # -------------------------------------------------------------------------
-    S = points.shape[0]
+    # Static axes
+    axis_len = 0.5
+    rr.log(
+        f"{BASE}/axes",
+        rr.Arrows3D(
+            origins=[[0, 0, 0]] * 3,
+            vectors=[[axis_len, 0, 0], [0, axis_len, 0], [0, 0, axis_len]],
+            colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],
+            labels=["+X", "+Y", "+Z"],
+        ),
+        timeless=True,
+    )
+
+    # Floor (already final)
+    floor = frames_final.get("floor", None)
+    if floor is not None:
+        v = np.asarray(floor["vertices"], dtype=np.float32)
+        f = _faces_u32(np.asarray(floor["faces"]))
+        kwargs = {}
+        if floor.get("colors", None) is not None:
+            kwargs["vertex_colors"] = np.asarray(floor["colors"], dtype=np.uint8)
+        else:
+            kwargs["albedo_factor"] = [160, 160, 160]
+        rr.log(f"{BASE}/floor", rr.Mesh3D(vertex_positions=v, triangle_indices=f, **kwargs), timeless=True)
+
+    points_S = np.asarray(frames_final["points"])
+    colors_S = frames_final.get("colors", None)
+    conf_S = frames_final.get("conf", None)
+    camera_poses_S = frames_final.get("camera_poses", None)
+    stems_S = frames_final["frame_stems"]
+    bbox_frames = frames_final.get("bbox_frames", None)
+
+    S, H_grid, W_grid, _ = points_S.shape
 
     for vis_t in range(S):
         stem = stems_S[vis_t]
-
         rr.set_time_sequence("frame", vis_t)
         rr.log("/", rr.Clear(recursive=True))
 
-        _log_static_frames()
+        # Points (already final)
+        pts = points_S[vis_t].reshape(-1, 3)
+        cols = colors_S[vis_t].reshape(-1, 3) if colors_S is not None else None
+        conf_flat = conf_S[vis_t].reshape(-1) if conf_S is not None else None
 
-        # ---------------------------------------------------------------------
-        # FLOOR MESH: BEFORE / AFTER
-        # ---------------------------------------------------------------------
-        if floor_vertices is not None and floor_faces is not None:
-            rr.log(
-                f"{BASE}/floor",
-                rr.Mesh3D(
-                    vertex_positions=floor_vertices.astype(np.float32),
-                    triangle_indices=floor_faces,
-                    **(floor_kwargs or {}),
-                ),
-            )
+        if conf_flat is not None:
+            good = np.isfinite(conf_flat)
+            cfs_valid = conf_flat[good]
+            thr = min_conf_default if cfs_valid.size == 0 else max(min_conf_default, np.percentile(cfs_valid, 5))
+            keep = (conf_flat >= thr) & np.isfinite(pts).all(axis=1)
+        else:
+            keep = np.isfinite(pts).all(axis=1)
 
-        # ---------------------------------------------------------------------
-        # FLOOR AXES: BEFORE / AFTER
-        # ---------------------------------------------------------------------
-        if floor_origin_world is not None and floor_axes is not None:
-            origins_floor_before = np.repeat(floor_origin_world[None, :], 3, axis=0)
-            rr.log(
-                f"{BASE}/floor_frame",
-                rr.Arrows3D(
-                    origins=origins_floor_before,
-                    vectors=floor_axes,
-                    colors=[
-                        [200, 200, 0],
-                        [0, 200, 200],
-                        [200, 0, 200],
-                    ],
-                    labels=["Floor(Before) +X", "Floor(Before) +Y", "Floor(Before) +Z"],
-                ),
-            )
+        pts_keep = pts[keep]
+        kwargs_pts = {}
+        if cols is not None:
+            kwargs_pts["colors"] = cols[keep].astype(np.uint8)
 
-        # ---------------------------------------------------------------------
-        # CAMERAS: BEFORE / AFTER + MIRROR
-        # ---------------------------------------------------------------------
-        if camera is not None and vis_t < camera.shape[0]:
-            cam_pose_b = camera[vis_t]
-            if cam_pose_b.shape == (3, 4):
-                T_b = np.eye(4, dtype=np.float32)
-                T_b[:3, :4] = cam_pose_b
-            elif cam_pose_b.shape == (4, 4):
-                T_b = cam_pose_b.astype(np.float32)
-            else:
-                T_b = np.eye(4, dtype=np.float32)
+        if pts_keep.shape[0] > 0:
+            rr.log(f"{BASE}/points", rr.Points3D(pts_keep, **kwargs_pts))
 
-            cam_origin_b = T_b[:3, 3]
-            R_cam_b = T_b[:3, :3]
-
-            axis_len_cam = 0.4
-            cam_axes_vec_b = np.stack(
-                [
-                    R_cam_b[:, 0] * axis_len_cam,
-                    R_cam_b[:, 1] * axis_len_cam,
-                    R_cam_b[:, 2] * axis_len_cam,
-                ],
-                axis=0,
-            )
-            origins_cam_b = np.repeat(cam_origin_b[None, :], 3, axis=0)
-
-            rr.log(
-                f"{BASE}/camera_axes",
-                rr.Arrows3D(
-                    origins=origins_cam_b,
-                    vectors=cam_axes_vec_b,
-                    colors=[
-                        [180, 0, 0],
-                        [0, 180, 0],
-                        [0, 0, 180],
-                    ],
-                    labels=["Cam(Before) +X", "Cam(Before) +Y", "Cam(Before) +Z"],
-                ),
-            )
+        # Camera (already final)
+        if camera_poses_S is not None and vis_t < camera_poses_S.shape[0]:
+            T = np.asarray(camera_poses_S[vis_t], dtype=np.float32)
+            if T.shape == (3, 4):
+                T4 = np.eye(4, dtype=np.float32)
+                T4[:3, :4] = T
+                T = T4
+            cam_origin = T[:3, 3]
+            R_cam = T[:3, :3]
 
             rr.log(
                 f"{BASE}/camera/frustum",
@@ -337,103 +148,31 @@ def rerun_frame_vis_results(
                     camera_xyz=rr.ViewCoordinates.RUB,
                     image_plane_distance=0.1,
                 ),
-                rr.Transform3D(
-                    translation=cam_origin_b.tolist(),
-                    mat3x3=R_cam_b,
-                ),
+                rr.Transform3D(translation=cam_origin.tolist(), mat3x3=R_cam),
             )
 
-        # ---------------------------------------------------------------------
-        # POINTS: BEFORE (dark) / AFTER (colorful) / AFTER_MIRROR
-        # ---------------------------------------------------------------------
-        pts = points[vis_t].reshape(-1, 3)  # (N,3)
-        cols = (
-            colors_S[vis_t].reshape(-1, 3) if colors_S is not None else None
-        )
-        conf_flat = (
-            conf_S[vis_t].reshape(-1) if conf_S is not None else None
-        )
-
-        if conf_flat is not None:
-            good = np.isfinite(conf_flat)
-            cfs_valid = conf_flat[good]
-            if cfs_valid.size > 0:
-                med = np.median(cfs_valid)
-                p5 = np.percentile(cfs_valid, 5)
-                thr = max(min_conf_default, p5)
-                print(
-                    f"[orig-pts][{video_id}] frame {stem}: "
-                    f"conf thr = {thr:.4f} (med={med:.4f}, n_valid={cfs_valid.size})"
-                )
-            else:
-                thr = min_conf_default
-            keep = (conf_flat >= thr) & np.isfinite(pts).all(axis=1)
-        else:
-            thr = None
-            keep = np.isfinite(pts).all(axis=1)
-
-        # AFTER: colorful points
-        pts_a_keep = pts[keep]
-        if cols is not None:
-            cols_a_keep = cols[keep].astype(np.uint8)
-        else:
-            cols_a_keep = None
-
-        if pts_a_keep.shape[0] > 0:
-            kwargs_pts: Dict[str, Any] = {}
-            if cols_a_keep is not None:
-                kwargs_pts["colors"] = cols_a_keep
-            rr.log(
-                f"{BASE}/points",
-                rr.Points3D(
-                    pts_a_keep,
-                    **kwargs_pts,  # same colors as AFTER
-                ),
-            )
-
-        # -----------------------------------------------------------------------------
-        # 3D BOUNDING BOXES: BEFORE / AFTER / AFTER_MIRROR
-        # -----------------------------------------------------------------------------
-        if frame_3dbb_map is not None:
+        # BBoxes (already final)
+        if bbox_frames is not None:
             frame_name = f"{stem}.png"
-            if frame_name in frame_3dbb_map:
-                frame_objects = frame_3dbb_map[frame_name]["objects"]
-                for bi, obj in enumerate(frame_objects):
-                    label = obj["label"]
-                    bbox_3d = obj["aabb_floor_aligned"]
-                    corners_world = np.asarray(
-                        bbox_3d["corners_world"], dtype=np.float32
-                    )  # (8,3)
-
+            rec = bbox_frames.get(frame_name, None)
+            if rec is not None:
+                for bi, obj in enumerate(rec.get("objects", [])):
+                    corners_final = np.asarray(obj["corners_final"], dtype=np.float32)  # (8,3)
                     col = obj.get("color", [255, 180, 0])
-
-                    # BEFORE: world coords
-                    strips = []
-                    for e0, e1 in cuboid_edges:
-                        strips.append(corners_world[[e0, e1], :])
-
+                    strips = [corners_final[[e0, e1], :] for (e0, e1) in cuboid_edges]
                     rr.log(
-                        f"{BASE}/bboxes/frame_{vis_t}/bbox_{bi}",
-                        rr.LineStrips3D(
-                            strips=strips,
-                            colors=[col] * len(strips),
-                        ),
+                        f"{BASE}/bboxes/bbox_{bi}",
+                        rr.LineStrips3D(strips=strips, colors=[col] * len(strips)),
                     )
-        # ---------------------------------------------------------------------
-        # ORIGINAL RGB FRAME (single copy, not transformed)
-        # ---------------------------------------------------------------------
+
+        # Original RGB image (not transformed)
         img = _get_image_for_stem(stem)
         if img is not None:
             rr.log(f"{BASE}/image", rr.Image(img))
 
-    print(
-        "[orig-pts] BEFORE/AFTER visualization running for "
-        f"{video_id}. BEFORE = original frame, AFTER = floor-aligned frame, "
-        "AFTER_MIRROR = mirror of AFTER about ZY plane (x -> -x). . Scrub the 'frame' timeline in Rerun and "
-        "toggle entities in the UI."
-    )
+    print(f"[final-only-vis] running for {video_id}. Scrub the 'frame' timeline in Rerun.")
 
-# --------------------------------------------------------------------------------------
+# ----------------------------------------------------------------
 # FrameToWorldAnnotations
 #   - loads 3D bbox annotations (.pkl produced by BBox3DGenerator)
 #   - can visualize ORIGINAL Pi3 points + floor mesh + 3D boxes for annotated frames
@@ -1091,7 +830,7 @@ class FrameToWorldAnnotations:
         if frames_final is None:
             raise ValueError(f"[final-only][{video_id}] frames_final missing in {final_pkl}")
 
-        rerun_frame_vis_results(
+        rerun_frame_vis_final_only(
             video_id,
             frames_final=frames_final,
             frame_annotated_dir_path=self.frame_annotated_dir_path,
