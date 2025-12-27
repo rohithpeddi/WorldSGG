@@ -74,7 +74,7 @@ class ActionGenomeDatasetResize(Dataset):
         return person_bbox, object_bbox
 
     def _build_dataset(self):
-        self.samples: List[Dict] = []
+        self.samples = {}
         self.valid_nums = 0
         self.non_gt_human_nums = 0
         for frame_name in self.person_bbox.keys():
@@ -92,7 +92,12 @@ class ActionGenomeDatasetResize(Dataset):
                     bbox_xyxy = np.array([bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]])
                     objects.append({'bbox': bbox_xyxy, 'class': class_idx})
             if len(objects) > 0 or len(person_boxes) > 0:
-                self.samples.append({'filename': frame_name, 'person_boxes': person_boxes, 'objects': objects})
+                self.samples[frame_name] = {
+                    'filename': frame_name,
+                    'person_boxes': person_boxes,
+                    'objects': objects
+                }
+
                 self.valid_nums += 1
         print(f"Built dataset with {self.valid_nums} valid frames\n")
         print(f"Removed {self.non_gt_human_nums} frames without person boxes\n")
@@ -106,8 +111,25 @@ class ActionGenomeDatasetResize(Dataset):
             with open(video_3d_annotations_path, 'rb') as f:
                 video_3d_data = pickle.load(f)
             f.close()
-            for frame_name in video_3d_data.keys():
-                pass
+            video_id = video_3d_data["video_id"]
+            for frame_id, frame_name in enumerate(video_3d_data["frames_final"]["bbox_frames"].keys()):
+                video_frame_name = f"{video_id}/{frame_name}"
+                frame_objects = video_3d_data["frames_final"]["bbox_frames"][frame_name]["objects"]
+                frame_person_3d_bboxes = None
+                frame_object_3d_bboxes = []
+                for frame_object in frame_objects:
+                    label = frame_object["label"]
+                    if label == "person":
+                        frame_person_3d_bboxes = np.array(frame_object["aabb_floor_aligned"]["corners_world"])
+                    else:
+                        frame_object_3d_bboxes.append({
+                            "class": label,
+                            "bbox_3d": np.array(frame_object["aabb_floor_aligned"]["corners_world"])
+                        })
+                # Find the corresponding sample and append 3D boxes
+                if video_frame_name in self.samples:
+                    self.samples[video_frame_name]['person_boxes_3d'] = frame_person_3d_bboxes
+                    self.samples[video_frame_name]['object_boxes_3d'] = frame_object_3d_bboxes
 
     def __len__(self):
         return len(self.samples)
