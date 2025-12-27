@@ -84,7 +84,7 @@ def rerun_frame_vis_final_only(
     )
 
     # Floor (already final)
-    floor = frames_final.get("floor", None)
+    floor = frames_final["floor"]
     if floor is not None:
         v = np.asarray(floor["vertices"], dtype=np.float32)
         f = _faces_u32(np.asarray(floor["faces"]))
@@ -96,11 +96,11 @@ def rerun_frame_vis_final_only(
         rr.log(f"{BASE}/floor", rr.Mesh3D(vertex_positions=v, triangle_indices=f, **kwargs), timeless=True)
 
     points_S = np.asarray(frames_final["points"])
-    colors_S = frames_final.get("colors", None)
-    conf_S = frames_final.get("conf", None)
-    camera_poses_S = frames_final.get("camera_poses", None)
+    colors_S = frames_final["colors"]
+    conf_S = frames_final["conf"]
+    camera_poses_S = frames_final["camera_poses"]
     stems_S = frames_final["frame_stems"]
-    bbox_frames = frames_final.get("bbox_frames", None)
+    bbox_frames = frames_final["bbox_frames"]
 
     S, H_grid, W_grid, _ = points_S.shape
 
@@ -253,6 +253,7 @@ class FrameToWorldAnnotations:
         self.bbox_4d_root_dir = self.world_annotations_root_dir / "bbox_annotations_4d"
         self.bbox_3d_final_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_final"
         os.makedirs(self.bbox_4d_root_dir, exist_ok=True)
+        os.makedirs(self.bbox_3d_final_root_dir, exist_ok=True)
 
         # GT annotations
         self.gt_annotations_root_dir = self.ag_root_directory / "gt_annotations"
@@ -830,6 +831,25 @@ class FrameToWorldAnnotations:
         if frames_final is None:
             raise ValueError(f"[final-only][{video_id}] frames_final missing in {final_pkl}")
 
+        # Load original points + cameras for annotated frames
+        P = self._load_original_points_for_video(video_id)
+        points_original = P["points"]
+        cols = P["colors"]
+
+        # Apply the transform to original points to get final points
+        world_to_final = rec["world_to_final"]
+        origin_world = world_to_final["origin_world"]
+        A = world_to_final["A_world_to_final"]
+        S, H, W, _ = points_original.shape
+        pts_flat = points_original.reshape(-1, 3)
+        pts_final_flat = self._apply_world_to_final_points_row(
+            pts_flat, origin_world=origin_world, A_world_to_final=A
+        )
+        points_final = pts_final_flat.reshape(S, H, W, 3).astype(np.float32)
+        frames_final["points"] = points_final
+        frames_final["colors"] = cols
+        frames_final["conf"] = P["conf"]
+
         rerun_frame_vis_final_only(
             video_id,
             frames_final=frames_final,
@@ -958,8 +978,9 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
     )
-    video_id = "0DJ6R.mp4"
-    frame_to_world_generator.generate_sample_gt_world_3D_annotations(video_id=video_id)
+    video_id = "00T1E.mp4"
+    frame_to_world_generator.build_frames_final_and_store(video_id=video_id, overwrite=False)
+    frame_to_world_generator.visualize_final_only(video_id=video_id, app_id="World4D-FinalOnly-Sample")
 
 
 if __name__ == "__main__":
