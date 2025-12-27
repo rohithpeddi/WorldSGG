@@ -29,9 +29,6 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.lines import Line2D
 
-# ----------------------------
-# Your project imports
-# ----------------------------
 from dataloader.ag_dataset_resize import ActionGenomeDatasetResize as ActionGenomeDataset, collate_fn
 from model.dinov2_torch import create_model
 from torch_utils import utils
@@ -53,6 +50,7 @@ def clear_cuda_cache_for_current_process(sync: bool = True) -> None:
     for dev in range(torch.cuda.device_count()):
         with torch.cuda.device(dev):
             torch.cuda.empty_cache()
+
 
 # ============================
 # Helpers (kept as functions)
@@ -309,7 +307,7 @@ class DinoAGTrainer:
     def save_checkpoint(self, epoch: int) -> None:
         path_to_checkpoint = os.path.join(self.path_to_experiment, f"checkpoint_{epoch}")
         if not self.accelerator.is_main_process:
-            self.accelerator.print(f"Checkpoint saved at epoch {epoch+1}")
+            self.accelerator.print(f"Checkpoint saved at epoch {epoch + 1}")
             return
 
         os.makedirs(path_to_checkpoint, exist_ok=True)
@@ -323,7 +321,7 @@ class DinoAGTrainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
         }
         torch.save(checkpoint_dict, checkpoint_file)
-        self.accelerator.print(f"✓ Checkpoint saved at epoch {epoch+1} to {checkpoint_file}")
+        self.accelerator.print(f"✓ Checkpoint saved at epoch {epoch + 1} to {checkpoint_file}")
 
     # ----------------------------
     # Visualization
@@ -365,7 +363,7 @@ class DinoAGTrainer:
         fig, ax = plt.subplots(1, 1, figsize=(12, 12))
         ax.imshow(image_np)
         ax.set_title(
-            f"Epoch {epoch+1} | Sample: {sample['filename']}\n"
+            f"Epoch {epoch + 1} | Sample: {sample['filename']}\n"
             f"GT: {len(gt_boxes)} boxes | Pred: {len(pred_boxes)} boxes (score>={score_threshold})"
         )
         ax.axis("off")
@@ -376,7 +374,8 @@ class DinoAGTrainer:
             rect = patches.Rectangle((x1, y1), max(0.0, x2 - x1), max(0.0, y2 - y1),
                                      linewidth=2.5, edgecolor=color, facecolor="none")
             ax.add_patch(rect)
-            class_name = self.test_dataset.object_classes[int(lab)] if 0 <= int(lab) < len(self.test_dataset.object_classes) else str(lab)
+            class_name = self.test_dataset.object_classes[int(lab)] if 0 <= int(lab) < len(
+                self.test_dataset.object_classes) else str(lab)
             ax.text(
                 max(0, x1), max(10, y1 - 2), f"{class_name}",
                 fontsize=8, color="black", verticalalignment="top",
@@ -389,7 +388,8 @@ class DinoAGTrainer:
             rect = patches.Rectangle((x1, y1), max(0.0, x2 - x1), max(0.0, y2 - y1),
                                      linewidth=2.0, edgecolor=color, facecolor="none")
             ax.add_patch(rect)
-            class_name = self.test_dataset.object_classes[int(lab)] if 0 <= int(lab) < len(self.test_dataset.object_classes) else str(lab)
+            class_name = self.test_dataset.object_classes[int(lab)] if 0 <= int(lab) < len(
+                self.test_dataset.object_classes) else str(lab)
             ax.text(
                 max(0, x1), max(10, y1 - 2), f"{class_name} ({score:.2f})",
                 fontsize=8, color="black", verticalalignment="top",
@@ -402,7 +402,7 @@ class DinoAGTrainer:
         ]
         ax.legend(handles=legend_elements, loc="upper right")
 
-        save_path = os.path.join(save_dir, f"predictions_epoch_resize_{epoch+1:03d}.png")
+        save_path = os.path.join(save_dir, f"predictions_epoch_resize_{epoch + 1:03d}.png")
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         return save_path
@@ -457,13 +457,13 @@ class DinoAGTrainer:
         return [{k: v.to(self.model_device) if isinstance(v, torch.Tensor) else v for k, v in targets.items()}]
 
     def _log_iteration_losses(
-        self,
-        running_total_loss: float,
-        running_cls_loss: float,
-        running_box_loss: float,
-        running_object_loss: float,
-        running_rpn_loss: float,
-        running_count: int,
+            self,
+            running_total_loss: float,
+            running_cls_loss: float,
+            running_box_loss: float,
+            running_object_loss: float,
+            running_rpn_loss: float,
+            running_count: int,
     ) -> None:
         if running_count == 0:
             return
@@ -550,7 +550,8 @@ class DinoAGTrainer:
                     batch_loss_list.append(losses_reduced.item())
                     batch_loss_cls_list.append(loss_dict_reduced.get("loss_classifier", torch.tensor(0.0)).item())
                     batch_loss_box_reg_list.append(loss_dict_reduced.get("loss_box_reg", torch.tensor(0.0)).item())
-                    batch_loss_objectness_list.append(loss_dict_reduced.get("loss_objectness", torch.tensor(0.0)).item())
+                    batch_loss_objectness_list.append(
+                        loss_dict_reduced.get("loss_objectness", torch.tensor(0.0)).item())
                     batch_loss_rpn_list.append(loss_dict_reduced.get("loss_rpn_box_reg", torch.tensor(0.0)).item())
 
                     running_total_loss += losses_reduced.item()
@@ -621,7 +622,7 @@ class DinoAGTrainer:
             train_stats = self.train_one_epoch(epoch)
 
             # Epoch-end COCO eval
-            self.accelerator.print(f"Evaluating COCO mAP at end of epoch {epoch+1}...")
+            self.accelerator.print(f"Evaluating COCO mAP at end of epoch {epoch + 1}...")
             epoch_metrics = self.evaluate_map_coco()
 
             # Plot predictions
@@ -632,7 +633,7 @@ class DinoAGTrainer:
                         sample_idx=self.cfg.plot_sample_idx,
                         score_threshold=self.cfg.plot_score_thresh,
                     )
-                    self.accelerator.print(f"✓ Prediction visualization saved for epoch {epoch+1}")
+                    self.accelerator.print(f"✓ Prediction visualization saved for epoch {epoch + 1}")
                 except Exception as e:
                     self.accelerator.print(f"⚠️  Failed to save visualization: {e}")
 
@@ -661,7 +662,7 @@ class DinoAGTrainer:
             )
 
             # Print summary
-            self.accelerator.print(f"\nEpoch {epoch+1}/{self.cfg.epochs}")
+            self.accelerator.print(f"\nEpoch {epoch + 1}/{self.cfg.epochs}")
             self.accelerator.print(f"Train Loss: {train_stats['train_total_loss']:.4f}")
             self.accelerator.print(f"  Cls: {train_stats['train_cls_loss']:.4f}")
             self.accelerator.print(f"  Box: {train_stats['train_box_loss']:.4f}")
