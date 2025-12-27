@@ -1,16 +1,15 @@
+#!/usr/bin/env python3
 import json
+import os
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict
 from typing import Optional
-
-import numpy as np
-import torch
-from matplotlib import pyplot as plt
-
-import json
 
 import cv2
 import numpy as np
 import torch
+from matplotlib import pyplot as plt
 
 
 # ---------------------------
@@ -136,3 +135,90 @@ def get_color_map(num_colors):
     """Generates a list of distinct colors for visualization."""
     colors = plt.cm.get_cmap('hsv', num_colors)
     return [(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255)) for c in colors(range(num_colors))]
+
+
+# ------------------------------ Logging ------------------------------
+
+def _to_serializable(obj: Any) -> Any:
+    """
+    Recursively convert objects to JSON-serializable types.
+    Handles numpy, torch tensors, and nested containers.
+    """
+    # Lazy imports to avoid hard deps if not needed
+    import numpy as np
+    try:
+        import torch
+    except ImportError:  # torch may not be available in all contexts
+        torch = None
+
+    if isinstance(obj, dict):
+        return {k: _to_serializable(v) for k, v in obj.items()}
+
+    if isinstance(obj, (list, tuple)):
+        return [_to_serializable(v) for v in obj]
+
+    if torch is not None and isinstance(obj, torch.Tensor):
+        if obj.numel() == 1:
+            return obj.item()
+        return obj.detach().cpu().tolist()
+
+    if isinstance(obj, (np.generic,)):  # np.float32, np.int64, etc.
+        return obj.item()
+
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+
+    # Fall back to default
+    return obj
+
+
+class LocalLogger:
+    """
+    Simple JSON-lines logger for local experiments.
+
+    Usage:
+        logger = LocalLogger("/path/to/experiment")
+        logger.log(log_type="epoch", epoch=0, mAP=0.42, train_total_loss=1.23)
+
+    This will create:
+        /path/to/experiment/json_logs/epoch.jsonl  (one JSON object per line)
+    """
+
+    def __init__(self, experiment_dir: str):
+        self.experiment_dir = experiment_dir
+        self.log_dir = os.path.join(self.experiment_dir, "json_logs")
+        os.makedirs(self.log_dir, exist_ok=True)
+
+        # Only rank 0 logs in distributed setups
+        rank = int(os.environ.get("RANK", "0"))
+        self.is_main_process = (rank == 0)
+
+    def _get_log_path(self, log_type: str) -> str:
+        """
+        Return the path for a given log_type, e.g. 'epoch' -> epoch.jsonl
+        """
+        safe_type = log_type.replace("/", "_")
+        return os.path.join(self.log_dir, f"{safe_type}.jsonl")
+
+    def log(self, log_type: str, **kwargs: Any) -> None:
+        """
+        Append a JSON record for the given log_type.
+
+        Example:
+            log("epoch", epoch=0, mAP=0.42, train_total_loss=1.23)
+        """
+        if not self.is_main_process:
+            # Avoid multiple processes writing to the same file
+            return
+
+        record: Dict[str, Any] = {
+            "log_type": log_type,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+        record.update(kwargs)
+
+        record = _to_serializable(record)
+        log_path = self._get_log_path(log_type)
+
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")

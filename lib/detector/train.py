@@ -8,11 +8,11 @@ Key change vs your original:
 """
 
 import argparse
+import gc
 import os
 import warnings
-import gc
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -29,10 +29,9 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.lines import Line2D
 
-from dataloader.ag_dataset_resize import ActionGenomeDatasetResize as ActionGenomeDataset, collate_fn
-from model.dinov2_torch import create_model
-from torch_utils import utils
-from utils.json_logger import LocalLogger
+from ag_dataset_resize import ActionGenomeDatasetResize as ActionGenomeDataset, collate_fn
+from dinov2_torch import create_model
+from utils import LocalLogger
 from lib.detector.evaluate import DetectionEvaluator
 
 
@@ -89,15 +88,42 @@ def tensor_to_image_np(img_tensor, mean, std):
     return img
 
 
+def reduce_dict(input_dict, average=True):
+    """
+    Reduce the values in the dictionary from all processes so that all processes
+    have the averaged results. Returns a dict with the same fields.
+    """
+    world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+    if world_size < 2:
+        return input_dict
+
+    with torch.no_grad():
+        names = []
+        values = []
+        for k in sorted(input_dict.keys()):
+            names.append(k)
+            values.append(input_dict[k])
+        values = torch.stack(values, dim=0)
+        torch.distributed.all_reduce(values)
+        if average:
+            values /= world_size
+
+        reduced_dict = {k: v for k, v in zip(names, values)}
+        return reduced_dict
+
+
 # ============================
 # Config
 # ============================
 @dataclass
 class TrainConfig:
     experiment_name: str
-    working_dir: str = "/home/cse/msr/csy227518/scratch/Projects/Active/Practice/ag_object_detection/train_data"
-    data_path: str = "/home/cse/msr/csy227518/scratch/Datasets/action_genome"
-    save_path: str = "/home/cse/msr/csy227518/scratch/Projects/Active/Practice/ag_object_detection/save_models"
+    # working_dir: str = "/home/cse/msr/csy227518/scratch/Projects/Active/Practice/ag_object_detection/train_data"
+    # data_path: str = "/home/cse/msr/csy227518/scratch/Datasets/action_genome"
+    # save_path: str = "/home/cse/msr/csy227518/scratch/Projects/Active/Practice/ag_object_detection/save_models"
+    working_dir: str = "/data/rohith/ag/"
+    data_path: str = "/data/rohith/ag/"
+    save_path: str = "/data/rohith/ag/detector/"
     ckpt: Optional[str] = None
 
     lr: float = 1e-4
@@ -528,7 +554,7 @@ class DinoAGTrainer:
 
                 losses = sum(loss / self.cfg.gradient_accumulation_steps for loss in loss_dict.values())
 
-                loss_dict_reduced = utils.reduce_dict(loss_dict)
+                loss_dict_reduced = reduce_dict(loss_dict)
                 losses_reduced = sum(loss / self.cfg.gradient_accumulation_steps for loss in loss_dict_reduced.values())
 
                 self.accelerator.backward(losses)
@@ -606,7 +632,7 @@ class DinoAGTrainer:
     def run(self) -> None:
         os.makedirs(self.path_to_experiment, exist_ok=True)
 
-        self.init_trackers()
+        # self.init_trackers()
         self.build_datasets()
         self.build_dataloaders()
         self.build_model()

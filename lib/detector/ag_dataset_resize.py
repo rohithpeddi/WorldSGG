@@ -41,6 +41,7 @@ class ActionGenomeDatasetResize(Dataset):
         self.person_bbox, self.object_bbox = self._fetch_object_person_bboxes(filter_small_box)
 
         print("---------       Building Dataset (Resize)       ---------")
+        self.world_3d_annotations = os.path.join(self.data_path, const.WORLD_ANNOTATIONS, "bbox_annotations_3d_final")
         self._build_dataset()
 
         # Use only mean/std from the processor for normalization
@@ -50,8 +51,6 @@ class ActionGenomeDatasetResize(Dataset):
 
         print(f"Dataset (Resize) initialized with {len(self.samples)} frames")
         print(f"Object classes: {len(self.object_classes)}")
-
-        self.world_3d_annotations = os.path.join(self.data_path, const.WORLD_ANNOTATIONS)
 
     def _fetch_object_classes(self):
         self.object_classes = [const.BACKGROUND]
