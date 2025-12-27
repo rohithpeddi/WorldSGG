@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import rerun as rr
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from annotation_utils import (
     get_video_belongs_to_split,
@@ -872,10 +873,13 @@ class FrameToWorldAnnotations:
         """
         Iterate over an AG dataloader and build frames_final PKLs for videos in the given split.
         """
-        for data in dataloader:
+        for data in tqdm(dataloader):
             video_id = data["video_id"]
             if get_video_belongs_to_split(video_id) != split:
                 continue
+
+            print("-----------------------------------------------------------------")
+            print(f"[frames_final] processing video {video_id}...")
 
             try:
                 self.build_frames_final_and_store(
@@ -885,6 +889,7 @@ class FrameToWorldAnnotations:
                 )
             except Exception as e:
                 print(f"[frames_final] failed video {video_id}: {e}")
+            print(f"[frames_final] done video {video_id}.")
 
 
 # --------------------------------------------------------------------------------------
@@ -957,13 +962,8 @@ def main():
     )
     _, _, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
 
-    # Example: run over one split
-    frame_to_world_generator.generate_gt_world_3D_bb_annotations(
-        dataloader=dataloader_train, split=args.split
-    )
-    frame_to_world_generator.generate_gt_world_3D_bb_annotations(
-        dataloader=dataloader_test, split=args.split
-    )
+    frame_to_world_generator.generate_gt_world_3D_bb_annotations(dataloader=dataloader_train)
+    frame_to_world_generator.generate_gt_world_3D_bb_annotations(dataloader=dataloader_test)
 
 
 def main_sample():
@@ -984,5 +984,5 @@ def main_sample():
 
 
 if __name__ == "__main__":
-    # main()
-    main_sample()
+    main()
+    # main_sample()
