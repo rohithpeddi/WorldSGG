@@ -1034,28 +1034,93 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                     # so WORLD-space boxes remain as originally constructed.
 
         # ----------------------------------------------------------------------
-        # Optional: visualize world-4D bboxes (wireframe only, no points)
+        # Optional: visualize world-4D bboxes + POINTS (BEFORE/AFTER) over time
         # ----------------------------------------------------------------------
         if visualize:
-            stems_S = [Path(fn).stem for fn in frame_names_sorted]
+            # --- 1) Load original Pi3 outputs for annotated frames (same slicing logic) ---
+            P = self._load_original_points_for_video(video_id)
+
+            # P["frame_stems"] are like ["000123", ...]
+            stem_to_idx = {f"{s}.png": i for i, s in enumerate(P["frame_stems"])}
+
+            # Make sure ordering matches your bbox frame_names_sorted
+            keep_frame_names = [fn for fn in frame_names_sorted if fn in stem_to_idx]
+            if len(keep_frame_names) == 0:
+                raise RuntimeError(
+                    f"[world4d][{video_id}] No overlap between bbox frames and loaded points stems."
+                )
+
+            idxs = [stem_to_idx[fn] for fn in keep_frame_names]
+            stems_S = [Path(fn).stem for fn in keep_frame_names]
+
+            points_world = np.asarray(P["points"], dtype=np.float32)[idxs]          # (S,H,W,3)
+            conf_world = (np.asarray(P["conf"], dtype=np.float32)[idxs]
+                          if P["conf"] is not None else None)                       # (S,H,W) or None
+            colors_world = (np.asarray(P["colors"], dtype=np.uint8)[idxs]
+                            if P["colors"] is not None else None)                   # (S,H,W,3) or None
+            cameras_world = (np.asarray(P["camera_poses"], dtype=np.float32)[idxs]
+                             if P["camera_poses"] is not None else None)            # (S,4,4)/(S,3,4) or None
+
+            # --- 2) Transform points into FINAL coords ---
+            pts_flat = points_world.reshape(-1, 3)
+            pts_final_flat = (R_final @ pts_flat.T).T + t_final[None, :]
+            points_final = pts_final_flat.reshape(points_world.shape).astype(np.float32)
+
+            # Reuse same RGB for FINAL
+            colors_final = colors_world
+
+            # --- 3) Transform cameras into FINAL coords ---
+            cameras_final = None
+            if cameras_world is not None:
+                cam_list = []
+                for cam_pose in cameras_world:
+                    if cam_pose.shape == (3, 4):
+                        T_wc = np.eye(4, dtype=np.float32)
+                        T_wc[:3, :4] = cam_pose
+                    elif cam_pose.shape == (4, 4):
+                        T_wc = cam_pose.astype(np.float32)
+                    else:
+                        T_wc = np.eye(4, dtype=np.float32)
+
+                    R_wc = T_wc[:3, :3]
+                    t_wc = T_wc[:3, 3]
+
+                    # x_final = R_final @ x_world + t_final
+                    # so: R_fc = R_final @ R_wc, t_fc = R_final @ t_wc + t_final
+                    R_fc = R_final @ R_wc
+                    t_fc = (R_final @ t_wc) + t_final
+
+                    T_fc = np.eye(4, dtype=np.float32)
+                    T_fc[:3, :3] = R_fc
+                    T_fc[:3, 3] = t_fc
+                    cam_list.append(T_fc)
+
+                cameras_final = np.stack(cam_list, axis=0).astype(np.float32)
+
+            # (Optional) trim bbox dict to the same set of frames for cleanliness
+            frames_filled_world_vis = {fn: frames_filled_world[fn] for fn in keep_frame_names}
 
             print(
                 f"[world4d][{video_id}] visualize=True -> launching Rerun "
-                "(wireframe 4D bboxes only, FINAL coords)."
+                "(4D bboxes + points over time, FINAL coords)."
             )
 
             rerun_frame_vis_results(
                 video_id=video_id,
                 stems_S=stems_S,
                 frame_annotated_dir_path=self.frame_annotated_dir_path,
-                # No points / cameras for this visualization
+
+                # Points/cameras BEFORE
                 points_before=None,
-                conf_before=None,
+                conf_before=conf_world,
                 colors_before=None,
                 cameras_before=None,
-                points_after=None,
-                colors_after=None,
-                cameras_after=None,
+
+                # Points/cameras AFTER
+                points_after=points_final,
+                colors_after=colors_final,
+                cameras_after=cameras_final,
+
                 # Floor mesh / axes BEFORE + AFTER (if available)
                 floor_vertices_before=floor_vertices_before,
                 floor_axes_before=floor_axes_before,
@@ -1063,14 +1128,17 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                 floor_vertices_after=floor_vertices_after,
                 floor_axes_after=floor_axes_after,
                 floor_origin_after=floor_origin_final,
-                # Use the *filled* 4D bboxes (FINAL coords via aabb_final)
+
+                # 4D bboxes in FINAL coords
                 frame_3dbb_before=None,
-                frame_3dbb_after=frames_filled_world,
+                frame_3dbb_after=frames_filled_world_vis,
+
                 floor_faces=floor_faces,
                 floor_kwargs=floor_kwargs,
+
                 img_maxsize=480,
-                app_id="World4D-BBoxesOnly",
-                vis_mode="after",  # only show FINAL frame
+                app_id="World4D-BBoxes+Points",
+                vis_mode="after",   # change to "both" if you want BEFORE/AFTER side-by-side
             )
 
         # ----------------------------------------------------------------------
