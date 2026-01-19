@@ -947,7 +947,7 @@ def parse_args():
     parser.add_argument(
         "--dynamic_scene_dir_path",
         type=str,
-        default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
+        default="/data2/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
     )
     parser.add_argument("--split", type=str, default="04")
     return parser.parse_args()

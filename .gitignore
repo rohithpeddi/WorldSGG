@@ -6,6 +6,9 @@ dataloader/*.pkl
 datasets/preprocess/inpainting/RoseEdit/weights/transformer/*
 datasets/preprocess/inpainting/RoseEdit/models/*
 
+datasets/preprocess/reconstruction/pi3/.gradio/*
+datasets/preprocess/segmentation/gt4d/*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
