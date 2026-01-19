@@ -17,72 +17,15 @@ from tqdm import tqdm
 
 from dataloader.standard.action_genome.ag_dataset import StandardAG
 from datasets.preprocess.human.prompt_hmr.vis.traj import align_meshes_to_ground
+from datasets.preprocess.annotations.bb3D_base import BBox3DBase
+from datasets.preprocess.annotations.annotation_utils import (
+    _load_pkl_if_exists,
+    _is_empty_array,
+    get_video_belongs_to_split,
+)
 
 
-def get_video_belongs_to_split(video_id: str) -> Optional[str]:
-    """
-    Get the split that the video belongs to based on its ID.
-    Accepts either a bare ID (e.g., '0DJ6R') or a filename (e.g., '0DJ6R.mp4').
-    """
-    stem = Path(video_id).stem
-    if not stem:
-        return None
-    first_letter = stem[0]
-    if first_letter.isdigit() and int(first_letter) < 5:
-        return "04"
-    elif first_letter.isdigit() and int(first_letter) >= 5:
-        return "59"
-    elif first_letter in "ABCD":
-        return "AD"
-    elif first_letter in "EFGH":
-        return "EH"
-    elif first_letter in "IJKL":
-        return "IL"
-    elif first_letter in "MNOP":
-        return "MP"
-    elif first_letter in "QRST":
-        return "QT"
-    elif first_letter in "UVWXYZ":
-        return "UZ"
-    return None
 
-
-def _is_empty_array(x):
-    # Handles None, list, tuple, torch.Tensor, np.ndarray
-    if x is None:
-        return True
-    # list/tuple
-    if isinstance(x, (list, tuple)):
-        return len(x) == 0
-    # try tensor-like / ndarray-like
-    try:
-        return getattr(x, "numel", None) and x.numel() == 0
-    except Exception:
-        pass
-    try:
-        return hasattr(x, "size") and hasattr(x, "shape") and x.size == 0
-    except Exception:
-        pass
-    return False
-
-
-def _to_len(x):
-    if x is None:
-        return 0
-    if isinstance(x, (list, tuple)):
-        return len(x)
-    # torch / np
-    try:
-        return int(x.shape[0])
-    except Exception:
-        return 0
-
-
-def _load_pkl_if_exists(path: Path):
-    if path.exists():
-        with open(path, "rb") as f:
-            return pickle.load(f)
-    return None
 
 
 def build_scene_floor(scene_pts_xyz: np.ndarray,
@@ -112,276 +55,16 @@ def build_scene_floor(scene_pts_xyz: np.ndarray,
     return R, offset, floor_v, floor_f, floor_c
 
 
-class BBox3DGenerator:
+class BBox3DGenerator(BBox3DBase):
 
     def __init__(
             self,
             dynamic_scene_dir_path: Optional[str] = None,
             ag_root_directory: Optional[str] = None,
     ) -> None:
-        self.ag_root_directory = Path(ag_root_directory)
-        self.dynamic_scene_dir_path = Path(dynamic_scene_dir_path)
+        super().__init__(dynamic_scene_dir_path, ag_root_directory)
 
-        self.dataset_classnames = [
-            '__background__', 'person', 'bag', 'bed', 'blanket', 'book', 'box', 'broom', 'chair',
-            'closet/cabinet', 'clothes', 'cup/glass/bottle', 'dish', 'door', 'doorknob', 'doorway',
-            'floor', 'food', 'groceries', 'laptop', 'light', 'medicine', 'mirror', 'paper/notebook',
-            'phone/camera', 'picture', 'pillow', 'refrigerator', 'sandwich', 'shelf', 'shoe',
-            'sofa/couch', 'table', 'television', 'towel', 'vacuum', 'window'
-        ]
-        self.name_to_catid = {name: idx for idx, name in enumerate(self.dataset_classnames) if idx > 0}
-        self.catid_to_name_map = {v: k for k, v in self.name_to_catid.items()}
 
-        self.categories_json: List[Dict[str, Any]] = [
-            {"id": cid, "name": name} for name, cid in self.name_to_catid.items()
-        ]
-
-        # ------------------------------ Directory Paths ------------------------------ #
-        # Detections paths
-        self.dynamic_detections_root_path = self.ag_root_directory / "detection" / 'gdino_bboxes'
-        self.static_detections_root_path = self.ag_root_directory / "detection" / 'gdino_bboxes_static'
-        self.frame_annotated_dir_path = self.ag_root_directory / "frames_annotated"
-        self.sampled_frames_idx_root_dir = self.ag_root_directory / "sampled_frames_idx"
-
-        self.world_annotations_root_dir = self.ag_root_directory / "world_annotations"
-        self.bbox_3d_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d"
-        os.makedirs(self.bbox_3d_root_dir, exist_ok=True)
-
-        self.gt_annotations_map_path = self.world_annotations_root_dir / "gt_annotations_map.pkl"
-        self.gdino_annotations_map_path = self.world_annotations_root_dir / "gdino_annotations_map.pkl"
-
-        # Segmentation masks paths
-        self.dynamic_masked_frames_im_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'image_based'
-        self.dynamic_masked_frames_vid_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'video_based'
-        self.dynamic_masked_frames_combined_dir_path = self.ag_root_directory / "segmentation" / 'masked_frames' / 'combined'
-        self.dynamic_masked_videos_dir_path = self.ag_root_directory / "segmentation" / "masked_videos"
-
-        # Internal (per-object) mask stores
-        self.dynamic_masks_im_dir_path = self.ag_root_directory / "segmentation" / "masks" / "image_based"
-        self.dynamic_masks_vid_dir_path = self.ag_root_directory / "segmentation" / "masks" / "video_based"
-        self.dynamic_masks_combined_dir_path = self.ag_root_directory / "segmentation" / "masks" / "combined"
-
-        self.static_masked_frames_im_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'image_based'
-        self.static_masked_frames_vid_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'video_based'
-        self.static_masked_frames_combined_dir_path = self.ag_root_directory / "segmentation_static" / 'masked_frames' / 'combined'
-        self.static_masked_videos_dir_path = self.ag_root_directory / "segmentation_static" / "masked_videos"
-
-        # Internal (per-object) mask stores
-        self.static_masks_im_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "image_based"
-        self.static_masks_vid_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "video_based"
-        self.static_masks_combined_dir_path = self.ag_root_directory / "segmentation_static" / "masks" / "combined"
-
-    # ------------------------------ Utilities ------------------------------ #
-    @staticmethod
-    def _xywh_to_xyxy(b):  # [x,y,w,h] -> [x1,y1,x2,y2]
-        x, y, w, h = [float(v) for v in b]
-        return [x, y, x + w, y + h]
-
-    @staticmethod
-    def _area_xyxy(b):
-        x1, y1, x2, y2 = b
-        return max(0.0, x2 - x1) * max(0.0, y2 - y1)
-
-    @staticmethod
-    def _iou_xyxy(a, b) -> float:
-        ax1, ay1, ax2, ay2 = a
-        bx1, by1, bx2, by2 = b
-        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-        inter = iw * ih
-        if inter <= 0:
-            return 0.0
-        ua = BBox3DGenerator._area_xyxy(a) + BBox3DGenerator._area_xyxy(b) - inter
-        return inter / max(ua, 1e-8)
-
-    @staticmethod
-    def _union_boxes_xyxy(boxes: List[List[float]]) -> Optional[List[float]]:
-        if not boxes:
-            return None
-        x1 = min(b[0] for b in boxes)
-        y1 = min(b[1] for b in boxes)
-        x2 = max(b[2] for b in boxes)
-        y2 = max(b[3] for b in boxes)
-        return [x1, y1, x2, y2]
-
-    @staticmethod
-    def _mask_from_bbox(h: int, w: int, xyxy: List[float]) -> np.ndarray:
-        m = np.zeros((h, w), dtype=bool)
-        x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
-        x1, y1 = max(x1, 0), max(y1, 0)
-        x2, y2 = min(x2, w), min(y2, h)
-        if x2 > x1 and y2 > y1:
-            m[y1:y2, x1:x2] = True
-        return m
-
-    @staticmethod
-    def _resize_mask_to(mask: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
-        th, tw = target_hw
-        if mask.shape == (th, tw):
-            return mask.astype(bool)
-        # nearest-neighbor for binary masks
-        return cv2.resize(mask.astype(np.uint8), (tw, th), interpolation=cv2.INTER_NEAREST).astype(bool)
-
-    @staticmethod
-    def _finite_and_nonzero(pts: np.ndarray) -> np.ndarray:
-        good = np.isfinite(pts).all(axis=-1)
-        if pts.ndim == 2:  # (N,3)
-            nz = np.linalg.norm(pts, axis=-1) > 1e-12
-        else:  # (H,W,3)
-            nz = np.linalg.norm(pts, axis=-1) > 1e-12
-        return good & nz
-
-    @staticmethod
-    def _aabb(pts_n3: np.ndarray) -> Dict[str, Any]:
-        mins = pts_n3.min(axis=0).tolist()
-        maxs = pts_n3.max(axis=0).tolist()
-        return {"min": mins, "max": maxs}
-
-    @staticmethod
-    def _pca_obb(pts_n3: np.ndarray) -> Dict[str, Any]:
-        # center
-        c = pts_n3.mean(axis=0)
-        X = pts_n3 - c
-        # PCA via SVD
-        U, S, Vt = np.linalg.svd(X, full_matrices=False)
-        R = Vt  # (3,3) rows are principal axes in world coords
-        # project points to PCA basis
-        Y = X @ R.T  # (N,3)
-        mins = Y.min(axis=0)
-        maxs = Y.max(axis=0)
-        extents = (maxs - mins)  # box size along each axis
-        # corners in PCA frame (8 corners)
-        corners_local = np.array([[mins[0], mins[1], mins[2]],
-                                  [mins[0], mins[1], maxs[2]],
-                                  [mins[0], maxs[1], mins[2]],
-                                  [mins[0], maxs[1], maxs[2]],
-                                  [maxs[0], mins[1], mins[2]],
-                                  [maxs[0], mins[1], maxs[2]],
-                                  [maxs[0], maxs[1], mins[2]],
-                                  [maxs[0], maxs[1], maxs[2]]], dtype=np.float32)
-        # back to world frame
-        corners_world = corners_local @ R + c
-        return {
-            "center": c.tolist(),
-            "axes": R.tolist(),  # rows are axis directions in world frame
-            "extents": extents.tolist(),  # full lengths along each axis
-            "corners": corners_world.tolist()
-        }
-
-    @staticmethod
-    def log_floor_rr(floor_v, floor_f, floor_c):
-        v = np.asarray(floor_v, dtype=np.float32)
-        f = np.asarray(floor_f, dtype=np.uint32)
-        c = np.asarray(floor_c, dtype=np.uint8)
-
-        # try mesh first
-        rr.log(
-            "world/floor",
-            rr.Mesh3D(
-                vertex_positions=v,
-                vertex_colors=c,
-                triangle_indices=f
-            ),
-        )
-
-    @staticmethod
-    def log_floor_rr_as_points(floor_v, floor_c):
-        if rr is None:
-            return
-        v = np.asarray(floor_v, dtype=np.float32)
-        c = np.asarray(floor_c, dtype=np.uint8)
-        rr.log("world/floor", rr.Points3D(v, colors=c))
-
-    @staticmethod
-    def transform_pts_R_offset(pts: np.ndarray, R: np.ndarray, offset: np.ndarray):
-        return (R @ pts.T).T + offset[None, :]
-
-    @staticmethod
-    def _box_edges_from_corners(corners: np.ndarray) -> List[np.ndarray]:
-        # 8 corners -> 12 edges as 2-point line segments
-        idx_pairs = [
-            (0, 1), (0, 2), (0, 4),
-            (7, 6), (7, 5), (7, 3),
-            (1, 3), (1, 5),
-            (2, 3), (2, 6),
-            (4, 5), (4, 6)
-        ]
-        return [np.vstack([corners[i], corners[j]]) for (i, j) in idx_pairs]
-
-    def _log_box_lines_rr(self, path: str, corners: np.ndarray,
-                          rgba=(255, 255, 255, 255), radius=0.002):
-        edges = self._box_edges_from_corners(corners)
-        for k, e in enumerate(edges):
-            e = np.asarray(e, dtype=np.float32)
-            rr.log(
-                f"{path}/edge_{k}",
-                rr.LineStrips3D(
-                    [e],  # list of strips
-                    radii=radius,
-                    colors=[rgba],
-                ),
-            )
-
-    def labels_for_frame(self, video_id: str, stem: str, is_static: bool) -> List[str]:
-        lbls = set()
-        if is_static:
-            image_root_dir_list = [self.static_masks_im_dir_path, self.static_masks_vid_dir_path]
-        else:
-            image_root_dir_list = [self.dynamic_masks_im_dir_path, self.dynamic_masks_vid_dir_path]
-        for root in image_root_dir_list:
-            vdir = root / video_id
-            if not vdir.exists():
-                continue
-            for fn in os.listdir(vdir):
-                if not fn.endswith(".png"):
-                    continue
-                if "__" in fn:
-                    st, lbl = fn.split("__", 1)
-                    lbl = lbl.rsplit(".png", 1)[0]
-                    if st == stem:
-                        lbls.add(lbl)
-        return sorted(lbls)
-
-    def get_union_mask(self, video_id: str, stem: str, label: str, is_static) -> Optional[np.ndarray]:
-        if is_static:
-            im_p = self.static_masks_im_dir_path / video_id / f"{stem}__{label}.png"
-            vd_p = self.static_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
-        else:
-            im_p = self.dynamic_masks_im_dir_path / video_id / f"{stem}__{label}.png"
-            vd_p = self.dynamic_masks_vid_dir_path / video_id / f"{stem}__{label}.png"
-        m_im = cv2.imread(str(im_p), cv2.IMREAD_GRAYSCALE) if im_p.exists() else None
-        m_vd = cv2.imread(str(vd_p), cv2.IMREAD_GRAYSCALE) if vd_p.exists() else None
-        if m_im is None and m_vd is None:
-            return None
-        if m_im is None:
-            m = (m_vd > 127)
-        elif m_vd is None:
-            m = (m_im > 127)
-        else:
-            m = (m_im > 127) | (m_vd > 127)
-        return m.astype(bool)
-
-    def update_frame_map(
-            self,
-            frame_stems,
-            video_id,
-            frame_map: Dict[str, Dict[str, np.ndarray]],
-            is_static
-    ):
-        all_labels = set()
-        for stem in frame_stems:
-            lbls = self.labels_for_frame(video_id, stem, is_static)
-            if not lbls:
-                continue
-            all_labels.update(lbls)
-            if stem not in frame_map:
-                frame_map[stem] = {}
-            for lbl in lbls:
-                m = self.get_union_mask(video_id, stem, lbl, is_static)
-                if m is not None:
-                    frame_map[stem][lbl] = m
-        return frame_map, all_labels
 
     def create_gt_annotations_map(self, dataloader, split):
         video_id_gt_annotations_map = {}
@@ -437,130 +120,20 @@ class BBox3DGenerator:
             if get_video_belongs_to_split(video_id) != split:
                 continue
 
-            # 1. Load dynamic gdino annotations
-            video_dynamic_gdino_prediction_file_path = self.dynamic_detections_root_path / f"{video_id}.pkl"
-            video_dynamic_predictions = _load_pkl_if_exists(video_dynamic_gdino_prediction_file_path)
-
-            # 2. Load static gdino annotations
-            video_static_gdino_prediction_file_path = self.static_detections_root_path / f"{video_id}.pkl"
-            video_static_predictions = _load_pkl_if_exists(video_static_gdino_prediction_file_path)
-
-            # Normalize None to empty dict to simplify logic
-            if video_dynamic_predictions is None:
-                video_dynamic_predictions = {}
-            if video_static_predictions is None:
-                video_static_predictions = {}
-
-            # If both are empty, that's an error for this video
-            if not video_dynamic_predictions and not video_static_predictions:
-                raise ValueError(
-                    f"No GDINO predictions found for video {video_id} "
-                    f"in both dynamic ({video_dynamic_gdino_prediction_file_path}) "
-                    f"and static ({video_static_gdino_prediction_file_path}) paths."
-                )
-
-            # Collect all frame names seen in either dict
-            all_frame_names = set(video_dynamic_predictions.keys()) | set(video_static_predictions.keys())
-
-            combined_gdino_predictions = {}
-            for frame_name in all_frame_names:
-                dyn_pred = video_dynamic_predictions.get(frame_name, None)
-                stat_pred = video_static_predictions.get(frame_name, None)
-                if dyn_pred is None:
-                    dyn_pred = {"boxes": [], "labels": [], "scores": []}
-                if stat_pred is None:
-                    stat_pred = {"boxes": [], "labels": [], "scores": []}
-
-                if _is_empty_array(dyn_pred["boxes"]) and _is_empty_array(stat_pred["boxes"]):
-                    combined_gdino_predictions[frame_name] = {
-                        "boxes": [],
-                        "labels": [],
-                        "scores": [],
-                    }
-                    continue
-
-                combined_boxes = []
-                combined_labels = []
-                combined_scores = []
-
-                if not _is_empty_array(dyn_pred["boxes"]):
-                    combined_boxes += list(dyn_pred["boxes"])
-                    combined_labels += list(dyn_pred["labels"])
-                    combined_scores += list(dyn_pred["scores"])
-
-                if not _is_empty_array(stat_pred["boxes"]):
-                    combined_boxes += list(stat_pred["boxes"])
-                    combined_labels += list(stat_pred["labels"])
-                    combined_scores += list(stat_pred["scores"])
-
-                final_pred = {
-                    "boxes": combined_boxes,
-                    "labels": combined_labels,
-                    "scores": combined_scores,
-                }
-
-                combined_gdino_predictions[frame_name] = final_pred
-            video_id_gdino_annotations_map[video_id] = combined_gdino_predictions
+            try:
+                combined_gdino_predictions = self.get_video_gdino_annotations(video_id)
+                video_id_gdino_annotations_map[video_id] = combined_gdino_predictions
+            except ValueError as e:
+                # Handle the case where no predictions are found, similar to original logic
+                # Original logic raised ValueError if both empty.
+                # Here we can just skip or re-raise.
+                # The original code raised ValueError, so we should probably let it bubble up or catch it.
+                # But wait, original code iterated over all videos.
+                raise e
 
         return video_id_gdino_annotations_map
 
-    def create_label_wise_masks_map(
-            self,
-            video_id,
-            gt_annotations
-    ) -> Tuple[Dict[str, Dict[str, Dict[str, np.ndarray]]], set, set]:
-        video_to_frame_to_label_mask: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
 
-        frame_stems = []
-        for frame_items in gt_annotations:
-            frame_name = frame_items[0]["frame"].split("/")[-1]  # e.g., '000123.png'
-            stem = Path(frame_name).stem
-            frame_stems.append(stem)
-
-        frame_map: Dict[str, Dict[str, np.ndarray]] = {}
-        frame_map, all_static_labels = self.update_frame_map(
-            frame_stems=frame_stems,
-            video_id=video_id,
-            frame_map=frame_map,
-            is_static=True
-        )
-        frame_map, all_dynamic_labels = self.update_frame_map(
-            frame_stems=frame_stems,
-            video_id=video_id,
-            frame_map=frame_map,
-            is_static=False
-        )
-        if frame_map:
-            video_to_frame_to_label_mask[video_id] = frame_map
-
-        return video_to_frame_to_label_mask, all_static_labels, all_dynamic_labels
-
-    # ------------------------------ (4) Match GDINO to GT ------------------------------ #
-    def _match_gdino_to_gt(
-            self,
-            gt_label: str,
-            gt_xyxy: List[float],
-            gd_boxes: List[List[float]],
-            gd_labels: List[str],
-            gd_scores: List[float],
-            iou_thr: float = 0.3,
-    ) -> List[float]:
-        candidates = [
-            (b, s) for b, l, s in zip(gd_boxes, gd_labels, gd_scores)
-            if (l == gt_label)
-        ]
-        if not candidates:
-            return gt_xyxy
-
-        # keep boxes with IoU >= iou_thr (or top-1 if none pass)
-        passing = [b for (b, s) in candidates if self._iou_xyxy(b, gt_xyxy) >= iou_thr]
-        if passing:
-            box = self._union_boxes_xyxy(passing)
-            return box if box is not None else gt_xyxy
-
-        # no IoU pass -> pick highest-score of same label
-        best = max(candidates, key=lambda t: t[1])[0]
-        return best
 
     # ------------------------------ (5) Load 3D points for frames ------------------------------ #
     def _load_points_for_video(self, video_id: str) -> Dict[str, Any]:
