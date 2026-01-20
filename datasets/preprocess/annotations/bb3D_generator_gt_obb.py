@@ -483,8 +483,8 @@ def parse_args():
     parser.add_argument("--output_human_dir_path", type=str, default="/data/rohith/ag/ag4D/human/")
     parser.add_argument("--video_id", type=str, required=True)
     parser.add_argument("--visualize", action="store_true")
+    parser.add_argument("--split", type=str, default="04")
     args = parser.parse_args()
-
     return args
 
 
@@ -512,7 +512,6 @@ def main():
     train_dataset, test_dataset, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
     bbox_3d_generator_obb.generate_gt_world_bb_annotations(dataloader=dataloader_train, split=args.split)
     bbox_3d_generator_obb.generate_gt_world_bb_annotations(dataloader=dataloader_test, split=args.split)
-    
 
 
 if __name__ == "__main__":
