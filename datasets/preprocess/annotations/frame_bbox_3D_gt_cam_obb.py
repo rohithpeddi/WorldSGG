@@ -7,7 +7,7 @@ instead of Axis-Aligned Bounding Boxes (AABB). All data is transformed to camera
 """
 import argparse
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from torch.utils.data import DataLoader
 
@@ -17,7 +17,7 @@ import pickle
 import rerun as rr
 
 from dataloader.standard.action_genome.ag_dataset import StandardAG
-from datasets.preprocess.annotations.frame_bbox_3D_base import FrameToWorldAnnotationsBase, rerun_frame_vis_final_only
+from datasets.preprocess.annotations.frame_bbox_3D_base import FrameToWorldAnnotationsBase
 
 
 def rerun_frame_vis_camera_obb(

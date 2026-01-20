@@ -2,7 +2,7 @@ import os
 import pickle
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
+import json
 import cv2
 import numpy as np
 import rerun as rr
@@ -70,7 +70,9 @@ class BBox3DBase:
 
         self.world_annotations_root_dir = self.ag_root_directory / "world_annotations"
         self.bbox_3d_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d"
+        self.bbox_3d_obb_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_obb"
         os.makedirs(self.bbox_3d_root_dir, exist_ok=True)
+        os.makedirs(self.bbox_3d_obb_root_dir, exist_ok=True)
 
         self.gt_annotations_map_path = self.world_annotations_root_dir / "gt_annotations_map.pkl"
         self.gdino_annotations_map_path = self.world_annotations_root_dir / "gdino_annotations_map.pkl"

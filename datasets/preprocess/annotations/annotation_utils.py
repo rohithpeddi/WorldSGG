@@ -115,6 +115,16 @@ def _iou_xyxy(a, b) -> float:
     return inter / max(ua, 1e-8)
 
 
+def _union_boxes_xyxy(boxes: List[List[float]]) -> Optional[List[float]]:
+    if not boxes:
+        return None
+    x1 = min(b[0] for b in boxes)
+    y1 = min(b[1] for b in boxes)
+    x2 = max(b[2] for b in boxes)
+    y2 = max(b[3] for b in boxes)
+    return [x1, y1, x2, y2]
+
+
 def _mask_from_bbox(h: int, w: int, xyxy: List[float]) -> np.ndarray:
     m = np.zeros((h, w), dtype=bool)
     x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
@@ -228,11 +238,7 @@ def _match_gdino_to_gt(
 
     passing = [b for (b, s) in candidates if _iou_xyxy(b, gt_xyxy) >= iou_thr]
     if passing:
-        x1 = min(p[0] for p in passing)
-        y1 = min(p[1] for p in passing)
-        x2 = max(p[2] for p in passing)
-        y2 = max(p[3] for p in passing)
-        return [x1, y1, x2, y2]
+        return _union_boxes_xyxy(passing)
 
     best = max(candidates, key=lambda t: t[1])[0]
     return best

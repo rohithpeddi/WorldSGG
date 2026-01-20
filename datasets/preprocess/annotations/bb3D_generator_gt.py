@@ -506,7 +506,8 @@ class BBox3DGenerator(BBox3DBase):
     ) -> None:
         # load dynamic points (annotated frames)
         try:
-            out_path = self.bbox_3d_root_dir / f"{video_id[:-4]}.pkl"
+            # out_path = self.bbox_3d_root_dir / f"{video_id[:-4]}.pkl"
+            out_path = self.bbox_3d_obb_root_dir / f"{video_id[:-4]}.pkl"
             if out_path.exists():
                 print(f"[bbox] floor-aligned 3D bboxes already exist for video {video_id}, skipping...")
                 return
