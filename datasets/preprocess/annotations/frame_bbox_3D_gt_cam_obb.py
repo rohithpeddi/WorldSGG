@@ -54,17 +54,12 @@ def rerun_frame_vis_camera_obb(
     BASE = "camera_frame"
     rr.log(BASE, rr.ViewCoordinates.RDF, static=True)
 
-    # Define cuboid faces as closed loops (each face is a quad)
-    # Bottom face: 0-1-3-2-0, Top face: 4-5-7-6-4
-    # Front face: 0-1-5-4-0, Back face: 2-3-7-6-2
-    # Left face: 0-2-6-4-0, Right face: 1-3-7-5-1
-    cuboid_faces = [
-        [0, 1, 3, 2, 0],  # Bottom face
-        [4, 5, 7, 6, 4],  # Top face
-        [0, 1, 5, 4, 0],  # Front face
-        [2, 3, 7, 6, 2],  # Back face
-        [0, 2, 6, 4, 0],  # Left face
-        [1, 3, 7, 5, 1],  # Right face
+    # OBB corners from cv2.boxPoints: 0-3 are bottom face going around perimeter,
+    # 4-7 are top face directly above (i.e., 4 is above 0, 5 is above 1, etc.)
+    cuboid_edges = [
+        (0, 1), (1, 2), (2, 3), (3, 0),  # Bottom face edges
+        (4, 5), (5, 6), (6, 7), (7, 4),  # Top face edges
+        (0, 4), (1, 5), (2, 6), (3, 7),  # Vertical edges
     ]
 
     def _get_image_for_stem(stem: str) -> Optional[np.ndarray]:
@@ -151,11 +146,10 @@ def rerun_frame_vis_camera_obb(
                         continue
                     corners_final = np.asarray(corners_final, dtype=np.float32)  # (8,3)
                     # Use green color for OBB to distinguish from AABB (orange)
-                    col = obj.get("color", [0, 255, 0])
+                    col = obj.get("color", [255, 180, 0])
                     label = obj.get("label", f"obj_{bi}")
                     
-                    # Create face strips (each face is a closed loop)
-                    strips = [corners_final[face_indices, :] for face_indices in cuboid_faces]
+                    strips = [corners_final[[e0, e1], :] for (e0, e1) in cuboid_edges]
                     rr.log(
                         f"{BASE}/bboxes/{label}_{bi}",
                         rr.LineStrips3D(strips=strips, colors=[col] * len(strips)),

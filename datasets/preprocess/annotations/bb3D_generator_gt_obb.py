@@ -9,6 +9,11 @@ import torch
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from dataloader.standard.action_genome.ag_dataset import StandardAG
+
 sys.path.insert(0, os.path.dirname(__file__) + '/..')
 
 # Import base class and utils
@@ -18,7 +23,7 @@ from datasets.preprocess.annotations.annotation_utils import (
     _xywh_to_xyxy,
     _resize_bbox_to,
     _mask_from_bbox,
-    _resize_mask_to,
+    _resize_mask_to, get_video_belongs_to_split,
 )
 
 # Helper for OBB calculation
@@ -396,8 +401,82 @@ class BBox3DGeneratorOBB(BBox3DGenerator):
 
         return out_frames
 
+    def generate_gt_world_bb_annotations(self, dataloader, split) -> None:
+        for data in tqdm(dataloader):
+            video_id = data['video_id']
+            if get_video_belongs_to_split(video_id) == split:
+                try:
+                    vid_gt, full_gt = self.get_video_gt_annotations(video_id)
+                    # vid_gt is per frame, full_gt is the list for the video
 
-def main():
+                    # Load GDINO (optional but good for consistency)
+                    gdino = self.get_video_gdino_annotations(video_id)
+
+                    self.generate_video_bb_annotations(
+                        video_id=video_id,
+                        video_gt_annotations=full_gt,
+                        video_gdino_predictions=gdino,
+                        visualize=False
+                    )
+
+                except Exception as e:
+                    print(f"Error processing {video_id}: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+    def generate_sample_gt_world_bb_annotations(self, video_id: str) -> None:
+        vid_gt, full_gt = self.get_video_gt_annotations(video_id)
+        # vid_gt is per frame, full_gt is the list for the video
+
+        # Load GDINO (optional but good for consistency)
+        gdino = self.get_video_gdino_annotations(video_id)
+
+        self.generate_video_bb_annotations(
+            video_id=video_id,
+            video_gt_annotations=full_gt,
+            video_gdino_predictions=gdino,
+            visualize=True
+        )
+
+
+def load_dataset(ag_root_directory: str):
+    train_dataset = StandardAG(
+        phase="train",
+        mode="sgdet",
+        datasize="large",
+        data_path=ag_root_directory,
+        filter_nonperson_box_frame=True,
+        filter_small_box=False
+    )
+
+    test_dataset = StandardAG(
+        phase="test",
+        mode="sgdet",
+        datasize="large",
+        data_path=ag_root_directory,
+        filter_nonperson_box_frame=True,
+        filter_small_box=False
+    )
+
+    dataloader_train = DataLoader(
+        train_dataset,
+        shuffle=True,
+        collate_fn=lambda b: b[0],
+        pin_memory=False,
+        num_workers=0
+    )
+
+    dataloader_test = DataLoader(
+        test_dataset,
+        shuffle=False,
+        collate_fn=lambda b: b[0],
+        pin_memory=False
+    )
+
+    return train_dataset, test_dataset, dataloader_train, dataloader_test
+
+
+def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ag_root_directory", type=str, default="/data/rohith/ag")
     parser.add_argument("--dynamic_scene_dir_path", type=str, default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic")
@@ -406,36 +485,35 @@ def main():
     parser.add_argument("--visualize", action="store_true")
     args = parser.parse_args()
 
+    return args
+
+
+def main_sample():
+    args = parse_args()
+
     gen = BBox3DGeneratorOBB(
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
         ag_root_directory=args.ag_root_directory,
         output_human_dir_path=args.output_human_dir_path
     )
+
+    gen.generate_sample_gt_world_bb_annotations(args.video_id)
+
+
+def main():
+    args = parse_args()
+
+    bbox_3d_generator_obb = BBox3DGeneratorOBB(
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
+        ag_root_directory=args.ag_root_directory,
+        output_human_dir_path=args.output_human_dir_path
+    )
+
+    train_dataset, test_dataset, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
+    bbox_3d_generator_obb.generate_gt_world_bb_annotations(dataloader=dataloader_train, split=args.split)
+    bbox_3d_generator_obb.generate_gt_world_bb_annotations(dataloader=dataloader_test, split=args.split)
     
-    # We need to manually load GT annotations if we want to run just for one video like this
-    # Or use the standard loop.
-    # The base class usage usually loads entire dataset.
-    # For a helper script, we can support single video processing if we load its GT.
-    
-    # Load GT
-    try:
-        vid_gt, full_gt = gen.get_video_gt_annotations(args.video_id)
-        # vid_gt is per frame, full_gt is the list for the video
-        
-        # Load GDINO (optional but good for consistency)
-        gdino = gen.get_video_gdino_annotations(args.video_id)
-        
-        gen.generate_video_bb_annotations(
-            video_id=args.video_id,
-            video_gt_annotations=full_gt,
-            video_gdino_predictions=gdino,
-            visualize=args.visualize
-        )
-            
-    except Exception as e:
-        print(f"Error processing {args.video_id}: {e}")
-        import traceback
-        traceback.print_exc()
+
 
 if __name__ == "__main__":
     main()

@@ -215,6 +215,7 @@ class BBox3DBase:
 
         # no IoU pass -> pick highest-score of same label
         best = max(candidates, key=lambda t: t[1])[0]
+
     def get_video_gt_annotations(self, video_id):
         video_gt_annotations_json_path = self.gt_annotations_root_dir / video_id / "gt_annotations.json"
         if not video_gt_annotations_json_path.exists():
