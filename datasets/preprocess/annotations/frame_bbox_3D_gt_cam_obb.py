@@ -54,10 +54,17 @@ def rerun_frame_vis_camera_obb(
     BASE = "camera_frame"
     rr.log(BASE, rr.ViewCoordinates.RDF, static=True)
 
-    cuboid_edges = [
-        (0, 1), (1, 3), (3, 2), (2, 0),
-        (4, 5), (5, 7), (7, 6), (6, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
+    # Define cuboid faces as closed loops (each face is a quad)
+    # Bottom face: 0-1-3-2-0, Top face: 4-5-7-6-4
+    # Front face: 0-1-5-4-0, Back face: 2-3-7-6-2
+    # Left face: 0-2-6-4-0, Right face: 1-3-7-5-1
+    cuboid_faces = [
+        [0, 1, 3, 2, 0],  # Bottom face
+        [4, 5, 7, 6, 4],  # Top face
+        [0, 1, 5, 4, 0],  # Front face
+        [2, 3, 7, 6, 2],  # Back face
+        [0, 2, 6, 4, 0],  # Left face
+        [1, 3, 7, 5, 1],  # Right face
     ]
 
     def _get_image_for_stem(stem: str) -> Optional[np.ndarray]:
@@ -146,7 +153,9 @@ def rerun_frame_vis_camera_obb(
                     # Use green color for OBB to distinguish from AABB (orange)
                     col = obj.get("color", [0, 255, 0])
                     label = obj.get("label", f"obj_{bi}")
-                    strips = [corners_final[[e0, e1], :] for (e0, e1) in cuboid_edges]
+                    
+                    # Create face strips (each face is a closed loop)
+                    strips = [corners_final[face_indices, :] for face_indices in cuboid_faces]
                     rr.log(
                         f"{BASE}/bboxes/{label}_{bi}",
                         rr.LineStrips3D(strips=strips, colors=[col] * len(strips)),
@@ -204,7 +213,7 @@ class FrameToWorldAnnotationsOBB(FrameToWorldAnnotationsBase):
             print(f"[frames_cam_obb][{video_id}] exists: {out_path} (overwrite=False). Skipping.")
             return out_path
 
-        video_3dgt = self.get_video_3d_annotations(video_id)
+        video_3dgt = self.get_video_3d_obb_annotations(video_id)
         if video_3dgt is None:
             print(f"[frames_cam_obb][{video_id}] missing original bbox_annotations_3d PKL. Skipping.")
             return None
@@ -254,11 +263,11 @@ class FrameToWorldAnnotationsOBB(FrameToWorldAnnotationsBase):
                 objs = frame_rec.get("objects", [])
                 out_objs = []
                 for obj in objs:
-                    obb = obj.get("obb", None)
-                    if obb is None or "corners" not in obb:
+                    obb = obj.get("obb_floor_parallel", None)
+                    if obb is None or "corners_world" not in obb:
                         continue
                     
-                    corners_w = np.asarray(obb["corners"], dtype=np.float32)  # (8,3)
+                    corners_w = np.asarray(obb["corners_world"], dtype=np.float32)  # (8,3)
                     
                     # Transform OBB corners to camera frame
                     corners_c = corners_w @ R_cw.T + t_cw[None, :]
