@@ -115,6 +115,16 @@ def _iou_xyxy(a, b) -> float:
     return inter / max(ua, 1e-8)
 
 
+def _union_boxes_xyxy(boxes: List[List[float]]) -> Optional[List[float]]:
+    if not boxes:
+        return None
+    x1 = min(b[0] for b in boxes)
+    y1 = min(b[1] for b in boxes)
+    x2 = max(b[2] for b in boxes)
+    y2 = max(b[3] for b in boxes)
+    return [x1, y1, x2, y2]
+
+
 def _mask_from_bbox(h: int, w: int, xyxy: List[float]) -> np.ndarray:
     m = np.zeros((h, w), dtype=bool)
     x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
@@ -228,11 +238,7 @@ def _match_gdino_to_gt(
 
     passing = [b for (b, s) in candidates if _iou_xyxy(b, gt_xyxy) >= iou_thr]
     if passing:
-        x1 = min(p[0] for p in passing)
-        y1 = min(p[1] for p in passing)
-        x2 = max(p[2] for p in passing)
-        y2 = max(p[3] for p in passing)
-        return [x1, y1, x2, y2]
+        return _union_boxes_xyxy(passing)
 
     best = max(candidates, key=lambda t: t[1])[0]
     return best
@@ -465,3 +471,78 @@ def _del_and_collect(*objs):
             pass
     gc.collect()
     _safe_empty_cuda_cache()
+def _aabb(pts: np.ndarray):
+    """
+    Axis Aligned Bounding Box from points.
+    Returns dict with min, max, center, lengths, corners.
+    """
+    if pts is None or pts.shape[0] == 0:
+        return None
+    min_pt = pts.min(axis=0)
+    max_pt = pts.max(axis=0)
+    center = (min_pt + max_pt) / 2
+    lengths = max_pt - min_pt
+    
+    # 8 corners
+    c_list = []
+    for ix in [min_pt[0], max_pt[0]]:
+        for iy in [min_pt[1], max_pt[1]]:
+            for iz in [min_pt[2], max_pt[2]]:
+                c_list.append([ix, iy, iz])
+    corners = np.array(c_list)
+    
+    return {
+        "min": min_pt,
+        "max": max_pt,
+        "center": center,
+        "lengths": lengths,
+        "corners": corners
+    }
+
+
+def _pca_obb(pts: np.ndarray):
+    """
+    Oriented Bounding Box using PCA on points.
+    Returns dict with center, axes, lengths, corners.
+    """
+    if pts is None or pts.shape[0] < 4:
+        # Fallback to AABB if too few points, or return None?
+        return _aabb(pts)
+        
+    mu = pts.mean(axis=0)
+    data = pts - mu
+    cov = np.cov(data, rowvar=False)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    
+    # Sort largest to smallest
+    sort_idx = np.argsort(eigvals)[::-1]
+    eigvecs = eigvecs[:, sort_idx]
+    
+    # Project
+    proj = data @ eigvecs
+    min_pt = proj.min(axis=0)
+    max_pt = proj.max(axis=0)
+    
+    center_local = (min_pt + max_pt) / 2
+    lengths = max_pt - min_pt
+    
+    # Back to world
+    center_world = mu + eigvecs @ center_local
+    
+    # Corners in local
+    c_local = []
+    for ix in [min_pt[0], max_pt[0]]:
+        for iy in [min_pt[1], max_pt[1]]:
+            for iz in [min_pt[2], max_pt[2]]:
+                c_local.append([ix, iy, iz])
+    c_local = np.array(c_local)
+    
+    # Corners world: mu + c_local * eigvecs^T
+    corners_world = mu + c_local @ eigvecs.T
+    
+    return {
+        "center": center_world,
+        "axes": eigvecs,
+        "lengths": lengths,
+        "corners": corners_world
+    }

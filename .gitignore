@@ -9,6 +9,8 @@ datasets/preprocess/inpainting/RoseEdit/models/*
 datasets/preprocess/reconstruction/pi3/.gradio/*
 datasets/preprocess/segmentation/gt4d/*
 
+datasets/preprocess/sam_3d/notebook/*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

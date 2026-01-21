@@ -128,26 +128,7 @@ class MismatchStatsEstimator(FrameToWorldBase):
 
 class CameraMotionStatsEstimator(FrameToWorldBase):
 
-    def construct_avg_motion_buckets(self, motion_magnitudes: List[float]) -> Dict[str, int]:
-        motion_buckets: Dict[str, int] = {
-            "0.0-0.01": 0,
-            "0.01-0.05": 0,
-            "0.05-0.1": 0,
-            "0.1-0.5": 0,
-            "0.5+": 0,
-        }
-        for motion in motion_magnitudes:
-            if motion < 0.01:
-                motion_buckets["0.0-0.01"] += 1
-            elif motion < 0.05:
-                motion_buckets["0.01-0.05"] += 1
-            elif motion < 0.1:
-                motion_buckets["0.05-0.1"] += 1
-            elif motion < 0.5:
-                motion_buckets["0.1-0.5"] += 1
-            else:
-                motion_buckets["0.5+"] += 1
-        return motion_buckets
+
 
     def estimate_camera_motion_for_video(
         self, video_id: str, video_dynamic_predictions: Dict[str, Any]
@@ -280,27 +261,7 @@ class CameraMotionStatsEstimator(FrameToWorldBase):
 # --------------------------------------------------------------------------------------
 
 class CameraMotionStatsCombiner(FrameToWorldBase):
-    def construct_avg_motion_buckets(self, motion_magnitudes: List[float]) -> Dict[str, int]:
-        # keep identical bucket logic to estimator
-        motion_buckets: Dict[str, int] = {
-            "0.0-0.01": 0,
-            "0.01-0.05": 0,
-            "0.05-0.1": 0,
-            "0.1-0.5": 0,
-            "0.5+": 0,
-        }
-        for motion in motion_magnitudes:
-            if motion < 0.01:
-                motion_buckets["0.0-0.01"] += 1
-            elif motion < 0.05:
-                motion_buckets["0.01-0.05"] += 1
-            elif motion < 0.1:
-                motion_buckets["0.05-0.1"] += 1
-            elif motion < 0.5:
-                motion_buckets["0.1-0.5"] += 1
-            else:
-                motion_buckets["0.5+"] += 1
-        return motion_buckets
+
 
     def combine_camera_motion_stats_all_splits(self) -> None:
         def _combine_one_group(json_paths: List[Path], dataset_split: str) -> None:
