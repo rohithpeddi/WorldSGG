@@ -66,6 +66,7 @@ from datasets.preprocess.annotations.annotation_utils import (
     _safe_empty_cuda_cache,
     _torch_inference_ctx,
     _del_and_collect,
+    _as_np
 )
 
 
@@ -89,7 +90,6 @@ class BBox3DGenerator(BBox3DBase):
 
         self.erosion_kernel_sizes = list(range(0, 11))
         self.min_points_per_scale = 50
-
 
 
     def _load_points_for_video(self, video_id: str) -> Dict[str, Any]:
@@ -643,6 +643,161 @@ class BBox3DGenerator(BBox3DBase):
                 except Exception:
                     pass
             print(f"[bbox] Cleared all files")
+
+    def visualize_from_saved_files(
+            self,
+            video_id: str,
+            *,
+            app_id: str = "World4D-Saved",
+            img_maxsize: int = 480,
+            vis_floor: bool = True,
+            vis_humans: bool = False,
+            min_conf_default: float = 1e-6,
+    ) -> None:
+        """
+        Load precomputed artifacts from disk and launch rerun visualization.
+        - NO recomputation of the pipeline
+        - NO saving/writing
+        Uses:
+          (1) saved bbox pickle: self.bbox_3d_obb_root_dir / f"{video_id[:-4]}.pkl"
+          (2) dynamic predictions: self.dynamic_scene_dir_path / f"{video_id[:-4]}_10/predictions.npz"
+        """
+
+        # ------------------------------------------------------------
+        # 1) Load saved bbox/alignment outputs (pickle)
+        # ------------------------------------------------------------
+        pkl_path = self.bbox_3d_obb_root_dir / f"{video_id[:-4]}.pkl"
+        if not pkl_path.exists():
+            raise FileNotFoundError(
+                f"[vis] Missing saved bbox file: {pkl_path}\n"
+                f"Run generation once (generate_video_bb_annotations) before visualization."
+            )
+
+        with open(pkl_path, "rb") as f:
+            saved: Dict[str, Any] = pickle.load(f)
+
+        per_frame_sims = saved.get("per_frame_sims", None)
+
+        gsim = saved.get("global_floor_sim", None)
+        global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None
+        if isinstance(gsim, dict) and all(k in gsim for k in ("s", "R", "t")):
+            global_floor_sim = (
+                float(gsim["s"]),
+                _as_np(gsim["R"], np.float32),
+                _as_np(gsim["t"], np.float32),
+            )
+        elif isinstance(gsim, (tuple, list)) and len(gsim) == 3:
+            global_floor_sim = (
+                float(gsim[0]),
+                _as_np(gsim[1], np.float32),
+                _as_np(gsim[2], np.float32),
+            )
+
+        frame_bbox_meshes = saved.get("frame_bbox_meshes", None)
+
+        gv = saved.get("gv", None)
+        gf = saved.get("gf", None)
+        gc = saved.get("gc", None)
+
+        floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None
+        if gv is not None and gf is not None:
+            floor = (
+                _as_np(gv, np.float32),
+                _as_np(gf, np.uint32),
+                _as_np(gc, np.uint8) if gc is not None else None,
+            )
+
+        # ------------------------------------------------------------
+        # 2) Load dynamic predictions (npz) for images + camera poses
+        # ------------------------------------------------------------
+        pred_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
+        if not pred_path.exists():
+            raise FileNotFoundError(f"[vis] Missing dynamic predictions file: {pred_path}")
+
+        # Use your existing _npz_open helper if you want; np.load is fine too.
+        with _npz_open(pred_path) as npz:
+            imgs_f32 = npz["images"]  # (S,H,W,3) in [0,1] (typically)
+            images_u8 = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
+            images: List[Optional[np.ndarray]] = [images_u8[i] for i in range(images_u8.shape[0])]
+
+            camera_poses = None
+            if "camera_poses" in npz:
+                camera_poses = npz["camera_poses"]
+
+            S_full = int(images_u8.shape[0])
+
+        # ------------------------------------------------------------
+        # 3) Reconstruct the indexing the visualizer expects
+        # ------------------------------------------------------------
+        # annotated_frame_idx_in_sample_idx are the indices into the sampled range (0..S_full-1)
+        # We only need those indices + a sampled_indices list whose indexing matches predictions.npz.
+        try:
+            (_, sample_idx, _, _, annotated_frame_idx_in_sample_idx) = self.idx_to_frame_idx_path(video_id)
+            # Sanity: predictions length should match sampled range length
+            if len(sample_idx) != S_full:
+                print(
+                    f"[vis][warn] predictions.npz S={S_full} but idx_to_frame_idx_path sample_idx={len(sample_idx)}. "
+                    f"Proceeding with min length."
+                )
+                S_use = min(S_full, len(sample_idx))
+                images = images[:S_use]
+                S_full = S_use
+        except Exception as e:
+            print(f"[vis][warn] idx_to_frame_idx_path failed ({e}); falling back to showing all frames.")
+            annotated_frame_idx_in_sample_idx = list(range(S_full))
+
+        sampled_indices = list(range(S_full))
+
+        # ------------------------------------------------------------
+        # 4) Build a minimal world dict (camera only, optionally humans)
+        # ------------------------------------------------------------
+        world4d: Dict[int, dict] = {}
+
+        if camera_poses is not None:
+            for i in range(S_full):
+                cam_i = np.asarray(camera_poses[i])
+                if cam_i.shape == (4, 4):
+                    cam_3x4 = cam_i[:3, :4]
+                elif cam_i.shape == (3, 4):
+                    cam_3x4 = cam_i
+                else:
+                    raise ValueError(f"[vis] Unexpected camera_poses[{i}] shape: {cam_i.shape}")
+                world4d[i] = {
+                    "camera": cam_3x4.astype(np.float32),
+                    # humans are optional; rerun_vis_world4d checks these keys
+                    "track_id": [],
+                    "vertices_orig": [],
+                }
+        else:
+            # fallback: identity camera so rerun doesn't crash
+            I = np.eye(3, 4, dtype=np.float32)
+            world4d = {
+                i: {"camera": I, "track_id": [], "vertices_orig": []}
+                for i in range(S_full)
+            }
+
+        # ------------------------------------------------------------
+        # 5) Launch rerun visualizer
+        # ------------------------------------------------------------
+        rerun_vis_world4d(
+            video_id=video_id,
+            images=images,
+            world4d=world4d,
+            faces=self.smplx.faces,  # already on the layer
+            sampled_indices=sampled_indices,
+            annotated_frame_idx_in_sample_idx=annotated_frame_idx_in_sample_idx,
+            dynamic_prediction_path=str(self.dynamic_scene_dir_path),
+            per_frame_sims=per_frame_sims,
+            global_floor_sim=global_floor_sim,
+            floor=floor,
+            img_maxsize=img_maxsize,
+            app_id=app_id,
+            frame_bbox_meshes=frame_bbox_meshes,
+            vis_floor=vis_floor,
+            vis_humans=vis_humans,  # typically False unless you also load vertices_orig
+            min_conf_default=min_conf_default,
+        )
+
 
     # ------------------------------------------------------------------
     # 1) MULTISCALE BLOCK (per-frame, per-label, keep all scales)

@@ -481,7 +481,6 @@ def parse_args():
     parser.add_argument("--ag_root_directory", type=str, default="/data/rohith/ag")
     parser.add_argument("--dynamic_scene_dir_path", type=str, default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic")
     parser.add_argument("--output_human_dir_path", type=str, default="/data/rohith/ag/ag4D/human/")
-    parser.add_argument("--video_id", type=str, required=True)
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--split", type=str, default="04")
     args = parser.parse_args()
@@ -490,15 +489,20 @@ def parse_args():
 
 def main_sample():
     args = parse_args()
-
+    video_id = "00T1E.mp4"
     gen = BBox3DGeneratorOBB(
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
         ag_root_directory=args.ag_root_directory,
         output_human_dir_path=args.output_human_dir_path
     )
 
-    gen.generate_sample_gt_world_bb_annotations(args.video_id)
-
+    # gen.generate_sample_gt_world_bb_annotations(video_id)
+    gen.visualize_from_saved_files(
+        video_id=video_id,
+        vis_floor=True,
+        vis_humans=False,   # set True only if you also load vertices_orig into world4d
+        img_maxsize=480,
+    )
 
 def main():
     args = parse_args()
@@ -515,4 +519,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    main_sample()

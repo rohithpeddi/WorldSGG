@@ -193,7 +193,7 @@ class FrameToWorldAnnotationsOBB(FrameToWorldAnnotationsBase):
           - bbox_annotations_3d PKL (world frame) - uses OBB corners
         
         Produces:
-          - video_3dgt_updated["frames_final"] where:
+            - video_3dgt_updated[ "frames_final"] where:
               - points are in CAMERA frame of that frame
               - OBB bboxes are in CAMERA frame of that frame
               - camera_poses are Identity (since we are in camera frame)
@@ -280,9 +280,9 @@ class FrameToWorldAnnotationsOBB(FrameToWorldAnnotationsBase):
         
         frames_final = {
             "frame_stems": stems,
-            "points": points_cam,
-            "colors": P.get("colors", None),
-            "conf": P.get("conf", None),
+            # "points": points_cam,
+            # "colors": P.get("colors", None),
+            # "conf": P.get("conf", None),
             "camera_poses": cams_identity, 
             "bbox_frames": bbox_frames_cam,
             "floor": None  # Floor is not transformed to camera frame
@@ -415,5 +415,5 @@ def main_sample():
 
 
 if __name__ == "__main__":
-    # main()
-    main_sample()
+    main()
+    # main_sample()
