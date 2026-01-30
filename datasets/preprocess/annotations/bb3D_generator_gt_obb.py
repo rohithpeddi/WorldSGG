@@ -566,7 +566,6 @@ class BBox3DGeneratorOBB(BBox3DGenerator):
             min_conf_default=min_conf_default,
         )
 
-
     def generate_gt_world_bb_annotations(self, dataloader, split) -> None:
         for data in tqdm(dataloader):
             video_id = data['video_id']
@@ -809,6 +808,7 @@ def rerun_vis_obb_world4d(
 
         # ---- fallback: manual rr.LineStrips3D using _box_edges_from_corners ----
         try:
+            print(f"------------------------ Fallback _log_box_lines_rr for {path} ------------------------")
             edges = _box_edges_from_corners(corners_world)
 
             if isinstance(edges, (list, tuple)) and len(edges) > 0 and isinstance(edges[0], (list, tuple)) and len(edges[0]) == 2:
@@ -1040,7 +1040,7 @@ def main_sample():
     )
 
     # gen.generate_sample_gt_world_bb_annotations(video_id)
-    gen.visualize_from_saved_files(
+    gen.visualize_obb_from_saved_files(
         video_id=video_id,
         vis_floor=True,
         vis_humans=False,   # set True only if you also load vertices_orig into world4d

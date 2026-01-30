@@ -1163,7 +1163,7 @@ class BBox3DGenerator(BBox3DBase):
                 fused_maxs = (weights[:, None] * maxs_stack).sum(axis=0)
 
                 # NEW: clamp fused_volume to be near the median for this frame
-                # lets say we allow only 0.6x .. 1.4x of the frame's median volume
+                # let's say we allow only 0.6x. 1.4x of the frame's median volume
                 vol_low = 0.6 * vol_med
                 vol_high = 1.4 * vol_med
                 fused_volume = float(np.clip(fused_volume, vol_low, vol_high))
@@ -1190,7 +1190,7 @@ class BBox3DGenerator(BBox3DBase):
             F = np.eye(4, dtype=np.float32)
             H = np.eye(4, dtype=np.float32)
 
-            # process noise: allow motion in center, very low on volume
+            # process noise: allow motion in a center, very low on volume
             Q = np.diag([1e-4, 1e-4, 1e-4, 1e-5]).astype(np.float32)
 
             # measurement noise: trust centers, be more skeptical about volume
