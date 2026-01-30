@@ -434,19 +434,11 @@ class BBox3DGeneratorOBB(BBox3DGenerator):
         # ------------------------------------------------------------
         # 1) Load saved bbox/alignment outputs (pickle)
         # ------------------------------------------------------------
-        pkl_path = self.bbox_3d_obb_root_dir / f"{video_id[:-4]}.pkl"
-        if not pkl_path.exists():
-            raise FileNotFoundError(
-                f"[vis] Missing saved bbox file: {pkl_path}\n"
-                f"Run generation once (generate_video_bb_annotations) before visualization."
-            )
+        video_3dgt = self.get_video_3d_obb_annotations(video_id)
+        frames_map = video_3dgt.get("frames", None)
+        per_frame_sims = video_3dgt.get("per_frame_sims", None)
 
-        with open(pkl_path, "rb") as f:
-            saved: Dict[str, Any] = pickle.load(f)
-
-        per_frame_sims = saved.get("per_frame_sims", None)
-
-        gsim = saved.get("global_floor_sim", None)
+        gsim = video_3dgt.get("global_floor_sim", None)
         global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None
         if isinstance(gsim, dict) and all(k in gsim for k in ("s", "R", "t")):
             global_floor_sim = (
@@ -461,11 +453,11 @@ class BBox3DGeneratorOBB(BBox3DGenerator):
                 _as_np(gsim[2], np.float32),
             )
 
-        frame_bbox_meshes = saved.get("frame_bbox_meshes", None)
+        frame_bbox_meshes = video_3dgt.get("frame_bbox_meshes", None)
 
-        gv = saved.get("gv", None)
-        gf = saved.get("gf", None)
-        gc = saved.get("gc", None)
+        gv = video_3dgt.get("gv", None)
+        gf = video_3dgt.get("gf", None)
+        gc = video_3dgt.get("gc", None)
 
         floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None
         if gv is not None and gf is not None:
@@ -556,6 +548,7 @@ class BBox3DGeneratorOBB(BBox3DGenerator):
             annotated_frame_idx_in_sample_idx=annotated_frame_idx_in_sample_idx,
             dynamic_prediction_path=str(self.dynamic_scene_dir_path),
             per_frame_sims=per_frame_sims,
+            frames_map=frames_map,
             global_floor_sim=global_floor_sim,
             floor=floor,
             img_maxsize=img_maxsize,
@@ -614,6 +607,7 @@ def rerun_vis_obb_world4d(
         sampled_indices: List[int],
         dynamic_prediction_path: str,
         per_frame_sims: Optional[Dict[int, Dict[str, Any]]] = None,
+        frames_map: Optional[Dict[str, Dict[str, Any]]] = None,
         global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None,
         floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None,
         img_maxsize: int = 320,
@@ -689,146 +683,6 @@ def rerun_vis_obb_world4d(
         (4, 5), (5, 7), (7, 6), (6, 4),
         (0, 4), (1, 5), (2, 6), (3, 7),
     ]
-
-    # ------------------------------------------------------------------
-    # OBB helpers (OBB-first extraction; fall back to existing fields)
-    # ------------------------------------------------------------------
-    def _corners_from_obb(center: np.ndarray, R: np.ndarray, half_sizes: np.ndarray) -> np.ndarray:
-        center = np.asarray(center, dtype=np.float32).reshape(3)
-        R = np.asarray(R, dtype=np.float32).reshape(3, 3)
-        half_sizes = np.asarray(half_sizes, dtype=np.float32).reshape(3)
-
-        signs = np.array([
-            [-1, -1, -1],
-            [-1, -1,  1],
-            [-1,  1, -1],
-            [-1,  1,  1],
-            [ 1, -1, -1],
-            [ 1, -1,  1],
-            [ 1,  1, -1],
-            [ 1,  1,  1],
-        ], dtype=np.float32)
-
-        local = signs * half_sizes[None, :]      # (8,3) in box-local
-        corners = center[None, :] + local @ R.T  # (8,3) in world
-        return corners
-
-    def _extract_corners_world(bbox_m: Dict[str, Any]) -> Optional[np.ndarray]:
-        """
-        Preference order:
-          1) bbox_m["obb_corners_world"] or bbox_m["corners_world"] if (8,3)
-          2) bbox_m["obb"] params -> corners
-          3) bbox_m["verts"] if (8,3) (your existing format)
-          4) bbox_m["aabb_corners_world"] if (8,3)
-        """
-        for k in ("obb_corners_world", "corners_world"):
-            if k in bbox_m and bbox_m[k] is not None:
-                cw = np.asarray(bbox_m[k], dtype=np.float32)
-                if cw.shape == (8, 3):
-                    return cw
-
-        obb = bbox_m.get("obb", None)
-        if isinstance(obb, dict):
-            c = obb.get("center", None)
-            Rm = obb.get("R", None)
-            hs = obb.get("half_sizes", None)
-            ext = obb.get("extents", None)
-            if hs is None and ext is not None:
-                hs = 0.5 * np.asarray(ext, dtype=np.float32)
-            if c is not None and Rm is not None and hs is not None:
-                try:
-                    return _corners_from_obb(c, Rm, hs)
-                except Exception:
-                    pass
-
-        if "verts" in bbox_m and bbox_m["verts"] is not None:
-            v = np.asarray(bbox_m["verts"], dtype=np.float32)
-            if v.shape == (8, 3):
-                return v
-
-        if "aabb_corners_world" in bbox_m and bbox_m["aabb_corners_world"] is not None:
-            cw = np.asarray(bbox_m["aabb_corners_world"], dtype=np.float32)
-            if cw.shape == (8, 3):
-                return cw
-
-        return None
-
-    def _call_log_box_lines_rr(path: str, corners_world: np.ndarray, color: List[int]):
-        """
-        Try to call your _log_box_lines_rr helper (unknown signature).
-        If it fails, fallback to rr.LineStrips3D using _box_edges_from_corners.
-        """
-        # ---- attempt helper call (signature-safe) ----
-        try:
-            fn = _log_box_lines_rr
-            sig = inspect.signature(fn)
-            params = list(sig.parameters.keys())
-
-            args = []
-            # detect likely order
-            if params:
-                p0 = params[0].lower()
-                if "corner" in p0 or "verts" in p0:
-                    args.append(corners_world)
-                    if len(params) >= 2 and ("path" in params[1].lower() or "entity" in params[1].lower()):
-                        args.append(path)
-                else:
-                    # assume (path, corners, ...)
-                    args.append(path)
-                    if len(params) >= 2:
-                        args.append(corners_world)
-
-            kwargs = {}
-            for cand in ("color", "colors", "rgb", "albedo_factor", "line_color"):
-                if cand in sig.parameters:
-                    kwargs[cand] = color
-                    break
-
-            # provide edges/strips if requested
-            if ("edges" in sig.parameters) or ("strips" in sig.parameters):
-                edges = _box_edges_from_corners(corners_world)
-                strips = None
-                # edges can be list[(i,j)] or array(E,2,3)
-                if isinstance(edges, (list, tuple)) and len(edges) > 0 and isinstance(edges[0], (list, tuple)) and len(edges[0]) == 2:
-                    strips = [corners_world[[i, j], :] for (i, j) in edges]
-                else:
-                    segs = np.asarray(edges, dtype=np.float32)
-                    if segs.ndim == 3 and segs.shape[1:] == (2, 3):
-                        strips = [segs[e] for e in range(segs.shape[0])]
-
-                if "edges" in sig.parameters:
-                    kwargs["edges"] = edges
-                if "strips" in sig.parameters and strips is not None:
-                    kwargs["strips"] = strips
-
-            fn(*args, **kwargs)
-            return
-        except Exception:
-            pass
-
-        # ---- fallback: manual rr.LineStrips3D using _box_edges_from_corners ----
-        try:
-            print(f"------------------------ Fallback _log_box_lines_rr for {path} ------------------------")
-            edges = _box_edges_from_corners(corners_world)
-
-            if isinstance(edges, (list, tuple)) and len(edges) > 0 and isinstance(edges[0], (list, tuple)) and len(edges[0]) == 2:
-                strips = [corners_world[[i, j], :] for (i, j) in edges]
-            else:
-                segs = np.asarray(edges, dtype=np.float32)
-                if segs.ndim == 3 and segs.shape[1:] == (2, 3):
-                    strips = [segs[e] for e in range(segs.shape[0])]
-                else:
-                    strips = [corners_world[[e0, e1], :] for (e0, e1) in cuboid_edges]
-
-            rr.log(
-                path,
-                rr.LineStrips3D(
-                    strips=strips,
-                    colors=[color] * len(strips),
-                ),
-            )
-        except Exception:
-            return
 
     # ------------------------------------------------------------------
     # frames to iterate
@@ -922,6 +776,18 @@ def rerun_vis_obb_world4d(
                     ),
                 )
 
+        if frames_map and frame_name in frames_map:
+            frame_rec = frames_map[frame_name]
+            objs = frame_rec.get("objects", [])
+            out_objs = []
+            for obj in objs:
+                obb = obj.get("obb_floor_parallel", None)
+                if obb is None or "corners_world" not in obb:
+                    continue
+
+                corners_w = np.asarray(obb["corners_world"], dtype=np.float32)  # (8,3)
+
+
         # --- per-frame OBB bboxes (preferred), fallback to AABB ---
         if frame_bbox_meshes is not None:
             # frame_bbox_meshes might be keyed by:
@@ -939,15 +805,18 @@ def rerun_vis_obb_world4d(
 
             if bbox_key is not None:
                 for bi, bbox_m in enumerate(frame_bbox_meshes[bbox_key]):
-                    corners_world = _extract_corners_world(bbox_m)
+                    corners_world = corners_w
                     if corners_world is None:
                         continue
 
-                    col = bbox_m.get("color", [255, 180, 0])
-                    path = f"{BASE}/bboxes/frame_{frame_idx}/bbox_{bi}"
+                    col = obj.get("color", [255, 180, 0])
+                    label = obj.get("label", f"obj_{bi}")
 
-                    # Use helper-based logger if possible; fallback otherwise
-                    _call_log_box_lines_rr(path, corners_world.astype(np.float32), col)
+                    strips = [corners_world[[e0, e1], :] for (e0, e1) in cuboid_edges]
+                    rr.log(
+                        f"{BASE}/bboxes/frame_{frame_idx}/{label}_{bi}",
+                        rr.LineStrips3D(strips=strips, colors=[col] * len(strips)),
+                    )
 
         # camera
         cam_3x4 = np.asarray(frame_data["camera"], dtype=np.float32)
