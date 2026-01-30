@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import contextlib
-import gc
-import json
 import os
 import pickle
 import sys
@@ -35,35 +32,23 @@ from datasets.preprocess.human.pipeline.kp_utils import (
     get_smpl_joint_names,
 )
 
-from annotation_utils import get_video_belongs_to_split, _load_pkl_if_exists, _npz_open, _torch_inference_ctx
+from annotation_utils import _npz_open
 from datasets.preprocess.annotations.bb3D_base import BBox3DBase
 from datasets.preprocess.annotations.annotation_utils import (
-    _load_pkl_if_exists,
-    _is_empty_array,
     get_video_belongs_to_split,
     _faces_u32,
     _pinhole_from_fov,
     _xywh_to_xyxy,
     _resize_bbox_to,
-    _area_xyxy,
-    _iou_xyxy,
     _mask_from_bbox,
     _resize_mask_to,
     _finite_and_nonzero,
-    transform_pts_R_offset,
-    inv_transform_pts_R_offset,
-    _box_edges_from_corners,
     _lift_2d_to_3d,
     _build_frame_to_kps_map,
-    _log_box_lines_rr,
-    _match_gdino_to_gt,
     _choose_primary_actor,
     _find_actor_index_in_frame,
-    _similarity_umeyama,
     _robust_similarity_ransac,
-    _mad_based_mask,
     _average_sims_robust,
-    _safe_empty_cuda_cache,
     _torch_inference_ctx,
     _del_and_collect,
     _as_np
