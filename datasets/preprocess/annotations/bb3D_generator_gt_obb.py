@@ -492,7 +492,7 @@ class BBox3DGeneratorOBB(BBox3DGenerator):
         # annotated_frame_idx_in_sample_idx are the indices into the sampled range (0..S_full-1)
         # We only need those indices + a sampled_indices list whose indexing matches predictions.npz.
         try:
-            (_, sample_idx, _, _, annotated_frame_idx_in_sample_idx) = self.idx_to_frame_idx_path(video_id)
+            (frame_idx_frame_path_map, sample_idx, _, _, annotated_frame_idx_in_sample_idx) = self.idx_to_frame_idx_path(video_id)
             # Sanity: predictions length should match sampled range length
             if len(sample_idx) != S_full:
                 print(
@@ -504,7 +504,8 @@ class BBox3DGeneratorOBB(BBox3DGenerator):
                 S_full = S_use
         except Exception as e:
             print(f"[vis][warn] idx_to_frame_idx_path failed ({e}); falling back to showing all frames.")
-            annotated_frame_idx_in_sample_idx = list(range(S_full))
+            raise e
+            # annotated_frame_idx_in_sample_idx = list(range(S_full))
 
         sampled_indices = list(range(S_full))
 
@@ -549,6 +550,7 @@ class BBox3DGeneratorOBB(BBox3DGenerator):
             dynamic_prediction_path=str(self.dynamic_scene_dir_path),
             per_frame_sims=per_frame_sims,
             frames_map=frames_map,
+            frame_idx_frame_path_map=frame_idx_frame_path_map,
             global_floor_sim=global_floor_sim,
             floor=floor,
             img_maxsize=img_maxsize,
@@ -608,6 +610,7 @@ def rerun_vis_obb_world4d(
         dynamic_prediction_path: str,
         per_frame_sims: Optional[Dict[int, Dict[str, Any]]] = None,
         frames_map: Optional[Dict[str, Dict[str, Any]]] = None,
+        frame_idx_frame_path_map: Optional[Dict[int, str]] = None,
         global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None,
         floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None,
         img_maxsize: int = 320,
@@ -623,7 +626,6 @@ def rerun_vis_obb_world4d(
       - Uses _box_edges_from_corners + _log_box_lines_rr (signature-safe).
       - Robustly handles frame_bbox_meshes keyed by sample_idx OR vis_t OR frame_idx.
     """
-    import inspect
 
     faces_u32 = _faces_u32(faces)
     rr.init(app_id, spawn=True)
@@ -677,11 +679,12 @@ def rerun_vis_obb_world4d(
             img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         return img
 
-    # edges for a cuboid (8 vertices) used only as ultimate fallback
+    # OBB corners from cv2.boxPoints: 0-3 are the bottom face going around perimeter,
+    # 4-7 are the top face directly above (i.e., 4 is above 0, 5 is above 1, etc.)
     cuboid_edges = [
-        (0, 1), (1, 3), (3, 2), (2, 0),
-        (4, 5), (5, 7), (7, 6), (6, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
+        (0, 1), (1, 2), (2, 3), (3, 0),  # Bottom face edges
+        (4, 5), (5, 6), (6, 7), (7, 4),  # Top face edges
+        (0, 4), (1, 5), (2, 6), (3, 7),  # Vertical edges
     ]
 
     # ------------------------------------------------------------------
@@ -697,6 +700,7 @@ def rerun_vis_obb_world4d(
             continue
 
         frame_idx = sampled_indices[sample_idx]
+        frame_name = frame_idx_frame_path_map[frame_idx]
 
         rr.set_time_sequence("frame", vis_t)
         rr.log("/", rr.Clear(recursive=True))
@@ -779,44 +783,25 @@ def rerun_vis_obb_world4d(
         if frames_map and frame_name in frames_map:
             frame_rec = frames_map[frame_name]
             objs = frame_rec.get("objects", [])
-            out_objs = []
-            for obj in objs:
+            for obj_idx, obj in enumerate(objs):
                 obb = obj.get("obb_floor_parallel", None)
                 if obb is None or "corners_world" not in obb:
                     continue
 
                 corners_w = np.asarray(obb["corners_world"], dtype=np.float32)  # (8,3)
 
+                corners_world = corners_w
+                if corners_world is None:
+                    continue
 
-        # --- per-frame OBB bboxes (preferred), fallback to AABB ---
-        if frame_bbox_meshes is not None:
-            # frame_bbox_meshes might be keyed by:
-            #   - sample_idx (recommended, aligns with predictions indexing)
-            #   - vis_t (older code)
-            #   - frame_idx (sometimes)
-            if sample_idx in frame_bbox_meshes:
-                bbox_key = sample_idx
-            elif vis_t in frame_bbox_meshes:
-                bbox_key = vis_t
-            elif frame_idx in frame_bbox_meshes:
-                bbox_key = frame_idx
-            else:
-                bbox_key = None
+                col = obj.get("color", [255, 180, 0])
+                label = obj.get("label", f"obj_{obj_idx}")
 
-            if bbox_key is not None:
-                for bi, bbox_m in enumerate(frame_bbox_meshes[bbox_key]):
-                    corners_world = corners_w
-                    if corners_world is None:
-                        continue
-
-                    col = obj.get("color", [255, 180, 0])
-                    label = obj.get("label", f"obj_{bi}")
-
-                    strips = [corners_world[[e0, e1], :] for (e0, e1) in cuboid_edges]
-                    rr.log(
-                        f"{BASE}/bboxes/frame_{frame_idx}/{label}_{bi}",
-                        rr.LineStrips3D(strips=strips, colors=[col] * len(strips)),
-                    )
+                strips = [corners_world[[e0, e1], :] for (e0, e1) in cuboid_edges]
+                rr.log(
+                    f"{BASE}/bboxes/frame_{frame_idx}/{label}_{obj_idx}",
+                    rr.LineStrips3D(strips=strips, colors=[col] * len(strips)),
+                )
 
         # camera
         cam_3x4 = np.asarray(frame_data["camera"], dtype=np.float32)
