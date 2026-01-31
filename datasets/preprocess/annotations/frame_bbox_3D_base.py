@@ -110,7 +110,11 @@ def rerun_frame_vis_final_only(
     conf_S = frames_final["conf"]
     camera_poses_S = frames_final["camera_poses"]
     stems_S = frames_final["frame_stems"]
-    bbox_frames = frames_final["bbox_frames"]
+
+    if is_obb:
+        bbox_frames = frames_final["obb_bbox_frames"]
+    else:
+        bbox_frames = frames_final["bbox_frames"]
 
     S, H_grid, W_grid, _ = points_S.shape
 

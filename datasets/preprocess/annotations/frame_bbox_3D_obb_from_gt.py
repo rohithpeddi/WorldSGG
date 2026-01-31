@@ -20,7 +20,7 @@ from annotation_utils import (
 )
 
 
-class FrameToWorldOBBAnnotations(FrameToWorldAnnotationsBase):
+class FrameToWorldOBBFromGTAnnotations(FrameToWorldAnnotationsBase):
 
     def visualize_final_only(self, video_id: str, *, app_id: str = "World4D-FinalOnly") -> None:
         final_pkl = self.bbox_3d_obb_final_root_dir / f"{video_id[:-4]}.pkl"
@@ -99,56 +99,22 @@ class FrameToWorldOBBAnnotations(FrameToWorldAnnotationsBase):
         Writes:
           - to bbox_annotations_3d_final/<video_id[:-4]>.pkl
         """
-        out_path = self.bbox_3d_obb_final_root_dir / f"{video_id[:-4]}.pkl"
-        if out_path.exists() and not overwrite:
-            print(f"[frames_final][{video_id}] exists: {out_path} (overwrite=False). Skipping.")
-            return out_path
+        obb_out_path = self.bbox_3d_obb_final_root_dir / f"{video_id[:-4]}.pkl"
+        if obb_out_path.exists() and not overwrite:
+            print(f"[frames_final][{video_id}] exists: {obb_out_path} (overwrite=False). Skipping.")
+            return obb_out_path
 
         video_3dgt_obb = self.get_video_3d_obb_annotations(video_id)
         if video_3dgt_obb is None:
             print(f"[frames_final][{video_id}] missing original bbox_annotations_3d PKL. Skipping.")
             return None
 
-        gfs = video_3dgt_obb.get("global_floor_sim", None)
-        if gfs is None:
-            print(f"[frames_final][{video_id}] global_floor_sim missing in PKL; cannot build FINAL. Skipping.")
-            return None
+        aabb_out_path = self.bbox_3d_final_root_dir / f"{video_id[:-4]}.pkl"
+        with open(aabb_out_path, "rb") as f:
+            video_3d_aabb_annotations = pickle.load(f)
 
-        global_floor_sim = (
-            float(gfs["s"]),
-            np.asarray(gfs["R"], dtype=np.float32),
-            np.asarray(gfs["t"], dtype=np.float32),
-        )
-        Tinfo = self._compute_world_to_final(global_floor_sim=global_floor_sim)
-        origin_world = Tinfo["origin_world"]
-        A = Tinfo["A_world_to_final"]
-
-        # Load original annotated-frame points/cameras
-        P = self._load_original_points_for_video(video_id)
-        points_world = np.asarray(P["points"], dtype=np.float32)  # (S,H,W,3)
-        stems = P["frame_stems"]
-        cams_world = P["camera_poses"]
-
-        S, H, W, _ = points_world.shape
-
-        # Points FINAL
-        pts_flat = points_world.reshape(-1, 3)
-        pts_final_flat = self._apply_world_to_final_points_row(pts_flat, origin_world=origin_world, A_world_to_final=A)
-        points_final = pts_final_flat.reshape(S, H, W, 3).astype(points_dtype, copy=False)
-
-        # Cameras FINAL
-        cams_final = None
-        if cams_world is not None:
-            cams_final_list = []
-            for i in range(min(S, cams_world.shape[0])):
-                cams_final_list.append(
-                    self._apply_world_to_final_camera_pose(
-                        cams_world[i],
-                        origin_world=origin_world,
-                        A_world_to_final=A,
-                    )
-                )
-            cams_final = np.stack(cams_final_list, axis=0).astype(np.float32)
+        origin_world = video_3d_aabb_annotations["world_to_final"]["origin_world"]
+        A = video_3d_aabb_annotations["world_to_final"]["A_world_to_final"]
 
         # BBoxes FINAL (corners_world -> corners_final)
         bbox_frames_final: Dict[str, Any] = {}
@@ -175,45 +141,12 @@ class FrameToWorldOBBAnnotations(FrameToWorldAnnotationsBase):
                 if out_objs:
                     bbox_frames_final[frame_name] = {"objects": out_objs}
 
-        # Floor FINAL (optional)
-        floor_final = None
-        gv = video_3dgt_obb.get("gv", None)
-        gf = video_3dgt_obb.get("gf", None)
-        gc = video_3dgt_obb.get("gc", None)
-
-        if gv is not None and gf is not None:
-            gv0 = np.asarray(gv, dtype=np.float32)
-            gf0 = _faces_u32(np.asarray(gf))
-
-            # Move floor mesh into WORLD using global_floor_sim, then into FINAL
-            s_g, R_g, t_g = global_floor_sim
-            floor_world = s_g * (gv0 @ R_g.T) + t_g[None, :]
-            floor_final_v = self._apply_world_to_final_points_row(
-                floor_world, origin_world=origin_world, A_world_to_final=A
-            ).astype(np.float32)
-
-            floor_final = {"vertices": floor_final_v, "faces": gf0}
-            if gc is not None:
-                floor_final["colors"] = np.asarray(gc, dtype=np.uint8)
 
         # Updated PKL: keep original content intact, add frames_final + world_to_final
-        video_3dgt_updated = dict(video_3dgt_obb)
-        video_3dgt_updated["frames_final"] = {
-            "frame_stems": stems,
-            # "points": points_final,
-            # "colors": P["colors"],
-            # "conf": P["conf"],
-            "camera_poses": cams_final,
-            "bbox_frames": bbox_frames_final,
-            "floor": floor_final,
-        }
-        # Also store the transform used
-        video_3dgt_updated["world_to_final"] = {
-            "origin_world": origin_world,
-            "A_world_to_final": A,
-        }
+        video_3d_obb_annotations = dict(video_3d_aabb_annotations)
+        video_3d_obb_annotations["frames_final"]["obb_bbox_frames"] = bbox_frames_final
 
-        saved_path = self.save_video_3d_obb_annotations_final(video_id, video_3dgt_updated)
+        saved_path = self.save_video_3d_obb_annotations_final(video_id, video_3d_obb_annotations)
         print(f"[frames_final][{video_id}] wrote: {saved_path}")
         return saved_path
 
@@ -283,7 +216,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    frame_to_world_generator = FrameToWorldOBBAnnotations(
+    frame_to_world_generator = FrameToWorldOBBFromGTAnnotations(
         ag_root_directory=args.ag_root_directory,
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
     )
@@ -295,13 +228,13 @@ def main():
 
 def main_sample():
     """
-    Simple entry point to visualize original Pi3 point clouds + floor mesh
+    Simple entry point to visualize the original Pi3 point clouds and floor mesh
     + coordinate frames + camera frustum + 3D bounding boxes for a single video.
     Adjust `video_id` as needed.
     """
     args = parse_args()
 
-    frame_to_world_generator = FrameToWorldOBBAnnotations(
+    frame_to_world_generator = FrameToWorldOBBFromGTAnnotations(
         ag_root_directory=args.ag_root_directory,
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
     )
@@ -311,5 +244,5 @@ def main_sample():
 
 
 if __name__ == "__main__":
-    main()
-    # main_sample()
+    # main()
+    main_sample()
