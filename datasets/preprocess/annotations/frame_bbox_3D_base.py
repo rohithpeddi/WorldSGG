@@ -629,7 +629,7 @@ class FrameToWorldAnnotationsBase:
           R_align: (3,3) world->aligned (no mirror)
           M_mirror: (3,3)
           A_world_to_final: (3,3) such that:
-              p_final = A_world_to_final @ (p_world - origin_world)   (column-vector convention)
+              p_final = A_world_to_final @ (p_world - origin_world) (column-vector convention)
         """
         s_g, R_g, t_g = global_floor_sim
         R_g = np.asarray(R_g, dtype=np.float32)
@@ -661,7 +661,7 @@ class FrameToWorldAnnotationsBase:
             A_world_to_final: np.ndarray,
     ) -> np.ndarray:
         """
-        For row-vectors (...,3):
+        For row-vectors (..., 3):
           p_final_row = (p_world_row - origin_row) @ A.T
         """
         pts = np.asarray(pts_world, dtype=np.float32)

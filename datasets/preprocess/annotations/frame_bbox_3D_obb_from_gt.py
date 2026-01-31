@@ -141,7 +141,6 @@ class FrameToWorldOBBFromGTAnnotations(FrameToWorldAnnotationsBase):
                 if out_objs:
                     bbox_frames_final[frame_name] = {"objects": out_objs}
 
-
         # Updated PKL: keep original content intact, add frames_final + world_to_final
         video_3d_obb_annotations = dict(video_3d_aabb_annotations)
         video_3d_obb_annotations["frames_final"]["obb_bbox_frames"] = bbox_frames_final
@@ -149,7 +148,6 @@ class FrameToWorldOBBFromGTAnnotations(FrameToWorldAnnotationsBase):
         saved_path = self.save_video_3d_obb_annotations_final(video_id, video_3d_obb_annotations)
         print(f"[frames_final][{video_id}] wrote: {saved_path}")
         return saved_path
-
 
 
 # --------------------------------------------------------------------------------------
@@ -239,7 +237,7 @@ def main_sample():
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
     )
     video_id = "00T1E.mp4"
-    frame_to_world_generator.build_frames_final_and_store(video_id=video_id, overwrite=False)
+    # frame_to_world_generator.build_frames_final_and_store(video_id=video_id, overwrite=False)
     frame_to_world_generator.visualize_final_only(video_id=video_id, app_id="World4D-FinalOnly-Sample")
 
 
