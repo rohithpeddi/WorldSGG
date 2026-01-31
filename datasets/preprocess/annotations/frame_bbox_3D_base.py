@@ -249,12 +249,10 @@ class FrameToWorldAnnotationsBase:
         self.bbox_4d_root_dir = self.world_annotations_root_dir / "bbox_annotations_4d"
         self.bbox_3d_final_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_final"
         self.bbox_3d_camera_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_camera"
-        self.bbox_3d_final_scaled_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_final_scaled"
 
         os.makedirs(self.bbox_4d_root_dir, exist_ok=True)
         os.makedirs(self.bbox_3d_final_root_dir, exist_ok=True)
         os.makedirs(self.bbox_3d_camera_root_dir, exist_ok=True)
-        os.makedirs(self.bbox_3d_final_scaled_root_dir, exist_ok=True)
 
         # GT annotations
         self.gt_annotations_root_dir = self.ag_root_directory / "gt_annotations"

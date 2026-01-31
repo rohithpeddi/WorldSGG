@@ -71,8 +71,17 @@ class BBox3DBase:
         self.world_annotations_root_dir = self.ag_root_directory / "world_annotations"
         self.bbox_3d_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d"
         self.bbox_3d_obb_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_obb"
+
+
+        self.bbox_4d_root_dir = self.world_annotations_root_dir / "bbox_annotations_4d"
+        self.bbox_3d_final_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_final"
+        self.bbox_3d_camera_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_camera"
+
         os.makedirs(self.bbox_3d_root_dir, exist_ok=True)
         os.makedirs(self.bbox_3d_obb_root_dir, exist_ok=True)
+        os.makedirs(self.bbox_3d_camera_root_dir, exist_ok=True)
+        os.makedirs(self.bbox_3d_final_root_dir, exist_ok=True)
+        os.makedirs(self.bbox_4d_root_dir, exist_ok=True)
 
         self.gt_annotations_map_path = self.world_annotations_root_dir / "gt_annotations_map.pkl"
         self.gdino_annotations_map_path = self.world_annotations_root_dir / "gdino_annotations_map.pkl"
@@ -216,47 +225,6 @@ class BBox3DBase:
         # no IoU pass -> pick highest-score of same label
         best = max(candidates, key=lambda t: t[1])[0]
 
-    def get_video_gt_annotations(self, video_id):
-        video_gt_annotations_json_path = self.gt_annotations_root_dir / video_id / "gt_annotations.json"
-        if not video_gt_annotations_json_path.exists():
-            raise FileNotFoundError(f"GT annotations file not found: {video_gt_annotations_json_path}")
-
-        with open(video_gt_annotations_json_path, "r") as f:
-            video_gt_annotations = json.load(f)
-
-        video_gt_bboxes = {}
-        for frame_idx, frame_items in enumerate(video_gt_annotations):
-            frame_name = frame_items[0]["frame"].split("/")[-1]
-            boxes = []
-            labels = []
-            for item in frame_items:
-                if 'person_bbox' in item:
-                    boxes.append(item['person_bbox'][0])
-                    labels.append('person')
-                    continue
-                category_id = item['class']
-                category_name = self.catid_to_name_map[category_id]
-                if category_name:
-                    if category_name == "closet/cabinet":
-                        category_name = "closet"
-                    elif category_name == "cup/glass/bottle":
-                        category_name = "cup"
-                    elif category_name == "paper/notebook":
-                        category_name = "paper"
-                    elif category_name == "sofa/couch":
-                        category_name = "sofa"
-                    elif category_name == "phone/camera":
-                        category_name = "phone"
-                    boxes.append(item['bbox'])
-                    labels.append(category_name)
-            if boxes:
-                video_gt_bboxes[frame_name] = {
-                    'boxes': boxes,
-                    'labels': labels
-                }
-
-        return video_gt_bboxes, video_gt_annotations
-
     def idx_to_frame_idx_path(self, video_id: str):
         video_frames_annotated_dir_path = os.path.join(self.frame_annotated_dir_path, video_id)
         annotated_frame_id_list = [f for f in os.listdir(video_frames_annotated_dir_path) if f.endswith('.png')]
@@ -302,40 +270,97 @@ class BBox3DBase:
         frame_idx_frame_path_map = {i: f"{frame_id:06d}.png" for i, frame_id in enumerate(chosen_frames)}
         return frame_idx_frame_path_map, sample_idx, video_sampled_frame_id_list, annotated_frame_id_list, sample_idx
 
-    def get_video_gdino_annotations(self, video_id):
-        video_dynamic_gdino_prediction_file_path = self.dynamic_detections_root_path / f"{video_id}.pkl"
-        video_dynamic_predictions = _load_pkl_if_exists(video_dynamic_gdino_prediction_file_path)
+    # ----------------------------------------------------------------------------------
+    # GT + GDINO + 3D annotations loaders
+    # ----------------------------------------------------------------------------------
 
-        video_static_gdino_prediction_file_path = self.static_detections_root_path / f"{video_id}.pkl"
-        video_static_predictions = _load_pkl_if_exists(video_static_gdino_prediction_file_path)
+    def get_video_gt_annotations(self, video_id: str):
+        video_gt_annotations_json_path = (
+            self.gt_annotations_root_dir / video_id / "gt_annotations.json"
+        )
+        if not video_gt_annotations_json_path.exists():
+            raise FileNotFoundError(
+                f"GT annotations file not found: {video_gt_annotations_json_path}"
+            )
 
-        # Normalize None to empty dict to simplify logic
+        with open(video_gt_annotations_json_path, "r") as f:
+            video_gt_annotations = json.load(f)
+
+        video_gt_bboxes: Dict[str, Dict[str, Any]] = {}
+        for frame_idx, frame_items in enumerate(video_gt_annotations):
+            frame_name = frame_items[0]["frame"].split("/")[-1]
+            boxes = []
+            labels = []
+            for item in frame_items:
+                if "person_bbox" in item:
+                    boxes.append(item["person_bbox"][0])
+                    labels.append("person")
+                    continue
+
+                category_id = item["class"]
+                category_name = self.catid_to_name_map[category_id]
+
+                if category_name:
+                    # Normalize some label names
+                    if category_name == "closet/cabinet":
+                        category_name = "closet"
+                    elif category_name == "cup/glass/bottle":
+                        category_name = "cup"
+                    elif category_name == "paper/notebook":
+                        category_name = "paper"
+                    elif category_name == "sofa/couch":
+                        category_name = "sofa"
+                    elif category_name == "phone/camera":
+                        category_name = "phone"
+
+                    boxes.append(item["bbox"])
+                    labels.append(category_name)
+
+            if boxes:
+                video_gt_bboxes[frame_name] = {"boxes": boxes, "labels": labels}
+
+        return video_gt_bboxes, video_gt_annotations
+
+    def get_video_gdino_annotations(self, video_id: str):
+        video_dynamic_gdino_prediction_file_path = (
+            self.dynamic_detections_root_path / f"{video_id}.pkl"
+        )
+        video_dynamic_predictions = _load_pkl_if_exists(
+            video_dynamic_gdino_prediction_file_path
+        )
+
+        video_static_gdino_prediction_file_path = (
+            self.static_detections_root_path / f"{video_id}.pkl"
+        )
+        video_static_predictions = _load_pkl_if_exists(
+            video_static_gdino_prediction_file_path
+        )
+
         if video_dynamic_predictions is None:
             video_dynamic_predictions = {}
         if video_static_predictions is None:
             video_static_predictions = {}
 
-        # If both are empty, that's an error for this video
         if not video_dynamic_predictions and not video_static_predictions:
-            raise ValueError(
-                f"No GDINO predictions found for video {video_id} "
-                f"in both dynamic ({video_dynamic_gdino_prediction_file_path}) "
-                f"and static ({video_static_gdino_prediction_file_path}) paths."
-            )
+            raise ValueError(f"No GDINO predictions found for video {video_id}")
 
-        # Collect all frame names seen in either dict
-        all_frame_names = set(video_dynamic_predictions.keys()) | set(video_static_predictions.keys())
+        all_frame_names = set(video_dynamic_predictions.keys()) | set(
+            video_static_predictions.keys()
+        )
+        combined_gdino_predictions: Dict[str, Dict[str, Any]] = {}
 
-        combined_gdino_predictions = {}
         for frame_name in all_frame_names:
             dyn_pred = video_dynamic_predictions.get(frame_name, None)
             stat_pred = video_static_predictions.get(frame_name, None)
+
             if dyn_pred is None:
                 dyn_pred = {"boxes": [], "labels": [], "scores": []}
             if stat_pred is None:
                 stat_pred = {"boxes": [], "labels": [], "scores": []}
 
-            if _is_empty_array(dyn_pred["boxes"]) and _is_empty_array(stat_pred["boxes"]):
+            if _is_empty_array(dyn_pred["boxes"]) and _is_empty_array(
+                stat_pred["boxes"]
+            ):
                 combined_gdino_predictions[frame_name] = {
                     "boxes": [],
                     "labels": [],
@@ -362,6 +387,46 @@ class BBox3DBase:
                 "labels": combined_labels,
                 "scores": combined_scores,
             }
-
             combined_gdino_predictions[frame_name] = final_pred
+
         return combined_gdino_predictions
+
+    def get_video_3d_annotations(self, video_id: str):
+        """
+        Load the floor-aligned 3D bbox annotations created by BBox3DGenerator.
+        """
+        out_path = self.bbox_3d_root_dir / f"{video_id[:-4]}.pkl"
+        if not out_path.exists():
+            print(f"[world4d][{video_id}] 3D bbox annotations not found at {out_path}")
+            return None
+
+        with open(out_path, "rb") as f:
+            video_3d_annotations = pickle.load(f)
+        return video_3d_annotations
+
+    def get_video_3d_obb_annotations(self, video_id: str):
+        """
+        Load the floor-aligned 3D bbox annotations created by BBox3DGenerator.
+        """
+        out_path = self.bbox_3d_obb_root_dir / f"{video_id[:-4]}.pkl"
+        if not out_path.exists():
+            print(f"[world4d][{video_id}] 3D bbox annotations not found at {out_path}")
+            return None
+
+        with open(out_path, "rb") as f:
+            video_3d_annotations = pickle.load(f)
+        return video_3d_annotations
+
+    def get_video_dynamic_predictions(self, video_id: str):
+        """
+        If you ever need full dynamic scene predictions (not restricted to annotated frames).
+        Not used in the original-points visualization, which uses a more precise slicing.
+        """
+        video_dynamic_3d_scene_path = (
+            self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
+        )
+        if not video_dynamic_3d_scene_path.exists():
+            return None
+        video_dynamic_predictions = _npz_open(video_dynamic_3d_scene_path)
+        return video_dynamic_predictions
+

@@ -72,6 +72,13 @@ def _is_empty_array(x):
     return False
 
 
+def _as_np(x, dtype=None):
+    if x is None:
+        return None
+    arr = np.asarray(x)
+    return arr.astype(dtype) if dtype is not None else arr
+
+
 def _load_pkl_if_exists(path: Path):
     if path.exists():
         with open(path, "rb") as f:

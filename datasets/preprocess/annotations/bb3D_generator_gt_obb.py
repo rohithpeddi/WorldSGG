@@ -1,29 +1,41 @@
 #!/usr/bin/env python3
-import argparse
-import pickle
-import sys
 import os
-import cv2
-import numpy as np
-import torch
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-
-from dataloader.standard.action_genome.ag_dataset import StandardAG
+import sys
 
 sys.path.insert(0, os.path.dirname(__file__) + '/..')
 
-# Import base class and utils
 from datasets.preprocess.annotations.bb3D_generator_gt import BBox3DGenerator
+
+import argparse
+import os
+import pickle
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import cv2
+import numpy as np
+import rerun as rr
+from scipy.spatial.transform import Rotation as SciRot
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+sys.path.insert(0, os.path.dirname(__file__) + '/..')
+
+# from AG / human pipeline codebase
+from dataloader.standard.action_genome.ag_dataset import StandardAG
+
+from annotation_utils import _npz_open, _box_edges_from_corners, _log_box_lines_rr
 from datasets.preprocess.annotations.annotation_utils import (
-    _finite_and_nonzero,
+    get_video_belongs_to_split,
+    _faces_u32,
+    _pinhole_from_fov,
     _xywh_to_xyxy,
     _resize_bbox_to,
     _mask_from_bbox,
-    _resize_mask_to, get_video_belongs_to_split,
+    _resize_mask_to,
+    _finite_and_nonzero,
+    _as_np
 )
 
 # Helper for OBB calculation
@@ -177,7 +189,6 @@ def _compute_obb_floor_parallel(points_floor: np.ndarray, R_floor: np.ndarray, t
         "y_range": [float(y_min), float(y_max)],
         "corners_world": corners_world.tolist()
     }
-
 
 class BBox3DGeneratorOBB(BBox3DGenerator):
     """
@@ -401,6 +412,155 @@ class BBox3DGeneratorOBB(BBox3DGenerator):
 
         return out_frames
 
+    def visualize_obb_from_saved_files(
+            self,
+            video_id: str,
+            *,
+            app_id: str = "World4D-Saved",
+            img_maxsize: int = 480,
+            vis_floor: bool = True,
+            vis_humans: bool = False,
+            min_conf_default: float = 1e-6,
+    ) -> None:
+        """
+        Load precomputed artifacts from disk and launch rerun visualization.
+        - NO recomputation of the pipeline
+        - NO saving/writing
+        Uses:
+          (1) saved bbox pickle: self.bbox_3d_obb_root_dir / f"{video_id[:-4]}.pkl"
+          (2) dynamic predictions: self.dynamic_scene_dir_path / f"{video_id[:-4]}_10/predictions.npz"
+        """
+
+        # ------------------------------------------------------------
+        # 1) Load saved bbox/alignment outputs (pickle)
+        # ------------------------------------------------------------
+        video_3dgt = self.get_video_3d_obb_annotations(video_id)
+        frames_map = video_3dgt.get("frames", None)
+        per_frame_sims = video_3dgt.get("per_frame_sims", None)
+
+        gsim = video_3dgt.get("global_floor_sim", None)
+        global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None
+        if isinstance(gsim, dict) and all(k in gsim for k in ("s", "R", "t")):
+            global_floor_sim = (
+                float(gsim["s"]),
+                _as_np(gsim["R"], np.float32),
+                _as_np(gsim["t"], np.float32),
+            )
+        elif isinstance(gsim, (tuple, list)) and len(gsim) == 3:
+            global_floor_sim = (
+                float(gsim[0]),
+                _as_np(gsim[1], np.float32),
+                _as_np(gsim[2], np.float32),
+            )
+
+        frame_bbox_meshes = video_3dgt.get("frame_bbox_meshes", None)
+
+        gv = video_3dgt.get("gv", None)
+        gf = video_3dgt.get("gf", None)
+        gc = video_3dgt.get("gc", None)
+
+        floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None
+        if gv is not None and gf is not None:
+            floor = (
+                _as_np(gv, np.float32),
+                _as_np(gf, np.uint32),
+                _as_np(gc, np.uint8) if gc is not None else None,
+            )
+
+        # ------------------------------------------------------------
+        # 2) Load dynamic predictions (npz) for images + camera poses
+        # ------------------------------------------------------------
+        pred_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
+        if not pred_path.exists():
+            raise FileNotFoundError(f"[vis] Missing dynamic predictions file: {pred_path}")
+
+        # Use your existing _npz_open helper if you want; np.load is fine too.
+        with _npz_open(pred_path) as npz:
+            imgs_f32 = npz["images"]  # (S,H,W,3) in [0,1] (typically)
+            images_u8 = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
+            images: List[Optional[np.ndarray]] = [images_u8[i] for i in range(images_u8.shape[0])]
+
+            camera_poses = None
+            if "camera_poses" in npz:
+                camera_poses = npz["camera_poses"]
+
+            S_full = int(images_u8.shape[0])
+
+        # ------------------------------------------------------------
+        # 3) Reconstruct the indexing the visualizer expects
+        # ------------------------------------------------------------
+        # annotated_frame_idx_in_sample_idx are the indices into the sampled range (0..S_full-1)
+        # We only need those indices + a sampled_indices list whose indexing matches predictions.npz.
+        try:
+            (frame_idx_frame_path_map, sample_idx, _, _, annotated_frame_idx_in_sample_idx) = self.idx_to_frame_idx_path(video_id)
+            # Sanity: predictions length should match sampled range length
+            if len(sample_idx) != S_full:
+                print(
+                    f"[vis][warn] predictions.npz S={S_full} but idx_to_frame_idx_path sample_idx={len(sample_idx)}. "
+                    f"Proceeding with min length."
+                )
+                S_use = min(S_full, len(sample_idx))
+                images = images[:S_use]
+                S_full = S_use
+        except Exception as e:
+            print(f"[vis][warn] idx_to_frame_idx_path failed ({e}); falling back to showing all frames.")
+            raise e
+            # annotated_frame_idx_in_sample_idx = list(range(S_full))
+
+        sampled_indices = list(range(S_full))
+
+        # ------------------------------------------------------------
+        # 4) Build a minimal world dict (camera only, optionally humans)
+        # ------------------------------------------------------------
+        world4d: Dict[int, dict] = {}
+
+        if camera_poses is not None:
+            for i in range(S_full):
+                cam_i = np.asarray(camera_poses[i])
+                if cam_i.shape == (4, 4):
+                    cam_3x4 = cam_i[:3, :4]
+                elif cam_i.shape == (3, 4):
+                    cam_3x4 = cam_i
+                else:
+                    raise ValueError(f"[vis] Unexpected camera_poses[{i}] shape: {cam_i.shape}")
+                world4d[i] = {
+                    "camera": cam_3x4.astype(np.float32),
+                    # humans are optional; rerun_vis_world4d checks these keys
+                    "track_id": [],
+                    "vertices_orig": [],
+                }
+        else:
+            # fallback: identity camera so rerun doesn't crash
+            I = np.eye(3, 4, dtype=np.float32)
+            world4d = {
+                i: {"camera": I, "track_id": [], "vertices_orig": []}
+                for i in range(S_full)
+            }
+
+        # ------------------------------------------------------------
+        # 5) Launch rerun visualizer
+        # ------------------------------------------------------------
+        rerun_vis_obb_world4d(
+            video_id=video_id,
+            images=images,
+            world4d=world4d,
+            faces=self.smplx.faces,  # already on the layer
+            sampled_indices=sampled_indices,
+            annotated_frame_idx_in_sample_idx=annotated_frame_idx_in_sample_idx,
+            dynamic_prediction_path=str(self.dynamic_scene_dir_path),
+            per_frame_sims=per_frame_sims,
+            frames_map=frames_map,
+            frame_idx_frame_path_map=frame_idx_frame_path_map,
+            global_floor_sim=global_floor_sim,
+            floor=floor,
+            img_maxsize=img_maxsize,
+            app_id=app_id,
+            frame_bbox_meshes=frame_bbox_meshes,
+            vis_floor=vis_floor,
+            vis_humans=vis_humans,  # typically False unless you also load vertices_orig
+            min_conf_default=min_conf_default,
+        )
+
     def generate_gt_world_bb_annotations(self, dataloader, split) -> None:
         for data in tqdm(dataloader):
             video_id = data['video_id']
@@ -437,6 +597,243 @@ class BBox3DGeneratorOBB(BBox3DGenerator):
             video_gdino_predictions=gdino,
             visualize=True
         )
+
+
+def rerun_vis_obb_world4d(
+        video_id: str,
+        images: List[Optional[np.ndarray]],
+        world4d: Dict[int, dict],
+        faces: np.ndarray,
+        *,
+        annotated_frame_idx_in_sample_idx: List[int],
+        sampled_indices: List[int],
+        dynamic_prediction_path: str,
+        per_frame_sims: Optional[Dict[int, Dict[str, Any]]] = None,
+        frames_map: Optional[Dict[str, Dict[str, Any]]] = None,
+        frame_idx_frame_path_map: Optional[Dict[int, str]] = None,
+        global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]] = None,
+        floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None,
+        img_maxsize: int = 320,
+        app_id: str = "World4D",
+        frame_bbox_meshes: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+        vis_floor: bool = True,
+        vis_humans: bool = True,
+        min_conf_default: float = 1e-6,  # floor for conf
+):
+    """
+    Updated:
+      - Draw OBB (preferred) instead of AABB when available.
+      - Uses _box_edges_from_corners + _log_box_lines_rr (signature-safe).
+      - Robustly handles frame_bbox_meshes keyed by sample_idx OR vis_t OR frame_idx.
+    """
+
+    faces_u32 = _faces_u32(faces)
+    rr.init(app_id, spawn=True)
+    rr.log("/", rr.ViewCoordinates.RUB)
+
+    video_dynamic_prediction_path = os.path.join(dynamic_prediction_path, f"{video_id[:-4]}_10", "predictions.npz")
+    video_dynamic_predictions = np.load(video_dynamic_prediction_path, allow_pickle=True)
+    video_dynamic_predictions = {k: video_dynamic_predictions[k] for k in video_dynamic_predictions.files}
+    points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
+    conf = video_dynamic_predictions["conf"].astype(np.float32)      # (S,H,W)
+    imgs_f32 = video_dynamic_predictions["images"]
+    colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
+
+    BASE = "world"
+    rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
+
+    # ------------------------------------------------------------------
+    # floor
+    # ------------------------------------------------------------------
+    floor_vertices_tf = None
+    floor_faces = None
+    floor_kwargs = None
+    if floor is not None:
+        floor_verts0, floor_faces0, floor_colors0 = floor
+        floor_verts0 = np.asarray(floor_verts0, dtype=np.float32)
+        floor_faces0 = _faces_u32(np.asarray(floor_faces0))
+        if global_floor_sim is not None:
+            s_g, R_g, t_g = global_floor_sim
+            floor_vertices_tf = s_g * (floor_verts0 @ R_g.T) + t_g
+        else:
+            floor_vertices_tf = floor_verts0
+        floor_kwargs = {}
+        if floor_colors0 is not None:
+            floor_colors0 = np.asarray(floor_colors0, dtype=np.uint8)
+            floor_kwargs["vertex_colors"] = floor_colors0
+        else:
+            floor_kwargs["albedo_factor"] = [160, 160, 160]
+        floor_faces = floor_faces0
+
+    def _get_image_for_time(i: int) -> Optional[np.ndarray]:
+        if images is None:
+            return None
+        if i < 0 or i >= len(images):
+            return None
+        img = images[i]
+        if img is None:
+            return None
+        H, W = img.shape[:2]
+        if max(H, W) > img_maxsize:
+            scale = float(img_maxsize) / float(max(H, W))
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        return img
+
+    # OBB corners from cv2.boxPoints: 0-3 are the bottom face going around perimeter,
+    # 4-7 are the top face directly above (i.e., 4 is above 0, 5 is above 1, etc.)
+    cuboid_edges = [
+        (0, 1), (1, 2), (2, 3), (3, 0),  # Bottom face edges
+        (4, 5), (5, 6), (6, 7), (7, 4),  # Top face edges
+        (0, 4), (1, 5), (2, 6), (3, 7),  # Vertical edges
+    ]
+
+    # ------------------------------------------------------------------
+    # frames to iterate
+    # ------------------------------------------------------------------
+    if annotated_frame_idx_in_sample_idx:
+        iter_indices = annotated_frame_idx_in_sample_idx
+    else:
+        iter_indices = list(range(len(sampled_indices)))
+
+    for vis_t, sample_idx in enumerate(iter_indices):
+        if sample_idx < 0 or sample_idx >= len(sampled_indices):
+            continue
+
+        frame_idx = sampled_indices[sample_idx]
+        frame_name = frame_idx_frame_path_map[frame_idx]
+
+        rr.set_time_sequence("frame", vis_t)
+        rr.log("/", rr.Clear(recursive=True))
+
+        # floor
+        if vis_floor:
+            if floor_vertices_tf is not None and floor_faces is not None:
+                rr.log(
+                    f"{BASE}/floor",
+                    rr.Mesh3D(
+                        vertex_positions=floor_vertices_tf.astype(np.float32),
+                        triangle_indices=floor_faces,
+                        **(floor_kwargs or {}),
+                    ),
+                )
+
+        # per-frame sim
+        s_i = None
+        R_i = None
+        t_i = None
+        if per_frame_sims is not None and frame_idx in per_frame_sims:
+            s_i = float(per_frame_sims[frame_idx]["s"])
+            R_i = np.asarray(per_frame_sims[frame_idx]["R"], dtype=np.float32)
+            t_i = np.asarray(per_frame_sims[frame_idx]["t"], dtype=np.float32)
+
+        frame_data = world4d.get(frame_idx, None)
+        if frame_data is None:
+            continue
+
+        # humans
+        if vis_humans:
+            track_ids = frame_data.get("track_id", [])
+            verts_orig_list = frame_data.get("vertices_orig", [])
+            if track_ids and verts_orig_list:
+                tid = int(track_ids[0])
+                verts_orig = np.asarray(verts_orig_list[0], dtype=np.float32)
+                if s_i is not None and R_i is not None and t_i is not None:
+                    verts_flat = verts_orig.reshape(-1, 3)
+                    verts_tf = s_i * (verts_flat @ R_i.T) + t_i
+                    verts_tf = verts_tf.reshape(verts_orig.shape)
+                    rr.log(
+                        f"{BASE}/humans_xform/h{tid}",
+                        rr.Mesh3D(
+                            vertex_positions=verts_tf.astype(np.float32),
+                            triangle_indices=faces_u32,
+                            albedo_factor=[0, 255, 0],
+                        ),
+                    )
+
+        # --- dynamic points: confidence-filtered ---
+        if sample_idx < points.shape[0]:
+            pts = points[sample_idx].reshape(-1, 3)    # (N,3)
+            cols = colors[sample_idx].reshape(-1, 3)   # (N,3)
+            cfs = conf[sample_idx].reshape(-1)         # (N,)
+
+            # adaptive threshold
+            good = np.isfinite(cfs)
+            cfs_valid = cfs[good]
+            if cfs_valid.size > 0:
+                med = np.median(cfs_valid)
+                p5 = np.percentile(cfs_valid, 5)
+                thr = max(min_conf_default, p5)
+                print(f"frame {frame_idx}: conf thr = {thr:.4f} (med={med:.4f}, n_valid={cfs_valid.size})")
+            else:
+                thr = min_conf_default
+
+            keep = (cfs >= thr) & np.isfinite(pts).all(axis=1)
+            pts_keep = pts[keep]
+            cols_keep = cols[keep]
+
+            if pts_keep.shape[0] > 0:
+                rr.log(
+                    f"{BASE}/points",
+                    rr.Points3D(
+                        pts_keep,
+                        colors=cols_keep,
+                    ),
+                )
+
+        if frames_map and frame_name in frames_map:
+            frame_rec = frames_map[frame_name]
+            objs = frame_rec.get("objects", [])
+            for obj_idx, obj in enumerate(objs):
+                obb = obj.get("obb_floor_parallel", None)
+                if obb is None or "corners_world" not in obb:
+                    continue
+
+                corners_w = np.asarray(obb["corners_world"], dtype=np.float32)  # (8,3)
+
+                corners_world = corners_w
+                if corners_world is None:
+                    continue
+
+                col = obj.get("color", [255, 180, 0])
+                label = obj.get("label", f"obj_{obj_idx}")
+
+                strips = [corners_world[[e0, e1], :] for (e0, e1) in cuboid_edges]
+                rr.log(
+                    f"{BASE}/bboxes/frame_{frame_idx}/{label}_{obj_idx}",
+                    rr.LineStrips3D(strips=strips, colors=[col] * len(strips)),
+                )
+
+        # camera
+        cam_3x4 = np.asarray(frame_data["camera"], dtype=np.float32)
+        R_wc = cam_3x4[:3, :3]
+        t_wc = cam_3x4[:3, 3]
+        image = _get_image_for_time(frame_idx)
+        if image is not None:
+            H_img, W_img = image.shape[:2]
+        else:
+            H_img, W_img = 480, 640
+
+        fov_y = 0.96
+        fx, fy, cx, cy = _pinhole_from_fov(W_img, H_img, fov_y)
+        quat_xyzw = SciRot.from_matrix(R_wc).as_quat().astype(np.float32)
+
+        frus_path = f"{BASE}/frustum"
+        rr.log(
+            frus_path,
+            rr.Transform3D(
+                translation=t_wc.astype(np.float32),
+                rotation=rr.Quaternion(xyzw=quat_xyzw),
+            )
+        )
+        rr.log(
+            f"{frus_path}/camera",
+            rr.Pinhole(focal_length=(fx, fy), principal_point=(cx, cy), resolution=(W_img, H_img)),
+        )
+        if image is not None:
+            rr.log(f"{frus_path}/image", rr.Image(image))
+
+    print("Rerun visualization running. Scrub the 'frame' timeline.")
+
 
 
 def load_dataset(ag_root_directory: str):
@@ -481,7 +878,6 @@ def parse_args():
     parser.add_argument("--ag_root_directory", type=str, default="/data/rohith/ag")
     parser.add_argument("--dynamic_scene_dir_path", type=str, default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic")
     parser.add_argument("--output_human_dir_path", type=str, default="/data/rohith/ag/ag4D/human/")
-    parser.add_argument("--video_id", type=str, required=True)
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--split", type=str, default="04")
     args = parser.parse_args()
@@ -490,15 +886,20 @@ def parse_args():
 
 def main_sample():
     args = parse_args()
-
+    video_id = "00T1E.mp4"
     gen = BBox3DGeneratorOBB(
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
         ag_root_directory=args.ag_root_directory,
         output_human_dir_path=args.output_human_dir_path
     )
 
-    gen.generate_sample_gt_world_bb_annotations(args.video_id)
-
+    # gen.generate_sample_gt_world_bb_annotations(video_id)
+    gen.visualize_obb_from_saved_files(
+        video_id=video_id,
+        vis_floor=True,
+        vis_humans=False,   # set True only if you also load vertices_orig into world4d
+        img_maxsize=480,
+    )
 
 def main():
     args = parse_args()
@@ -515,4 +916,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    main_sample()
