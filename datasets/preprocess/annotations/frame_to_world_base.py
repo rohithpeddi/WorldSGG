@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-import argparse
-import contextlib
-import gc
 import json
 import os
 import pickle
@@ -12,19 +9,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import rerun as rr
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(__file__) + "/..")
 
-from dataloader.standard.action_genome.ag_dataset import StandardAG
-
 from annotation_utils import (
-    get_video_belongs_to_split,
     _load_pkl_if_exists,
     _npz_open,
     _is_empty_array,
-    _faces_u32,
 )
 
 
@@ -187,7 +178,7 @@ class FrameToWorldBase:
                 with open(video_id_object_reasoning_path, "r") as f:
                     video_reasoned_objects = [line.strip() for line in f if line.strip()]
 
-                # Ensure presence of "person", as it's always active
+                # Ensure the presence of "person", as it's always active
                 # If there is a television in annotated objects, add it to reasoned objects
                 # If there is a mirror in annotated objects, add it to reasoned objects
                 video_reasoned_objects = set(video_reasoned_objects)
