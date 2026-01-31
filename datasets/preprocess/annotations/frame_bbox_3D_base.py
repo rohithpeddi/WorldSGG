@@ -29,6 +29,7 @@ def rerun_frame_vis_final_only(
     img_maxsize: int = 320,
     app_id: str = "World4D-FinalOnly",
     min_conf_default: float = 1e-6,
+    is_obb: bool = False,
 ) -> None:
     """
     FINAL-ONLY viewer:
@@ -51,11 +52,20 @@ def rerun_frame_vis_final_only(
     BASE = "world_final"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
 
-    cuboid_edges = [
-        (0, 1), (1, 3), (3, 2), (2, 0),
-        (4, 5), (5, 7), (7, 6), (6, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
-    ]
+    if is_obb:
+        # OBB corners from cv2.boxPoints: 0-3 are the bottom face going around perimeter,
+        # 4-7 are the top face directly above (i.e., 4 is above 0, 5 is above 1, etc.)
+        cuboid_edges = [
+            (0, 1), (1, 2), (2, 3), (3, 0),  # Bottom face edges
+            (4, 5), (5, 6), (6, 7), (7, 4),  # Top face edges
+            (0, 4), (1, 5), (2, 6), (3, 7),  # Vertical edges
+        ]
+    else:
+        cuboid_edges = [
+            (0, 1), (1, 3), (3, 2), (2, 0),
+            (4, 5), (5, 7), (7, 6), (6, 4),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        ]
 
     def _get_image_for_stem(stem: str) -> Optional[np.ndarray]:
         img_path = frame_annotated_dir_path / video_id / f"{stem}.png"
@@ -530,7 +540,7 @@ class FrameToWorldAnnotationsBase:
         Returns:
             {
                 "points": (S,H,W,3) float32,
-                "conf":   (S,H,W) float32 or None,
+                "conf": (S,H,W) float32 or None,
                 "frame_stems": List[str],       # "000123", ...
                 "colors": (S,H,W,3) uint8,
                 "camera_poses": (S,4,4) or None

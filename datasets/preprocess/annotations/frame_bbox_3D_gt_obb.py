@@ -23,7 +23,7 @@ from annotation_utils import (
 class FrameToWorldOBBAnnotations(FrameToWorldAnnotationsBase):
 
     def visualize_final_only(self, video_id: str, *, app_id: str = "World4D-FinalOnly") -> None:
-        final_pkl = self.bbox_3d_final_root_dir / f"{video_id[:-4]}.pkl"
+        final_pkl = self.bbox_3d_obb_final_root_dir / f"{video_id[:-4]}.pkl"
         if not final_pkl.exists():
             raise FileNotFoundError(f"Final PKL not found: {final_pkl}")
 
@@ -34,7 +34,10 @@ class FrameToWorldOBBAnnotations(FrameToWorldAnnotationsBase):
         if frames_final is None:
             raise ValueError(f"[final-only][{video_id}] frames_final missing in {final_pkl}")
 
-        rgbd_info = self.get_video_rgbd_info(video_id)
+        origin_world = rec["world_to_final"]["origin_world"]
+        A = rec["world_to_final"]["A_world_to_final"]
+
+        rgbd_info = self.get_video_rgbd_info(video_id, origin_world=origin_world, A=A)
         frames_final["colors"] = rgbd_info.get("colors", None)
         frames_final["conf"] = rgbd_info.get("conf", None)
         frames_final["points"] = rgbd_info["points"]
@@ -44,18 +47,31 @@ class FrameToWorldOBBAnnotations(FrameToWorldAnnotationsBase):
             frames_final=frames_final,
             frame_annotated_dir_path=self.frame_annotated_dir_path,
             app_id=app_id,
+            is_obb=True
         )
 
-    def get_video_rgbd_info(self, video_id: str) -> Optional[Dict[str, Any]]:
+    def get_video_rgbd_info(
+            self,
+            video_id,
+            origin_world,
+            A
+    ) -> Optional[Dict[str, Any]]:
         """
         Override to load original points/cameras for a video.
         """
         # Load original annotated-frame points/cameras (WORLD frame)
         P = self._load_original_points_for_video(video_id)
         points_world = np.asarray(P["points"], dtype=np.float32)  # (S,H,W,3)
+        points_dtype = np.float32
+
+        S, H, W, _ = points_world.shape
+
+        pts_flat = points_world.reshape(-1, 3)
+        pts_final_flat = self._apply_world_to_final_points_row(pts_flat, origin_world=origin_world, A_world_to_final=A)
+        points_final = pts_final_flat.reshape(S, H, W, 3).astype(points_dtype, copy=False)
 
         rgbd_info = {
-            "points": points_world,
+            "points": points_final,
             "colors": P.get("colors", None),
             "conf": P.get("conf", None),
         }
@@ -184,11 +200,11 @@ class FrameToWorldOBBAnnotations(FrameToWorldAnnotationsBase):
         video_3dgt_updated = dict(video_3dgt_obb)
         video_3dgt_updated["frames_final"] = {
             "frame_stems": stems,
-            "points": points_final,
-            "colors": P["colors"],
-            "conf": P["conf"],
+            # "points": points_final,
+            # "colors": P["colors"],
+            # "conf": P["conf"],
             "camera_poses": cams_final,
-            "obb_bbox_frames": bbox_frames_final,
+            "bbox_frames": bbox_frames_final,
             "floor": floor_final,
         }
         # Also store the transform used
