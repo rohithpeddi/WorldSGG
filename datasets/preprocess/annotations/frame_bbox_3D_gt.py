@@ -68,7 +68,7 @@ def parse_args():
     parser.add_argument(
         "--dynamic_scene_dir_path",
         type=str,
-        default="/data2/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
+        default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
     )
     parser.add_argument("--split", type=str, default="04")
     return parser.parse_args()
@@ -99,8 +99,8 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
     )
-    video_id = "00T1E.mp4"
-    frame_to_world_generator.build_frames_final_and_store(video_id=video_id, overwrite=False)
+    video_id = "01KML.mp4"
+    # frame_to_world_generator.build_frames_final_and_store(video_id=video_id, overwrite=False)
     frame_to_world_generator.visualize_final_only(video_id=video_id, app_id="World4D-FinalOnly-Sample")
 
 

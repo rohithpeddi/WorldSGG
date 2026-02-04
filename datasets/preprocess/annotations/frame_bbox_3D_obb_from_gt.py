@@ -15,10 +15,6 @@ sys.path.insert(0, os.path.dirname(__file__) + "/..")
 
 from dataloader.standard.action_genome.ag_dataset import StandardAG
 
-from annotation_utils import (
-    _faces_u32,
-)
-
 
 class FrameToWorldOBBFromGTAnnotations(FrameToWorldAnnotationsBase):
 
@@ -49,34 +45,6 @@ class FrameToWorldOBBFromGTAnnotations(FrameToWorldAnnotationsBase):
             app_id=app_id,
             is_obb=True
         )
-
-    def get_video_rgbd_info(
-            self,
-            video_id,
-            origin_world,
-            A
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Override to load original points/cameras for a video.
-        """
-        # Load original annotated-frame points/cameras (WORLD frame)
-        P = self._load_original_points_for_video(video_id)
-        points_world = np.asarray(P["points"], dtype=np.float32)  # (S,H,W,3)
-        points_dtype = np.float32
-
-        S, H, W, _ = points_world.shape
-
-        pts_flat = points_world.reshape(-1, 3)
-        pts_final_flat = self._apply_world_to_final_points_row(pts_flat, origin_world=origin_world, A_world_to_final=A)
-        points_final = pts_final_flat.reshape(S, H, W, 3).astype(points_dtype, copy=False)
-
-        rgbd_info = {
-            "points": points_final,
-            "colors": P.get("colors", None),
-            "conf": P.get("conf", None),
-        }
-
-        return rgbd_info
 
     # -------------------------------------------------------------------------
     # Build frames_final and store in updated PKL
@@ -236,7 +204,7 @@ def main_sample():
         ag_root_directory=args.ag_root_directory,
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
     )
-    video_id = "00T1E.mp4"
+    video_id = "01KML.mp4"
     # frame_to_world_generator.build_frames_final_and_store(video_id=video_id, overwrite=False)
     frame_to_world_generator.visualize_final_only(video_id=video_id, app_id="World4D-FinalOnly-Sample")
 
