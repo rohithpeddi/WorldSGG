@@ -9,7 +9,7 @@ import numpy as np
 from annotation_utils import (
     _faces_u32,
 )
-from frame_to_world_base import FrameToWorldBase
+from frame_to_world_base import FrameToWorldBase, rerun_frame_vis_results
 
 
 # --------------------------------------------------------------------------------------
