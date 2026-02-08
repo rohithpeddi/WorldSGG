@@ -1,36 +1,128 @@
 #!/usr/bin/env python3
 import argparse
-import json
-import os
 import pickle
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
 import numpy as np
-import rerun as rr
-from torch.utils.data import DataLoader
 
-from dataloader.standard.action_genome.ag_dataset import StandardAG
 from annotation_utils import (
-    get_video_belongs_to_split,
-    _load_pkl_if_exists,
-    _npz_open,
     _faces_u32,
-    _resize_mask_to,
-    _mask_from_bbox,
-    _resize_bbox_to,
-    _xywh_to_xyxy,
-    _finite_and_nonzero,
-    _pinhole_from_fov,
-    _is_empty_array,
 )
-from datasets.preprocess.annotations.frame_to_world_base import (
-    FrameToWorldBase,
-    compute_final_world_transform,
-    rerun_frame_vis_results,
-)
+from frame_to_world_base import FrameToWorldBase
+
+
+# --------------------------------------------------------------------------------------
+# Final world transform helper
+# --------------------------------------------------------------------------------------
+
+def compute_final_world_transform(
+        floor: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]],
+        global_floor_sim: Optional[Tuple[float, np.ndarray, np.ndarray]],
+) -> Dict[str, np.ndarray]:
+    """
+    Compute the world -> final transform used in the visualization code.
+
+    Pipeline:
+        1) Apply global floor similarity (s_g, R_g, t_g) to the floor mesh.
+        2) Build a floor-aligned frame where:
+               - X, Z axes lie in the floor plane
+               - Y is the floor normal
+           This gives a rotation R_align that maps WORLD -> FLOOR frame,
+           with origin at floor_origin_world = t_g.
+        3) Optionally apply a mirror across the ZY plane in the FLOOR frame
+           (i.e., x -> -x).
+
+    The final transform is:
+        x_final = R_final @ x_world + t_final
+
+    Returns a dict with:
+        - R_world_to_floor   : (3,3) WORLD -> FLOOR
+        - t_world_to_floor   : (3,)  WORLD -> FLOOR
+        - T_world_to_floor   : (4,4)
+
+        - R_world_to_final   : (3,3) WORLD -> FINAL (floor (+ mirror))
+        - t_world_to_final   : (3,)
+        - T_world_to_final   : (4,4)
+
+        - floor_origin_world : (3,)
+
+    Coordinate conventions:
+        - All R, t are in column-vector form:
+              x_out = R @ x_in + t
+
+    If floor or global_floor_sim is None, this function returns an IDENTITY transform.
+    """
+
+    R_identity = np.eye(3, dtype=np.float32)
+    t_zero = np.zeros(3, dtype=np.float32)
+
+    result = {
+        "R_world_to_floor": R_identity.copy(),
+        "t_world_to_floor": t_zero.copy(),
+        "T_world_to_floor": np.eye(4, dtype=np.float32),
+
+        "R_world_to_final": R_identity.copy(),
+        "t_world_to_final": t_zero.copy(),
+        "T_world_to_final": np.eye(4, dtype=np.float32),
+
+        "floor_origin_world": t_zero.copy(),
+    }
+
+    if floor is None or global_floor_sim is None:
+        return result
+
+    # Unpack
+    floor_verts0, floor_faces0, floor_colors0 = floor
+    s_g, R_g, t_g = global_floor_sim
+
+    R_g = np.asarray(R_g, dtype=np.float32)  # (3,3)
+    t_g = np.asarray(t_g, dtype=np.float32)  # (3,)
+    s_g = float(s_g)
+
+    floor_origin_world = t_g.astype(np.float32)
+
+    # Floor-aligned basis
+    t1 = R_g[:, 0]  # in-plane
+    t2 = R_g[:, 2]  # in-plane
+    n = R_g[:, 1]  # normal
+
+    F = np.stack([t1, t2, n], axis=1)  # (3,3)
+    R_align = F.T.astype(np.float32)  # WORLD -> FLOOR
+
+    # Translation WORLD -> FLOOR:
+    #   x_floor = R_align @ x_world + t_align
+    t_align = -R_align @ floor_origin_world
+
+    T_world_to_floor = np.eye(4, dtype=np.float32)
+    T_world_to_floor[:3, :3] = R_align
+    T_world_to_floor[:3, 3] = t_align
+
+    # Optional mirror across ZY plane (x -> -x) in FLOOR frame
+    M_mirror = np.diag([-1.0, 1.0, 1.0]).astype(np.float32)
+
+    R_final = M_mirror @ R_align
+    t_final = M_mirror @ t_align
+
+    T_world_to_final = np.eye(4, dtype=np.float32)
+    T_world_to_final[:3, :3] = R_final
+    T_world_to_final[:3, 3] = t_final
+
+    result.update(
+        {
+            "R_world_to_floor": R_align,
+            "t_world_to_floor": t_align,
+            "T_world_to_floor": T_world_to_floor,
+
+            "R_world_to_final": R_final,
+            "t_world_to_final": t_final,
+            "T_world_to_final": T_world_to_final,
+
+            "floor_origin_world": floor_origin_world,
+        }
+    )
+
+    return result
 
 
 # --------------------------------------------------------------------------------------
@@ -50,12 +142,10 @@ class FrameToWorldAnnotations(FrameToWorldBase):
     # ----------------------------------------------------------------------------------
 
     def generate_video_world_bb_annotations(
-        self,
-        video_id: str,
-        video_id_gt_annotations,
-        video_id_gdino_annotations,
-        video_id_3d_bbox_predictions,
-        visualize: bool = True,
+            self,
+            video_id: str,
+            video_id_3d_bbox_predictions,
+            visualize: bool = True,
     ) -> None:
         """
         Generate world 4D bbox annotations for a single video.
@@ -137,7 +227,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             # Axes BEFORE (in world)
             t1 = R_g0[:, 0]  # in-plane
             t2 = R_g0[:, 2]  # in-plane
-            n = R_g0[:, 1]   # normal
+            n = R_g0[:, 1]  # normal
 
             floor_origin_world = t_g0.astype(np.float32)
             axis_len_floor = float(s_g) * 0.5 if s_g is not None else 0.5
@@ -161,8 +251,8 @@ class FrameToWorldAnnotations(FrameToWorldBase):
         # Compute WORLD -> FINAL transform using helper
         # ----------------------------------------------------------------------
         tf = compute_final_world_transform(floor=floor, global_floor_sim=global_floor_sim)
-        R_final = tf["R_world_to_final"]        # (3,3)
-        t_final = tf["t_world_to_final"]        # (3,)
+        R_final = tf["R_world_to_final"]  # (3,3)
+        t_final = tf["t_world_to_final"]  # (3,)
         floor_origin_world_tf = tf["floor_origin_world"]  # (3,)
 
         # ----------------------------------------------------------------------
@@ -218,319 +308,1236 @@ class FrameToWorldAnnotations(FrameToWorldBase):
         )
 
         if not all_labels:
-            print(f"[world4d][{video_id}] No labels found in any frame. Skipping.")
+            print(f"[world4d][{video_id}] No object labels found. Skipping 4D generation.")
             return
 
-        # ----------------------------------------------------------------------
-        # Enforce object permanence & fill missing
-        # ----------------------------------------------------------------------
-        # We assume `frame_3dbb_map_world` keys are "000123.png", etc.
-        # Sort them numerically.
-        def _get_frame_idx(fn: str) -> int:
-            return int(fn[:-4]) if fn.endswith(".png") else -1
+        # Loads object labels corresponding to active objects in the dataset
+        video_active_object_labels = self.video_id_active_objects_annotations_map[video_id]
+        video_reasoned_active_object_labels = self.video_id_active_objects_b_reasoned_map[video_id]
 
-        frame_names_sorted = sorted(frame_3dbb_map_world.keys(), key=_get_frame_idx)
+        # Heuristic list of non-moving labels
+        non_moving_objects = ["floor", "sofa", "couch", "bed", "doorway", "table", "chair"]
+
+        video_dynamic_object_labels = [
+            obj for obj in video_reasoned_active_object_labels
+            if obj not in non_moving_objects
+        ]
+
+        # Objects active in the video but not classified as dynamic => treated as static
+        video_static_object_labels = [
+            obj for obj in video_active_object_labels
+            if obj not in video_dynamic_object_labels
+        ]
+
+        # Only consider static labels that actually have 3D boxes
+        static_labels_in_3d = [
+            lbl for lbl in video_static_object_labels
+            if lbl in all_labels
+        ]
+
+        print(
+            f"[world4d][{video_id}] static_labels_in_3d={sorted(static_labels_in_3d)} "
+            f"(from active={sorted(video_active_object_labels)})"
+        )
+
+        # ----------------------------------------------------------------------
+        # Create world-4D annotations with object permanence
+        # ----------------------------------------------------------------------
+        # Sort frames chronologically by frame index (000123.png -> 123)
+        frame_names_sorted = sorted(
+            frame_3dbb_map_world.keys(),
+            key=lambda fn: int(Path(fn).stem)
+            if Path(fn).stem.isdigit()
+            else Path(fn).stem,
+        )
+
+        # First known bbox per label: label -> (source_frame_name, obj_dict)
+        label_first_source: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+        for fname in frame_names_sorted:
+            objects = frame_3dbb_map_world[fname].get("objects", [])
+            for obj in objects:
+                lbl = obj.get("label", None)
+                if not lbl:
+                    continue
+                if lbl not in label_first_source:
+                    label_first_source[lbl] = (fname, obj)
+
+        # Safety check: every label must appear at least once
+        for lbl in all_labels:
+            if lbl not in label_first_source:
+                raise ValueError(
+                    f"[world4d][{video_id}] Label '{lbl}' in all_labels "
+                    "has no actual bbox in any frame."
+                )
+
+        # Helper to clone an object and attach 4D metadata
+        def _clone_with_meta(
+                base_obj: Dict[str, Any],
+                *,
+                filled: bool,
+                source_frame: str,
+                target_frame: str,
+        ) -> Dict[str, Any]:
+            new_obj = dict(base_obj)  # shallow copy is enough; we don't mutate nested dicts
+            new_obj["world4d_filled"] = bool(filled)
+            new_obj["world4d_source_frame"] = source_frame
+            new_obj["world4d_frame"] = target_frame
+            return new_obj
+
+        # last known bbox per label on/before current frame
+        last_seen: Dict[str, Tuple[str, Dict[str, Any]]] = {}
         frames_filled_world: Dict[str, Dict[str, Any]] = {}
 
-        # Track "last seen" bbox for each label
-        last_seen_bbox_world: Dict[str, Dict[str, Any]] = {}
+        for fname in frame_names_sorted:
+            frame_rec = frame_3dbb_map_world.get(fname, {})
+            objects = frame_rec.get("objects", [])
 
-        # First pass: identify first occurrence of each label (for fallback)
-        first_seen_bbox_world: Dict[str, Dict[str, Any]] = {}
-        for fn in frame_names_sorted:
-            objs = frame_3dbb_map_world[fn].get("objects", [])
-            for obj in objs:
+            # Map label -> object for this frame (if present)
+            label_to_obj_current: Dict[str, Dict[str, Any]] = {}
+            for obj in objects:
                 lbl = obj.get("label", None)
-                if lbl and lbl not in first_seen_bbox_world:
-                    first_seen_bbox_world[lbl] = obj
+                if not lbl:
+                    continue
+                # If multiple instances of the same label exist, we keep the first.
+                if lbl not in label_to_obj_current:
+                    label_to_obj_current[lbl] = obj
 
-        # Second pass: fill
-        for fn in frame_names_sorted:
-            current_objs = frame_3dbb_map_world[fn].get("objects", [])
-            # Map label -> obj for current frame
-            current_label_map = {}
-            for obj in current_objs:
-                lbl = obj.get("label", None)
-                if lbl:
-                    current_label_map[lbl] = obj
+            filled_objects: List[Dict[str, Any]] = []
 
-            new_objs_list = []
-            for lbl in all_labels:
-                if lbl in current_label_map:
-                    # Present
-                    obj = current_label_map[lbl]
-                    last_seen_bbox_world[lbl] = obj
-                    # We'll append a copy to be safe
-                    new_objs_list.append(dict(obj))
+            # Only fill/extrapolate for static labels; dynamic objects only appear where detected
+            for lbl in sorted(all_labels):
+                is_static = lbl in static_labels_in_3d
+
+                if lbl in label_to_obj_current:
+                    # Object exists in this frame - always include it
+                    base_obj = label_to_obj_current[lbl]
+                    last_seen[lbl] = (fname, base_obj)
+                    filled_obj = _clone_with_meta(
+                        base_obj,
+                        filled=False,
+                        source_frame=fname,
+                        target_frame=fname,
+                    )
+                elif is_static:
+                    # Static object missing in this frame - fill from last/first known
+                    if lbl in last_seen:
+                        src_frame, base_obj = last_seen[lbl]
+                    else:
+                        src_frame, base_obj = label_first_source[lbl]
+
+                    filled_obj = _clone_with_meta(
+                        base_obj,
+                        filled=True,
+                        source_frame=src_frame,
+                        target_frame=fname,
+                    )
                 else:
-                    # Missing -> fill
-                    if lbl in last_seen_bbox_world:
-                        # Use last seen
-                        filled_obj = dict(last_seen_bbox_world[lbl])
-                        filled_obj["is_filled"] = True  # mark as filled
-                        new_objs_list.append(filled_obj)
-                    elif lbl in first_seen_bbox_world:
-                        # Use first seen (backward fill)
-                        filled_obj = dict(first_seen_bbox_world[lbl])
-                        filled_obj["is_filled"] = True
-                        new_objs_list.append(filled_obj)
+                    # Dynamic object missing - do NOT fill/extrapolate
+                    # Skip this label for this frame
+                    continue
+
+                # Ensure label is consistent
+                filled_obj["label"] = lbl
+
+                # Attach FINAL-coords bbox (aabb_final) from WORLD corners
+                if "aabb_floor_aligned" in filled_obj:
+                    bbox_3d = filled_obj["aabb_floor_aligned"]
+                    corners_world = np.asarray(
+                        bbox_3d.get("corners_world", []), dtype=np.float32
+                    )
+                    if corners_world.size == 0:
+                        corners_final = corners_world
                     else:
-                        # Should not happen given logic above
-                        print(f"[world4d][{video_id}] Label '{lbl}' missing everywhere??")
+                        corners_final = (R_final @ corners_world.T).T + t_final[None, :]
 
-            frames_filled_world[fn] = {
-                "objects": new_objs_list,
-                # Copy other frame-level metadata if needed
-                "camera_pose": frame_3dbb_map_world[fn].get("camera_pose", None),
-            }
-
-        # ----------------------------------------------------------------------
-        # Compute FINAL coords for every object
-        # ----------------------------------------------------------------------
-        # x_final = R_final @ x_world + t_final
-        # We'll store `aabb_final` inside each object dict.
-        # Structure of `aabb_floor_aligned`:
-        #   { "center_world": [x,y,z], "size_world": [w,h,d], "corners_world": (8,3), ... }
-
-        for fn in frame_names_sorted:
-            objs = frames_filled_world[fn]["objects"]
-            for obj in objs:
-                bbox_world = obj["aabb_floor_aligned"]
-                corners_w = np.asarray(bbox_world["corners_world"], dtype=np.float32) # (8,3)
-
-                # Transform corners
-                corners_f = (R_final @ corners_w.T).T + t_final[None, :]
-
-                # Recompute center/size in final frame from transformed corners
-                min_f = corners_f.min(axis=0)
-                max_f = corners_f.max(axis=0)
-                center_f = (min_f + max_f) / 2.0
-                size_f = (max_f - min_f)
-
-                obj["aabb_final"] = {
-                    "corners_final": corners_f,
-                    "center_final": center_f,
-                    "size_final": size_f,
-                }
-
-        # ----------------------------------------------------------------------
-        # Static Object Union (in FINAL coords)
-        # ----------------------------------------------------------------------
-        # Identify static labels
-        if video_id not in self.video_id_active_objects_annotations_map:
-            self.fetch_stored_active_objects_in_video(video_id)
-
-        annotated_active = set(self.video_id_active_objects_annotations_map.get(video_id, []))
-        reasoned_active = set(self.video_id_active_objects_b_reasoned_map.get(video_id, []))
-
-        # "Active" usually means "interacted with" or "moving".
-        # We'll treat anything NOT in reasoned_active as potentially static?
-        # Or use your heuristic:
-        non_moving_candidates = {"floor", "sofa", "couch", "bed", "doorway", "table", "chair", "shelf", "closet", "cabinet"}
-        # Actually, let's define "dynamic" as reasoned_active minus non_moving_candidates
-        # and "static" as everything else in `all_labels`.
-
-        # Refined logic from your stats script:
-        # dynamic_labels = [lbl for lbl in reasoned_active if lbl not in non_moving_candidates]
-        # static_labels = [lbl for lbl in all_labels if lbl not in dynamic_labels]
-
-        # Let's just use a simpler check: if it's in `reasoned_active` AND NOT in `non_moving_candidates`, it's dynamic.
-        # Otherwise static.
-        def _is_static(lbl: str) -> bool:
-            # normalize
-            lbl_norm = lbl.lower().strip()
-            if lbl_norm in non_moving_candidates:
-                return True
-            if lbl_norm in reasoned_active:
-                return False  # It is active and not a non-moving type => dynamic
-            # If not active, treat as static
-            return True
-
-        static_labels = [lbl for lbl in all_labels if _is_static(lbl)]
-        # dynamic_labels = [lbl for lbl in all_labels if not _is_static(lbl)]
-
-        # Compute union box for each static label
-        static_union_bboxes: Dict[str, Dict[str, Any]] = {}  # label -> {min_f, max_f}
-
-        for fn in frame_names_sorted:
-            objs = frames_filled_world[fn]["objects"]
-            for obj in objs:
-                lbl = obj.get("label", None)
-                if lbl in static_labels:
-                    aabb_f = obj["aabb_final"]
-                    c_f = aabb_f["corners_final"]
-                    curr_min = c_f.min(axis=0)
-                    curr_max = c_f.max(axis=0)
-
-                    if lbl not in static_union_bboxes:
-                        static_union_bboxes[lbl] = {
-                            "min": curr_min,
-                            "max": curr_max,
-                        }
-                    else:
-                        static_union_bboxes[lbl]["min"] = np.minimum(static_union_bboxes[lbl]["min"], curr_min)
-                        static_union_bboxes[lbl]["max"] = np.maximum(static_union_bboxes[lbl]["max"], curr_max)
-
-        # Overwrite static objects with union box
-        for fn in frame_names_sorted:
-            objs = frames_filled_world[fn]["objects"]
-            for obj in objs:
-                lbl = obj.get("label", None)
-                if lbl in static_union_bboxes:
-                    # It's static, overwrite aabb_final
-                    u = static_union_bboxes[lbl]
-                    min_u = u["min"]
-                    max_u = u["max"]
-                    center_u = (min_u + max_u) / 2.0
-                    size_u = (max_u - min_u)
-
-                    # Reconstruct 8 corners from min/max
-                    # (min_x, min_y, min_z), ...
-                    # A simple way is itertools product, or manual
-                    x0, y0, z0 = min_u
-                    x1, y1, z1 = max_u
-                    corners_u = np.array([
-                        [x0, y0, z0], [x0, y0, z1], [x0, y1, z0], [x0, y1, z1],
-                        [x1, y0, z0], [x1, y0, z1], [x1, y1, z0], [x1, y1, z1]
-                    ], dtype=np.float32)
-                    # Note: order doesn't strictly matter for bounding volume,
-                    # but for wireframe edges it might.
-                    # Let's use a standard order consistent with your cuboid_edges if possible.
-                    # Your cuboid_edges expects:
-                    # 0:000, 1:100, 2:010, 3:110, 4:001, 5:101, 6:011, 7:111 (example)
-                    # Let's just use the helper from annotation_utils if available, or manual:
-                    # _corners_from_mins_maxs
-                    corners_u = np.array([
-                        [x0, y0, z0], # 0
-                        [x1, y0, z0], # 1
-                        [x0, y1, z0], # 2
-                        [x1, y1, z0], # 3
-                        [x0, y0, z1], # 4
-                        [x1, y0, z1], # 5
-                        [x0, y1, z1], # 6
-                        [x1, y1, z1], # 7
-                    ], dtype=np.float32)
-
-                    obj["aabb_final"] = {
-                        "corners_final": corners_u,
-                        "center_final": center_u,
-                        "size_final": size_u,
+                    filled_obj["aabb_final"] = {
+                        "corners_final": corners_final,
                     }
-                    obj["is_static_union"] = True
+
+                # Choose a default color for AFTER visualization if not present
+                if "color_after" not in filled_obj:
+                    filled_obj["color_after"] = filled_obj.get("color", [255, 230, 80])
+
+                filled_objects.append(filled_obj)
+
+            frames_filled_world[fname] = {"objects": filled_objects}
 
         # ----------------------------------------------------------------------
-        # Save 4D annotations
+        # Static-object union logic (UNION IN FINAL COORDS, WORLD UNCHANGED)
         # ----------------------------------------------------------------------
-        video_4d_out = {
-            "video_id": video_id,
-            "frames": frames_filled_world,  # keyed by "000123.png"
-            "global_floor_sim": gfs,
-            "floor_mesh": {
-                "gv": gv,
-                "gf": gf,
-                "gc": gc
-            } if floor else None,
-            "world_to_final": {
-                "R_final": R_final,
-                "t_final": t_final,
-            },
-            "all_labels": sorted(list(all_labels)),
-            "static_labels": sorted(list(static_labels)),
-        }
 
-        out_path = self.bbox_4d_root_dir / f"{video_id[:-4]}.pkl"
-        with open(out_path, "wb") as f:
-            pickle.dump(video_4d_out, f, protocol=pickle.HIGHEST_PROTOCOL)
-        print(f"[world4d][{video_id}] Saved 4D annotations to {out_path}")
+        def _make_aabb_corners_from_minmax(min_xyz: np.ndarray,
+                                           max_xyz: np.ndarray) -> np.ndarray:
+            """
+            Build 8 axis-aligned cuboid corners from min/max in FINAL coords.
+
+            Corner indexing is consistent with a standard cuboid and works
+            with the existing `cuboid_edges` list in rerun_frame_vis_results.
+            """
+            x0, y0, z0 = min_xyz
+            x1, y1, z1 = max_xyz
+            return np.array(
+                [
+                    [x0, y0, z0],
+                    [x1, y0, z0],
+                    [x0, y0, z1],
+                    [x1, y0, z1],
+                    [x0, y1, z0],
+                    [x1, y1, z0],
+                    [x0, y1, z1],
+                    [x1, y1, z1],
+                ],
+                dtype=np.float32,
+            )
+
+        static_union_map_final: Dict[str, np.ndarray] = {}
+
+        # 1) Compute union bbox (FINAL coords) per static label
+        for lbl in static_labels_in_3d:
+            all_corners_list_final: List[np.ndarray] = []
+
+            for fname in frame_names_sorted:
+                frame_rec = frames_filled_world[fname]
+                for obj in frame_rec["objects"]:
+                    if obj.get("label") != lbl:
+                        continue
+
+                    aabb_final = obj.get("aabb_final", None)
+                    if not aabb_final:
+                        continue
+
+                    corners_final = np.asarray(
+                        aabb_final.get("corners_final", []), dtype=np.float32
+                    )
+                    if corners_final.size == 0:
+                        continue
+
+                    all_corners_list_final.append(corners_final)
+
+            if not all_corners_list_final:
+                print(
+                    f"[world4d][{video_id}] WARNING: static label '{lbl}' has no "
+                    "aabb_final corners available; skipping union."
+                )
+            else:
+                all_pts_final = np.concatenate(all_corners_list_final, axis=0)  # (N*8, 3)
+                min_xyz_f = all_pts_final.min(axis=0)
+                max_xyz_f = all_pts_final.max(axis=0)
+                union_corners_final = _make_aabb_corners_from_minmax(min_xyz_f, max_xyz_f)
+                static_union_map_final[lbl] = union_corners_final
+
+        # 2) Apply union bbox (FINAL coords) to all frames for those static labels
+        if static_union_map_final:
+            print(
+                f"[world4d][{video_id}] Applying static union bboxes in FINAL coords "
+                f"for {len(static_union_map_final)} labels."
+            )
+
+            for fname in frame_names_sorted:
+                frame_rec = frames_filled_world[fname]
+                for obj in frame_rec["objects"]:
+                    lbl = obj.get("label", None)
+                    if lbl not in static_union_map_final:
+                        continue
+
+                    union_corners_final = static_union_map_final[lbl]  # (8,3)
+
+                    # Ensure aabb_final exists, then overwrite only FINAL box
+                    if "aabb_final" not in obj:
+                        obj["aabb_final"] = {}
+
+                    obj["aabb_final"]["corners_final"] = union_corners_final
+
+                    # NOTE: we intentionally do NOT touch
+                    # obj["aabb_floor_aligned"]["corners_world"]
+                    # so WORLD-space boxes remain as originally constructed.
 
         # ----------------------------------------------------------------------
-        # Visualization (Optional)
+        # Optional: visualize world-4D bboxes + POINTS (BEFORE/AFTER) over time
         # ----------------------------------------------------------------------
         if visualize:
-            stems_S = [Path(fn).stem for fn in frame_names_sorted]
-            # Optional: visualize world-4D bboxes (wireframe only, no points)
+            # --- 1) Load original Pi3 outputs for annotated frames (same slicing logic) ---
+            P = self._load_original_points_for_video(video_id)
+
+            # P["frame_stems"] are like ["000123", ...]
+            stem_to_idx = {f"{s}.png": i for i, s in enumerate(P["frame_stems"])}
+
+            # Make sure ordering matches your bbox frame_names_sorted
+            keep_frame_names = [fn for fn in frame_names_sorted if fn in stem_to_idx]
+            if len(keep_frame_names) == 0:
+                raise RuntimeError(
+                    f"[world4d][{video_id}] No overlap between bbox frames and loaded points stems."
+                )
+
+            idxs = [stem_to_idx[fn] for fn in keep_frame_names]
+            stems_S = [Path(fn).stem for fn in keep_frame_names]
+
+            points_world = np.asarray(P["points"], dtype=np.float32)[idxs]  # (S,H,W,3)
+            conf_world = (np.asarray(P["conf"], dtype=np.float32)[idxs]
+                          if P["conf"] is not None else None)  # (S,H,W) or None
+            colors_world = (np.asarray(P["colors"], dtype=np.uint8)[idxs]
+                            if P["colors"] is not None else None)  # (S,H,W,3) or None
+            cameras_world = (np.asarray(P["camera_poses"], dtype=np.float32)[idxs]
+                             if P["camera_poses"] is not None else None)  # (S,4,4)/(S,3,4) or None
+
+            # --- 2) Transform points into FINAL coords ---
+            pts_flat = points_world.reshape(-1, 3)
+            pts_final_flat = (R_final @ pts_flat.T).T + t_final[None, :]
+            points_final = pts_final_flat.reshape(points_world.shape).astype(np.float32)
+
+            # Reuse same RGB for FINAL
+            colors_final = colors_world
+
+            # --- 3) Transform cameras into FINAL coords ---
+            cameras_final = None
+            if cameras_world is not None:
+                cam_list = []
+                for cam_pose in cameras_world:
+                    if cam_pose.shape == (3, 4):
+                        T_wc = np.eye(4, dtype=np.float32)
+                        T_wc[:3, :4] = cam_pose
+                    elif cam_pose.shape == (4, 4):
+                        T_wc = cam_pose.astype(np.float32)
+                    else:
+                        T_wc = np.eye(4, dtype=np.float32)
+
+                    R_wc = T_wc[:3, :3]
+                    t_wc = T_wc[:3, 3]
+
+                    # x_final = R_final @ x_world + t_final
+                    # so: R_fc = R_final @ R_wc, t_fc = R_final @ t_wc + t_final
+                    R_fc = R_final @ R_wc
+                    t_fc = (R_final @ t_wc) + t_final
+
+                    T_fc = np.eye(4, dtype=np.float32)
+                    T_fc[:3, :3] = R_fc
+                    T_fc[:3, 3] = t_fc
+                    cam_list.append(T_fc)
+
+                cameras_final = np.stack(cam_list, axis=0).astype(np.float32)
+
+            # (Optional) trim bbox dict to the same set of frames for cleanliness
+            frames_filled_world_vis = {fn: frames_filled_world[fn] for fn in keep_frame_names}
+
+            print(
+                f"[world4d][{video_id}] visualize=True -> launching Rerun "
+                "(4D bboxes + points over time, FINAL coords)."
+            )
+
             rerun_frame_vis_results(
                 video_id=video_id,
                 stems_S=stems_S,
                 frame_annotated_dir_path=self.frame_annotated_dir_path,
 
-                # No points / cameras for this visualization
+                # Points/cameras BEFORE
                 points_before=None,
-                conf_before=None,
+                conf_before=conf_world,
                 colors_before=None,
                 cameras_before=None,
 
-                points_after=None,
-                colors_after=None,
-                cameras_after=None,
+                # Points/cameras AFTER
+                points_after=points_final,
+                colors_after=colors_final,
+                cameras_after=cameras_final,
 
-                # Floor mesh (BEFORE/AFTER)
+                # Floor mesh / axes BEFORE + AFTER (if available)
                 floor_vertices_before=floor_vertices_before,
                 floor_axes_before=floor_axes_before,
                 floor_origin_before=floor_origin_world,
-
                 floor_vertices_after=floor_vertices_after,
                 floor_axes_after=floor_axes_after,
                 floor_origin_after=floor_origin_final,
 
+                # 4D bboxes in FINAL coords
+                frame_3dbb_before=None,
+                frame_3dbb_after=frames_filled_world_vis,
+
                 floor_faces=floor_faces,
                 floor_kwargs=floor_kwargs,
 
-                # Use the *filled* 4D bboxes (FINAL coords via aabb_final)
-                # Note: rerun_frame_vis_results expects `frame_3dbb_after`
-                # to have structure { frame_name: { "objects": [ ... ] } }
-                frame_3dbb_after=frames_filled_world,
-
-                app_id="World4D-BBoxesOnly",
-                vis_mode="after",  # only show FINAL frame
+                img_maxsize=480,
+                app_id="World4D-BBoxes+Points",
+                vis_mode="after",  # change to "both" if you want BEFORE/AFTER side-by-side
             )
 
+        # ----------------------------------------------------------------------
+        # Save world-4D annotations
+        # ----------------------------------------------------------------------
+        out_4d_path = self.bbox_4d_root_dir / f"{video_id[:-4]}.pkl"
+        world4d_annotations = {
+            "video_id": video_id,
+            "frames": frames_filled_world,  # frame_name -> {objects: [...]}
+            "frame_names": frame_names_sorted,  # ordered list of frame_name strings
+            "all_labels": sorted(all_labels),
+            "meta": {
+                "num_frames": len(frame_names_sorted),
+                "labels": sorted(all_labels),
+            },
+        }
 
-# --------------------------------------------------------------------------------------
-# Dataset + CLI
-# --------------------------------------------------------------------------------------
+        with open(out_4d_path, "wb") as f:
+            pickle.dump(world4d_annotations, f)
 
+        print(f"[world4d][{video_id}] Saved world-4D bbox annotations to {out_4d_path}")
 
-def load_dataset(ag_root_directory: str):
-    train_dataset = StandardAG(
-        phase="train",
-        mode="sgdet",
-        datasize="large",
-        data_path=ag_root_directory,
-        filter_nonperson_box_frame=True,
-        filter_small_box=False,
-    )
+    # ----------------------------------------------------------------------------------
+    # Generate World4D from Firebase annotations
+    # ----------------------------------------------------------------------------------
 
-    test_dataset = StandardAG(
-        phase="test",
-        mode="sgdet",
-        datasize="large",
-        data_path=ag_root_directory,
-        filter_nonperson_box_frame=True,
-        filter_small_box=False,
-    )
+    def generate_world4d_from_firebase(
+            self,
+            video_id: str,
+            firebase_service,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Generate world4d annotations from Firebase data.
 
-    dataloader_train = DataLoader(
-        train_dataset,
-        shuffle=True,
-        collate_fn=lambda b: b[0],
-        pin_memory=False,
-        num_workers=0,
-    )
+        Priority:
+          1) worldframe_obb/final_alignments/{video_id}/latest  (pre-computed)
+          2) worldframe_obb/edited/{video_id}/{frame}/latest    (edited per-frame)
+          3) worldframe_obb/world/{video_id}/{frame}            (original per-frame)
+          4) local PKL fallback (and if only WORLD corners exist, compute FINAL using global_floor_sim)
 
-    dataloader_test = DataLoader(
-        test_dataset,
-        shuffle=False,
-        collate_fn=lambda b: b[0],
-        pin_memory=False,
-    )
+        Semantics match:
+          - object permanence ONLY for static labels
+          - dynamic objects appear only in frames they exist
+          - static union computed in FINAL coords; WORLD data left untouched
+        """
+        print(f"[world4d][{video_id}] Generating from Firebase annotations")
 
-    return train_dataset, test_dataset, dataloader_train, dataloader_test
+        video_id_clean = video_id.replace(".mp4", "").replace(".", "_")
+
+        # Ensure we have static/dynamic classification
+        self.fetch_stored_active_objects_in_video(video_id)
+
+        video_active_object_labels = self.video_id_active_objects_annotations_map.get(video_id, [])
+        video_reasoned_active_object_labels = self.video_id_active_objects_b_reasoned_map.get(video_id, [])
+
+        non_moving_objects = ["floor", "sofa", "couch", "bed", "doorway", "table", "chair"]
+        video_dynamic_object_labels = [
+            obj for obj in video_reasoned_active_object_labels
+            if obj not in non_moving_objects
+        ]
+        video_static_object_labels = [
+            obj for obj in video_active_object_labels
+            if obj not in video_dynamic_object_labels
+        ]
+
+        # --- 1) Try final_alignments first ---
+        final_alignment_path = f"worldframe_obb/final_alignments/{video_id_clean}/latest"
+        final_alignment_data = firebase_service.get_data(final_alignment_path)
+        if final_alignment_data and final_alignment_data.get("frames"):
+            print(f"[world4d][{video_id}] Using final_alignments data")
+            return self._generate_world4d_from_final_alignment(
+                video_id=video_id,
+                final_alignment_data=final_alignment_data,
+                video_static_object_labels=video_static_object_labels,
+            )
+
+        # --- 2) Need local PKL to know which frames to query ---
+        video_3dgt = self.get_video_3d_annotations(video_id)
+        if video_3dgt is None:
+            print(f"[world4d][{video_id}] No local 3D annotations found")
+            return None
+
+        frame_3dbb_map_world = video_3dgt.get("frames", {})
+        if not frame_3dbb_map_world:
+            print(f"[world4d][{video_id}] No frame data in 3D annotations")
+            return None
+
+        # Sort frames like your main pipeline
+        frame_names_sorted = sorted(
+            frame_3dbb_map_world.keys(),
+            key=lambda fn: int(Path(fn).stem) if Path(fn).stem.isdigit() else Path(fn).stem,
+        )
+
+        # Optional: compute WORLD->FINAL for local fallback (only if needed)
+        floor = None
+        global_floor_sim = None
+        gv = video_3dgt.get("gv", None)
+        gf = video_3dgt.get("gf", None)
+        gc = video_3dgt.get("gc", None)
+        if gv is not None and gf is not None:
+            floor = (gv, gf, gc)
+
+        gfs = video_3dgt.get("global_floor_sim", None)
+        if gfs is not None:
+            s_g = float(gfs["s"])
+            R_g = np.asarray(gfs["R"], dtype=np.float32)
+            t_g = np.asarray(gfs["t"], dtype=np.float32)
+            global_floor_sim = (s_g, R_g, t_g)
+
+        tf = compute_final_world_transform(floor=floor, global_floor_sim=global_floor_sim)
+        R_final = tf["R_world_to_final"]
+        t_final = tf["t_world_to_final"]
+
+        def _to_list_corners(corners_any: Any) -> List[List[float]]:
+            if corners_any is None:
+                return []
+            if isinstance(corners_any, np.ndarray):
+                return corners_any.astype(np.float32).tolist()
+            # assume list-like
+            return np.asarray(corners_any, dtype=np.float32).tolist()
+
+        def _obj_from_corners(label: str, corners_final: Any, color: Any, object_id: str = None) -> Dict[str, Any]:
+            corners_list = _to_list_corners(corners_final)
+            if len(corners_list) > 0:
+                c = np.asarray(corners_list, dtype=np.float32)
+                center = c.mean(axis=0).tolist()
+            else:
+                center = [0.0, 0.0, 0.0]
+            obj = {
+                "label": label,
+                "aabb_final": {"corners_final": corners_list},
+                "corners_final": corners_list,  # keep both for compatibility
+                "center": center,
+                "color": color if color is not None else [255, 180, 0],
+            }
+            if object_id:
+                obj["object_id"] = object_id
+            return obj
+
+        print(f"[world4d][{video_id}] Checking Firebase per-frame data for {len(frame_names_sorted)} frames")
+
+        frames_from_firebase: Dict[str, Dict[str, Any]] = {}
+        firebase_frames_found = 0
+
+        for frame_name in frame_names_sorted:
+            frame_stem = Path(frame_name).stem
+
+            # 2a) Edited annotations first
+            edited_path = f"worldframe_obb/edited/{video_id_clean}/{frame_stem}/latest"
+            edited_data = firebase_service.get_data(edited_path)
+
+            objects: List[Dict[str, Any]] = []
+            if edited_data and edited_data.get("annotations"):
+                for ann in edited_data["annotations"]:
+                    objects.append(
+                        _obj_from_corners(
+                            label=ann.get("object_label", "Object"),
+                            corners_final=ann.get("bbox_corners", []),
+                            color=ann.get("color", [255, 180, 0]),
+                            object_id=ann.get("object_id"),
+                        )
+                    )
+                frames_from_firebase[frame_name] = {"objects": objects, "relationships": []}
+                firebase_frames_found += 1
+                continue
+
+            # 2b) Original worldframe_obb/world
+            original_path = f"worldframe_obb/world/{video_id_clean}/{frame_stem}"
+            original_data = firebase_service.get_data(original_path)
+
+            if original_data and original_data.get("objects"):
+                objects_raw = original_data["objects"]
+                if isinstance(objects_raw, dict):
+                    # When stored as dict, keys are object_ids
+                    for obj_id, obj_raw in objects_raw.items():
+                        objects.append(
+                            _obj_from_corners(
+                                label=obj_raw.get("object_label", "Object"),
+                                corners_final=obj_raw.get("bbox_corners", []),
+                                color=obj_raw.get("color", [255, 180, 0]),
+                                object_id=obj_raw.get("object_id", obj_id),
+                            )
+                        )
+                else:
+                    for obj_raw in objects_raw:
+                        objects.append(
+                            _obj_from_corners(
+                                label=obj_raw.get("object_label", "Object"),
+                                corners_final=obj_raw.get("bbox_corners", []),
+                                color=obj_raw.get("color", [255, 180, 0]),
+                                object_id=obj_raw.get("object_id"),
+                            )
+                        )
+
+                # Fetch relationships for this frame
+                relationships = original_data.get("relationships", [])
+                if not isinstance(relationships, list):
+                    relationships = []
+
+                frames_from_firebase[frame_name] = {"objects": objects, "relationships": relationships}
+                firebase_frames_found += 1
+                continue
+
+            # 2c) Local PKL fallback
+            local_frame = frame_3dbb_map_world.get(frame_name, {})
+            local_objects = local_frame.get("objects", [])
+
+            for obj_raw in local_objects:
+                lbl = obj_raw.get("label", "Object")
+                col = obj_raw.get("color", [255, 180, 0])
+
+                corners_final = None
+
+                # Prefer existing aabb_final if present
+                aabb_final = obj_raw.get("aabb_final", None)
+                if isinstance(aabb_final, dict) and aabb_final.get("corners_final") is not None:
+                    corners_final = aabb_final.get("corners_final")
+
+                # Otherwise compute FINAL from WORLD corners if available
+                if corners_final is None:
+                    aabb_world = obj_raw.get("aabb_floor_aligned", None)
+                    if isinstance(aabb_world, dict) and aabb_world.get("corners_world") is not None:
+                        corners_world = np.asarray(aabb_world["corners_world"], dtype=np.float32)
+                        if corners_world.size > 0:
+                            corners_final = (R_final @ corners_world.T).T + t_final[None, :]
+
+                objects.append(_obj_from_corners(lbl, corners_final if corners_final is not None else [], col))
+
+            frames_from_firebase[frame_name] = {"objects": objects, "relationships": []}
+
+        print(f"[world4d][{video_id}] Loaded {firebase_frames_found} frames from Firebase (rest from local fallback)")
+
+        return self._apply_world4d_filling(
+            video_id=video_id,
+            frames_data=frames_from_firebase,
+            frame_names_sorted=frame_names_sorted,
+            video_static_object_labels=video_static_object_labels,
+            include_relationships=True,
+        )
+
+    def _generate_world4d_from_final_alignment(
+            self,
+            video_id: str,
+            final_alignment_data: Dict[str, Any],
+            video_static_object_labels: List[str],
+    ) -> Dict[str, Any]:
+        """
+        Normalize final_alignment frames to:
+          frames_data[<frame>.png] = {"objects": [ {label, aabb_final:{corners_final}, ...}, ... ]}
+
+        Then apply the SAME filling + static union logic via _apply_world4d_filling.
+        """
+        frames_raw = final_alignment_data.get("frames", {})
+        if not isinstance(frames_raw, dict) or not frames_raw:
+            return {
+                "video_id": video_id,
+                "frames": {},
+                "frame_names": [],
+                "all_labels": [],
+                "static_labels": [],
+                "meta": {"num_frames": 0},
+            }
+
+        def _canon_frame_name(k: str) -> str:
+            st = Path(str(k)).stem
+            return f"{st}.png"
+
+        def _sort_key(fn: str):
+            st = Path(fn).stem
+            return int(st) if st.isdigit() else st
+
+        def _to_list_corners(corners_any: Any) -> List[List[float]]:
+            if corners_any is None:
+                return []
+            if isinstance(corners_any, np.ndarray):
+                return corners_any.astype(np.float32).tolist()
+            return np.asarray(corners_any, dtype=np.float32).tolist()
+
+        def _obj_norm(obj: Dict[str, Any]) -> Dict[str, Any]:
+            lbl = obj.get("label", "Object")
+
+            # accept either "corners" or "corners_final" or nested aabb_final
+            corners = None
+            if isinstance(obj.get("aabb_final"), dict) and obj["aabb_final"].get("corners_final") is not None:
+                corners = obj["aabb_final"]["corners_final"]
+            elif obj.get("corners_final") is not None:
+                corners = obj.get("corners_final")
+            elif obj.get("corners") is not None:
+                corners = obj.get("corners")
+
+            corners_list = _to_list_corners(corners)
+
+            if len(corners_list) > 0:
+                c = np.asarray(corners_list, dtype=np.float32)
+                center = c.mean(axis=0).tolist()
+            else:
+                center = obj.get("center", [0.0, 0.0, 0.0])
+
+            color = obj.get("color", [255, 180, 0])
+            object_id = obj.get("object_id") or obj.get("id")
+
+            out = dict(obj)
+            out["label"] = lbl
+            out["aabb_final"] = {"corners_final": corners_list}
+            out["corners_final"] = corners_list
+            out["center"] = center
+            out["color"] = color
+            if object_id:
+                out["object_id"] = object_id
+            return out
+
+        normalized_frames: Dict[str, Dict[str, Any]] = {}
+
+        # preserve order of keys but sort numerically like main pipeline
+        canon_names = [_canon_frame_name(k) for k in frames_raw.keys()]
+        frame_names_sorted = sorted(set(canon_names), key=_sort_key)
+
+        for k, v in frames_raw.items():
+            fname = _canon_frame_name(k)
+
+            objects: List[Dict[str, Any]] = []
+
+            if isinstance(v, list):
+                # list of objects
+                for obj in v:
+                    if isinstance(obj, dict):
+                        objects.append(_obj_norm(obj))
+            elif isinstance(v, dict):
+                # could be {"objects":[...]} or dict-of-objects
+                if isinstance(v.get("objects"), list):
+                    for obj in v["objects"]:
+                        if isinstance(obj, dict):
+                            objects.append(_obj_norm(obj))
+                else:
+                    # dict-of-objects
+                    for obj in v.values():
+                        if isinstance(obj, dict):
+                            objects.append(_obj_norm(obj))
+
+            normalized_frames[fname] = {"objects": objects, "relationships": []}
+
+        return self._apply_world4d_filling(
+            video_id=video_id,
+            frames_data=normalized_frames,
+            frame_names_sorted=frame_names_sorted,
+            video_static_object_labels=video_static_object_labels,
+            include_relationships=False,  # final_alignments don't have relationships yet
+        )
+
+    def _apply_world4d_filling(
+            self,
+            video_id: str,
+            frames_data: Dict[str, Dict[str, Any]],
+            frame_names_sorted: List[str],
+            video_static_object_labels: List[str],
+            include_relationships: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        EXACT semantic match to your main pipeline:
+
+          - all_labels collected from observed objects
+          - static_labels_in_3d = static_labels ) all_labels
+          - for each frame:
+              include objects that exist
+              fill ONLY static labels using last_seen else first_seen
+              skip missing dynamic labels
+          - compute static union AABB in FINAL coords and overwrite ONLY FINAL corners
+            (do not modify any world-space data if present)
+        """
+
+        def _sort_key(fn: str):
+            st = Path(fn).stem
+            return int(st) if st.isdigit() else st
+
+        # Ensure deterministic frame ordering
+        frame_names_sorted = sorted(list(frame_names_sorted), key=_sort_key)
+
+        def _get_label(obj: Dict[str, Any]) -> Optional[str]:
+            return obj.get("label", None)
+
+        def _get_corners_final(obj: Dict[str, Any]) -> List[List[float]]:
+            if isinstance(obj.get("aabb_final"), dict) and obj["aabb_final"].get("corners_final") is not None:
+                return obj["aabb_final"]["corners_final"]
+            if obj.get("corners_final") is not None:
+                return obj["corners_final"]
+            return []
+
+        def _set_corners_final(obj: Dict[str, Any], corners_list: List[List[float]]) -> None:
+            if not isinstance(obj.get("aabb_final"), dict):
+                obj["aabb_final"] = {}
+            obj["aabb_final"]["corners_final"] = corners_list
+            obj["corners_final"] = corners_list  # keep both for compatibility
+
+            if len(corners_list) > 0:
+                c = np.asarray(corners_list, dtype=np.float32)
+                obj["center"] = c.mean(axis=0).tolist()
+            else:
+                obj["center"] = [0.0, 0.0, 0.0]
+
+        def _deepish_clone_obj(base_obj: Dict[str, Any]) -> Dict[str, Any]:
+            # Avoid shared nested references that later union-overwrites would mutate across frames
+            out = dict(base_obj)
+
+            # Copy aabb_final dict + corners
+            if isinstance(base_obj.get("aabb_final"), dict):
+                out["aabb_final"] = dict(base_obj["aabb_final"])
+                if out["aabb_final"].get("corners_final") is not None:
+                    out["aabb_final"]["corners_final"] = np.asarray(
+                        out["aabb_final"]["corners_final"], dtype=np.float32
+                    ).tolist()
+
+            # Copy top-level corners_final too
+            if base_obj.get("corners_final") is not None:
+                out["corners_final"] = np.asarray(base_obj["corners_final"], dtype=np.float32).tolist()
+
+            return out
+
+        # ----------------------------------------------------------------------
+        # Collect all labels from observed objects
+        # ----------------------------------------------------------------------
+        # Determine which labels are static (strictly based on input)
+        # ----------------------------------------------------------------------
+        all_labels = set()
+        for fname in frame_names_sorted:
+            for obj in frames_data.get(fname, {}).get("objects", []):
+                lbl = _get_label(obj)
+                if lbl:
+                    all_labels.add(lbl)
+
+        static_labels_in_3d = [lbl for lbl in video_static_object_labels if lbl in all_labels]
+
+        print(f"[world4d][{video_id}] All labels: {sorted(all_labels)}")
+        print(f"[world4d][{video_id}] Static labels in 3D (filled): {sorted(static_labels_in_3d)}")
+
+        if not all_labels:
+            return {
+                "video_id": video_id,
+                "frames": {},
+                "frame_names": frame_names_sorted,
+                "all_labels": [],
+                "static_labels": [],
+                "meta": {"num_frames": len(frame_names_sorted)},
+            }
+
+        # ----------------------------------------------------------------------
+        # First-seen source per label (must exist for every label in all_labels)
+        # ----------------------------------------------------------------------
+        label_first_source: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+        for fname in frame_names_sorted:
+            objects = frames_data.get(fname, {}).get("objects", [])
+            for obj in objects:
+                lbl = _get_label(obj)
+                if lbl and lbl not in label_first_source:
+                    label_first_source[lbl] = (fname, obj)
+
+        for lbl in all_labels:
+            if lbl not in label_first_source:
+                raise ValueError(
+                    f"[world4d][{video_id}] Label '{lbl}' appears in all_labels but has no source frame."
+                )
+
+        # ----------------------------------------------------------------------
+        # Object permanence fill (STATIC ONLY), dynamic missing => skip
+        # Smart object_id assignment:
+        #   - Visible objects: keep their original object_id from worldframe_obb
+        #   - Filled objects: assign new object_id by incrementing from max in frame
+        # ----------------------------------------------------------------------
+        last_seen: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+        frames_filled: Dict[str, Dict[str, Any]] = {}
+
+        def _extract_obj_id_number(obj_id: str) -> int:
+            """Extract the numeric part from object_id like 'obj_5' -> 5"""
+            if not obj_id or not isinstance(obj_id, str):
+                return -1
+            if obj_id.startswith("obj_"):
+                try:
+                    return int(obj_id[4:])
+                except ValueError:
+                    return -1
+            return -1
+
+        for fname in frame_names_sorted:
+            objects = frames_data.get(fname, {}).get("objects", [])
+
+            # Map first instance per label, and track max object_id in this frame
+            label_to_obj_current: Dict[str, Dict[str, Any]] = {}
+            max_obj_id_num = -1
+
+            for obj in objects:
+                lbl = _get_label(obj)
+                if lbl and lbl not in label_to_obj_current:
+                    label_to_obj_current[lbl] = obj
+
+                # Track max object_id number in visible objects
+                obj_id = obj.get("object_id", "")
+                obj_num = _extract_obj_id_number(obj_id)
+                if obj_num > max_obj_id_num:
+                    max_obj_id_num = obj_num
+
+            filled_objects: List[Dict[str, Any]] = []
+            next_obj_id_num = max_obj_id_num + 1  # For filled objects
+
+            for lbl in sorted(all_labels):
+                is_static = lbl in static_labels_in_3d
+
+                if lbl in label_to_obj_current:
+                    # Object is visible in this frame - keep original object_id
+                    base_obj = label_to_obj_current[lbl]
+                    last_seen[lbl] = (fname, base_obj)
+
+                    new_obj = _deepish_clone_obj(base_obj)
+                    new_obj["world4d_filled"] = False
+                    new_obj["world4d_source_frame"] = fname
+                    new_obj["world4d_frame"] = fname
+                    new_obj["label"] = lbl
+                    # object_id is preserved from base_obj via _deepish_clone_obj
+
+                elif is_static:
+                    # Static object NOT visible but needs to be filled
+                    if lbl in last_seen:
+                        src_frame, base_obj = last_seen[lbl]
+                    else:
+                        src_frame, base_obj = label_first_source[lbl]
+
+                    new_obj = _deepish_clone_obj(base_obj)
+                    new_obj["world4d_filled"] = True
+                    new_obj["world4d_source_frame"] = src_frame
+                    new_obj["world4d_frame"] = fname
+                    new_obj["label"] = lbl
+
+                    # Assign new object_id for filled object
+                    new_obj["object_id"] = f"obj_{next_obj_id_num}"
+                    next_obj_id_num += 1
+
+                else:
+                    # dynamic and missing => do NOT fill
+                    continue
+
+                # Ensure corners_final is consistently stored and center is correct
+                corners = _get_corners_final(new_obj)
+                corners_list = np.asarray(corners, dtype=np.float32).tolist() if corners else []
+                _set_corners_final(new_obj, corners_list)
+
+                filled_objects.append(new_obj)
+
+            # Include relationships if available
+            frame_relationships = []
+            if include_relationships:
+                frame_relationships = frames_data.get(fname, {}).get("relationships", [])
+
+            frames_filled[fname] = {"objects": filled_objects, "relationships": frame_relationships}
+
+        # ----------------------------------------------------------------------
+        # Static union logic: UNION IN FINAL COORDS, WORLD UNCHANGED
+        # ----------------------------------------------------------------------
+        def _make_aabb_corners_from_minmax(min_xyz: np.ndarray, max_xyz: np.ndarray) -> List[List[float]]:
+            x0, y0, z0 = min_xyz.tolist()
+            x1, y1, z1 = max_xyz.tolist()
+            return [
+                [x0, y0, z0],
+                [x1, y0, z0],
+                [x0, y0, z1],
+                [x1, y0, z1],
+                [x0, y1, z0],
+                [x1, y1, z0],
+                [x0, y1, z1],
+                [x1, y1, z1],
+            ]
+
+        static_union_map_final: Dict[str, List[List[float]]] = {}
+
+        for lbl in static_labels_in_3d:
+            all_corners_list: List[np.ndarray] = []
+            for fname in frame_names_sorted:
+                for obj in frames_filled.get(fname, {}).get("objects", []):
+                    if obj.get("label") != lbl:
+                        continue
+                    corners = _get_corners_final(obj)
+                    if not corners:
+                        continue
+                    c = np.asarray(corners, dtype=np.float32)
+                    if c.shape != (8, 3):
+                        continue
+                    all_corners_list.append(c)
+
+            if not all_corners_list:
+                print(
+                    f"[world4d][{video_id}] WARNING: static label '{lbl}' has no valid corners_final; skipping union.")
+                continue
+
+            all_pts = np.concatenate(all_corners_list, axis=0)  # (N*8,3)
+            min_xyz = all_pts.min(axis=0)
+            max_xyz = all_pts.max(axis=0)
+            static_union_map_final[lbl] = _make_aabb_corners_from_minmax(min_xyz, max_xyz)
+
+        if static_union_map_final:
+            print(
+                f"[world4d][{video_id}] Applying static union bboxes in FINAL coords for {len(static_union_map_final)} labels.")
+            for fname in frame_names_sorted:
+                for obj in frames_filled.get(fname, {}).get("objects", []):
+                    lbl = obj.get("label")
+                    if lbl not in static_union_map_final:
+                        continue
+
+                    # Overwrite ONLY FINAL coords
+                    _set_corners_final(obj, static_union_map_final[lbl])
+
+                    # NOTE: if obj carries any world-space fields, we intentionally do not touch them.
+
+        result = {
+            "video_id": video_id,
+            "frames": frames_filled,
+            "frame_names": frame_names_sorted,
+            "all_labels": sorted(all_labels),
+            "static_labels": static_labels_in_3d,
+            "meta": {
+                "num_frames": len(frame_names_sorted),
+                "total_objects_per_frame": {
+                    fname: len(frames_filled.get(fname, {}).get("objects", []))
+                    for fname in frame_names_sorted
+                },
+            },
+        }
+
+        print(f"[world4d][{video_id}] Generated 4D annotations for {len(frame_names_sorted)} frames")
+        return result
+
+    # ----------------------------------------------------------------------------------
+    # NEW: centralized transform + visualization entry point
+    # ----------------------------------------------------------------------------------
+
+    def visualize_original_results(self, video_id: str, vis_mode: str = "after") -> None:
+        """
+        1) Loads original Pi3 points using the same slicing logic as bbox_3D construction.
+        2) Loads floor mesh + global_floor_sim from the 3D bbox .pkl (if present).
+        3) Uses `compute_final_world_transform` to compute WORLD -> FINAL transform.
+        4) Applies that transform to:
+             - points
+             - cameras
+             - floor mesh
+             - 3D bbox corners
+        5) Calls `rerun_frame_vis_results` with both BEFORE (world) and AFTER (final) data.
+        """
+        P = self._load_original_points_for_video(video_id)
+
+        points_world = P["points"]  # (S,H,W,3)
+        conf_world = P["conf"]  # (S,H,W) or None
+        stems = P["frame_stems"]  # ["000123", ...]
+        colors_world = P["colors"]  # (S,H,W,3)
+        camera_poses_world = P["camera_poses"]  # (S,4,4) or (S,3,4) or None
+
+        # Optional floor mesh + similarity transform from bbox_3d pkl
+        floor = None
+        global_floor_sim = None
+        frame_3dbb_map_world = None
+        floor_vertices_before = None
+        floor_vertices_after = None
+        floor_axes_before = None
+        floor_axes_after = None
+        floor_origin_world = None
+        floor_faces = None
+        floor_kwargs = None
+
+        video_3dgt = self.get_video_3d_annotations(video_id)
+        if video_3dgt is not None:
+            gv = video_3dgt.get("gv", None)
+            gf = video_3dgt.get("gf", None)
+            gc = video_3dgt.get("gc", None)
+            if gv is not None and gf is not None:
+                floor = (gv, gf, gc)
+
+            gfs = video_3dgt.get("global_floor_sim", None)
+            if gfs is not None:
+                s_g = float(gfs["s"])
+                R_g = np.asarray(gfs["R"], dtype=np.float32)
+                t_g = np.asarray(gfs["t"], dtype=np.float32)
+                global_floor_sim = (s_g, R_g, t_g)
+
+            # 3D bboxes per frame
+            frame_3dbb_map_world = video_3dgt.get("frames", None)
+
+            # Precompute floor mesh in WORLD coords
+            if floor is not None and global_floor_sim is not None:
+                floor_verts0 = np.asarray(gv, dtype=np.float32)
+                floor_faces0 = _faces_u32(np.asarray(gf))
+                floor_faces = floor_faces0
+
+                s_g, R_g, t_g = global_floor_sim
+                R_g = np.asarray(R_g, dtype=np.float32)
+                t_g = np.asarray(t_g, dtype=np.float32)
+
+                floor_vertices_before = s_g * (floor_verts0 @ R_g.T) + t_g
+
+                # Axes BEFORE (in world)
+                t1 = R_g[:, 0]  # in-plane
+                t2 = R_g[:, 2]  # in-plane
+                n = R_g[:, 1]  # normal
+
+                floor_origin_world = t_g.astype(np.float32)
+                axis_len_floor = float(s_g) * 0.5 if s_g is not None else 0.5
+                floor_axes_before = np.stack(
+                    [
+                        t1 * axis_len_floor,
+                        t2 * axis_len_floor,
+                        n * axis_len_floor,
+                    ],
+                    axis=0,
+                )  # (3,3)
+
+                # Floor colors
+                if gc is not None:
+                    gc = np.asarray(gc, dtype=np.uint8)
+                    floor_kwargs = {"vertex_colors": gc}
+                else:
+                    floor_kwargs = {"albedo_factor": [160, 160, 160]}
+
+        # ----------------------------------------------------------------------
+        # Compute WORLD -> FINAL transform using helper
+        # ----------------------------------------------------------------------
+        tf = compute_final_world_transform(floor=floor, global_floor_sim=global_floor_sim)
+        R_final = tf["R_world_to_final"]  # (3,3)
+        t_final = tf["t_world_to_final"]  # (3,)
+        floor_origin_world_tf = tf["floor_origin_world"]  # (3,)
+
+        # ----------------------------------------------------------------------
+        # Transform points
+        # ----------------------------------------------------------------------
+        points_final = None
+        if points_world is not None:
+            pts_flat = points_world.reshape(-1, 3)
+            pts_final_flat = (R_final @ pts_flat.T).T + t_final[None, :]
+            points_final = pts_final_flat.reshape(points_world.shape)
+
+        # Colors: we reuse the same colors as BEFORE for AFTER
+        colors_final = colors_world
+
+        # ----------------------------------------------------------------------
+        # Transform cameras
+        # ----------------------------------------------------------------------
+        cameras_final = None
+        if camera_poses_world is not None:
+            cam_list = []
+            for cam_pose in camera_poses_world:
+                if cam_pose.shape == (3, 4):
+                    T_wc = np.eye(4, dtype=np.float32)
+                    T_wc[:3, :4] = cam_pose
+                elif cam_pose.shape == (4, 4):
+                    T_wc = cam_pose.astype(np.float32)
+                else:
+                    T_wc = np.eye(4, dtype=np.float32)
+
+                R_wc = T_wc[:3, :3]
+                t_wc = T_wc[:3, 3]
+
+                # FINAL-from-CAMERA
+                R_fc = R_final @ R_wc
+                t_fc = R_final @ t_wc + t_final
+
+                T_fc = np.eye(4, dtype=np.float32)
+                T_fc[:3, :3] = R_fc
+                T_fc[:3, 3] = t_fc
+                cam_list.append(T_fc)
+
+            cameras_final = np.stack(cam_list, axis=0)
+
+        # ----------------------------------------------------------------------
+        # Transform floor mesh & axes to FINAL coords
+        # ----------------------------------------------------------------------
+        floor_origin_final = None
+        if floor_vertices_before is not None:
+            v_flat = floor_vertices_before.reshape(-1, 3)
+            v_final_flat = (R_final @ v_flat.T).T + t_final[None, :]
+            floor_vertices_after = v_final_flat.reshape(floor_vertices_before.shape)
+
+            # floor origin in world maps to origin in FINAL (by construction),
+            # but we can be explicit:
+            floor_origin_final = (R_final @ floor_origin_world_tf) + t_final
+            # For visualization, we expect this to be ~[0,0,0].
+            # Axes AFTER: canonical basis in FINAL, scaled similarly
+            axis_len_floor = np.linalg.norm(floor_axes_before[0]) if floor_axes_before is not None else 0.5
+            floor_axes_after = np.array(
+                [
+                    [axis_len_floor, 0.0, 0.0],
+                    [0.0, axis_len_floor, 0.0],
+                    [0.0, 0.0, axis_len_floor],
+                ],
+                dtype=np.float32,
+            )
+
+        # ----------------------------------------------------------------------
+        # Transform 3D bounding boxes
+        #   - Add `aabb_final` with `corners_final` into a separate map
+        # ----------------------------------------------------------------------
+        frame_3dbb_map_final: Optional[Dict[str, Dict[str, Any]]] = None
+        if frame_3dbb_map_world is not None:
+            frame_3dbb_map_final = {}
+            for frame_name, frame_rec in frame_3dbb_map_world.items():
+                objects_world = frame_rec.get("objects", [])
+                objects_final = []
+                for obj in objects_world:
+                    bbox_3d = obj["aabb_floor_aligned"]
+                    corners_world = np.asarray(
+                        bbox_3d["corners_world"], dtype=np.float32
+                    )  # (8,3)
+
+                    corners_final = (R_final @ corners_world.T).T + t_final[None, :]
+
+                    obj_final = dict(obj)
+                    obj_final["aabb_final"] = {
+                        "corners_final": corners_final,
+                    }
+                    # Optional: separate color for AFTER
+                    obj_final["color_after"] = obj.get("color", [255, 230, 80])
+
+                    objects_final.append(obj_final)
+
+                frame_3dbb_map_final[frame_name] = {
+                    "objects": objects_final
+                }
+
+        # ----------------------------------------------------------------------
+        # Call visualization (no transforms inside)
+        # ----------------------------------------------------------------------
+        rerun_frame_vis_results(
+            video_id=video_id,
+            stems_S=stems,
+            frame_annotated_dir_path=self.frame_annotated_dir_path,
+            points_before=points_world,
+            conf_before=conf_world,
+            colors_before=colors_world,
+            cameras_before=camera_poses_world,
+            floor_vertices_before=floor_vertices_before,
+            floor_axes_before=floor_axes_before,
+            floor_origin_before=floor_origin_world,
+            frame_3dbb_before=frame_3dbb_map_world,
+            points_after=points_final,
+            colors_after=colors_final,
+            cameras_after=cameras_final,
+            floor_vertices_after=floor_vertices_after,
+            floor_axes_after=floor_axes_after,
+            floor_origin_after=floor_origin_final,
+            frame_3dbb_after=frame_3dbb_map_final,
+            floor_faces=floor_faces,
+            floor_kwargs=floor_kwargs,
+            img_maxsize=480,
+            app_id="World4D-Original",
+            vis_mode=vis_mode,
+        )
+
+    def generate_sample_gt_world_4D_annotations(self, video_id: str) -> None:
+        """
+        Example/debug entry point for a single video.
+
+        Right now:
+          - loads GT / GDINO / 3D bboxes;
+          - calls generate_video_bb_annotations (skeleton stats);
+          - visualizes original Pi3 point clouds + floor mesh + frames + camera + 3D boxes.
+        """
+        video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
+        video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
+        video_id_3d_bbox_predictions = self.get_video_3d_annotations(video_id)
+
+        self.generate_video_world_bb_annotations(
+            video_id,
+            video_id_3d_bbox_predictions,
+            visualize=True,
+        )
+
+        # Now show the original Pi3-space outputs (points + floor + frames + camera + 3D boxes)
+        self.visualize_original_results(video_id=video_id)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate World 4D BBox Annotations (fill missing + static union)."
+        description=(
+            "World4D GT helper: "
+            "(a) inspect 3D bbox annotations, "
+            "(b) visualize original Pi3 outputs (points + floor + frames + camera + 3D boxes) "
+            "for annotated frames."
+        )
     )
     parser.add_argument("--ag_root_directory", type=str, default="/data/rohith/ag")
     parser.add_argument(
@@ -539,64 +1546,26 @@ def parse_args():
         default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
     )
     parser.add_argument("--split", type=str, default="04")
-    parser.add_argument("--visualize", action="store_true", help="Visualize results in Rerun")
     return parser.parse_args()
-
-
-def main():
-    args = parse_args()
-
-    generator = FrameToWorldAnnotations(
-        ag_root_directory=args.ag_root_directory,
-        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
-    )
-    _, _, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
-
-    # Process train
-    for data in tqdm(dataloader_train, desc="Processing Train"):
-        video_id = data["video_id"]
-        if get_video_belongs_to_split(video_id) != args.split:
-            continue
-        try:
-            generator.generate_video_world_bb_annotations(
-                video_id=video_id,
-                video_id_gt_annotations=None,
-                video_id_gdino_annotations=None,
-                video_id_3d_bbox_predictions=None,
-                visualize=args.visualize,
-            )
-        except Exception as e:
-            print(f"Error processing {video_id}: {e}")
-
-    # Process test
-    for data in tqdm(dataloader_test, desc="Processing Test"):
-        video_id = data["video_id"]
-        if get_video_belongs_to_split(video_id) != args.split:
-            continue
-        try:
-            generator.generate_video_world_bb_annotations(
-                video_id=video_id,
-                video_id_gt_annotations=None,
-                video_id_gdino_annotations=None,
-                video_id_3d_bbox_predictions=None,
-                visualize=args.visualize,
-            )
-        except Exception as e:
-            print(f"Error processing {video_id}: {e}")
 
 
 def main_sample():
     args = parse_args()
-    generator = FrameToWorldAnnotations(
+
+    frame_to_world_generator = FrameToWorldAnnotations(
         ag_root_directory=args.ag_root_directory,
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
     )
     video_id = "00T1E.mp4"
-    generator.generate_video_world_bb_annotations(
+    # frame_to_world_generator.visualize_original_results(
+    #     video_id=video_id,
+    #     vis_mode="after",  # "before", "after", or "both"
+    # )
+
+    frame_to_world_generator.fetch_stored_active_objects_in_video(video_id)
+    frame_to_world_generator.generate_video_world_bb_annotations(
         video_id=video_id,
-        video_id_gt_annotations=None,
-        video_id_gdino_annotations=None,
-        video_id_3d_bbox_predictions=None,
+        video_id_3d_bbox_predictions=frame_to_world_generator.get_video_3d_annotations(video_id),
         visualize=True,
     )
 
