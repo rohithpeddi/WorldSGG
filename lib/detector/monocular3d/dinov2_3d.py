@@ -5,24 +5,28 @@ import torchvision
 from torchvision.models.detection.transform import GeneralizedRCNNTransform
 
 from dinov2_torch import create_model
+try:
+    from .ovmono3d_loss import ovmono3d_loss
+except ImportError:
+    from ovmono3d_loss import ovmono3d_loss
+
 
 class Monocular3DHead(nn.Module):
+    """Lifting head: 8 corners (24) + uncertainty µ (1) for OVMono3D-style loss."""
     def __init__(self, in_channels, representation_size=1024, num_classes=1):
         super().__init__()
         self.fc1 = nn.Linear(in_channels, representation_size)
         self.fc2 = nn.Linear(representation_size, representation_size)
-        # Output: 8 corners * 3 coordinates = 24 values
-        # We predict this for each class or class-agnostic. 
-        # The prompt implies "predicts the 3D bbox information".
-        # Let's do class-agnostic for simplicity as per "lifting 2D bounding boxes to 3D cuboids in a class-agnostic manner" from the snippet.
-        self.bbox_pred = nn.Linear(representation_size, 24) 
-        
+        self.bbox_pred = nn.Linear(representation_size, 24)   # 8 corners * 3
+        self.mu_pred = nn.Linear(representation_size, 1)      # uncertainty for L = sqrt(2)*exp(-µ)*L3D + µ
+
     def forward(self, x):
         x = x.flatten(start_dim=1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        bbox_3d = self.bbox_pred(x)
-        return bbox_3d
+        bbox_3d = self.bbox_pred(x)   # (N, 24)
+        mu = self.mu_pred(x).squeeze(-1)  # (N,)
+        return bbox_3d, mu
 
 class DinoV2Monocular3D(nn.Module):
     def __init__(self, num_classes=37, pretrained=True, model="v3l"):
@@ -91,20 +95,13 @@ class DinoV2Monocular3D(nn.Module):
             # Yes, self.transform updates targets['boxes'].
             
             box_features = self.roi_pooler_3d(features, gt_boxes, images.image_sizes)
-            pred_3d = self.head_3d(box_features)
-            
-            # Calculate Loss
-            # Flatten GT 3D boxes
-            gt_3d_flat = torch.cat(gt_boxes_3d, dim=0).view(-1, 24)
-            
-            # Simple L1 loss for now
-            # Mask out invalid boxes (all zeros)
-            mask = (gt_3d_flat.abs().sum(dim=1) > 0)
-            if mask.sum() > 0:
-                loss_3d = F.l1_loss(pred_3d[mask], gt_3d_flat[mask])
-            else:
-                loss_3d = torch.tensor(0.0, device=pred_3d.device, requires_grad=True)
-                
+            pred_3d, pred_mu = self.head_3d(box_features)
+            gt_corners = torch.cat(gt_boxes_3d, dim=0)  # (N, 8, 3)
+
+            # OVMono3D-style loss: L = sqrt(2)*exp(-µ)*L3D + µ, with disentangled L3D + Chamfer
+            loss_3d, _l3d, _chamfer = ovmono3d_loss(
+                pred_3d, gt_corners, pred_mu, use_smooth_l1=True
+            )
             losses_3d = {'loss_3d': loss_3d}
             
         else:
@@ -118,12 +115,10 @@ class DinoV2Monocular3D(nn.Module):
                     d['boxes_3d'] = torch.empty((0, 8, 3), device=d['boxes'].device)
             else:
                 box_features = self.roi_pooler_3d(features, pred_boxes, images.image_sizes)
-                pred_3d = self.head_3d(box_features)
-                
+                pred_3d, _ = self.head_3d(box_features)
                 # Split predictions back to per-image
                 boxes_per_image = [len(b) for b in pred_boxes]
                 pred_3d_split = pred_3d.split(boxes_per_image)
-                
                 for i, d in enumerate(detections):
                     d['boxes_3d'] = pred_3d_split[i].view(-1, 8, 3)
                     

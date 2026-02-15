@@ -1,6 +1,6 @@
 import os
 import pickle
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 
 import numpy as np
 import torch
@@ -11,10 +11,28 @@ from transformers import AutoImageProcessor
 from constants import Constants as const
 
 
+def _get_corners_world(frame_object: dict) -> Optional[np.ndarray]:
+    """Get 8x3 corners from a frame object. Supports aabb_floor_aligned or obb_camera (top-level corners_world)."""
+    # Format 1: aabb_floor_aligned["corners_world"]
+    if "aabb_floor_aligned" in frame_object:
+        aligned = frame_object["aabb_floor_aligned"]
+        if isinstance(aligned, dict) and "corners_world" in aligned:
+            arr = np.array(aligned["corners_world"], dtype=np.float32)
+            if arr.shape == (8, 3):
+                return arr
+    # Format 2: obb_camera style — top-level "corners_world"
+    if "corners_world" in frame_object:
+        arr = np.array(frame_object["corners_world"], dtype=np.float32)
+        if arr.shape == (8, 3):
+            return arr
+    return None
+
+
 class ActionGenomeDataset3D(Dataset):
     """
     Action Genome dataset with direct resize to target_size x target_size.
-    Includes 3D bounding box annotations.
+    Frames and 2D annotations come from data_path (Action Genome). 3D GT for the loss
+    comes from pkl files (folder of per-video .pkl).
     """
 
     def __init__(
@@ -25,6 +43,7 @@ class ActionGenomeDataset3D(Dataset):
             filter_nonperson_box_frame: bool = True,
             filter_small_box: bool = False,
             target_size: int = 224,
+            world_3d_annotations_path: Optional[str] = None,
     ):
         self.data_path = data_path
         self.phase = phase
@@ -34,12 +53,17 @@ class ActionGenomeDataset3D(Dataset):
         self.target_size = target_size
         self.frames_path = os.path.join(self.data_path, const.FRAMES)
 
+        # 3D GT from pkl: optional path; if None, use data_path/world_annotations/bbox_annotations_3d_final
+        if world_3d_annotations_path is not None:
+            self.world_3d_annotations = world_3d_annotations_path
+        else:
+            self.world_3d_annotations = os.path.join(self.data_path, const.WORLD_ANNOTATIONS, "bbox_annotations_3d_final")
+
         print("---------       Loading Annotation Files (3D)       ---------")
         self._fetch_object_classes()
         self.person_bbox, self.object_bbox = self._fetch_object_person_bboxes(filter_small_box)
 
         print("---------       Building Dataset (3D)       ---------")
-        self.world_3d_annotations = os.path.join(self.data_path, const.WORLD_ANNOTATIONS, "bbox_annotations_3d_final")
         self._build_dataset()
 
         # Use only mean/std from the processor for normalization
@@ -108,71 +132,47 @@ class ActionGenomeDataset3D(Dataset):
         print(f"Built dataset with {self.valid_nums} valid frames\n")
         print(f"Removed {self.non_gt_human_nums} frames without person boxes\n")
 
-        # ------------ 3D Annotations ------------ #
-        # Loop through all samples to append the 3D annotations to the samples directory
-        for video_file in os.listdir(self.world_3d_annotations):
-            if not video_file.endswith('.pkl'):
-                continue
-            video_3d_annotations_path = os.path.join(self.world_3d_annotations, video_file)
-            with open(video_3d_annotations_path, 'rb') as f:
-                video_3d_data = pickle.load(f)
+        # ------------ 3D Annotations (from pkl) ------------ #
+        if not os.path.isdir(self.world_3d_annotations):
+            print(f"3D pkl folder not found: {self.world_3d_annotations} — 3D loss GT will be zeros.")
+        else:
+            for video_file in os.listdir(self.world_3d_annotations):
+                if not video_file.endswith('.pkl'):
+                    continue
+                video_3d_annotations_path = os.path.join(self.world_3d_annotations, video_file)
+                with open(video_3d_annotations_path, 'rb') as f:
+                    video_3d_data = pickle.load(f)
 
-            video_id = video_3d_data["video_id"]
-            bbox_frames = video_3d_data["frames_final"]["bbox_frames"]
+                video_id_raw = video_3d_data.get("video_id", video_file.replace(".pkl", ""))
+                # Match AG frame keys (e.g. G93A5/000050.png): strip .mp4 if present
+                video_id = video_id_raw.replace(".mp4", "") if isinstance(video_id_raw, str) else str(video_id_raw)
+                bbox_frames = video_3d_data.get("frames_final", {}).get("bbox_frames", {})
 
-            for frame_id, frame_name in enumerate(bbox_frames.keys()):
-                video_frame_name = f"{video_id}/{frame_name}"
-                frame_objects = bbox_frames[frame_name]["objects"]
+                for frame_name in bbox_frames.keys():
+                    video_frame_name = f"{video_id}/{frame_name}"
+                    frame_data = bbox_frames[frame_name]
+                    frame_objects = frame_data.get("objects", [])
 
-                frame_person_3d_bboxes = None
-                frame_object_3d_bboxes = []
+                    frame_person_3d_bboxes = None
+                    frame_object_3d_bboxes = []
 
-                # We need to be careful to match these 3D objects to the 2D objects
-                # The current logic just collects them. 
-                # Ideally, the order in 'objects' and 'object_boxes_3d' should match or be linkable.
-                # The 'objects' list in _build_dataset is built from self.object_bbox (2D annotations).
-                # The 3D annotations come from a separate file.
-                # Assuming the 3D annotations file contains *all* objects present in the scene, 
-                # but we only have 2D boxes for some.
-                # 
-                # However, for the purpose of this task, we will try to match them by class or assume 
-                # the 3D data structure allows us to find the corresponding object.
-                # 
-                # Looking at the provided code in ag_dataset_resize.py, it just stores them.
-                # Let's store them as is for now, but in __getitem__ we might have an issue if we can't align them.
-                # 
-                # Wait, the user request says: "A new model should be created with another MLP head that predicts the 3D bbox information using the features from the output of the detected 2D bboxes."
-                # This implies we need ground truth 3D boxes for the *detected* (or GT) 2D boxes.
-                # 
-                # If the 2D and 3D annotations are not explicitly linked by an ID, we might have to do matching (e.g. by class and maybe projection?).
-                # But let's look at how they are stored.
-                # 2D: list of dicts with 'bbox' and 'class'.
-                # 3D: list of dicts with 'label' (class) and 'aabb_floor_aligned'.
+                    for frame_object in frame_objects:
+                        label = frame_object.get("label")
+                        if label is None:
+                            continue
+                        corners = _get_corners_world(frame_object)
+                        if corners is None:
+                            continue
+                        if label == "person":
+                            frame_person_3d_bboxes = corners
+                        else:
+                            class_idx = self.object_classes.index(label) if label in self.object_classes else -1
+                            if class_idx != -1:
+                                frame_object_3d_bboxes.append({"class": class_idx, "bbox_3d": corners})
 
-                # Let's try to store them in a way that we can try to align them later, or just store all of them.
-                # For the person, it's usually one per frame in this dataset context (or at least treated as such in the original code's logic for 3D which assigns a single frame_person_3d_bboxes).
-
-                for frame_object in frame_objects:
-                    label = frame_object["label"]
-                    if label == "person":
-                        frame_person_3d_bboxes = np.array(
-                            frame_object["aabb_floor_aligned"]["corners_world"], dtype=np.float32
-                        )
-                    else:
-                        class_idx = self.object_classes.index(label) if label in self.object_classes else -1
-                        if class_idx != -1:
-                            frame_object_3d_bboxes.append({
-                                "class": class_idx,
-                                "bbox_3d": np.array(
-                                    frame_object["aabb_floor_aligned"]["corners_world"], dtype=np.float32
-                                ),
-                                # Store center/dimensions if needed, but corners are enough for now
-                            })
-
-                # Find the corresponding sample and append 3D boxes
-                if video_frame_name in self.samples:
-                    self.samples[video_frame_name]['person_boxes_3d'] = frame_person_3d_bboxes
-                    self.samples[video_frame_name]['object_boxes_3d'] = frame_object_3d_bboxes
+                    if video_frame_name in self.samples:
+                        self.samples[video_frame_name]["person_boxes_3d"] = frame_person_3d_bboxes
+                        self.samples[video_frame_name]["object_boxes_3d"] = frame_object_3d_bboxes
 
         # ---------- Build indexable list of frame names ---------- #
         self.frame_names: List[str] = sorted(self.samples.keys())
