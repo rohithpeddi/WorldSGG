@@ -29,8 +29,8 @@ from matplotlib.lines import Line2D
 # NEW IMPORTS
 from ag_dataset_3d import ActionGenomeDataset3D, collate_fn
 from dinov2_3d import DinoV2Monocular3D
-from utils import LocalLogger
-from lib.detector.evaluate import DetectionEvaluator
+from utils.json_logger import LocalLogger
+#from lib.detector.evaluate import DetectionEvaluator
 
 
 def clear_cuda_cache_for_current_process(sync: bool = True) -> None:
@@ -138,9 +138,11 @@ def reduce_dict(input_dict, average=True):
 @dataclass
 class TrainConfig:
     experiment_name: str
-    working_dir: str = "/data/rohith/ag/"
-    data_path: str = "/data/rohith/ag/"
-    save_path: str = "/data/rohith/ag/detector_3d/" # Changed save path
+    working_dir: str = "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/lib/detector/monocular3d"
+    data_path: str = "/home/cse/msr/csy227518/scratch/Datasets/action_genome"
+    save_path: str = "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/save_path" # Changed save path
+    # 3D loss GT from pkl: folder of per-video .pkl. If None, uses data_path/world_annotations/bbox_annotations_3d_final
+    world_3d_annotations_path: Optional[str] = None
     ckpt: Optional[str] = None
 
     lr: float = 1e-4
@@ -203,7 +205,7 @@ class DinoAGTrainer3D:
         self.scheduler = None
         self.model_device = None
 
-        self.evaluator: Optional[DetectionEvaluator] = None
+        # self.evaluator: Optional[DetectionEvaluator] = None
 
         self.starting_epoch = 0
         self.global_iteration = 0
@@ -231,9 +233,13 @@ class DinoAGTrainer3D:
             )
 
     def build_datasets(self) -> None:
-        # Use ActionGenomeDataset3D
-        self.train_dataset = ActionGenomeDataset3D(self.cfg.data_path, phase="train", target_size=self.cfg.target_size)
-        self.test_dataset = ActionGenomeDataset3D(self.cfg.data_path, phase="test", target_size=self.cfg.target_size)
+        # Frames + 2D from data_path (Action Genome); 3D loss GT from pkl (world_3d_annotations_path or default under data_path)
+        kwargs = {"phase": "train", "target_size": self.cfg.target_size}
+        if self.cfg.world_3d_annotations_path is not None:
+            kwargs["world_3d_annotations_path"] = self.cfg.world_3d_annotations_path
+        self.train_dataset = ActionGenomeDataset3D(self.cfg.data_path, **kwargs)
+        kwargs["phase"] = "test"
+        self.test_dataset = ActionGenomeDataset3D(self.cfg.data_path, **kwargs)
 
     def build_dataloaders(self) -> None:
         train_subset = Subset(self.train_dataset, list(range(self.cfg.train_subset_size)))
@@ -314,12 +320,12 @@ class DinoAGTrainer3D:
         except Exception:
             pass
 
-        self.evaluator = DetectionEvaluator(
-            device=self.model_device,
-            accelerator=self.accelerator,
-            frame_batch_size=10,
-            iou_thresholds_2d=None,
-        )
+        # self.evaluator = DetectionEvaluator(
+        #     device=self.model_device,
+        #     accelerator=self.accelerator,
+        #     frame_batch_size=10,
+        #     iou_thresholds_2d=None,
+        # )
 
     # ----------------------------
     # Checkpointing
@@ -487,11 +493,13 @@ class DinoAGTrainer3D:
     # Training
     # ----------------------------
     def _move_targets(self, targets: Any) -> Any:
-        if self.cfg.use_collate:
+        # Dataloader with collate_fn always returns targets as list of dicts (one per image).
+        if isinstance(targets, list):
             return [
                 {k: v.to(self.model_device) if isinstance(v, torch.Tensor) else v for k, v in t.items()}
                 for t in targets
             ]
+        # Single dict fallback
         return [{k: v.to(self.model_device) if isinstance(v, torch.Tensor) else v for k, v in targets.items()}]
 
     def _log_iteration_losses(
@@ -558,7 +566,11 @@ class DinoAGTrainer3D:
         running_object_loss = running_rpn_loss = running_3d_loss = 0.0
         running_count = 0
 
+        first_iter = True
         for images, targets in tqdm(self.train_loader, ascii=True):
+            if first_iter:
+                self.accelerator.print("First batch: loading data and first CUDA run (can take 2–5 min)...")
+                first_iter = False
             images = torch.stack([img for img in images]).to(self.model_device, non_blocking=True)
             # images = images.contiguous(memory_format=torch.channels_last)
             targets = self._move_targets(targets)
@@ -732,11 +744,17 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--lr", type=float, default=TrainConfig.lr)
     parser.add_argument("--batch_size", type=int, default=TrainConfig.batch_size)
     parser.add_argument("--epochs", type=int, default=TrainConfig.epochs)
-    parser.add_argument("--data_path", type=str, default=TrainConfig.data_path)
+    parser.add_argument("--data_path", type=str, default=TrainConfig.data_path,
+                        help="Action Genome root (frames + annotations). e.g. Datasets/action_genome")
+    parser.add_argument("--world_3d_annotations_path", type=str, default=None,
+                        help="Folder of per-video .pkl for 3D GT. If unset, uses data_path/world_annotations/bbox_annotations_3d_final")
     parser.add_argument("--save_path", type=str, default=TrainConfig.save_path)
     parser.add_argument("--ckpt", type=str, default=None)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=TrainConfig.gradient_accumulation_steps)
     parser.add_argument("--max_grad_norm", type=float, default=TrainConfig.max_grad_norm)
+    parser.add_argument("--num_workers_train", type=int, default=TrainConfig.num_workers_train,
+                        help="DataLoader workers for training. Use 0 to avoid fork/deadlock issues or debug first-iteration slowness.")
+    parser.add_argument("--num_workers_test", type=int, default=TrainConfig.num_workers_test)
     parser.add_argument("--use_accelerator", action="store_true") # Added
 
     args = parser.parse_args()
