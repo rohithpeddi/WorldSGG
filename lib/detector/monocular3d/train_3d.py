@@ -66,7 +66,7 @@ class DummyAccelerator:
 
     def autocast(self):
         if torch.cuda.is_available():
-            return torch.cuda.amp.autocast()
+            return torch.autocast(device_type="cuda", dtype=torch.float16)
         else:
             return contextlib.nullcontext()
 
@@ -156,6 +156,7 @@ class TrainConfig:
     use_wandb: bool = True
 
     use_accelerator: bool = False
+    use_compile: bool = False
 
     num_workers_train: int = 16
     num_workers_test: int = 16
@@ -203,6 +204,7 @@ class DinoAGTrainer3D:
         self.model = None
         self.optimizer = None
         self.scheduler = None
+        self.scaler = None  # GradScaler for AMP
         self.model_device = None
 
         # self.evaluator: Optional[DetectionEvaluator] = None
@@ -242,9 +244,12 @@ class DinoAGTrainer3D:
         self.test_dataset = ActionGenomeDataset3D(self.cfg.data_path, **kwargs)
 
     def build_dataloaders(self) -> None:
-        train_subset = Subset(self.train_dataset, list(range(self.cfg.train_subset_size)))
-        test_subset = Subset(self.test_dataset, list(range(self.cfg.test_subset_size)))
+        train_subset_size = min(self.cfg.train_subset_size, len(self.train_dataset))
+        test_subset_size = min(self.cfg.test_subset_size, len(self.test_dataset))
+        train_subset = Subset(self.train_dataset, list(range(train_subset_size)))
+        test_subset = Subset(self.test_dataset, list(range(test_subset_size)))
 
+        _persistent = self.cfg.num_workers_train > 0
         self.train_loader = DataLoader(
             train_subset,
             batch_size=self.cfg.batch_size,
@@ -252,7 +257,10 @@ class DinoAGTrainer3D:
             num_workers=self.cfg.num_workers_train,
             collate_fn=collate_fn,
             pin_memory=True,
+            persistent_workers=_persistent,
+            prefetch_factor=4 if _persistent else None,
         )
+        _persistent_test = self.cfg.num_workers_test > 0
         self.test_loader = DataLoader(
             self.test_dataset,
             batch_size=self.cfg.batch_size,
@@ -261,7 +269,10 @@ class DinoAGTrainer3D:
             collate_fn=collate_fn,
             drop_last=True,
             pin_memory=True,
+            persistent_workers=_persistent_test,
+            prefetch_factor=4 if _persistent_test else None,
         )
+        _persistent_test_sub = self.cfg.num_workers_test_subset > 0
         self.test_loader_subset = DataLoader(
             test_subset,
             batch_size=self.cfg.batch_size,
@@ -269,12 +280,17 @@ class DinoAGTrainer3D:
             num_workers=self.cfg.num_workers_test_subset,
             collate_fn=collate_fn,
             pin_memory=True,
+            persistent_workers=_persistent_test_sub,
+            prefetch_factor=4 if _persistent_test_sub else None,
         )
 
     def build_model(self) -> None:
         num_classes = len(self.train_dataset.object_classes)
         # Use DinoV2Monocular3D
         self.model = DinoV2Monocular3D(num_classes=num_classes, pretrained=True, model="v3l")
+        if self.cfg.use_compile:
+            self.accelerator.print("Compiling model with torch.compile()...")
+            self.model = torch.compile(self.model, mode="reduce-overhead")
 
     def build_optimizer_and_scheduler(self) -> None:
         total_steps = self.cfg.epochs * len(self.train_loader)
@@ -286,6 +302,10 @@ class DinoAGTrainer3D:
         warmup = LinearLR(self.optimizer, start_factor=1e-1, end_factor=1.0, total_iters=warmup_steps)
         cosine = CosineAnnealingLR(self.optimizer, T_max=(total_steps - warmup_steps), eta_min=self.cfg.lr * 0.1)
         self.scheduler = SequentialLR(self.optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
+
+        # GradScaler for mixed precision (only used with DummyAccelerator)
+        if not self.cfg.use_accelerator and torch.cuda.is_available():
+            self.scaler = torch.amp.GradScaler()
 
     def prepare_with_accelerator(self) -> None:
         (
@@ -472,7 +492,9 @@ class DinoAGTrainer3D:
         return out
 
     def evaluate_map_coco(self) -> Dict[str, Any]:
-        assert self.evaluator is not None, "Evaluator not initialized."
+        if not hasattr(self, 'evaluator') or self.evaluator is None:
+            self.accelerator.print("⚠️  Evaluator not initialized — skipping COCO mAP evaluation.")
+            return {}
         self.model.eval()
         with torch.no_grad():
             coco = self.evaluator.evaluate_2d_map_coco(self.model, self.test_loader)
@@ -566,13 +588,14 @@ class DinoAGTrainer3D:
         running_object_loss = running_rpn_loss = running_3d_loss = 0.0
         running_count = 0
 
+        _zero = 0.0  # avoid creating torch.tensor(0.0) per iteration
         first_iter = True
         for images, targets in tqdm(self.train_loader, ascii=True):
             if first_iter:
                 self.accelerator.print("First batch: loading data and first CUDA run (can take 2–5 min)...")
                 first_iter = False
-            images = torch.stack([img for img in images]).to(self.model_device, non_blocking=True)
-            # images = images.contiguous(memory_format=torch.channels_last)
+            # collate_fn already returns a list of tensors; stack once and transfer
+            images = torch.stack(images).to(self.model_device, non_blocking=True)
             targets = self._move_targets(targets)
 
             with self.accelerator.accumulate(self.model):
@@ -589,31 +612,48 @@ class DinoAGTrainer3D:
                 loss_dict_reduced = reduce_dict(loss_dict)
                 losses_reduced = sum(loss / self.cfg.gradient_accumulation_steps for loss in loss_dict_reduced.values())
 
-                self.accelerator.backward(losses)
+                # Backward with GradScaler if available, otherwise standard
+                if self.scaler is not None:
+                    self.scaler.scale(losses).backward()
+                else:
+                    self.accelerator.backward(losses)
 
                 if self.accelerator.sync_gradients:
+                    if self.scaler is not None:
+                        self.scaler.unscale_(self.optimizer)
                     self.accelerator.clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
 
-                self.optimizer.step()
+                if self.scaler is not None:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none=True)
                 self.scheduler.step()
 
                 self.global_iteration += 1
 
                 if self.accelerator.is_main_process:
-                    batch_loss_list.append(losses_reduced.item())
-                    batch_loss_cls_list.append(loss_dict_reduced.get("loss_classifier", torch.tensor(0.0)).item())
-                    batch_loss_box_reg_list.append(loss_dict_reduced.get("loss_box_reg", torch.tensor(0.0)).item())
-                    batch_loss_objectness_list.append(loss_dict_reduced.get("loss_objectness", torch.tensor(0.0)).item())
-                    batch_loss_rpn_list.append(loss_dict_reduced.get("loss_rpn_box_reg", torch.tensor(0.0)).item())
-                    batch_loss_3d_list.append(loss_dict_reduced.get("loss_3d", torch.tensor(0.0)).item()) # NEW
+                    _total = losses_reduced.item()
+                    _cls = loss_dict_reduced["loss_classifier"].item() if "loss_classifier" in loss_dict_reduced else _zero
+                    _box = loss_dict_reduced["loss_box_reg"].item() if "loss_box_reg" in loss_dict_reduced else _zero
+                    _obj = loss_dict_reduced["loss_objectness"].item() if "loss_objectness" in loss_dict_reduced else _zero
+                    _rpn = loss_dict_reduced["loss_rpn_box_reg"].item() if "loss_rpn_box_reg" in loss_dict_reduced else _zero
+                    _l3d = loss_dict_reduced["loss_3d"].item() if "loss_3d" in loss_dict_reduced else _zero
 
-                    running_total_loss += losses_reduced.item()
-                    running_cls_loss += loss_dict_reduced.get("loss_classifier", torch.tensor(0.0)).item()
-                    running_box_loss += loss_dict_reduced.get("loss_box_reg", torch.tensor(0.0)).item()
-                    running_object_loss += loss_dict_reduced.get("loss_objectness", torch.tensor(0.0)).item()
-                    running_rpn_loss += loss_dict_reduced.get("loss_rpn_box_reg", torch.tensor(0.0)).item()
-                    running_3d_loss += loss_dict_reduced.get("loss_3d", torch.tensor(0.0)).item() # NEW
+                    batch_loss_list.append(_total)
+                    batch_loss_cls_list.append(_cls)
+                    batch_loss_box_reg_list.append(_box)
+                    batch_loss_objectness_list.append(_obj)
+                    batch_loss_rpn_list.append(_rpn)
+                    batch_loss_3d_list.append(_l3d)
+
+                    running_total_loss += _total
+                    running_cls_loss += _cls
+                    running_box_loss += _box
+                    running_object_loss += _obj
+                    running_rpn_loss += _rpn
+                    running_3d_loss += _l3d
                     running_count += 1
 
                 if self.global_iteration % self.cfg.iter_log_every == 0 and self.accelerator.is_main_process:
@@ -755,7 +795,9 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--num_workers_train", type=int, default=TrainConfig.num_workers_train,
                         help="DataLoader workers for training. Use 0 to avoid fork/deadlock issues or debug first-iteration slowness.")
     parser.add_argument("--num_workers_test", type=int, default=TrainConfig.num_workers_test)
-    parser.add_argument("--use_accelerator", action="store_true") # Added
+    parser.add_argument("--use_accelerator", action="store_true")
+    parser.add_argument("--use_compile", action="store_true",
+                        help="Use torch.compile() on the model for faster training (PyTorch 2.0+)")
 
     args = parser.parse_args()
     return TrainConfig(**vars(args))

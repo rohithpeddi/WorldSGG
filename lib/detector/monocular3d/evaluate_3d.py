@@ -200,7 +200,7 @@ def evaluate_3d_metrics(model, dataloader, device, iou_threshold_2d=0.5):
                 gt_3d = targets[i]["boxes_3d"].detach().cpu().numpy()  # (M, 8, 3)
 
                 n_gt_total += len(gt_boxes)
-                valid_gt = (gt_3d.reshape(gt_3d.shape[0], -1).abs().sum(axis=1) > 1e-6)
+                valid_gt = (np.abs(gt_3d.reshape(gt_3d.shape[0], -1)).sum(axis=1) > 1e-6)
                 gt_boxes = gt_boxes[valid_gt]
                 gt_labels = gt_labels[valid_gt]
                 gt_3d = gt_3d[valid_gt]
@@ -282,6 +282,7 @@ def main():
     if args.max_test_samples is not None:
         test_dataset = torch.utils.data.Subset(
             test_dataset, list(range(min(args.max_test_samples, len(test_dataset))))
+        )
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
         batch_size=args.batch_size,

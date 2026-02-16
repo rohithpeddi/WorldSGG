@@ -54,80 +54,66 @@ class DinoV2Monocular3D(nn.Module):
         self.head_3d = Monocular3DHead(in_channels)
         
     def forward(self, images, targets=None):
-        # 1. Transform images (normalization, resizing if needed - though we resize in dataset)
-        # GeneralizedRCNNTransform expects a list of tensors
-        if isinstance(images, torch.Tensor):
-            if images.dim() == 4:
-                images = [img for img in images]
-        
+        # 1. Transform images — GeneralizedRCNNTransform expects a list of tensors
+        if isinstance(images, torch.Tensor) and images.dim() == 4:
+            images = list(images.unbind(0))  # unbind is faster than list comprehension
+
         original_image_sizes = [img.shape[-2:] for img in images]
         images, targets = self.transform(images, targets)
-        
+
         # 2. Backbone features
         features = self.backbone(images.tensors)
-        
+
         # 3. RPN
         if isinstance(features, torch.Tensor):
             features = {"0": features}
-            
+
         proposals, proposal_losses = self.rpn(images, features, targets)
-        
+
         # 4. ROI Heads (2D Detection)
         detections, detector_losses = self.roi_heads(features, proposals, images.image_sizes, targets)
-        
+
         # 5. 3D Head
         losses_3d = {}
-        detections_3d = []
-        
+
         if self.training:
-            # During training, we use Ground Truth 2D boxes to train the 3D head
-            # targets contains 'boxes' and 'boxes_3d'
-            
-            # We need to filter out targets that don't have valid 3D boxes if any?
-            # Our dataset puts zeros if missing. We should mask them in loss.
-            
+            # Use GT 2D boxes to train the 3D head — targets['boxes'] already
+            # transformed by GeneralizedRCNNTransform.
             gt_boxes = [t['boxes'] for t in targets]
             gt_boxes_3d = [t['boxes_3d'] for t in targets]
-            
-            # Extract features for GT boxes
-            # Note: roi_align expects boxes to be in the image coordinate system of 'images.tensors'
-            # The 'targets' passed to self.transform are already transformed (resized) by GeneralizedRCNNTransform?
-            # Yes, self.transform updates targets['boxes'].
-            
+
             box_features = self.roi_pooler_3d(features, gt_boxes, images.image_sizes)
             pred_3d, pred_mu = self.head_3d(box_features)
             gt_corners = torch.cat(gt_boxes_3d, dim=0)  # (N, 8, 3)
 
-            # OVMono3D-style loss: L = sqrt(2)*exp(-µ)*L3D + µ, with disentangled L3D + Chamfer
             loss_3d, _l3d, _chamfer = ovmono3d_loss(
                 pred_3d, gt_corners, pred_mu, use_smooth_l1=True
             )
             losses_3d = {'loss_3d': loss_3d}
-            
+
         else:
-            # Inference
-            # Use detected boxes
+            # Inference: use detected boxes from 2D head
             pred_boxes = [d['boxes'] for d in detections]
-            
-            # If no boxes detected, handle gracefully
+
             if all(len(b) == 0 for b in pred_boxes):
                 for d in detections:
                     d['boxes_3d'] = torch.empty((0, 8, 3), device=d['boxes'].device)
             else:
-                box_features = self.roi_pooler_3d(features, pred_boxes, images.image_sizes)
-                pred_3d, _ = self.head_3d(box_features)
+                with torch.no_grad():
+                    box_features = self.roi_pooler_3d(features, pred_boxes, images.image_sizes)
+                    pred_3d, _ = self.head_3d(box_features)
                 # Split predictions back to per-image
                 boxes_per_image = [len(b) for b in pred_boxes]
                 pred_3d_split = pred_3d.split(boxes_per_image)
                 for i, d in enumerate(detections):
                     d['boxes_3d'] = pred_3d_split[i].view(-1, 8, 3)
-                    
+
         # Combine losses
         losses = {}
         losses.update(proposal_losses)
         losses.update(detector_losses)
         losses.update(losses_3d)
-        
+
         if self.training:
             return losses
         else:

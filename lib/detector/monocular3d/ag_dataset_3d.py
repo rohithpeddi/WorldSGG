@@ -5,9 +5,16 @@ from typing import Tuple, List, Dict, Optional
 
 import numpy as np
 import torch
-from PIL import Image
+import torchvision.transforms.functional as TF
 from torch.utils.data import Dataset
 from transformers import AutoImageProcessor
+
+try:
+    from torchvision.io import read_image, ImageReadMode
+    _USE_TORCHVISION_IO = True
+except ImportError:
+    from PIL import Image
+    _USE_TORCHVISION_IO = False
 
 from constants import Constants as const
 
@@ -198,11 +205,21 @@ class ActionGenomeDataset3D(Dataset):
         sample = self.samples[frame_name]
 
         img_path = os.path.join(self.frames_path, sample['filename'])
-        pil_image = Image.open(img_path).convert('RGB')
-        orig_w, orig_h = pil_image.size
 
-        # Stretch resize to target_size x target_size
-        resized = pil_image.resize((self.target_size, self.target_size), Image.BILINEAR)
+        # --- Fast image loading via torchvision.io (avoids PIL overhead) ---
+        if _USE_TORCHVISION_IO:
+            img_tensor = read_image(img_path, mode=ImageReadMode.RGB)  # uint8 CHW
+            _, orig_h, orig_w = img_tensor.shape
+            img_tensor = TF.resize(img_tensor, [self.target_size, self.target_size],
+                                   interpolation=TF.InterpolationMode.BILINEAR, antialias=True)
+            img_chw = img_tensor.float() / 255.0
+        else:
+            pil_image = Image.open(img_path).convert('RGB')
+            orig_w, orig_h = pil_image.size
+            resized = pil_image.resize((self.target_size, self.target_size), Image.BILINEAR)
+            img_np = np.array(resized).astype(np.float32) / 255.0
+            img_chw = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
+
         scale_x = self.target_size / float(orig_w)
         scale_y = self.target_size / float(orig_h)
 
@@ -211,65 +228,34 @@ class ActionGenomeDataset3D(Dataset):
         boxes_3d: List[np.ndarray] = []  # List of 8x3 arrays
 
         # --- Person ---
-        # We have potentially multiple 2D person boxes, but usually only one 3D person box in the 3D dict?
-        # The code in _build_dataset assigns `frame_person_3d_bboxes` as a single array (8,3).
-        # But `person_boxes` (2D) is a list.
-        # If there are multiple people in 2D but only one in 3D, that's a mismatch.
-        # However, Action Genome usually focuses on the person performing the action.
-        # Let's assume the first 2D box corresponds to the 3D person box if it exists.
-
         person_boxes = np.array(sample['person_boxes'], dtype=np.float32).reshape(-1, 4)
         person_3d = sample.get('person_boxes_3d', None)
 
         for i, pb in enumerate(person_boxes):
             x1, y1, x2, y2 = pb.tolist()
-            x1 = x1 * scale_x
-            x2 = x2 * scale_x
-            y1 = y1 * scale_y
-            y2 = y2 * scale_y
-            x1 = np.clip(x1, 0, self.target_size - 1)
-            x2 = np.clip(x2, 0, self.target_size - 1)
-            y1 = np.clip(y1, 0, self.target_size - 1)
-            y2 = np.clip(y2, 0, self.target_size - 1)
+            x1 = np.clip(x1 * scale_x, 0, self.target_size - 1)
+            x2 = np.clip(x2 * scale_x, 0, self.target_size - 1)
+            y1 = np.clip(y1 * scale_y, 0, self.target_size - 1)
+            y2 = np.clip(y2 * scale_y, 0, self.target_size - 1)
 
             if (x2 - x1) >= 1 and (y2 - y1) >= 1:
                 boxes.append([x1, y1, x2, y2])
-                labels.append(1)  # Person class is 1? In object_classes, 1 is usually person if background is 0?
-                # Wait, in _fetch_object_classes, background is added first. 
-                # But 'person' is not explicitly in object_classes list from the file usually?
-                # In standard COCO, person is 1. 
-                # Let's check where 'person' is. 
-                # The original code uses `labels.append(1)` for person. 
-                # And `class_idx = self.object_classes.index(obj[const.CLASS])` for objects.
-                # If object_classes has 'person', we should use that index.
-                # If not, 1 is hardcoded. Let's stick to 1 for person.
+                labels.append(1)
 
                 if i == 0 and person_3d is not None:
                     boxes_3d.append(person_3d)
                 else:
-                    # If we have more 2D boxes than 3D, or no 3D box, we pad with zeros or handle it.
-                    # For now, let's append zeros if missing, to keep alignment.
                     boxes_3d.append(np.zeros((8, 3), dtype=np.float32))
 
         # --- Objects ---
-        # We need to match 2D objects to 3D objects.
-        # Strategy: Match by class. If multiple of same class, it's ambiguous without more info.
-        # We will try to greedily match.
-
-        available_3d_objects = sample.get('object_boxes_3d', [])
-        # Make a copy to consume
-        available_3d_objects = list(available_3d_objects)
+        available_3d_objects = list(sample.get('object_boxes_3d', []))
 
         for obj in sample['objects']:
             x1, y1, x2, y2 = np.array(obj['bbox'], dtype=np.float32).tolist()
-            x1 = x1 * scale_x
-            x2 = x2 * scale_x
-            y1 = y1 * scale_y
-            y2 = y2 * scale_y
-            x1 = np.clip(x1, 0, self.target_size - 1)
-            x2 = np.clip(x2, 0, self.target_size - 1)
-            y1 = np.clip(y1, 0, self.target_size - 1)
-            y2 = np.clip(y2, 0, self.target_size - 1)
+            x1 = np.clip(x1 * scale_x, 0, self.target_size - 1)
+            x2 = np.clip(x2 * scale_x, 0, self.target_size - 1)
+            y1 = np.clip(y1 * scale_y, 0, self.target_size - 1)
+            y2 = np.clip(y2 * scale_y, 0, self.target_size - 1)
 
             if (x2 - x1) >= 1 and (y2 - y1) >= 1:
                 cls_idx = obj['class']
@@ -288,10 +274,6 @@ class ActionGenomeDataset3D(Dataset):
                     boxes_3d.append(match_3d)
                 else:
                     boxes_3d.append(np.zeros((8, 3), dtype=np.float32))
-
-        # Convert image to CHW tensor and normalize with DINOv2 stats
-        img_np = np.array(resized).astype(np.float32) / 255.0
-        img_chw = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
 
         target = {
             'boxes': torch.tensor(boxes, dtype=torch.float32) if boxes else torch.empty((0, 4), dtype=torch.float32),

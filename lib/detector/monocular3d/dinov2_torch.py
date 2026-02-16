@@ -1,4 +1,3 @@
-from pyexpat import features
 from typing import Dict, Union, List
 import sys
 import os
@@ -11,7 +10,9 @@ from torchvision.models.detection.rpn import AnchorGenerator
 
 from huggingface_hub import login
 
-login("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")
+_hf_token = os.environ.get("HF_TOKEN")
+if _hf_token:
+    login(_hf_token)
 
 
 class ConvAdapter(nn.Module):
