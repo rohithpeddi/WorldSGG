@@ -179,7 +179,7 @@ class FrameToWorldAnnotationsOBB(FrameToWorldAnnotationsBase):
         import os
         os.makedirs(self.bbox_3d_obb_camera_root_dir, exist_ok=True)
 
-    def get_video_rgbd_info(self, video_id: str) -> Optional[Dict[str, Any]]:
+    def get_video_rgbd_info_cam(self, video_id: str) -> Optional[Dict[str, Any]]:
         """
         Override to load original points/cameras for a video.
         """
@@ -389,7 +389,7 @@ class FrameToWorldAnnotationsOBB(FrameToWorldAnnotationsBase):
         if frames_final is None:
             raise ValueError(f"[camera-frame-obb][{video_id}] frames_final missing in {camera_pkl}")
 
-        rgbd_info = self.get_video_rgbd_info(video_id)
+        rgbd_info = self.get_video_rgbd_info_cam(video_id)
         frames_final["colors"] = rgbd_info.get("colors", None)
         frames_final["conf"] = rgbd_info.get("conf", None)
         frames_final["points"] = rgbd_info["points"]

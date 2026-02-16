@@ -29,6 +29,7 @@ def rerun_frame_vis_final_only(
     img_maxsize: int = 320,
     app_id: str = "World4D-FinalOnly",
     min_conf_default: float = 1e-6,
+    is_obb: bool = False,
 ) -> None:
     """
     FINAL-ONLY viewer:
@@ -51,11 +52,20 @@ def rerun_frame_vis_final_only(
     BASE = "world_final"
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
 
-    cuboid_edges = [
-        (0, 1), (1, 3), (3, 2), (2, 0),
-        (4, 5), (5, 7), (7, 6), (6, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
-    ]
+    if is_obb:
+        # OBB corners from cv2.boxPoints: 0-3 are the bottom face going around perimeter,
+        # 4-7 are the top face directly above (i.e., 4 is above 0, 5 is above 1, etc.)
+        cuboid_edges = [
+            (0, 1), (1, 2), (2, 3), (3, 0),  # Bottom face edges
+            (4, 5), (5, 6), (6, 7), (7, 4),  # Top face edges
+            (0, 4), (1, 5), (2, 6), (3, 7),  # Vertical edges
+        ]
+    else:
+        cuboid_edges = [
+            (0, 1), (1, 3), (3, 2), (2, 0),
+            (4, 5), (5, 7), (7, 6), (6, 4),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        ]
 
     def _get_image_for_stem(stem: str) -> Optional[np.ndarray]:
         img_path = frame_annotated_dir_path / video_id / f"{stem}.png"
@@ -100,7 +110,11 @@ def rerun_frame_vis_final_only(
     conf_S = frames_final["conf"]
     camera_poses_S = frames_final["camera_poses"]
     stems_S = frames_final["frame_stems"]
-    bbox_frames = frames_final["bbox_frames"]
+
+    if is_obb:
+        bbox_frames = frames_final["obb_bbox_frames"]
+    else:
+        bbox_frames = frames_final["bbox_frames"]
 
     S, H_grid, W_grid, _ = points_S.shape
 
@@ -248,11 +262,13 @@ class FrameToWorldAnnotationsBase:
 
         self.bbox_4d_root_dir = self.world_annotations_root_dir / "bbox_annotations_4d"
         self.bbox_3d_final_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_final"
+        self.bbox_3d_obb_final_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_obb_final"
         self.bbox_3d_camera_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_camera"
 
         os.makedirs(self.bbox_4d_root_dir, exist_ok=True)
         os.makedirs(self.bbox_3d_final_root_dir, exist_ok=True)
         os.makedirs(self.bbox_3d_camera_root_dir, exist_ok=True)
+        os.makedirs(self.bbox_3d_obb_final_root_dir, exist_ok=True)
 
         # GT annotations
         self.gt_annotations_root_dir = self.ag_root_directory / "gt_annotations"
@@ -528,7 +544,7 @@ class FrameToWorldAnnotationsBase:
         Returns:
             {
                 "points": (S,H,W,3) float32,
-                "conf":   (S,H,W) float32 or None,
+                "conf": (S,H,W) float32 or None,
                 "frame_stems": List[str],       # "000123", ...
                 "colors": (S,H,W,3) uint8,
                 "camera_poses": (S,4,4) or None
@@ -613,7 +629,7 @@ class FrameToWorldAnnotationsBase:
           R_align: (3,3) world->aligned (no mirror)
           M_mirror: (3,3)
           A_world_to_final: (3,3) such that:
-              p_final = A_world_to_final @ (p_world - origin_world)   (column-vector convention)
+              p_final = A_world_to_final @ (p_world - origin_world) (column-vector convention)
         """
         s_g, R_g, t_g = global_floor_sim
         R_g = np.asarray(R_g, dtype=np.float32)
@@ -645,7 +661,7 @@ class FrameToWorldAnnotationsBase:
             A_world_to_final: np.ndarray,
     ) -> np.ndarray:
         """
-        For row-vectors (...,3):
+        For row-vectors (..., 3):
           p_final_row = (p_world_row - origin_row) @ A.T
         """
         pts = np.asarray(pts_world, dtype=np.float32)
@@ -688,6 +704,12 @@ class FrameToWorldAnnotationsBase:
 
     def save_video_3d_annotations_final(self, video_id: str, video_3dgt_updated: Dict[str, Any]) -> Path:
         out_path = self.bbox_3d_final_root_dir / f"{video_id[:-4]}.pkl"
+        with open(out_path, "wb") as f:
+            pickle.dump(video_3dgt_updated, f, protocol=pickle.HIGHEST_PROTOCOL)
+        return out_path
+
+    def save_video_3d_obb_annotations_final(self, video_id: str, video_3dgt_updated: Dict[str, Any]) -> Path:
+        out_path = self.bbox_3d_obb_final_root_dir / f"{video_id[:-4]}.pkl"
         with open(out_path, "wb") as f:
             pickle.dump(video_3dgt_updated, f, protocol=pickle.HIGHEST_PROTOCOL)
         return out_path
@@ -835,6 +857,34 @@ class FrameToWorldAnnotationsBase:
     # FINAL-only visualization entry
     # -------------------------------------------------------------------------
 
+    def get_video_rgbd_info(
+            self,
+            video_id,
+            origin_world,
+            A
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Override to load original points/cameras for a video.
+        """
+        # Load original annotated-frame points/cameras (WORLD frame)
+        P = self._load_original_points_for_video(video_id)
+        points_world = np.asarray(P["points"], dtype=np.float32)  # (S,H,W,3)
+        points_dtype = np.float32
+
+        S, H, W, _ = points_world.shape
+
+        pts_flat = points_world.reshape(-1, 3)
+        pts_final_flat = self._apply_world_to_final_points_row(pts_flat, origin_world=origin_world, A_world_to_final=A)
+        points_final = pts_final_flat.reshape(S, H, W, 3).astype(points_dtype, copy=False)
+
+        rgbd_info = {
+            "points": points_final,
+            "colors": P.get("colors", None),
+            "conf": P.get("conf", None),
+        }
+
+        return rgbd_info
+
     def visualize_final_only(self, video_id: str, *, app_id: str = "World4D-FinalOnly") -> None:
         final_pkl = self.bbox_3d_final_root_dir / f"{video_id[:-4]}.pkl"
         if not final_pkl.exists():
@@ -846,6 +896,14 @@ class FrameToWorldAnnotationsBase:
         frames_final = rec.get("frames_final", None)
         if frames_final is None:
             raise ValueError(f"[final-only][{video_id}] frames_final missing in {final_pkl}")
+
+        origin_world = rec["world_to_final"]["origin_world"]
+        A = rec["world_to_final"]["A_world_to_final"]
+
+        rgbd_info = self.get_video_rgbd_info(video_id, origin_world=origin_world, A=A)
+        frames_final["colors"] = rgbd_info.get("colors", None)
+        frames_final["conf"] = rgbd_info.get("conf", None)
+        frames_final["points"] = rgbd_info["points"]
 
         rerun_frame_vis_final_only(
             video_id,
