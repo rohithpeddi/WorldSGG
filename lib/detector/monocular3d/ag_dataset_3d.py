@@ -1,5 +1,6 @@
 import os
 import pickle
+import zipfile
 from typing import Tuple, List, Dict, Optional
 
 import numpy as np
@@ -43,7 +44,7 @@ class ActionGenomeDataset3D(Dataset):
             filter_nonperson_box_frame: bool = True,
             filter_small_box: bool = False,
             target_size: int = 224,
-            world_3d_annotations_path: Optional[str] = None,
+            world_3d_annotations_path: Optional[str] = "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/bbox_annotations_3d_obb_camera",
     ):
         self.data_path = data_path
         self.phase = phase
@@ -132,17 +133,29 @@ class ActionGenomeDataset3D(Dataset):
         print(f"Built dataset with {self.valid_nums} valid frames\n")
         print(f"Removed {self.non_gt_human_nums} frames without person boxes\n")
 
-        # ------------ 3D Annotations (from pkl) ------------ #
-        if not os.path.isdir(self.world_3d_annotations):
-            print(f"3D pkl folder not found: {self.world_3d_annotations} — 3D loss GT will be zeros.")
-        else:
-            for video_file in os.listdir(self.world_3d_annotations):
-                if not video_file.endswith('.pkl'):
-                    continue
-                video_3d_annotations_path = os.path.join(self.world_3d_annotations, video_file)
-                with open(video_3d_annotations_path, 'rb') as f:
-                    video_3d_data = pickle.load(f)
+        # ------------ 3D Annotations (from pkl folder or .zip) ------------ #
+        def _iter_3d_pkls():
+            if self.world_3d_annotations.lower().endswith('.zip') and os.path.isfile(self.world_3d_annotations):
+                with zipfile.ZipFile(self.world_3d_annotations, 'r') as zf:
+                    for name in zf.namelist():
+                        if not name.endswith('.pkl'):
+                            continue
+                        with zf.open(name, 'r') as f:
+                            yield os.path.basename(name), pickle.load(f)
+            elif os.path.isdir(self.world_3d_annotations):
+                for video_file in os.listdir(self.world_3d_annotations):
+                    if not video_file.endswith('.pkl'):
+                        continue
+                    path = os.path.join(self.world_3d_annotations, video_file)
+                    with open(path, 'rb') as f:
+                        yield video_file, pickle.load(f)
+            else:
+                return
 
+        if not (self.world_3d_annotations.lower().endswith('.zip') and os.path.isfile(self.world_3d_annotations)) and not os.path.isdir(self.world_3d_annotations):
+            print(f"3D pkl folder/zip not found: {self.world_3d_annotations} — 3D loss GT will be zeros.")
+        else:
+            for video_file, video_3d_data in _iter_3d_pkls():
                 video_id_raw = video_3d_data.get("video_id", video_file.replace(".pkl", ""))
                 # Match AG frame keys (e.g. G93A5/000050.png): strip .mp4 if present
                 video_id = video_id_raw.replace(".mp4", "") if isinstance(video_id_raw, str) else str(video_id_raw)
