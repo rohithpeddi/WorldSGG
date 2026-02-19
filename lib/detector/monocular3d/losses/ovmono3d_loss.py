@@ -45,12 +45,11 @@ def corners_to_attributes(corners: torch.Tensor) -> dict:
     # Covariance of xy per sample: (N, 2, 2)
     cov = torch.bmm(xy.transpose(1, 2), xy) / 8.0
     # Eigen decomposition for 2x2: main eigenvector gives yaw
-    # For 2x2 sym: [[a,b],[b,c]], largest eval = (a+c)/2 + sqrt((a-c)^2/4 + b^2)
     a, b, c = cov[:, 0, 0], cov[:, 0, 1], cov[:, 1, 1]
     delta = (a - c) * (a - c) / 4 + b * b
     delta = torch.clamp(delta, min=1e-12)
     sqrt_d = torch.sqrt(delta)
-    # Eigenvector for larger eigenvalue (a+c)/2 + sqrt_d: (b, lambda - a) with lambda = (a+c)/2 + sqrt_d
+    # Eigenvector for larger eigenvalue
     lam = (a + c) / 2 + sqrt_d
     ev_x = b
     ev_y = lam - a
@@ -60,7 +59,7 @@ def corners_to_attributes(corners: torch.Tensor) -> dict:
     ev_y = ev_y / nrm
     r = torch.atan2(ev_y, ev_x)  # (N,) in [-pi, pi]
 
-    # Project corners onto local frame: x' = cos(r)*x + sin(r)*y, y' = -sin(r)*x + cos(r)*y
+    # Project corners onto local frame
     cos_r = torch.cos(r).unsqueeze(1).unsqueeze(2)  # (N, 1, 1)
     sin_r = torch.sin(r).unsqueeze(1).unsqueeze(2)
     x = centered[..., 0:1]
@@ -95,8 +94,6 @@ def attributes_to_corners(center: torch.Tensor, dims: torch.Tensor, r: torch.Ten
     device = center.device
     l, w, h = dims[:, 0], dims[:, 1], dims[:, 2]
     half = 0.5
-    # 8 corners in local: (±l/2, ±w/2, ±h/2) in order: bottom then top
-    # (0,1,2,3) bottom, (4,5,6,7) top
     corners_local = torch.stack([
         -l * half, -w * half, -h * half,
         l * half, -w * half, -h * half,
@@ -179,7 +176,7 @@ def ovmono3d_loss(
     pred_attr = corners_to_attributes(pred_c)
     gt_attr = corners_to_attributes(gt_c)
 
-    # Geometry-level disentangled losses: mixed box per attribute, then Chamfer to GT
+    # Geometry-level disentangled losses
     # L_xy: box from (pred_xy, gt_z, gt_dims, gt_r)
     center_xy = torch.cat([pred_attr["center"][:, :2], gt_attr["center"][:, 2:3]], dim=1)
     box_xy = attributes_to_corners(center_xy, gt_attr["dims"], gt_attr["r"])
@@ -194,7 +191,7 @@ def ovmono3d_loss(
     box_whl = attributes_to_corners(gt_attr["center"], pred_attr["dims"], gt_attr["r"])
     L_whl = chamfer_loss_8corners(box_whl, gt_c, reduction="mean")
 
-    # L_r: box from (gt_xy, gt_z, gt_dims, pred_r). Use wrapped angle for consistency.
+    # L_r: box from (gt_xy, gt_z, gt_dims, pred_r)
     pred_r = _wrap_angle(pred_attr["r"])
     box_r = attributes_to_corners(gt_attr["center"], gt_attr["dims"], pred_r)
     L_r = chamfer_loss_8corners(box_r, gt_c, reduction="mean")

@@ -4,20 +4,17 @@ import sys
 import torch
 from torch.utils.data import DataLoader
 
-# Add parent directory to path to allow imports if needed
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add project root for package imports
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_SCRIPT_DIR)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
-from ag_dataset_3d import ActionGenomeDataset3D, collate_fn
-from dinov2_3d import DinoV2Monocular3D
+from lib.detector.monocular3d.datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
+from lib.detector.monocular3d.models.dinov2_3d import DinoV2Monocular3D
 
 def test_dataset():
     print("Testing Dataset...")
-    # Assuming data path is available. If not, this might fail.
-    # I'll use a dummy path or try to find where the user has data.
-    # The user's current file `ag_dataset_resize.py` uses `data_path` in `__init__`.
-    # I'll try to use the path from `train.py` default or ask user?
-    # TrainConfig default is "/data/rohith/ag/".
-    # I'll try that.
     data_path = "/data/rohith/ag/"
     if not os.path.exists(data_path):
         print(f"Warning: Data path {data_path} does not exist. Skipping dataset test with real data.")

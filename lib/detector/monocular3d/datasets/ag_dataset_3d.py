@@ -16,7 +16,7 @@ except ImportError:
     from PIL import Image
     _USE_TORCHVISION_IO = False
 
-from constants import Constants as const
+from ..constants import Constants as const
 
 
 def _get_corners_world(frame_object: dict) -> Optional[np.ndarray]:
@@ -103,12 +103,11 @@ class ActionGenomeDataset3D(Dataset):
         return person_bbox, object_bbox
 
     def _build_dataset(self):
-        # self.samples: Dict[str, Dict]
         self.samples: Dict[str, Dict] = {}
         self.valid_nums = 0
         self.non_gt_human_nums = 0
 
-        # ---------------- 2D boxes ---------------- #
+        # 2D boxes
         for frame_name in self.person_bbox.keys():
             if self.object_bbox[frame_name][0][const.METADATA][const.SET] != self.phase:
                 continue
@@ -131,7 +130,6 @@ class ActionGenomeDataset3D(Dataset):
                     'filename': frame_name,
                     'person_boxes': person_boxes,
                     'objects': objects,
-                    # Initialize 3D placeholders
                     'person_boxes_3d': None,
                     'object_boxes_3d': []
                 }
@@ -140,7 +138,7 @@ class ActionGenomeDataset3D(Dataset):
         print(f"Built dataset with {self.valid_nums} valid frames\n")
         print(f"Removed {self.non_gt_human_nums} frames without person boxes\n")
 
-        # ------------ 3D Annotations (from pkl folder or .zip) ------------ #
+        # 3D Annotations (from pkl folder or .zip)
         def _iter_3d_pkls():
             if self.world_3d_annotations.lower().endswith('.zip') and os.path.isfile(self.world_3d_annotations):
                 with zipfile.ZipFile(self.world_3d_annotations, 'r') as zf:
@@ -164,7 +162,6 @@ class ActionGenomeDataset3D(Dataset):
         else:
             for video_file, video_3d_data in _iter_3d_pkls():
                 video_id_raw = video_3d_data.get("video_id", video_file.replace(".pkl", ""))
-                # Match AG frame keys (e.g. G93A5/000050.png): strip .mp4 if present
                 video_id = video_id_raw.replace(".mp4", "") if isinstance(video_id_raw, str) else str(video_id_raw)
                 bbox_frames = video_3d_data.get("frames_final", {}).get("bbox_frames", {})
 
@@ -194,7 +191,7 @@ class ActionGenomeDataset3D(Dataset):
                         self.samples[video_frame_name]["person_boxes_3d"] = frame_person_3d_bboxes
                         self.samples[video_frame_name]["object_boxes_3d"] = frame_object_3d_bboxes
 
-        # ---------- Build indexable list of frame names ---------- #
+        # Build indexable list of frame names
         self.frame_names: List[str] = sorted(self.samples.keys())
 
     def __len__(self):
@@ -206,7 +203,7 @@ class ActionGenomeDataset3D(Dataset):
 
         img_path = os.path.join(self.frames_path, sample['filename'])
 
-        # --- Fast image loading via torchvision.io (avoids PIL overhead) ---
+        # Fast image loading via torchvision.io (avoids PIL overhead)
         if _USE_TORCHVISION_IO:
             img_tensor = read_image(img_path, mode=ImageReadMode.RGB)  # uint8 CHW
             _, orig_h, orig_w = img_tensor.shape
@@ -225,9 +222,9 @@ class ActionGenomeDataset3D(Dataset):
 
         boxes: List[List[float]] = []
         labels: List[int] = []
-        boxes_3d: List[np.ndarray] = []  # List of 8x3 arrays
+        boxes_3d: List[np.ndarray] = []
 
-        # --- Person ---
+        # Person
         person_boxes = np.array(sample['person_boxes'], dtype=np.float32).reshape(-1, 4)
         person_3d = sample.get('person_boxes_3d', None)
 
@@ -247,7 +244,7 @@ class ActionGenomeDataset3D(Dataset):
                 else:
                     boxes_3d.append(np.zeros((8, 3), dtype=np.float32))
 
-        # --- Objects ---
+        # Objects
         available_3d_objects = list(sample.get('object_boxes_3d', []))
 
         for obj in sample['objects']:
@@ -262,7 +259,6 @@ class ActionGenomeDataset3D(Dataset):
                 boxes.append([x1, y1, x2, y2])
                 labels.append(cls_idx)
 
-                # Find matching 3D box
                 match_3d = None
                 for i, obj3d in enumerate(available_3d_objects):
                     if obj3d['class'] == cls_idx:

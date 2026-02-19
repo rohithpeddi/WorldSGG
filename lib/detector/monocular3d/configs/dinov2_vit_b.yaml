@@ -1,0 +1,30 @@
+# =============================================================================
+# Monocular3D Training — DINOv2 ViT-B (Smaller Backbone)
+# =============================================================================
+# Uses the smaller ViT-B backbone for faster training with lower VRAM.
+# Suitable for single-GPU setups with 24GB VRAM.
+# Usage: python train.py --config configs/dinov2_vit_b.yaml
+# =============================================================================
+
+experiment_name: "mono3d_vit_b"
+
+# --- Model ---
+model: "v2"                        # DINOv2 ViT-B
+pretrained: true
+use_compile: true
+
+# --- Training ---
+lr: 2.0e-4                         # slightly higher LR for smaller model
+batch_size: 32
+epochs: 70
+
+# --- Image ---
+target_size: 512                   # lower res for ViT-B
+
+# --- DataLoader ---
+num_workers_train: 8
+num_workers_test: 8
+num_workers_test_subset: 16
+
+# --- Logging ---
+use_wandb: true

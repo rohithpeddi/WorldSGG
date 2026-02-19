@@ -1,0 +1,43 @@
+# =============================================================================
+# Monocular3D Training — High Resolution 1024×1024
+# =============================================================================
+# Full-resolution training with DINOv2 ViT-L. Requires multi-GPU or 80GB VRAM.
+# Usage: python train.py --config configs/high_res_1024.yaml --use_accelerator
+# =============================================================================
+
+experiment_name: "mono3d_hires_1024"
+
+# --- Model ---
+model: "v3l"                       # DINOv2 ViT-L
+pretrained: true
+use_compile: true                  # torch.compile for speed
+
+# --- Training ---
+lr: 1.0e-4
+batch_size: 64
+epochs: 70
+gradient_accumulation_steps: 1
+max_grad_norm: 1.0
+
+# --- Image ---
+target_size: 1024
+
+# --- DataLoader ---
+num_workers_train: 16
+num_workers_test: 16
+num_workers_test_subset: 32
+prefetch_factor: 4
+
+# --- Subset sizes ---
+train_subset_size: 180000
+test_subset_size: 2000
+
+# --- Logging ---
+use_wandb: true
+iter_log_every: 10000
+
+# --- Visualization ---
+plot_each_epoch: true
+
+# --- Misc ---
+use_accelerator: true              # recommended for high-res

@@ -20,21 +20,17 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-# Project root: from .../Scene4Cast/lib/detector/monocular3d/evaluate_3d.py -> Scene4Cast
+# Project root: from .../Scene4Cast/lib/detector/monocular3d/evaluation/evaluate_3d.py -> Scene4Cast
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(_SCRIPT_DIR))))
+_MONO3D_DIR = os.path.dirname(_SCRIPT_DIR)
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_MONO3D_DIR)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from lib.detector.detector2d.evaluate import DetectionEvaluator, clear_cuda_cache_for_current_process
 
-# Monocular3d imports (same package as this script)
-_mono3d_dir = os.path.dirname(_SCRIPT_DIR)
-if _mono3d_dir not in sys.path:
-    sys.path.insert(0, _mono3d_dir)
-
-from ag_dataset_3d import ActionGenomeDataset3D, collate_fn
-from dinov2_3d import DinoV2Monocular3D
+from ..datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
+from ..models.dinov2_3d import DinoV2Monocular3D
 
 
 def corners_to_aabb(corners: np.ndarray) -> np.ndarray:
@@ -347,12 +343,12 @@ if __name__ == "__main__":
 
 """ 
 # Full evaluation (2D + 3D)
-python lib/detector/monocular3d/evaluate_3d.py \
+python -m lib.detector.monocular3d.evaluation.evaluate_3d \
   --checkpoint /path/to/checkpoint_XX \
   --data_path /path/to/Datasets/action_genome
 
 # Optional: 3D pkl folder, limit test size, save JSON
-python lib/detector/monocular3d/evaluate_3d.py \
+python -m lib.detector.monocular3d.evaluation.evaluate_3d \
   --checkpoint /path/to/checkpoint_XX \
   --data_path /path/to/Datasets/action_genome \
   --world_3d_annotations_path /path/to/bbox_annotations_3d_obb_camera \
@@ -360,9 +356,8 @@ python lib/detector/monocular3d/evaluate_3d.py \
   --output results/metrics.json
 
 # Only 2D or only 3D
-python lib/detector/monocular3d/evaluate_3d.py --checkpoint ... --no_3d
-python lib/detector/monocular3d/evaluate_3d.py --checkpoint ... --no_2d
-
+python -m lib.detector.monocular3d.evaluation.evaluate_3d --checkpoint ... --no_3d
+python -m lib.detector.monocular3d.evaluation.evaluate_3d --checkpoint ... --no_2d
 
 
 --checkpoint can be:
@@ -370,6 +365,6 @@ a directory containing checkpoint_state.pth (e.g. path_to_experiment/checkpoint_
 the path to a .pth file.
 Notes
 2D mAP is computed over all test samples with torchmetrics (COCO-style).
-3D metrics are computed only on matched pred–GT pairs (2D IoU ≥ 0.5, same class). If there is no 3D GT or no matches, 3D metrics are zero or N/A.
+3D metrics are computed only on matched pred–GT pairs (2D IoU >= 0.5, same class). If there is no 3D GT or no matches, 3D metrics are zero or N/A.
 3D IoU uses axis-aligned boxes (AABB) derived from the 8 corners, so it is not oriented IoU but is stable and easy to interpret.
 """

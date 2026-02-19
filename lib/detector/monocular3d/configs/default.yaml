@@ -1,0 +1,60 @@
+# =============================================================================
+# Monocular3D Training — Default Configuration
+# =============================================================================
+# This is the base config with all standard training defaults.
+# Override any field via CLI: python train.py --config configs/default.yaml --lr 5e-5
+# =============================================================================
+
+# --- Experiment ---
+experiment_name: "mono3d_default"
+working_dir: "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/lib/detector/monocular3d"
+save_path: "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/save_path"
+
+# --- Data ---
+data_path: "/home/cse/msr/csy227518/scratch/Datasets/action_genome"
+world_3d_annotations_path: null   # null = use data_path/world_annotations/bbox_annotations_3d_final
+
+# --- Model ---
+model: "v3l"                       # "v3l" = DINOv2 ViT-L, "v2" = DINOv2 ViT-B
+num_classes: null                  # null = auto-detect from dataset
+pretrained: true
+use_compile: false                 # torch.compile() — PyTorch 2.0+
+
+# --- Training ---
+lr: 1.0e-4
+weight_decay: 0.001
+batch_size: 64
+epochs: 70
+gradient_accumulation_steps: 1
+max_grad_norm: 1.0
+warmup_fraction: 0.01              # fraction of total steps for warmup
+
+# --- Image ---
+target_size: 1024
+
+# --- DataLoader ---
+num_workers_train: 16
+num_workers_test: 16
+num_workers_test_subset: 32
+prefetch_factor: 4
+persistent_workers: true
+
+# --- Subset sizes ---
+train_subset_size: 180000
+test_subset_size: 2000
+
+# --- Logging ---
+use_wandb: true
+wandb_project: "DINOv2-Object-Detector-AG-3D"
+iter_log_every: 10000
+eval_every_iters: 10000000
+
+# --- Visualization ---
+plot_each_epoch: true
+plot_sample_idx: 120
+plot_score_thresh: 0.1
+
+# --- Misc ---
+use_collate: true
+use_accelerator: false
+ckpt: null                         # path to checkpoint folder for resume

@@ -4,11 +4,8 @@ import torch.nn.functional as F
 import torchvision
 from torchvision.models.detection.transform import GeneralizedRCNNTransform
 
-from dinov2_torch import create_model
-try:
-    from .ovmono3d_loss import ovmono3d_loss
-except ImportError:
-    from ovmono3d_loss import ovmono3d_loss
+from .dinov2_torch import create_model
+from ..losses.ovmono3d_loss import ovmono3d_loss
 
 
 class Monocular3DHead(nn.Module):
@@ -41,8 +38,6 @@ class DinoV2Monocular3D(nn.Module):
         self.transform = self.base_detector.transform
         
         # 3D Head components
-        # We use the same ROI align resolution as the 2D head usually, or larger.
-        # 2D head uses 7x7. Let's use 7x7.
         self.roi_pooler_3d = torchvision.ops.MultiScaleRoIAlign(
             featmap_names=['p2', 'p3', 'p4', 'p5'],
             output_size=7,
@@ -77,8 +72,7 @@ class DinoV2Monocular3D(nn.Module):
         losses_3d = {}
 
         if self.training:
-            # Use GT 2D boxes to train the 3D head — targets['boxes'] already
-            # transformed by GeneralizedRCNNTransform.
+            # Use GT 2D boxes to train the 3D head
             gt_boxes = [t['boxes'] for t in targets]
             gt_boxes_3d = [t['boxes_3d'] for t in targets]
 

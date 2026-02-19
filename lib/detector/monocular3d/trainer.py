@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Train DINOv2 AG Monocular 3D object detector.
+DinoAGTrainer3D: Trainer class for DINOv2 AG Monocular 3D object detection.
+
+This module contains the TrainConfig dataclass, helper utilities, and the
+DinoAGTrainer3D class. It is intended to be driven by train.py which handles
+YAML config loading and CLI override merging.
 """
 
-import argparse
 import contextlib
 import gc
 import os
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -26,11 +29,9 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.lines import Line2D
 
-# NEW IMPORTS
-from ag_dataset_3d import ActionGenomeDataset3D, collate_fn
-from dinov2_3d import DinoV2Monocular3D
-from utils.json_logger import LocalLogger
-#from lib.detector.evaluate import DetectionEvaluator
+from .datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
+from .models.dinov2_3d import DinoV2Monocular3D
+from .utils.json_logger import LocalLogger
 
 
 def clear_cuda_cache_for_current_process(sync: bool = True) -> None:
@@ -137,42 +138,57 @@ def reduce_dict(input_dict, average=True):
 # ============================
 @dataclass
 class TrainConfig:
-    experiment_name: str
+    experiment_name: str = "mono3d_default"
     working_dir: str = "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/lib/detector/monocular3d"
     data_path: str = "/home/cse/msr/csy227518/scratch/Datasets/action_genome"
-    save_path: str = "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/save_path" # Changed save path
+    save_path: str = "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/save_path"
     # 3D loss GT from pkl: folder of per-video .pkl. If None, uses data_path/world_annotations/bbox_annotations_3d_final
     world_3d_annotations_path: Optional[str] = None
     ckpt: Optional[str] = None
 
-    lr: float = 1e-4
-    batch_size: int = 64
-    epochs: int = 70
-
-    gradient_accumulation_steps: int = 1
-    max_grad_norm: float = 1.0
-
-    use_collate: bool = True
-    use_wandb: bool = True
-
-    use_accelerator: bool = False
+    # Model
+    model: str = "v3l"
+    num_classes: Optional[int] = None  # None = auto-detect from dataset
+    pretrained: bool = True
     use_compile: bool = False
 
+    # Training
+    lr: float = 1e-4
+    weight_decay: float = 0.001
+    batch_size: int = 64
+    epochs: int = 70
+    gradient_accumulation_steps: int = 1
+    max_grad_norm: float = 1.0
+    warmup_fraction: float = 0.01
+
+    # DataLoader
     num_workers_train: int = 16
     num_workers_test: int = 16
     num_workers_test_subset: int = 32
+    prefetch_factor: int = 4
+    persistent_workers: bool = True
 
+    # Image
+    target_size: int = 1024
+
+    # Subsets
     train_subset_size: int = 180000
     test_subset_size: int = 2000
 
-    target_size: int = 1024
-
+    # Logging
+    use_wandb: bool = True
+    wandb_project: str = "DINOv2-Object-Detector-AG-3D"
     iter_log_every: int = 10000
     eval_every_iters: int = 10_000_000
 
+    # Visualization
     plot_each_epoch: bool = True
     plot_sample_idx: int = 120
     plot_score_thresh: float = 0.1
+
+    # Misc
+    use_collate: bool = True
+    use_accelerator: bool = False
 
 
 # ============================
@@ -207,8 +223,6 @@ class DinoAGTrainer3D:
         self.scaler = None  # GradScaler for AMP
         self.model_device = None
 
-        # self.evaluator: Optional[DetectionEvaluator] = None
-
         self.starting_epoch = 0
         self.global_iteration = 0
 
@@ -225,17 +239,18 @@ class DinoAGTrainer3D:
 
         if self.cfg.use_wandb and self.accelerator.is_main_process:
             wandb.init(
-                project="DINOv2-Object-Detector-AG-3D", # Changed project name
+                project=self.cfg.wandb_project,
                 config={
                     "learning_rate": self.cfg.lr,
                     "epochs": self.cfg.epochs,
                     "batch_size": self.cfg.batch_size,
                     "dataset": "Action_Genome_3D",
+                    "model": self.cfg.model,
+                    "target_size": self.cfg.target_size,
                 },
             )
 
     def build_datasets(self) -> None:
-        # Frames + 2D from data_path (Action Genome); 3D loss GT from pkl (world_3d_annotations_path or default under data_path)
         kwargs = {"phase": "train", "target_size": self.cfg.target_size}
         if self.cfg.world_3d_annotations_path is not None:
             kwargs["world_3d_annotations_path"] = self.cfg.world_3d_annotations_path
@@ -249,7 +264,7 @@ class DinoAGTrainer3D:
         train_subset = Subset(self.train_dataset, list(range(train_subset_size)))
         test_subset = Subset(self.test_dataset, list(range(test_subset_size)))
 
-        _persistent = self.cfg.num_workers_train > 0
+        _persistent = self.cfg.num_workers_train > 0 and self.cfg.persistent_workers
         self.train_loader = DataLoader(
             train_subset,
             batch_size=self.cfg.batch_size,
@@ -258,9 +273,9 @@ class DinoAGTrainer3D:
             collate_fn=collate_fn,
             pin_memory=True,
             persistent_workers=_persistent,
-            prefetch_factor=4 if _persistent else None,
+            prefetch_factor=self.cfg.prefetch_factor if _persistent else None,
         )
-        _persistent_test = self.cfg.num_workers_test > 0
+        _persistent_test = self.cfg.num_workers_test > 0 and self.cfg.persistent_workers
         self.test_loader = DataLoader(
             self.test_dataset,
             batch_size=self.cfg.batch_size,
@@ -270,9 +285,9 @@ class DinoAGTrainer3D:
             drop_last=True,
             pin_memory=True,
             persistent_workers=_persistent_test,
-            prefetch_factor=4 if _persistent_test else None,
+            prefetch_factor=self.cfg.prefetch_factor if _persistent_test else None,
         )
-        _persistent_test_sub = self.cfg.num_workers_test_subset > 0
+        _persistent_test_sub = self.cfg.num_workers_test_subset > 0 and self.cfg.persistent_workers
         self.test_loader_subset = DataLoader(
             test_subset,
             batch_size=self.cfg.batch_size,
@@ -281,23 +296,26 @@ class DinoAGTrainer3D:
             collate_fn=collate_fn,
             pin_memory=True,
             persistent_workers=_persistent_test_sub,
-            prefetch_factor=4 if _persistent_test_sub else None,
+            prefetch_factor=self.cfg.prefetch_factor if _persistent_test_sub else None,
         )
 
     def build_model(self) -> None:
-        num_classes = len(self.train_dataset.object_classes)
-        # Use DinoV2Monocular3D
-        self.model = DinoV2Monocular3D(num_classes=num_classes, pretrained=True, model="v3l")
+        num_classes = self.cfg.num_classes or len(self.train_dataset.object_classes)
+        self.model = DinoV2Monocular3D(
+            num_classes=num_classes,
+            pretrained=self.cfg.pretrained,
+            model=self.cfg.model,
+        )
         if self.cfg.use_compile:
             self.accelerator.print("Compiling model with torch.compile()...")
             self.model = torch.compile(self.model, mode="reduce-overhead")
 
     def build_optimizer_and_scheduler(self) -> None:
         total_steps = self.cfg.epochs * len(self.train_loader)
-        warmup_steps = int(0.01 * total_steps)
+        warmup_steps = int(self.cfg.warmup_fraction * total_steps)
 
         params = [p for _, p in self.model.named_parameters() if p.requires_grad]
-        self.optimizer = torch.optim.AdamW(params, lr=self.cfg.lr, weight_decay=0.001)
+        self.optimizer = torch.optim.AdamW(params, lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
 
         warmup = LinearLR(self.optimizer, start_factor=1e-1, end_factor=1.0, total_iters=warmup_steps)
         cosine = CosineAnnealingLR(self.optimizer, T_max=(total_steps - warmup_steps), eta_min=self.cfg.lr * 0.1)
@@ -327,8 +345,6 @@ class DinoAGTrainer3D:
         self.accelerator.register_for_checkpointing(self.scheduler)
 
         self.model_device = next(self.model.parameters()).device
-        # self.model = self.model.to(self.model_device, memory_format=torch.channels_last) 
-        # Note: memory_format might cause issues with some custom layers or if not supported everywhere, careful.
 
         # speed toggles
         torch.backends.cudnn.benchmark = True
@@ -339,13 +355,6 @@ class DinoAGTrainer3D:
             torch.backends.cuda.enable_mem_efficient_sdp(True)
         except Exception:
             pass
-
-        # self.evaluator = DetectionEvaluator(
-        #     device=self.model_device,
-        #     accelerator=self.accelerator,
-        #     frame_batch_size=10,
-        #     iou_thresholds_2d=None,
-        # )
 
     # ----------------------------
     # Checkpointing
@@ -412,14 +421,12 @@ class DinoAGTrainer3D:
 
         with torch.no_grad():
             image_batch = image_tensor.unsqueeze(0).to(self.model_device)
-            # For inference, model returns detections
             predictions = self.model(image_batch)
 
         pred = predictions[0]
         pred_boxes = pred["boxes"].detach().cpu().numpy()
         pred_labels = pred["labels"].detach().cpu().numpy()
         pred_scores = pred["scores"].detach().cpu().numpy()
-        # pred_boxes_3d = pred["boxes_3d"].detach().cpu().numpy() # If we want to use them
 
         keep = pred_scores >= score_threshold
         pred_boxes, pred_labels, pred_scores = pred_boxes[keep], pred_labels[keep], pred_scores[keep]
@@ -515,13 +522,11 @@ class DinoAGTrainer3D:
     # Training
     # ----------------------------
     def _move_targets(self, targets: Any) -> Any:
-        # Dataloader with collate_fn always returns targets as list of dicts (one per image).
         if isinstance(targets, list):
             return [
                 {k: v.to(self.model_device) if isinstance(v, torch.Tensor) else v for k, v in t.items()}
                 for t in targets
             ]
-        # Single dict fallback
         return [{k: v.to(self.model_device) if isinstance(v, torch.Tensor) else v for k, v in targets.items()}]
 
     def _log_iteration_losses(
@@ -531,7 +536,7 @@ class DinoAGTrainer3D:
             running_box_loss: float,
             running_object_loss: float,
             running_rpn_loss: float,
-            running_3d_loss: float, # NEW
+            running_3d_loss: float,
             running_count: int,
     ) -> None:
         if running_count == 0:
@@ -541,7 +546,7 @@ class DinoAGTrainer3D:
         avg_box_loss = running_box_loss / running_count
         avg_object_loss = running_object_loss / running_count
         avg_rpn_loss = running_rpn_loss / running_count
-        avg_3d_loss = running_3d_loss / running_count # NEW
+        avg_3d_loss = running_3d_loss / running_count
         lr = self.scheduler.get_last_lr()[0]
 
         if self.cfg.use_wandb and self.accelerator.is_main_process:
@@ -552,7 +557,7 @@ class DinoAGTrainer3D:
                 "iter/box_loss": avg_box_loss,
                 "iter/object_loss": avg_object_loss,
                 "iter/rpn_loss": avg_rpn_loss,
-                "iter/3d_loss": avg_3d_loss, # NEW
+                "iter/3d_loss": avg_3d_loss,
                 "learning_rate": lr,
             })
 
@@ -564,7 +569,7 @@ class DinoAGTrainer3D:
             iter_box_loss=avg_box_loss,
             iter_object_loss=avg_object_loss,
             iter_rpn_loss=avg_rpn_loss,
-            iter_3d_loss=avg_3d_loss, # NEW
+            iter_3d_loss=avg_3d_loss,
             learning_rate=lr,
         )
 
@@ -582,19 +587,18 @@ class DinoAGTrainer3D:
         batch_loss_box_reg_list = []
         batch_loss_objectness_list = []
         batch_loss_rpn_list = []
-        batch_loss_3d_list = [] # NEW
+        batch_loss_3d_list = []
 
         running_total_loss = running_cls_loss = running_box_loss = 0.0
         running_object_loss = running_rpn_loss = running_3d_loss = 0.0
         running_count = 0
 
-        _zero = 0.0  # avoid creating torch.tensor(0.0) per iteration
+        _zero = 0.0
         first_iter = True
         for images, targets in tqdm(self.train_loader, ascii=True):
             if first_iter:
                 self.accelerator.print("First batch: loading data and first CUDA run (can take 2–5 min)...")
                 first_iter = False
-            # collate_fn already returns a list of tensors; stack once and transfer
             images = torch.stack(images).to(self.model_device, non_blocking=True)
             targets = self._move_targets(targets)
 
@@ -674,7 +678,7 @@ class DinoAGTrainer3D:
             "train_box_loss": float(np.mean(batch_loss_box_reg_list)) if batch_loss_box_reg_list else 0.0,
             "train_object_loss": float(np.mean(batch_loss_objectness_list)) if batch_loss_objectness_list else 0.0,
             "train_rpn_loss": float(np.mean(batch_loss_rpn_list)) if batch_loss_rpn_list else 0.0,
-            "train_3d_loss": float(np.mean(batch_loss_3d_list)) if batch_loss_3d_list else 0.0, # NEW
+            "train_3d_loss": float(np.mean(batch_loss_3d_list)) if batch_loss_3d_list else 0.0,
         }
 
     def _maybe_eval_mid_epoch(self) -> None:
@@ -705,7 +709,6 @@ class DinoAGTrainer3D:
     def run(self) -> None:
         os.makedirs(self.path_to_experiment, exist_ok=True)
 
-        # self.init_trackers() 
         self.build_datasets()
         self.build_dataloaders()
         self.build_model()
@@ -739,7 +742,7 @@ class DinoAGTrainer3D:
                     "train/box_loss": train_stats["train_box_loss"],
                     "train/object_loss": train_stats["train_object_loss"],
                     "train/rpn_loss": train_stats["train_rpn_loss"],
-                    "train/3d_loss": train_stats["train_3d_loss"], # NEW
+                    "train/3d_loss": train_stats["train_3d_loss"],
                     "epoch/map": epoch_metrics.get("map", 0.0),
                     "epoch/map_50": epoch_metrics.get("map_50", 0.0),
                     "epoch/map_75": epoch_metrics.get("map_75", 0.0),
@@ -760,7 +763,7 @@ class DinoAGTrainer3D:
             self.accelerator.print(f"  Box: {train_stats['train_box_loss']:.4f}")
             self.accelerator.print(f"  Object: {train_stats['train_object_loss']:.4f}")
             self.accelerator.print(f"  RPN: {train_stats['train_rpn_loss']:.4f}")
-            self.accelerator.print(f"  3D: {train_stats['train_3d_loss']:.4f}") # NEW
+            self.accelerator.print(f"  3D: {train_stats['train_3d_loss']:.4f}")
             self.accelerator.print(f"COCO mAP: {epoch_metrics}")
             self.accelerator.print(f"Learning Rate: {lr:.6f}")
             self.accelerator.print("-" * 80)
@@ -768,42 +771,3 @@ class DinoAGTrainer3D:
             self.save_checkpoint(epoch)
 
         self.accelerator.end_training()
-
-
-# ============================
-# CLI
-# ============================
-def parse_args() -> TrainConfig:
-    parser = argparse.ArgumentParser(description="Train DINOv2 AG Monocular 3D object detector")
-    parser.add_argument("--experiment_name", required=True, type=str)
-    parser.add_argument("--working_dir", default=TrainConfig.working_dir, type=str)
-    parser.add_argument("--use_collate", action="store_true")
-    parser.add_argument("--no_collate", action="store_false", dest="use_collate")
-    parser.add_argument("--use_wandb", action="store_true")
-    parser.add_argument("--no_wandb", action="store_false", dest="use_wandb")
-    parser.add_argument("--lr", type=float, default=TrainConfig.lr)
-    parser.add_argument("--batch_size", type=int, default=TrainConfig.batch_size)
-    parser.add_argument("--epochs", type=int, default=TrainConfig.epochs)
-    parser.add_argument("--data_path", type=str, default=TrainConfig.data_path,
-                        help="Action Genome root (frames + annotations). e.g. Datasets/action_genome")
-    parser.add_argument("--world_3d_annotations_path", type=str, default=None,
-                        help="Folder of per-video .pkl for 3D GT. If unset, uses data_path/world_annotations/bbox_annotations_3d_final")
-    parser.add_argument("--save_path", type=str, default=TrainConfig.save_path)
-    parser.add_argument("--ckpt", type=str, default=None)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=TrainConfig.gradient_accumulation_steps)
-    parser.add_argument("--max_grad_norm", type=float, default=TrainConfig.max_grad_norm)
-    parser.add_argument("--num_workers_train", type=int, default=TrainConfig.num_workers_train,
-                        help="DataLoader workers for training. Use 0 to avoid fork/deadlock issues or debug first-iteration slowness.")
-    parser.add_argument("--num_workers_test", type=int, default=TrainConfig.num_workers_test)
-    parser.add_argument("--use_accelerator", action="store_true")
-    parser.add_argument("--use_compile", action="store_true",
-                        help="Use torch.compile() on the model for faster training (PyTorch 2.0+)")
-
-    args = parser.parse_args()
-    return TrainConfig(**vars(args))
-
-
-if __name__ == "__main__":
-    cfg = parse_args()
-    trainer = DinoAGTrainer3D(cfg)
-    trainer.run()
