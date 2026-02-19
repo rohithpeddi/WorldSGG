@@ -1,3 +1,4 @@
+import math
 import os
 import pickle
 import zipfile
@@ -50,15 +51,17 @@ class ActionGenomeDataset3D(Dataset):
             datasize: str = 'full',
             filter_nonperson_box_frame: bool = True,
             filter_small_box: bool = False,
-            target_size: int = 224,
-            world_3d_annotations_path: Optional[str] = "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/bbox_annotations_3d_obb_camera",
+            pixel_limit: int = 255000,
+            target_size: Optional[int] = None,
+            world_3d_annotations_path: Optional[str] = "/data/rohith/ag/world_annotations/bbox_annotations_3d_obb_camera",
     ):
         self.data_path = data_path
         self.phase = phase
         self.datasize = datasize
         self.filter_nonperson_box_frame = filter_nonperson_box_frame
         self.filter_small_box = filter_small_box
-        self.target_size = target_size
+        self.pixel_limit = pixel_limit
+        self.target_size = target_size  # If set, forces square resize (legacy); otherwise uses pixel_limit scaling
         self.frames_path = os.path.join(self.data_path, const.FRAMES)
 
         # 3D GT from pkl: optional path; if None, use data_path/world_annotations/bbox_annotations_3d_final
@@ -194,6 +197,24 @@ class ActionGenomeDataset3D(Dataset):
         # Build indexable list of frame names
         self.frame_names: List[str] = sorted(self.samples.keys())
 
+    @staticmethod
+    def _compute_target_size(orig_w: int, orig_h: int, pixel_limit: int = 255000) -> Tuple[int, int]:
+        """
+        Compute annotation-consistent target size.
+        Matches the scaling logic used during 3D annotation generation:
+        aspect-ratio preserving, dimensions rounded to multiples of 14 (DINOv2 patch size),
+        total pixels ≤ pixel_limit.
+        """
+        scale = math.sqrt(pixel_limit / (orig_w * orig_h)) if orig_w * orig_h > 0 else 1
+        w_target, h_target = orig_w * scale, orig_h * scale
+        k, m = round(w_target / 14), round(h_target / 14)
+        while (k * 14) * (m * 14) > pixel_limit:
+            if k / m > w_target / h_target:
+                k -= 1
+            else:
+                m -= 1
+        return max(1, k) * 14, max(1, m) * 14
+
     def __len__(self):
         return len(self.frame_names)
 
@@ -203,22 +224,34 @@ class ActionGenomeDataset3D(Dataset):
 
         img_path = os.path.join(self.frames_path, sample['filename'])
 
-        # Fast image loading via torchvision.io (avoids PIL overhead)
+        # Load image and get original dimensions
         if _USE_TORCHVISION_IO:
             img_tensor = read_image(img_path, mode=ImageReadMode.RGB)  # uint8 CHW
             _, orig_h, orig_w = img_tensor.shape
-            img_tensor = TF.resize(img_tensor, [self.target_size, self.target_size],
-                                   interpolation=TF.InterpolationMode.BILINEAR, antialias=True)
-            img_chw = img_tensor.float() / 255.0
         else:
             pil_image = Image.open(img_path).convert('RGB')
             orig_w, orig_h = pil_image.size
-            resized = pil_image.resize((self.target_size, self.target_size), Image.BILINEAR)
+
+        # Compute target size using the same logic as annotation generation
+        if self.target_size is not None:
+            # Legacy: force square resize
+            target_w, target_h = self.target_size, self.target_size
+        else:
+            # Annotation-consistent: aspect-ratio preserving, multiples of 14
+            target_w, target_h = self._compute_target_size(orig_w, orig_h, self.pixel_limit)
+
+        # Resize
+        if _USE_TORCHVISION_IO:
+            img_tensor = TF.resize(img_tensor, [target_h, target_w],
+                                   interpolation=TF.InterpolationMode.BILINEAR, antialias=True)
+            img_chw = img_tensor.float() / 255.0
+        else:
+            resized = pil_image.resize((target_w, target_h), Image.BILINEAR)
             img_np = np.array(resized).astype(np.float32) / 255.0
             img_chw = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
 
-        scale_x = self.target_size / float(orig_w)
-        scale_y = self.target_size / float(orig_h)
+        scale_x = target_w / float(orig_w)
+        scale_y = target_h / float(orig_h)
 
         boxes: List[List[float]] = []
         labels: List[int] = []
@@ -230,10 +263,10 @@ class ActionGenomeDataset3D(Dataset):
 
         for i, pb in enumerate(person_boxes):
             x1, y1, x2, y2 = pb.tolist()
-            x1 = np.clip(x1 * scale_x, 0, self.target_size - 1)
-            x2 = np.clip(x2 * scale_x, 0, self.target_size - 1)
-            y1 = np.clip(y1 * scale_y, 0, self.target_size - 1)
-            y2 = np.clip(y2 * scale_y, 0, self.target_size - 1)
+            x1 = np.clip(x1 * scale_x, 0, target_w - 1)
+            x2 = np.clip(x2 * scale_x, 0, target_w - 1)
+            y1 = np.clip(y1 * scale_y, 0, target_h - 1)
+            y2 = np.clip(y2 * scale_y, 0, target_h - 1)
 
             if (x2 - x1) >= 1 and (y2 - y1) >= 1:
                 boxes.append([x1, y1, x2, y2])
@@ -249,10 +282,10 @@ class ActionGenomeDataset3D(Dataset):
 
         for obj in sample['objects']:
             x1, y1, x2, y2 = np.array(obj['bbox'], dtype=np.float32).tolist()
-            x1 = np.clip(x1 * scale_x, 0, self.target_size - 1)
-            x2 = np.clip(x2 * scale_x, 0, self.target_size - 1)
-            y1 = np.clip(y1 * scale_y, 0, self.target_size - 1)
-            y2 = np.clip(y2 * scale_y, 0, self.target_size - 1)
+            x1 = np.clip(x1 * scale_x, 0, target_w - 1)
+            x2 = np.clip(x2 * scale_x, 0, target_w - 1)
+            y1 = np.clip(y1 * scale_y, 0, target_h - 1)
+            y2 = np.clip(y2 * scale_y, 0, target_h - 1)
 
             if (x2 - x1) >= 1 and (y2 - y1) >= 1:
                 cls_idx = obj['class']
