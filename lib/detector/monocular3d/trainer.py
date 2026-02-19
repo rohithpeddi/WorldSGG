@@ -30,7 +30,7 @@ import matplotlib.patches as patches
 from matplotlib.lines import Line2D
 
 from .datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
-from .models.dinov2_3d import DinoV2Monocular3D
+from .models.dino_mono_3d import DinoV2Monocular3D
 from .utils.json_logger import LocalLogger
 
 

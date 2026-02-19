@@ -11,7 +11,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from lib.detector.monocular3d.datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
-from lib.detector.monocular3d.models.dinov2_3d import DinoV2Monocular3D
+from lib.detector.monocular3d.models.dino_mono_3d import DinoV2Monocular3D
 
 def test_dataset():
     print("Testing Dataset...")
