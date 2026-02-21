@@ -27,6 +27,7 @@ Usage:
         [--overwrite]
 """
 import argparse
+import io
 import os
 import pickle
 from pathlib import Path
@@ -34,6 +35,25 @@ from typing import Any, Dict, Optional
 
 import joblib
 import numpy as np
+
+
+class _NumpyCompatUnpickler(pickle.Unpickler):
+    """Handle numpy 2.x pickles on numpy 1.x (numpy._core -> numpy.core)."""
+
+    def find_class(self, module: str, name: str):
+        if module.startswith("numpy._core"):
+            module = module.replace("numpy._core", "numpy.core", 1)
+        return super().find_class(module, name)
+
+
+def _load_pkl_compat(path):
+    """Load a pickle file with numpy version compatibility."""
+    with open(path, "rb") as f:
+        try:
+            return pickle.load(f)
+        except ModuleNotFoundError:
+            f.seek(0)
+            return _NumpyCompatUnpickler(f).load()
 
 
 def extract_intrinsics_from_human_results(
@@ -146,8 +166,7 @@ def attach_intrinsics(
 
         # Load OBB camera annotation (standard pickle)
         try:
-            with open(obb_pkl_path, "rb") as f:
-                obb_data = pickle.load(f)
+            obb_data = _load_pkl_compat(obb_pkl_path)
         except Exception as e:
             print(f"  [{video_id}] ERROR loading OBB annotation: {e}")
             stats["errors"] += 1
@@ -208,8 +227,7 @@ def inspect_sample(ag_root_directory: str, human_dir: str, video_id: str = "00MF
     # OBB annotation
     obb_path = ag_root / "world_annotations" / "bbox_annotations_3d_obb_camera" / f"{stem}.pkl"
     if obb_path.exists():
-        with open(obb_path, "rb") as f:
-            obb_data = pickle.load(f)
+        obb_data = _load_pkl_compat(obb_path)
         print(f"\n[{video_id}] OBB camera annotation keys: {list(obb_data.keys())}")
         ff = obb_data.get("frames_final", None)
         if ff is not None:
