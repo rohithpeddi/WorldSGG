@@ -90,8 +90,17 @@ def attributes_to_corners(center: torch.Tensor, dims: torch.Tensor, r: torch.Ten
 
     center: (N, 3), dims: (N, 3), r: (N,) -> (N, 8, 3)
     """
+    cos_r = torch.cos(r)
+    sin_r = torch.sin(r)
+    return _corners_from_precomputed(center, dims, cos_r, sin_r)
+
+
+def _corners_from_precomputed(
+    center: torch.Tensor, dims: torch.Tensor,
+    cos_r: torch.Tensor, sin_r: torch.Tensor,
+) -> torch.Tensor:
+    """Build 8 corners from pre-computed cos/sin of yaw (avoids redundant trig)."""
     N = center.shape[0]
-    device = center.device
     l, w, h = dims[:, 0], dims[:, 1], dims[:, 2]
     half = 0.5
     corners_local = torch.stack([
@@ -105,16 +114,23 @@ def attributes_to_corners(center: torch.Tensor, dims: torch.Tensor, r: torch.Ten
         -l * half, w * half, h * half,
     ], dim=1).view(N, 8, 3)  # (N, 8, 3)
 
-    cos_r = torch.cos(r).unsqueeze(1)
-    sin_r = torch.sin(r).unsqueeze(1)
+    cr = cos_r.unsqueeze(1)
+    sr = sin_r.unsqueeze(1)
     lx = corners_local[..., 0]
     ly = corners_local[..., 1]
     lz = corners_local[..., 2]
-    wx = cos_r * lx - sin_r * ly
-    wy = sin_r * lx + cos_r * ly
+    wx = cr * lx - sr * ly
+    wy = sr * lx + cr * ly
     corners_world = torch.stack([wx, wy, lz], dim=-1)
     corners_world = corners_world + center.unsqueeze(1)
     return corners_world
+
+
+def _chamfer_pairwise_dist(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
+    """Compute per-box Chamfer distance. pred, gt: (N, 8, 3) -> (N,)."""
+    diff = pred.unsqueeze(2) - gt.unsqueeze(1)  # (N, 8, 8, 3)
+    dist_sq = (diff * diff).sum(dim=-1)          # (N, 8, 8)
+    return dist_sq.min(dim=2).values.mean(dim=1) + dist_sq.min(dim=1).values.mean(dim=1)
 
 
 def chamfer_loss_8corners(pred: torch.Tensor, gt: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
@@ -123,11 +139,7 @@ def chamfer_loss_8corners(pred: torch.Tensor, gt: torch.Tensor, reduction: str =
     pred: (N, 8, 3), gt: (N, 8, 3).
     For each box: (1/8) sum_i min_j ||p_i - q_j||^2 + (1/8) sum_j min_i ||p_i - q_j||^2.
     """
-    diff = pred.unsqueeze(3) - gt.unsqueeze(2)
-    dist_sq = (diff ** 2).sum(dim=-1)
-    min_pred_to_gt, _ = dist_sq.min(dim=2)
-    min_gt_to_pred, _ = dist_sq.min(dim=1)
-    per_box = min_pred_to_gt.mean(dim=1) + min_gt_to_pred.mean(dim=1)
+    per_box = _chamfer_pairwise_dist(pred, gt)
     if reduction == "mean":
         return per_box.mean()
     elif reduction == "sum":
@@ -147,8 +159,9 @@ def ovmono3d_loss(
     L = sqrt(2)*exp(-mu)*L3D + mu
     L3D = L_xy + L_z + L_whl + L_r + L_all
 
-    For each attribute a in {xy, z, dims, r}: build box B_a from (pred_a, gt_rest),
-    then L_a = Chamfer(B_a, gt_corners). L_all = Chamfer(pred_corners, gt_corners).
+    Optimized: GT attributes and trig values are computed ONCE and reused
+    across all 4 disentangled attribute losses. All 5 Chamfer computations
+    are batched into a single fused call.
 
     pred_corners_flat: (N, 24), gt_corners: (N, 8, 3), pred_mu: (N,) or (N, 1).
 
@@ -160,8 +173,9 @@ def ovmono3d_loss(
 
     pred_corners = pred_corners_flat.view(N, 8, 3)
 
+    # Filter out zero/invalid GT boxes (padding from mismatched 3D annotations)
     gt_flat = gt_corners.view(N, -1)
-    valid = (gt_flat.abs().sum(dim=1) > 1e-6)
+    valid = (gt_flat.abs().sum(dim=1) > 1e-6)  # Non-zero corners mask
     if valid.sum() == 0:
         return (
             torch.tensor(0.0, device=device, requires_grad=True),
@@ -173,36 +187,49 @@ def ovmono3d_loss(
     gt_c = gt_corners[valid]
     n_valid = pred_c.shape[0]
 
+    # Decompose corners → (center, dims, yaw) for both pred and GT
     pred_attr = corners_to_attributes(pred_c)
     gt_attr = corners_to_attributes(gt_c)
 
-    # Geometry-level disentangled losses
-    # L_xy: box from (pred_xy, gt_z, gt_dims, gt_r)
+    # Pre-compute GT trig values ONCE (reused across 3 of 4 disentangled losses)
+    gt_cos_r = torch.cos(gt_attr["r"])
+    gt_sin_r = torch.sin(gt_attr["r"])
+
+    # Build all 5 disentangled boxes in one go, then batch Chamfer
+    # L_xy: (pred_xy, gt_z, gt_dims, gt_r)
     center_xy = torch.cat([pred_attr["center"][:, :2], gt_attr["center"][:, 2:3]], dim=1)
-    box_xy = attributes_to_corners(center_xy, gt_attr["dims"], gt_attr["r"])
-    L_xy = chamfer_loss_8corners(box_xy, gt_c, reduction="mean")
+    box_xy = _corners_from_precomputed(center_xy, gt_attr["dims"], gt_cos_r, gt_sin_r)
 
-    # L_z: box from (gt_xy, pred_z, gt_dims, gt_r)
+    # L_z: (gt_xy, pred_z, gt_dims, gt_r)
     center_z = torch.cat([gt_attr["center"][:, :2], pred_attr["center"][:, 2:3]], dim=1)
-    box_z = attributes_to_corners(center_z, gt_attr["dims"], gt_attr["r"])
-    L_z = chamfer_loss_8corners(box_z, gt_c, reduction="mean")
+    box_z = _corners_from_precomputed(center_z, gt_attr["dims"], gt_cos_r, gt_sin_r)
 
-    # L_whl: box from (gt_xy, gt_z, pred_dims, gt_r)
-    box_whl = attributes_to_corners(gt_attr["center"], pred_attr["dims"], gt_attr["r"])
-    L_whl = chamfer_loss_8corners(box_whl, gt_c, reduction="mean")
+    # L_whl: (gt_center, pred_dims, gt_r)
+    box_whl = _corners_from_precomputed(gt_attr["center"], pred_attr["dims"], gt_cos_r, gt_sin_r)
 
-    # L_r: box from (gt_xy, gt_z, gt_dims, pred_r)
+    # L_r: (gt_center, gt_dims, pred_r)  — only this one needs new trig
     pred_r = _wrap_angle(pred_attr["r"])
-    box_r = attributes_to_corners(gt_attr["center"], gt_attr["dims"], pred_r)
-    L_r = chamfer_loss_8corners(box_r, gt_c, reduction="mean")
+    pred_cos_r = torch.cos(pred_r)
+    pred_sin_r = torch.sin(pred_r)
+    box_r = _corners_from_precomputed(gt_attr["center"], gt_attr["dims"], pred_cos_r, pred_sin_r)
 
-    # Holistic Chamfer
-    L_all = chamfer_loss_8corners(pred_c, gt_c, reduction="mean")
+    # Batch all 5 Chamfer computations into one: stack (5*n_valid, 8, 3)
+    all_pred = torch.cat([box_xy, box_z, box_whl, box_r, pred_c], dim=0)   # (5*n, 8, 3)
+    all_gt = gt_c.repeat(5, 1, 1)                                           # (5*n, 8, 3)
+    all_chamfer = _chamfer_pairwise_dist(all_pred, all_gt)                  # (5*n,)
+
+    # Split back into 5 loss components
+    L_xy, L_z, L_whl, L_r, L_all = [
+        chunk.mean() for chunk in all_chamfer.split(n_valid)
+    ]
 
     L3D = L_xy + L_z + L_whl + L_r + L_all
 
+    # Uncertainty weighting: L = sqrt(2) * exp(-mu) * L3D + mu
+    # This learns to down-weight noisy samples automatically
     mu = pred_mu[valid].float().mean()
-    mu = torch.clamp(mu, -5.0, 10.0)
+    mu = torch.clamp(mu, -5.0, 10.0)  # Clamp for numerical stability
     loss_total = (2.0 ** 0.5) * torch.exp(-mu) * L3D + mu
 
     return loss_total, L3D.detach(), L_all.detach()
+

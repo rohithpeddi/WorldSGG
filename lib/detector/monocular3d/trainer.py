@@ -253,6 +253,10 @@ class DinoAGTrainer3D:
             )
 
     def build_datasets(self) -> None:
+        """Load and build train + test datasets from Action Genome annotations."""
+        self.accelerator.print("━" * 60)
+        self.accelerator.print("  [1/5] Building datasets...")
+        self.accelerator.print("━" * 60)
         kwargs = {
             "phase": "train",
             "target_size": self.cfg.target_size,
@@ -264,8 +268,11 @@ class DinoAGTrainer3D:
         self.train_dataset = ActionGenomeDataset3D(self.cfg.data_path, **kwargs)
         kwargs["phase"] = "test"
         self.test_dataset = ActionGenomeDataset3D(self.cfg.data_path, **kwargs)
+        self.accelerator.print(f"  ✓ Train: {len(self.train_dataset)} frames  |  Test: {len(self.test_dataset)} frames")
 
     def build_dataloaders(self) -> None:
+        """Create DataLoaders with resolution-bucketed batch samplers."""
+        self.accelerator.print("  [2/5] Building dataloaders (resolution-bucketed)...")
         train_subset_size = min(self.cfg.train_subset_size, len(self.train_dataset))
         test_subset_size = min(self.cfg.test_subset_size, len(self.test_dataset))
 
@@ -323,32 +330,47 @@ class DinoAGTrainer3D:
         )
 
     def build_model(self) -> None:
+        """Initialize the DINOv2 + Faster R-CNN + 3D head model."""
+        self.accelerator.print("  [3/5] Building model...")
         num_classes = self.cfg.num_classes or len(self.train_dataset.object_classes)
+        self.accelerator.print(f"    Model variant: {self.cfg.model}  |  Classes: {num_classes}")
         self.model = DinoV3Monocular3D(
             num_classes=num_classes,
             pretrained=self.cfg.pretrained,
             model=self.cfg.model,
         )
+        # Count trainable vs frozen parameters
+        trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in self.model.parameters())
+        self.accelerator.print(f"    ✓ Parameters: {trainable:,} trainable / {total:,} total ({100*trainable/total:.1f}% trainable)")
         if self.cfg.use_compile:
-            self.accelerator.print("Compiling model with torch.compile()...")
+            self.accelerator.print("    Compiling model with torch.compile()...")
             self.model = torch.compile(self.model, mode="reduce-overhead")
 
     def build_optimizer_and_scheduler(self) -> None:
+        """Create AdamW optimizer + warmup→cosine LR schedule + GradScaler for AMP."""
+        self.accelerator.print("  [4/5] Building optimizer & scheduler...")
         total_steps = self.cfg.epochs * len(self.train_loader)
         warmup_steps = int(self.cfg.warmup_fraction * total_steps)
 
+        # Only optimize trainable parameters (backbone is frozen)
         params = [p for _, p in self.model.named_parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(params, lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
 
+        # Schedule: linear warmup → cosine annealing
         warmup = LinearLR(self.optimizer, start_factor=1e-1, end_factor=1.0, total_iters=warmup_steps)
         cosine = CosineAnnealingLR(self.optimizer, T_max=(total_steps - warmup_steps), eta_min=self.cfg.lr * 0.1)
         self.scheduler = SequentialLR(self.optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
+        self.accelerator.print(f"    ✓ Total steps: {total_steps:,}  |  Warmup: {warmup_steps:,}  |  LR: {self.cfg.lr}")
 
-        # GradScaler for mixed precision (only used with DummyAccelerator)
+        # GradScaler for mixed precision (only used with DummyAccelerator / single-GPU)
         if not self.cfg.use_accelerator and torch.cuda.is_available():
             self.scaler = torch.amp.GradScaler()
+            self.accelerator.print("    ✓ AMP GradScaler enabled")
 
     def prepare_with_accelerator(self) -> None:
+        """Wrap model/optimizer/loaders with Accelerator and enable speed toggles."""
+        self.accelerator.print("  [5/5] Preparing with accelerator + speed toggles...")
         (
             self.model,
             self.optimizer,
@@ -369,10 +391,10 @@ class DinoAGTrainer3D:
 
         self.model_device = next(self.model.parameters()).device
 
-        # speed toggles
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        # Speed toggles: enable cuDNN autotuner, TF32, and Flash Attention
+        torch.backends.cudnn.benchmark = True        # Auto-tune convolution algorithms
+        torch.backends.cuda.matmul.allow_tf32 = True  # TF32 for matrix multiplications
+        torch.backends.cudnn.allow_tf32 = True         # TF32 for cuDNN operations
         try:
             torch.backends.cuda.enable_flash_sdp(True)
             torch.backends.cuda.enable_mem_efficient_sdp(True)
@@ -603,8 +625,10 @@ class DinoAGTrainer3D:
         )
 
     def train_one_epoch(self, epoch: int) -> Dict[str, float]:
+        """Run one full training epoch. Returns dict of average loss components."""
         self.model.train()
 
+        # Per-epoch loss accumulators
         batch_loss_list = []
         batch_loss_cls_list = []
         batch_loss_box_reg_list = []
@@ -612,21 +636,28 @@ class DinoAGTrainer3D:
         batch_loss_rpn_list = []
         batch_loss_3d_list = []
 
+        # Running accumulators for periodic logging within the epoch
         running_total_loss = running_cls_loss = running_box_loss = 0.0
         running_object_loss = running_rpn_loss = running_3d_loss = 0.0
         running_count = 0
 
         _zero = 0.0
         first_iter = True
-        for images, targets in tqdm(self.train_loader, ascii=True):
+        for images, targets in tqdm(
+            self.train_loader,
+            desc=f"Epoch {epoch+1}/{self.cfg.epochs} [Train]",
+            ascii=True,
+            dynamic_ncols=True,
+        ):
             if first_iter:
                 self.accelerator.print("First batch: loading data and first CUDA run (can take 2–5 min)...")
                 first_iter = False
+            # Move batch to GPU (non_blocking=True leverages pin_memory)
             images = torch.stack(images).to(self.model_device, non_blocking=True)
             targets = self._move_targets(targets)
 
-            with self.accelerator.accumulate(self.model):
-                with self.accelerator.autocast():
+            with self.accelerator.accumulate(self.model):  # handles gradient accumulation
+                with self.accelerator.autocast():  # mixed precision forward pass
                     loss_dict_original = self.model(images, targets)
 
                 box_weight = 1.0
@@ -634,8 +665,10 @@ class DinoAGTrainer3D:
                 for k, v in loss_dict_original.items():
                     loss_dict[k] = box_weight * v if k in ("loss_box_reg", "loss_rpn_box_reg") else v
 
+                # Scale loss by gradient accumulation steps for correct effective batch size
                 losses = sum(loss / self.cfg.gradient_accumulation_steps for loss in loss_dict.values())
 
+                # Reduce across processes (no-op for single GPU)
                 loss_dict_reduced = reduce_dict(loss_dict)
                 losses_reduced = sum(loss / self.cfg.gradient_accumulation_steps for loss in loss_dict_reduced.values())
 
@@ -730,19 +763,30 @@ class DinoAGTrainer3D:
     # Main run
     # ----------------------------
     def run(self) -> None:
+        """Main entry point: setup → train → evaluate → checkpoint, for all epochs."""
         os.makedirs(self.path_to_experiment, exist_ok=True)
+        self.accelerator.print("\n" + "═" * 60)
+        self.accelerator.print("  Monocular3D Training Pipeline")
+        self.accelerator.print("═" * 60)
 
-        self.build_datasets()
-        self.build_dataloaders()
-        self.build_model()
-        self.build_optimizer_and_scheduler()
-        self.prepare_with_accelerator()
-        self.maybe_resume()
+        # ---- Setup Phase ----
+        self.build_datasets()          # [1/5] Load AG annotations + build frame index
+        self.build_dataloaders()       # [2/5] Resolution-bucketed batch samplers
+        self.build_model()             # [3/5] DINOv2 backbone + FPN + Faster R-CNN + 3D head
+        self.build_optimizer_and_scheduler()  # [4/5] AdamW + warmup→cosine schedule
+        self.prepare_with_accelerator()       # [5/5] Device placement + speed toggles
+        self.maybe_resume()            # Resume from checkpoint if --ckpt specified
 
+        self.accelerator.print("\n" + "═" * 60)
+        self.accelerator.print(f"  Starting training: epochs {self.starting_epoch+1}→{self.cfg.epochs}")
+        self.accelerator.print("═" * 60 + "\n")
+
+        # ---- Training Loop ----
         for epoch in range(self.starting_epoch, self.cfg.epochs):
             train_stats = self.train_one_epoch(epoch)
 
-            self.accelerator.print(f"Evaluating COCO mAP at end of epoch {epoch + 1}...")
+            # End-of-epoch evaluation
+            self.accelerator.print(f"📊 Evaluating COCO mAP at end of epoch {epoch + 1}...")
             epoch_metrics = self.evaluate_map_coco()
 
             if self.cfg.plot_each_epoch and self.accelerator.is_main_process:

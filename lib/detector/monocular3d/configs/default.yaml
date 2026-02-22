@@ -15,7 +15,7 @@ data_path: "/data/rohith/ag"
 world_3d_annotations_path: null   # null = use data_path/world_annotations/bbox_annotations_3d_final
 
 # --- Model ---
-model: "v3l"                       # "v3l" = DINOv2 ViT-L, "v2" = DINOv2 ViT-B
+model: "v2"                        # "v2" = DINOv2 ViT-B (86M, fast), "v2l" = ViT-L, "v3l" = DINOv3 ViT-L
 num_classes: null                  # null = auto-detect from dataset
 pretrained: true
 use_compile: false                 # torch.compile() — PyTorch 2.0+

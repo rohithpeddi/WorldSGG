@@ -12,7 +12,6 @@ import torch
 import torchvision.transforms.functional as TF
 from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
-from transformers import AutoImageProcessor
 
 try:
     from torchvision.io import read_image, ImageReadMode
@@ -147,22 +146,28 @@ class ActionGenomeDataset3D(Dataset):
         else:
             self.world_3d_annotations = os.path.join(self.data_path, const.WORLD_ANNOTATIONS, "bbox_annotations_3d_final")
 
-        print("---------       Loading Annotation Files (3D)       ---------")
+        print(f"\n{'='*60}")
+        print(f"  ActionGenomeDataset3D [{phase.upper()}]")
+        print(f"{'='*60}")
+
+        # Step 1: Load annotation pickle files (person/object bboxes, class labels)
+        print("  [1/3] Loading annotation files...")
         self._fetch_object_classes()
         self.person_bbox, self.object_bbox = self._fetch_object_person_bboxes(filter_small_box)
 
-        print("---------       Building Dataset (3D)       ---------")
+        # Step 2: Build frame index + resolution buckets for efficient batching
+        print("  [2/3] Building dataset index...")
         self._build_dataset()
 
-        # DINOv2 normalization stats
-        self.processor = AutoImageProcessor.from_pretrained("facebook/dinov2-base")
-        self.image_mean: Tuple[float, float, float] = tuple(self.processor.image_mean)
-        self.image_std: Tuple[float, float, float] = tuple(self.processor.image_std)
+        # Step 3: DINOv2 normalization stats (hardcoded — avoids loading AutoImageProcessor)
+        self.image_mean: Tuple[float, float, float] = (0.485, 0.456, 0.406)
+        self.image_std: Tuple[float, float, float] = (0.229, 0.224, 0.225)
 
-        print(f"Dataset (3D) initialized with {len(self)} frames")
-        print(f"Object classes: {len(self.object_classes)}")
+        print(f"  [3/3] ✓ Dataset ready: {len(self):,} frames  |  {len(self.object_classes)} classes")
+        print(f"{'='*60}\n")
 
     def _fetch_object_classes(self):
+        """Load the 37 Action Genome object class names from file."""
         self.object_classes = [const.BACKGROUND]
         object_classes_path = os.path.join(self.data_path, const.ANNOTATIONS, const.OBJECT_CLASSES_FILE)
         with open(object_classes_path, 'r', encoding='utf-8') as f:
@@ -175,6 +180,7 @@ class ActionGenomeDataset3D(Dataset):
         self.object_classes[31] = 'sofa/couch'
 
     def _fetch_object_person_bboxes(self, filter_small_box=False):
+        """Load person and object bounding box pickles."""
         annotations_path = os.path.join(self.data_path, const.ANNOTATIONS)
         with open(os.path.join(annotations_path, const.PERSON_BOUNDING_BOX_PKL), 'rb') as f:
             person_bbox = pickle.load(f)
@@ -183,6 +189,7 @@ class ActionGenomeDataset3D(Dataset):
         return person_bbox, object_bbox
 
     def _build_dataset(self):
+        """Build the frame-level sample index: 2D boxes + 3D annotations + resolution buckets."""
         self.samples: Dict[str, Dict] = {}
         self.valid_nums = 0
         self.non_gt_human_nums = 0
@@ -190,8 +197,8 @@ class ActionGenomeDataset3D(Dataset):
         # Per-video intrinsics lookup
         self.video_intrinsics: Dict[str, Dict[str, float]] = {}
 
-        # ---- 2D boxes ----
-        for frame_name in tqdm(self.person_bbox.keys(), desc="Building 2D samples", ascii=True):
+        # ---- Phase 1: Build 2D sample index (person + object bboxes per frame) ----
+        for frame_name in tqdm(self.person_bbox.keys(), desc=f"  [{self.phase}] Indexing 2D boxes", ascii=True):
             if self.object_bbox[frame_name][0][const.METADATA][const.SET] != self.phase:
                 continue
 
@@ -218,8 +225,7 @@ class ActionGenomeDataset3D(Dataset):
                 }
                 self.valid_nums += 1
 
-        print(f"Built dataset with {self.valid_nums} valid frames")
-        print(f"Removed {self.non_gt_human_nums} frames without person boxes")
+        print(f"    ✓ {self.valid_nums:,} valid frames  |  {self.non_gt_human_nums:,} removed (no person bbox)")
 
         # ---- 3D Annotations ----
         def _iter_3d_pkls():
@@ -239,7 +245,7 @@ class ActionGenomeDataset3D(Dataset):
             else:
                 return
 
-        # ---- Build indexable list + pre-compute resolutions ----
+        # ---- Phase 2: Build indexable list + pre-compute target resolutions ----
         self.frame_names: List[str] = sorted(self.samples.keys())
 
         # Pre-compute target dimensions per VIDEO (all frames in a video share the same resolution).
@@ -255,7 +261,7 @@ class ActionGenomeDataset3D(Dataset):
         # Read one sample frame per video to get native resolution
         video_target_size: Dict[str, Tuple[int, int]] = {}
         n_read_errors = 0
-        for video_id, indices in tqdm(video_to_indices.items(), desc="Reading video resolutions", ascii=True):
+        for video_id, indices in tqdm(video_to_indices.items(), desc=f"  [{self.phase}] Reading resolutions", ascii=True):
             sample_frame = self.frame_names[indices[0]]
             img_path = os.path.join(self.frames_path, self.samples[sample_frame]['filename'])
             try:
@@ -309,21 +315,29 @@ class ActionGenomeDataset3D(Dataset):
         return len(self.frame_names)
 
     def __getitem__(self, idx: int):
+        """
+        Load a single frame: decode image, resize, normalize, build GT targets.
+
+        Pipeline: disk → JPEG decode → resize → float32/255 → DINOv2 normalize
+                  + scale bboxes + match 3D annotations + build intrinsics
+
+        Returns: (img_chw, target_dict)
+        """
         frame_name = self.frame_names[idx]
         sample = self.samples[frame_name]
         target_w, target_h = self.frame_target_sizes[idx]
 
         img_path = os.path.join(self.frames_path, sample['filename'])
 
-        # Load image
+        # ---- Step 1: Load image from disk (JPEG/PNG decode) ----
         if _USE_TORCHVISION_IO:
-            img_tensor = read_image(img_path, mode=ImageReadMode.RGB)  # uint8 CHW
+            img_tensor = read_image(img_path, mode=ImageReadMode.RGB)  # Fast torchvision decode → uint8 CHW
             _, orig_h, orig_w = img_tensor.shape
         else:
-            pil_image = Image.open(img_path).convert('RGB')
+            pil_image = Image.open(img_path).convert('RGB')  # Fallback: PIL decode
             orig_w, orig_h = pil_image.size
 
-        # Resize to pre-computed target (deterministic, same as annotation generation)
+        # ---- Step 2: Resize to pre-computed target dims (deterministic, aspect-ratio preserving) ----
         if _USE_TORCHVISION_IO:
             img_tensor = TF.resize(img_tensor, [target_h, target_w],
                                    interpolation=TF.InterpolationMode.BILINEAR, antialias=True)
@@ -333,6 +347,10 @@ class ActionGenomeDataset3D(Dataset):
             img_np = np.array(resized).astype(np.float32) / 255.0
             img_chw = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
 
+        # ---- Step 3: DINOv2 normalization (moved here from model transform for speed) ----
+        img_chw = TF.normalize(img_chw, mean=list(self.image_mean), std=list(self.image_std))
+
+        # ---- Step 4: Scale 2D bounding boxes to match resized image dims ----
         scale_x = target_w / float(orig_w)
         scale_y = target_h / float(orig_h)
 
@@ -340,7 +358,8 @@ class ActionGenomeDataset3D(Dataset):
         labels: List[int] = []
         boxes_3d: List[np.ndarray] = []
 
-        # Person
+        # ---- Step 5: Build GT targets (person + object boxes, labels, 3D corners) ----
+        # Person bounding boxes
         person_boxes = np.array(sample['person_boxes'], dtype=np.float32).reshape(-1, 4)
         person_3d = sample.get('person_boxes_3d', None)
 
@@ -359,7 +378,7 @@ class ActionGenomeDataset3D(Dataset):
                 else:
                     boxes_3d.append(np.zeros((8, 3), dtype=np.float32))
 
-        # Objects
+        # Object bounding boxes + 3D corner matching
         available_3d_objects = list(sample.get('object_boxes_3d', []))
 
         for obj in sample['objects']:
@@ -382,7 +401,7 @@ class ActionGenomeDataset3D(Dataset):
                         break
                 boxes_3d.append(match_3d if match_3d is not None else np.zeros((8, 3), dtype=np.float32))
 
-        # --- Intrinsics (scaled to match resized image) ---
+        # ---- Step 6: Camera intrinsics (scaled to match resized image) ----
         video_id = frame_name.split("/")[0] if "/" in frame_name else ""
         vid_intr = self.video_intrinsics.get(video_id, None)
 
@@ -397,6 +416,7 @@ class ActionGenomeDataset3D(Dataset):
             cx_scaled = target_w / 2.0
             cy_scaled = target_h / 2.0
 
+        # ---- Step 7: Pack into target dict ----
         target = {
             'boxes': torch.tensor(boxes, dtype=torch.float32) if boxes else torch.empty((0, 4), dtype=torch.float32),
             'labels': torch.tensor(labels, dtype=torch.int64) if labels else torch.empty((0,), dtype=torch.int64),
@@ -461,6 +481,7 @@ class ResolutionBucketBatchSampler(Sampler):
 
 
 def collate_fn(batch):
+    """Custom collate: keep images as list (varying sizes) + targets as list of dicts."""
     images = [item[0] for item in batch]
     targets = [item[1] for item in batch]
     return images, targets

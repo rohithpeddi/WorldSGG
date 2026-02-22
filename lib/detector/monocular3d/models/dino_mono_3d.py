@@ -16,6 +16,18 @@ _hf_token = os.environ.get("HF_TOKEN")
 if _hf_token:
     login(_hf_token)
 
+# ---------------------------------------------------------------------------
+# Model registry: config key → HuggingFace model ID
+# ---------------------------------------------------------------------------
+MODEL_REGISTRY: Dict[str, str] = {
+    "v2":    "facebook/dinov2-base",       # ViT-B/14  86M   hidden_size=768
+    "v2s":   "facebook/dinov2-small",      # ViT-S/14  22M   hidden_size=384
+    "v2l":   "facebook/dinov2-large",      # ViT-L/14  304M  hidden_size=1024
+    "v3l":   "facebook/dinov3-vitl16-pretrain-lvd1689m",   # hidden_size=1024
+    "v3h":   "facebook/dinov3-vith16plus-pretrain-lvd1689m",  # hidden_size=1280
+    "v3_7b": "facebook/dinov3-vit7b16-pretrain-lvd1689m",    # hidden_size=4096
+}
+
 # Import loss
 try:
     from ..losses.ovmono3d_loss import ovmono3d_loss
@@ -206,11 +218,10 @@ class SimpleFeaturePyramid(nn.Module):
             scale_factors=(4.0, 2.0, 1.0, 0.5),
             top_block=None,
             norm="BN",
-            model="v2"
     ):
         """
         Args:
-            in_channels: Input feature channels from backbone (768 for DINOv2-base)
+            in_channels: Input feature channels from backbone (auto-detected)
             out_channels: Output feature channels (typically 256)
             scale_factors: List of scaling factors for pyramid levels
             top_block: Optional top block to add p6 feature
@@ -218,12 +229,8 @@ class SimpleFeaturePyramid(nn.Module):
         """
         super().__init__()
 
-        if model == "v3_7b":
-            in_channels = 4096
-        if model == "v3l":
-            in_channels = 1024
-        if model == "v3h":
-            in_channels = 1280
+        # in_channels is now passed directly from base_backbone.out_channels
+        # (no more hardcoded overrides per model variant)
         self.scale_factors = scale_factors
         self.top_block = top_block
 
@@ -322,9 +329,18 @@ class SimpleFeaturePyramid(nn.Module):
 
 class Dinov3ModelBackbone(nn.Module):
 
-    def __init__(self,
-                 model_name='facebook/dinov3-vitl16-pretrain-lvd1689m'):  # facebook/dinov3-vitb16-pretrain-lvd1689m , facebook/dinov2-base
-        super().__init__()  # facebook/dinov3-vith16plus-pretrain-lvd1689m
+    def __init__(self, model: str = "v2"):
+        """
+        Args:
+            model: Key into MODEL_REGISTRY (e.g. 'v2', 'v2s', 'v2l', 'v3l').
+                   Defaults to 'v2' (DINOv2-Base, 86M params — fastest option).
+        """
+        super().__init__()
+        if model in MODEL_REGISTRY:
+            model_name = MODEL_REGISTRY[model]
+        else:
+            # Allow direct HuggingFace model IDs for flexibility
+            model_name = model
         self.model_name = model_name
         self.bck_model = AutoModel.from_pretrained(self.model_name)
         self.bck_model.eval()
@@ -340,51 +356,63 @@ class Dinov3ModelBackbone(nn.Module):
         W = Img_W // self.patch_size
         n_patches = H * W
 
-        outputs = self.bck_model(x)
+        # Use autocast for aggressive AMP — backbone is frozen, so float16/bfloat16 is safe
+        with torch.amp.autocast(device_type="cuda", enabled=torch.cuda.is_available()):
+            outputs = self.bck_model(x)
         features = outputs.last_hidden_state  # (B, N_total, C)
-        C = features.shape[-1]  # actual hidden dim (may differ from self.out_channels if overridden)
+        C = features.shape[-1]
 
         # Strip CLS + any register tokens: keep only the last n_patches spatial tokens.
-        # DINOv2/v3 token order: [CLS, (registers...), patch_0, patch_1, ...]
         features = features[:, -n_patches:, :]  # (B, H*W, C)
 
         features = features.permute(0, 2, 1).contiguous().view(B, C, H, W)
         return features
 
-class _NoResizeRCNNTransform(GeneralizedRCNNTransform):
-    """GeneralizedRCNNTransform that normalizes and batches but does NOT resize.
-    The dataset already produces images at the correct Pi3-compatible resolution
-    (multiples of 14), so any further resizing would break the ViT patch grid.
+class _NoOpRCNNTransform(GeneralizedRCNNTransform):
+    """GeneralizedRCNNTransform that ONLY batches — no resize, no normalization.
+    The dataset already produces normalized images at the correct Pi3-compatible
+    resolution (multiples of patch_size), so any further transforms are pure overhead.
     """
 
     def resize(self, image, target):
-        # Skip resize entirely — return image and target unchanged
         return image, target
+
+    def normalize(self, image):
+        # Skip normalization — already done in dataset __getitem__
+        return image
 
 
 class DinoV3Monocular3D(nn.Module):
+    """
+    Full Monocular 3D Object Detector combining:
+      - DINOv2 frozen backbone (ViT) for feature extraction
+      - SimpleFPN for multi-scale feature pyramid
+      - Faster R-CNN (RPN + ROI heads) for 2D detection
+      - FactorizedMonocular3DHead for 3D bounding box regression
+
+    Forward pass pipeline:
+      images → Transform → Backbone → FPN → RPN → ROI Heads → 3D Head
+               (batch)    (frozen)   (p2-p6)  (proposals)  (2D det)  (3D corners)
+    """
 
     def __init__(self, num_classes=37, pretrained=True, model="v3l"):
         super().__init__()
-        # Create the base 2D detector
+        # Create the base Faster R-CNN detector with DINOv2 backbone + FPN
         self.base_detector = create_model(num_classes=num_classes, pretrained=pretrained, use_fpn=True, model=model)
 
-        # Extract components
-        self.backbone = self.base_detector.backbone
-        self.rpn = self.base_detector.rpn
-        self.roi_heads = self.base_detector.roi_heads
+        # Extract Faster R-CNN components for explicit forward control
+        self.backbone = self.base_detector.backbone  # DINOv2 + SimpleFPN
+        self.rpn = self.base_detector.rpn             # Region Proposal Network
+        self.roi_heads = self.base_detector.roi_heads  # Box classification + regression
         
-        # Image transform: normalize ONLY — no resizing.
-        # The dataset already resizes to Pi3-compatible dims (multiples of 14).
-        # GeneralizedRCNNTransform.resize would shrink/grow images based on min_size,
-        # breaking the ViT patch grid. We override resize to be a no-op.
-        # size_divisible = backbone patch_size so batch padding stays on the patch grid.
+        # Transform: batching ONLY — no resize, no normalization.
+        # The dataset already produces normalized images at Pi3-compatible dims.
         _ps = self.backbone.base_backbone.patch_size if hasattr(self.backbone, 'base_backbone') else 14
-        self.transform = _NoResizeRCNNTransform(
+        self.transform = _NoOpRCNNTransform(
             min_size=800,   # ignored (resize is a no-op)
             max_size=1333,  # ignored (resize is a no-op)
-            image_mean=[0.485, 0.456, 0.406],  # DINOv2 mean
-            image_std=[0.229, 0.224, 0.225],   # DINOv2 std
+            image_mean=[0.0, 0.0, 0.0],  # no-op (normalization done in dataset)
+            image_std=[1.0, 1.0, 1.0],   # no-op (normalization done in dataset)
             size_divisible=_ps,
         )
         
@@ -400,33 +428,41 @@ class DinoV3Monocular3D(nn.Module):
         self.head_3d = FactorizedMonocular3DHead(in_channels)
 
     def forward(self, images, targets=None):
-        # 1. Transform images
+        """
+        Full forward pass: 2D detection + 3D box regression.
+
+        Training: returns dict of losses (cls, box, rpn, objectness, 3d)
+        Inference: returns list of detection dicts with boxes, labels, scores, boxes_3d
+        """
+        # ---- Stage 1: Transform (batching only — normalize + resize are no-ops) ----
         if isinstance(images, torch.Tensor) and images.dim() == 4:
-            images = list(images.unbind(0))
+            images = list(images.unbind(0))  # GeneralizedRCNNTransform expects a list
 
         original_image_sizes = [img.shape[-2:] for img in images]
-        images, targets = self.transform(images, targets)
+        images, targets = self.transform(images, targets)  # Pads + creates ImageList
 
-        # 2. Backbone features
-        features = self.backbone(images.tensors)
+        # ---- Stage 2: Backbone (frozen DINOv2 ViT → FPN multi-scale features) ----
+        features = self.backbone(images.tensors)  # Returns dict {p2, p3, p4, p5, p6}
 
-        # 3. RPN
+        # ---- Stage 3: RPN (generate ~1000 object proposals per image) ----
         if isinstance(features, torch.Tensor):
-            features = {"0": features}
+            features = {"0": features}  # Wrap for non-FPN case
 
         proposals, proposal_losses = self.rpn(images, features, targets)
 
-        # 4. ROI Heads (2D Detection)
-        # We need the 2D detections/proposals for the 3D head
+        # ---- Stage 4: ROI Heads (2D classification + box regression) ----
         detections, detector_losses = self.roi_heads(features, proposals, images.image_sizes, targets)
 
-        # 5. 3D Head
+        # ---- Stage 5: 3D Head (monocular 3D bounding box regression) ----
         losses_3d = {}
 
         if self.training:
-            # Proposal-based training: match RPN proposals to GT
-            # targets contains 'boxes' (GT 2D), 'boxes_3d' (GT 3D),
-            #   'focal_lengths' (2,), 'principal_point' (2,)
+            # --- Training: match RPN proposals to GT for 3D supervision ---
+            # Each target dict contains:
+            #   'boxes' (N_g, 4)          - GT 2D bounding boxes
+            #   'boxes_3d' (N_g, 8, 3)    - GT 3D corners in world coordinates
+            #   'focal_lengths' (2,)       - camera fx, fy
+            #   'principal_point' (2,)     - camera cx, cy
             
             final_proposals_3d = []
             final_gt_3d = []
@@ -438,13 +474,11 @@ class DinoV3Monocular3D(nn.Module):
                 gt_box = targets[i]['boxes']  # (N_g, 4)
                 gt_3d = targets[i]['boxes_3d']  # (N_g, 8, 3)
                 
-                # Match proposals to GT
-                if len(gt_box) == 0 or len(prop) == 0:
-                    continue
-                    
-                ious = torchvision.ops.box_iou(prop, gt_box)  # (N_p, N_g)
-                val, idx = ious.max(dim=1)
+                # Compute IoU between all proposals and GT boxes for matching
+                ious = torchvision.ops.box_iou(prop, gt_box)  # (N_p, N_g) IoU matrix
+                val, idx = ious.max(dim=1)  # Best GT match for each proposal
                 
+                # Keep proposals with IoU >= 0.5 (positive matches for 3D training)
                 mask = val >= 0.5
                 valid_props = prop[mask]
                 matched_gt_indices = idx[mask]
@@ -465,23 +499,28 @@ class DinoV3Monocular3D(nn.Module):
                 final_intrinsics.append(intr.unsqueeze(0).expand(len(valid_props), -1))
 
             if len(final_proposals_3d) > 0:
+                # Pool FPN features at 14×14 for matched proposals
                 box_features = self.roi_pooler_3d(features, final_proposals_3d, images.image_sizes)
                 
-                cat_bboxes = torch.cat(final_gt_2d_for_context, dim=0)  # (Total_N, 4)
-                cat_gt_3d = torch.cat(final_gt_3d, dim=0)
-                cat_intrinsics = torch.cat(final_intrinsics, dim=0)  # (Total_N, 4)
+                # Concatenate across all images in the batch
+                cat_bboxes = torch.cat(final_gt_2d_for_context, dim=0)     # (Total_K, 4)
+                cat_gt_3d = torch.cat(final_gt_3d, dim=0)                  # (Total_K, 8, 3)
+                cat_intrinsics = torch.cat(final_intrinsics, dim=0)        # (Total_K, 4)
                 
+                # Predict 3D corners + uncertainty from ROI features
                 pred_3d, pred_mu = self.head_3d(box_features, cat_bboxes, cat_intrinsics)
                 
+                # OVMono3D disentangled loss (geometry-level attribute supervision)
                 loss_3d, _l3d, _chamfer = ovmono3d_loss(
                     pred_3d.view(-1, 24), cat_gt_3d, pred_mu, use_smooth_l1=True
                 )
                 losses_3d = {'loss_3d': loss_3d}
             else:
+                # No valid matches — return zero loss (still requires grad for backward)
                 losses_3d = {'loss_3d': torch.tensor(0.0, device=features['p2'].device, requires_grad=True)}
 
         else:
-            # Inference
+            # --- Inference: run 3D head on detected boxes ---
             pred_boxes = [d['boxes'] for d in detections]
             
             if all(len(b) == 0 for b in pred_boxes):
@@ -513,11 +552,11 @@ class DinoV3Monocular3D(nn.Module):
                 for i, d in enumerate(detections):
                     d['boxes_3d'] = pred_3d_split[i].view(-1, 8, 3)
 
-        # Combine losses
+        # ---- Combine all losses (RPN + 2D detector + 3D head) ----
         losses = {}
-        losses.update(proposal_losses)
-        losses.update(detector_losses)
-        losses.update(losses_3d)
+        losses.update(proposal_losses)   # loss_objectness + loss_rpn_box_reg
+        losses.update(detector_losses)   # loss_classifier + loss_box_reg
+        losses.update(losses_3d)         # loss_3d
 
         if self.training:
             return losses
@@ -526,8 +565,21 @@ class DinoV3Monocular3D(nn.Module):
 
 
 def create_model(num_classes=37, pretrained=True, coco_model=False, use_fpn=True, model="v2"):
-    # Create base backbone (out_channels is set automatically from model config)
-    base_backbone = Dinov3ModelBackbone()
+    """
+    Factory function to build the full Faster R-CNN detector.
+
+    Args:
+        num_classes: Number of object classes (including background)
+        pretrained: Load pretrained DINOv2 weights from HuggingFace
+        use_fpn: Wrap backbone with SimpleFPN (recommended)
+        model: Key from MODEL_REGISTRY ('v2', 'v2s', 'v2l', 'v3l', etc.)
+
+    Returns:
+        FasterRCNN model with DINOv2 backbone
+    """
+    # Create base backbone — model key selects from MODEL_REGISTRY
+    print(f"  Creating backbone: model={model}")
+    base_backbone = Dinov3ModelBackbone(model=model)
 
     # Freeze backbone (keep adapter trainable)
     for name, params in base_backbone.named_parameters():
@@ -537,12 +589,11 @@ def create_model(num_classes=37, pretrained=True, coco_model=False, use_fpn=True
     # Wrap with SimpleFeaturePyramid
     if use_fpn:
         backbone = SimpleFeaturePyramid(
-            in_channels=base_backbone.out_channels,
+            in_channels=base_backbone.out_channels,  # auto-detected from backbone config
             out_channels=256,
             scale_factors=(4.0, 2.0, 1.0, 0.5),  # Creates p2, p3, p4, p5
             top_block=LastLevelMaxPool(),  # Adds p6
             norm="BN",
-            model=model,
         )
 
         class BackboneWithFPN(nn.Module):
