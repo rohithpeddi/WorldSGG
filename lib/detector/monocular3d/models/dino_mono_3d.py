@@ -362,6 +362,16 @@ class Dinov3ModelBackbone(nn.Module):
         features = features.permute(0, 2, 1).contiguous().view(B, self.out_channels, H, W)
         return features
 
+class _NoResizeRCNNTransform(GeneralizedRCNNTransform):
+    """GeneralizedRCNNTransform that normalizes and batches but does NOT resize.
+    The dataset already produces images at the correct Pi3-compatible resolution
+    (multiples of 14), so any further resizing would break the ViT patch grid.
+    """
+
+    def resize(self, image, target):
+        # Skip resize entirely — return image and target unchanged
+        return image, target
+
 
 class DinoV3Monocular3D(nn.Module):
 
@@ -375,13 +385,17 @@ class DinoV3Monocular3D(nn.Module):
         self.rpn = self.base_detector.rpn
         self.roi_heads = self.base_detector.roi_heads
         
-        # Image transform: normalize only, no resizing (dataset already resizes to Pi3-compatible dims).
-        # Use large min/max to avoid any internal resizing by GeneralizedRCNNTransform.
-        self.transform = GeneralizedRCNNTransform(
-            min_size=1,
-            max_size=2048,
+        # Image transform: normalize ONLY — no resizing.
+        # The dataset already resizes to Pi3-compatible dims (multiples of 14).
+        # GeneralizedRCNNTransform.resize would shrink/grow images based on min_size,
+        # breaking the ViT patch grid. We override resize to be a no-op.
+        # size_divisible=14 ensures batch padding stays on the DINOv2 patch grid.
+        self.transform = _NoResizeRCNNTransform(
+            min_size=800,   # ignored (resize is a no-op)
+            max_size=1333,  # ignored (resize is a no-op)
             image_mean=[0.485, 0.456, 0.406],  # DINOv2 mean
             image_std=[0.229, 0.224, 0.225],   # DINOv2 std
+            size_divisible=14,
         )
         
         # 3D Head components
