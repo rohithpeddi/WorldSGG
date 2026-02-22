@@ -861,21 +861,56 @@ class DinoAGTrainer3D:
                 **train_stats,
             )
 
-            self.accelerator.print(f"\nEpoch {epoch + 1}/{self.cfg.epochs}")
-            self.accelerator.print(f"Train Loss: {train_stats['train_total_loss']:.4f}")
-            self.accelerator.print(f"  Cls: {train_stats['train_cls_loss']:.4f}")
-            self.accelerator.print(f"  Box: {train_stats['train_box_loss']:.4f}")
-            self.accelerator.print(f"  Object: {train_stats['train_object_loss']:.4f}")
-            self.accelerator.print(f"  RPN: {train_stats['train_rpn_loss']:.4f}")
-            self.accelerator.print(f"  3D: {train_stats['train_3d_loss']:.4f}")
-            self.accelerator.print(f"2D COCO mAP: {epoch_metrics}")
-            self.accelerator.print(f"3D Metrics:")
-            self.accelerator.print(f"  Matched: {epoch_metrics_3d.get('n_matched', 0)}/{epoch_metrics_3d.get('n_gt_3d', 0)} GT boxes")
-            self.accelerator.print(f"  Chamfer: {epoch_metrics_3d.get('chamfer_mean', 0.0):.4f}  Corner L2: {epoch_metrics_3d.get('corner_l2_mean', 0.0):.4f}")
-            self.accelerator.print(f"  mAP_3d@50: {epoch_metrics_3d.get('mAP_3d_50', 0.0):.4f}  mAP_3d@75: {epoch_metrics_3d.get('mAP_3d_75', 0.0):.4f}  Mean IoU 3D: {epoch_metrics_3d.get('mean_iou_3d', 0.0):.4f}")
-            self.accelerator.print(f"  Center L2: {epoch_metrics_3d.get('center_l2_mean', 0.0):.4f}  Dims L1: {epoch_metrics_3d.get('dims_l1_mean', 0.0):.4f}  Rotation: {epoch_metrics_3d.get('rotation_deg_mean', 0.0):.1f}°")
-            self.accelerator.print(f"Learning Rate: {lr:.6f}")
-            self.accelerator.print("-" * 80)
+            self.accelerator.print(f"\n{'═' * 80}")
+            self.accelerator.print(f"  EPOCH {epoch + 1}/{self.cfg.epochs}  SUMMARY")
+            self.accelerator.print(f"{'═' * 80}")
+
+            # ── Training Losses ──
+            self.accelerator.print(f"\n  ── Training Losses ──")
+            self.accelerator.print(f"  Total Loss:      {train_stats['train_total_loss']:.4f}")
+            self.accelerator.print(f"    Classifier:    {train_stats['train_cls_loss']:.4f}")
+            self.accelerator.print(f"    Box Reg:       {train_stats['train_box_loss']:.4f}")
+            self.accelerator.print(f"    Objectness:    {train_stats['train_object_loss']:.4f}")
+            self.accelerator.print(f"    RPN Box Reg:   {train_stats['train_rpn_loss']:.4f}")
+            self.accelerator.print(f"    3D Loss:       {train_stats['train_3d_loss']:.4f}")
+
+            # ── 2D Evaluation Results ──
+            self.accelerator.print(f"\n  ── 2D Evaluation (COCO-style) ──")
+            if epoch_metrics:
+                self.accelerator.print(f"  mAP (0.50:0.95): {epoch_metrics.get('map', 0.0):.4f}")
+                self.accelerator.print(f"  mAP@50:           {epoch_metrics.get('map_50', 0.0):.4f}")
+                self.accelerator.print(f"  mAP@75:           {epoch_metrics.get('map_75', 0.0):.4f}")
+                if epoch_metrics.get("map_per_class") is not None:
+                    self.accelerator.print(f"  Per-class AP:     (available in logs)")
+            else:
+                self.accelerator.print(f"  ⚠️  No 2D metrics available")
+
+            # ── 3D Evaluation Results ──
+            self.accelerator.print(f"\n  ── 3D Evaluation (matched by 2D IoU ≥ 0.5) ──")
+            if epoch_metrics_3d:
+                n_matched = epoch_metrics_3d.get('n_matched', 0)
+                n_gt = epoch_metrics_3d.get('n_gt_3d', 0)
+                match_rate = (n_matched / n_gt * 100) if n_gt > 0 else 0.0
+                self.accelerator.print(f"  Matched Pairs:    {n_matched}/{n_gt} GT boxes ({match_rate:.1f}%)")
+                self.accelerator.print(f"  ┌─ Box Quality ─────────────────────────────────┐")
+                self.accelerator.print(f"  │  Chamfer Distance:   {epoch_metrics_3d.get('chamfer_mean', 0.0):10.4f}          │")
+                self.accelerator.print(f"  │  Corner L2 (mean):   {epoch_metrics_3d.get('corner_l2_mean', 0.0):10.4f}          │")
+                self.accelerator.print(f"  │  Mean IoU 3D:        {epoch_metrics_3d.get('mean_iou_3d', 0.0):10.4f}          │")
+                self.accelerator.print(f"  └────────────────────────────────────────────────┘")
+                self.accelerator.print(f"  ┌─ 3D mAP ────────────────────────────────────────┐")
+                self.accelerator.print(f"  │  mAP_3d@50:          {epoch_metrics_3d.get('mAP_3d_50', 0.0):10.4f}          │")
+                self.accelerator.print(f"  │  mAP_3d@75:          {epoch_metrics_3d.get('mAP_3d_75', 0.0):10.4f}          │")
+                self.accelerator.print(f"  └────────────────────────────────────────────────┘")
+                self.accelerator.print(f"  ┌─ Per-Attribute Errors ─────────────────────────┐")
+                self.accelerator.print(f"  │  Center L2:          {epoch_metrics_3d.get('center_l2_mean', 0.0):10.4f}          │")
+                self.accelerator.print(f"  │  Dimensions L1:      {epoch_metrics_3d.get('dims_l1_mean', 0.0):10.4f}          │")
+                self.accelerator.print(f"  │  Rotation Error:     {epoch_metrics_3d.get('rotation_deg_mean', 0.0):9.1f}°         │")
+                self.accelerator.print(f"  └────────────────────────────────────────────────┘")
+            else:
+                self.accelerator.print(f"  ⚠️  No 3D metrics available")
+
+            self.accelerator.print(f"\n  Learning Rate: {lr:.6f}")
+            self.accelerator.print(f"{'─' * 80}")
 
             self.save_checkpoint(epoch)
 
