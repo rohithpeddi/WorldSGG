@@ -21,11 +21,8 @@ if _hf_token:
 # ---------------------------------------------------------------------------
 MODEL_REGISTRY: Dict[str, str] = {
     "v2":    "facebook/dinov2-base",       # ViT-B/14  86M   hidden_size=768
-    "v2s":   "facebook/dinov2-small",      # ViT-S/14  22M   hidden_size=384
     "v2l":   "facebook/dinov2-large",      # ViT-L/14  304M  hidden_size=1024
     "v3l":   "facebook/dinov3-vitl16-pretrain-lvd1689m",   # hidden_size=1024
-    "v3h":   "facebook/dinov3-vith16plus-pretrain-lvd1689m",  # hidden_size=1280
-    "v3_7b": "facebook/dinov3-vit7b16-pretrain-lvd1689m",    # hidden_size=4096
 }
 
 # Import loss
