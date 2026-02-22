@@ -1,10 +1,11 @@
 import math
 import os
 import pickle
-import zipfile
-from typing import Tuple, List, Dict, Optional
-
 import random
+import struct
+import zipfile
+from collections import defaultdict
+from typing import Tuple, List, Dict, Optional
 
 import numpy as np
 import torch
@@ -45,10 +46,51 @@ def _load_pkl_compat(path):
 
 
 # ---------------------------------------------------------------------------
+# Fast image dimension reader (reads JPEG/PNG header only, no full decode)
+# ---------------------------------------------------------------------------
+def _read_image_dims_fast(path: str) -> Tuple[int, int]:
+    """Read (width, height) from image header without decoding pixels.
+    Supports JPEG and PNG. Falls back to PIL for other formats."""
+    try:
+        with open(path, 'rb') as f:
+            header = f.read(32)
+
+            # PNG: signature + IHDR chunk
+            if header[:8] == b'\x89PNG\r\n\x1a\n':
+                w = struct.unpack('>I', header[16:20])[0]
+                h = struct.unpack('>I', header[20:24])[0]
+                return w, h
+
+            # JPEG: scan for SOF marker
+            if header[:2] == b'\xff\xd8':
+                f.seek(0)
+                data = f.read()
+                idx = 2
+                while idx < len(data) - 9:
+                    if data[idx] != 0xFF:
+                        idx += 1
+                        continue
+                    marker = data[idx + 1]
+                    if marker in (0xC0, 0xC1, 0xC2):  # SOF0, SOF1, SOF2
+                        h = struct.unpack('>H', data[idx + 5:idx + 7])[0]
+                        w = struct.unpack('>H', data[idx + 7:idx + 9])[0]
+                        return w, h
+                    length = struct.unpack('>H', data[idx + 2:idx + 4])[0]
+                    idx += 2 + length
+    except Exception:
+        pass
+
+    # Fallback: PIL
+    from PIL import Image as _PILImage
+    with _PILImage.open(path) as img:
+        return img.size  # (w, h)
+
+
+# ---------------------------------------------------------------------------
 # Helper: extract 8x3 corners from a frame object
 # ---------------------------------------------------------------------------
 def _get_corners_world(frame_object: dict) -> Optional[np.ndarray]:
-    """Get 8x3 corners from a frame object. Supports aabb_floor_aligned or obb_camera (top-level corners_world)."""
+    """Get 8x3 corners from a frame object."""
     # Format 1: aabb_floor_aligned["corners_world"]
     if "aabb_floor_aligned" in frame_object:
         aligned = frame_object["aabb_floor_aligned"]
@@ -56,12 +98,12 @@ def _get_corners_world(frame_object: dict) -> Optional[np.ndarray]:
             arr = np.array(aligned["corners_world"], dtype=np.float32)
             if arr.shape == (8, 3):
                 return arr
-    # Format 2: obb_camera style — top-level "corners_world"
+    # Format 2: top-level "corners_world"
     if "corners_world" in frame_object:
         arr = np.array(frame_object["corners_world"], dtype=np.float32)
         if arr.shape == (8, 3):
             return arr
-    # Format 3: obb_corners_final (camera-frame OBB)
+    # Format 3: obb_corners_final
     if "obb_corners_final" in frame_object:
         arr = np.array(frame_object["obb_corners_final"], dtype=np.float32)
         if arr.shape == (8, 3):
@@ -71,9 +113,9 @@ def _get_corners_world(frame_object: dict) -> Optional[np.ndarray]:
 
 class ActionGenomeDataset3D(Dataset):
     """
-    Action Genome dataset with Pi3-compatible image resizing.
-    Frames and 2D annotations come from data_path (Action Genome). 3D GT for the loss
-    comes from pkl files (folder of per-video .pkl) that include camera intrinsics.
+    Action Genome dataset with resolution bucketing for efficient batching.
+    Pre-computes target dimensions at init so frames with the same resolution
+    can be batched together across different videos.
     """
 
     def __init__(
@@ -85,6 +127,7 @@ class ActionGenomeDataset3D(Dataset):
             filter_small_box: bool = False,
             pixel_limit: int = 255000,
             target_size: Optional[int] = None,
+            patch_size: int = 14,
             world_3d_annotations_path: Optional[str] = "/data/rohith/ag/world_annotations/monocular3d_bbox_annotations",
     ):
         self.data_path = data_path
@@ -93,10 +136,11 @@ class ActionGenomeDataset3D(Dataset):
         self.filter_nonperson_box_frame = filter_nonperson_box_frame
         self.filter_small_box = filter_small_box
         self.pixel_limit = pixel_limit
-        self.target_size = target_size  # If set, forces square resize (legacy); otherwise uses pixel_limit scaling
+        self.target_size = target_size  # If set, forces square resize (legacy)
+        self.patch_size = patch_size    # Must match backbone patch_size
         self.frames_path = os.path.join(self.data_path, const.FRAMES)
 
-        # 3D GT from pkl: optional path; if None, use data_path/world_annotations/bbox_annotations_3d_final
+        # 3D GT
         if world_3d_annotations_path is not None:
             self.world_3d_annotations = world_3d_annotations_path
         else:
@@ -109,7 +153,7 @@ class ActionGenomeDataset3D(Dataset):
         print("---------       Building Dataset (3D)       ---------")
         self._build_dataset()
 
-        # Use only mean/std from the processor for normalization
+        # DINOv2 normalization stats
         self.processor = AutoImageProcessor.from_pretrained("facebook/dinov2-base")
         self.image_mean: Tuple[float, float, float] = tuple(self.processor.image_mean)
         self.image_std: Tuple[float, float, float] = tuple(self.processor.image_std)
@@ -142,10 +186,10 @@ class ActionGenomeDataset3D(Dataset):
         self.valid_nums = 0
         self.non_gt_human_nums = 0
 
-        # Per-video intrinsics lookup: video_id (no ext) -> {fx, fy, cx, cy}
+        # Per-video intrinsics lookup
         self.video_intrinsics: Dict[str, Dict[str, float]] = {}
 
-        # 2D boxes
+        # ---- 2D boxes ----
         for frame_name in self.person_bbox.keys():
             if self.object_bbox[frame_name][0][const.METADATA][const.SET] != self.phase:
                 continue
@@ -173,10 +217,10 @@ class ActionGenomeDataset3D(Dataset):
                 }
                 self.valid_nums += 1
 
-        print(f"Built dataset with {self.valid_nums} valid frames\n")
-        print(f"Removed {self.non_gt_human_nums} frames without person boxes\n")
+        print(f"Built dataset with {self.valid_nums} valid frames")
+        print(f"Removed {self.non_gt_human_nums} frames without person boxes")
 
-        # 3D Annotations (from pkl folder or .zip)
+        # ---- 3D Annotations ----
         def _iter_3d_pkls():
             if self.world_3d_annotations.lower().endswith('.zip') and os.path.isfile(self.world_3d_annotations):
                 with zipfile.ZipFile(self.world_3d_annotations, 'r') as zf:
@@ -202,7 +246,7 @@ class ActionGenomeDataset3D(Dataset):
                 video_id_raw = video_3d_data.get("video_id", video_file.replace(".pkl", ""))
                 video_id = video_id_raw.replace(".mp4", "") if isinstance(video_id_raw, str) else str(video_id_raw)
 
-                # --- Extract per-video intrinsics ---
+                # Per-video intrinsics
                 intrinsics = video_3d_data.get("intrinsics", None)
                 if intrinsics is not None:
                     self.video_intrinsics[video_id] = {
@@ -214,7 +258,6 @@ class ActionGenomeDataset3D(Dataset):
                     n_intrinsics_loaded += 1
 
                 bbox_frames = video_3d_data.get("frames_final", {}).get("bbox_frames", {})
-
                 for frame_name in bbox_frames.keys():
                     video_frame_name = f"{video_id}/{frame_name}"
                     frame_data = bbox_frames[frame_name]
@@ -243,34 +286,57 @@ class ActionGenomeDataset3D(Dataset):
 
             print(f"Loaded intrinsics for {n_intrinsics_loaded} videos")
 
-        # Build indexable list of frame names
+        # ---- Build indexable list + pre-compute resolutions ----
         self.frame_names: List[str] = sorted(self.samples.keys())
 
-        # Group frame indices by video_id (all frames in a video share the same resolution)
-        self.video_groups: Dict[str, List[int]] = {}
-        for idx, frame_name in enumerate(self.frame_names):
-            video_id = frame_name.split("/")[0] if "/" in frame_name else "__unknown__"
-            self.video_groups.setdefault(video_id, []).append(idx)
+        # Pre-compute target dimensions for every frame (fast, header-only I/O)
+        # This enables resolution bucketing: group frames with identical (W, H) into one batch
+        print("  Pre-computing frame resolutions for bucketing...")
+        self.frame_target_sizes: List[Tuple[int, int]] = []  # (target_w, target_h) per frame
+        self.resolution_buckets: Dict[Tuple[int, int], List[int]] = defaultdict(list)
+        n_read_errors = 0
 
-        print(f"  Grouped frames into {len(self.video_groups)} videos")
+        for idx, frame_name in enumerate(self.frame_names):
+            img_path = os.path.join(self.frames_path, self.samples[frame_name]['filename'])
+            try:
+                orig_w, orig_h = _read_image_dims_fast(img_path)
+            except Exception:
+                orig_w, orig_h = 640, 480  # safe fallback
+                n_read_errors += 1
+
+            if self.target_size is not None:
+                tw, th = self.target_size, self.target_size
+            else:
+                tw, th = self._compute_target_size(orig_w, orig_h, self.pixel_limit, self.patch_size)
+
+            self.frame_target_sizes.append((tw, th))
+            self.resolution_buckets[(tw, th)].append(idx)
+
+        n_buckets = len(self.resolution_buckets)
+        sizes_str = ", ".join(f"{w}x{h}({len(idxs)})" for (w, h), idxs in
+                              sorted(self.resolution_buckets.items(), key=lambda x: -len(x[1]))[:8])
+        print(f"  {n_buckets} resolution buckets (top: {sizes_str})")
+        if n_read_errors:
+            print(f"  WARNING: {n_read_errors} frames failed header read, using fallback dims")
 
     @staticmethod
-    def _compute_target_size(orig_w: int, orig_h: int, pixel_limit: int = 255000) -> Tuple[int, int]:
+    def _compute_target_size(orig_w: int, orig_h: int, pixel_limit: int = 255000,
+                             patch_size: int = 14) -> Tuple[int, int]:
         """
         Compute annotation-consistent target size.
-        Matches the scaling logic used during 3D annotation generation (Pi3):
-        aspect-ratio preserving, dimensions rounded to multiples of 14 (DINOv2 patch size),
+        Aspect-ratio preserving, dimensions rounded to multiples of patch_size,
         total pixels ≤ pixel_limit.
         """
         scale = math.sqrt(pixel_limit / (orig_w * orig_h)) if orig_w * orig_h > 0 else 1
         w_target, h_target = orig_w * scale, orig_h * scale
-        k, m = round(w_target / 14), round(h_target / 14)
-        while (k * 14) * (m * 14) > pixel_limit:
+        k = round(w_target / patch_size)
+        m = round(h_target / patch_size)
+        while (k * patch_size) * (m * patch_size) > pixel_limit:
             if k / m > w_target / h_target:
                 k -= 1
             else:
                 m -= 1
-        return max(1, k) * 14, max(1, m) * 14
+        return max(1, k) * patch_size, max(1, m) * patch_size
 
     def __len__(self):
         return len(self.frame_names)
@@ -278,10 +344,11 @@ class ActionGenomeDataset3D(Dataset):
     def __getitem__(self, idx: int):
         frame_name = self.frame_names[idx]
         sample = self.samples[frame_name]
+        target_w, target_h = self.frame_target_sizes[idx]
 
         img_path = os.path.join(self.frames_path, sample['filename'])
 
-        # Load image and get original dimensions
+        # Load image
         if _USE_TORCHVISION_IO:
             img_tensor = read_image(img_path, mode=ImageReadMode.RGB)  # uint8 CHW
             _, orig_h, orig_w = img_tensor.shape
@@ -289,15 +356,7 @@ class ActionGenomeDataset3D(Dataset):
             pil_image = Image.open(img_path).convert('RGB')
             orig_w, orig_h = pil_image.size
 
-        # Compute target size using the same logic as Pi3
-        if self.target_size is not None:
-            # Legacy: force square resize
-            target_w, target_h = self.target_size, self.target_size
-        else:
-            # Annotation-consistent: aspect-ratio preserving, multiples of 14
-            target_w, target_h = self._compute_target_size(orig_w, orig_h, self.pixel_limit)
-
-        # Resize
+        # Resize to pre-computed target (deterministic, same as annotation generation)
         if _USE_TORCHVISION_IO:
             img_tensor = TF.resize(img_tensor, [target_h, target_w],
                                    interpolation=TF.InterpolationMode.BILINEAR, antialias=True)
@@ -328,7 +387,6 @@ class ActionGenomeDataset3D(Dataset):
             if (x2 - x1) >= 1 and (y2 - y1) >= 1:
                 boxes.append([x1, y1, x2, y2])
                 labels.append(1)
-
                 if i == 0 and person_3d is not None:
                     boxes_3d.append(person_3d)
                 else:
@@ -355,25 +413,18 @@ class ActionGenomeDataset3D(Dataset):
                         match_3d = obj3d['bbox_3d']
                         available_3d_objects.pop(i)
                         break
-
-                if match_3d is not None:
-                    boxes_3d.append(match_3d)
-                else:
-                    boxes_3d.append(np.zeros((8, 3), dtype=np.float32))
+                boxes_3d.append(match_3d if match_3d is not None else np.zeros((8, 3), dtype=np.float32))
 
         # --- Intrinsics (scaled to match resized image) ---
-        # Extract video_id from frame_name: "VIDEO_ID/FRAME.png" -> "VIDEO_ID"
         video_id = frame_name.split("/")[0] if "/" in frame_name else ""
         vid_intr = self.video_intrinsics.get(video_id, None)
 
         if vid_intr is not None:
-            # Scale intrinsics by the same resize ratio as the image
             fx_scaled = vid_intr["fx"] * scale_x
             fy_scaled = vid_intr["fy"] * scale_y
             cx_scaled = vid_intr["cx"] * scale_x
             cy_scaled = vid_intr["cy"] * scale_y
         else:
-            # Fallback: Pi3-style heuristic (focal = max dim, principal point = center)
             fx_scaled = float(max(target_w, target_h))
             fy_scaled = fx_scaled
             cx_scaled = target_w / 2.0
@@ -391,32 +442,55 @@ class ActionGenomeDataset3D(Dataset):
         return img_chw, target
 
 
-class VideoGroupedBatchSampler(Sampler):
+# ---------------------------------------------------------------------------
+# Resolution-bucketed batch sampler
+# ---------------------------------------------------------------------------
+class ResolutionBucketBatchSampler(Sampler):
     """
-    Batch sampler that yields ALL frames from a single video as one batch.
-    Each batch = 1 video, guaranteeing all images share the same resolution
-    (since Pi3 resizes all frames of a video identically).
+    Batch sampler that groups frames by resolution, then yields batches
+    of `batch_size` frames from the same resolution bucket.
 
-    Each epoch: videos are shuffled, then each video's frames are shuffled.
+    This guarantees `torch.stack` works (all images in a batch are the same size)
+    while allowing frames from DIFFERENT videos in the same batch, maximizing
+    GPU utilization and gradient diversity.
+
+    Each epoch: bucket order is shuffled, frames within each bucket are shuffled,
+    then chunked into batches of `batch_size`.
     """
 
-    def __init__(self, video_groups: Dict[str, List[int]], drop_last: bool = False):
-        self.video_groups = video_groups
+    def __init__(self, resolution_buckets: Dict[Tuple[int, int], List[int]],
+                 batch_size: int, drop_last: bool = False):
+        self.resolution_buckets = resolution_buckets
+        self.batch_size = batch_size
         self.drop_last = drop_last
 
     def __iter__(self):
-        video_ids = list(self.video_groups.keys())
-        random.shuffle(video_ids)
+        # Build all batches first, then shuffle for inter-resolution randomness
+        all_batches = []
 
-        for vid in video_ids:
-            indices = list(self.video_groups[vid])
-            random.shuffle(indices)
-            if self.drop_last and len(indices) == 0:
-                continue
-            yield indices
+        for res, indices in self.resolution_buckets.items():
+            perm = list(indices)
+            random.shuffle(perm)
+
+            for start in range(0, len(perm), self.batch_size):
+                batch = perm[start: start + self.batch_size]
+                if self.drop_last and len(batch) < self.batch_size:
+                    continue
+                all_batches.append(batch)
+
+        # Shuffle batch order so we don't always train on the same resolution first
+        random.shuffle(all_batches)
+        yield from all_batches
 
     def __len__(self):
-        return len(self.video_groups)
+        total = 0
+        for indices in self.resolution_buckets.values():
+            n = len(indices)
+            if self.drop_last:
+                total += n // self.batch_size
+            else:
+                total += (n + self.batch_size - 1) // self.batch_size
+        return total
 
 
 def collate_fn(batch):

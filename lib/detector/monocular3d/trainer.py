@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.lines import Line2D
 
-from .datasets.ag_dataset_3d import ActionGenomeDataset3D, VideoGroupedBatchSampler, collate_fn
+from .datasets.ag_dataset_3d import ActionGenomeDataset3D, ResolutionBucketBatchSampler, collate_fn
 from .models.dino_mono_3d import DinoV3Monocular3D
 from .utils.json_logger import LocalLogger
 
@@ -171,6 +171,7 @@ class TrainConfig:
     # Image
     target_size: Optional[int] = None  # None = use pixel_limit (Pi3-compatible); int = force square resize
     pixel_limit: int = 255000          # Pi3's PIXEL_LIMIT for aspect-ratio-preserving resize
+    patch_size: int = 14               # Must match backbone patch_size (14 for DINOv2, 16 for some ViT-L)
 
     # Subsets
     train_subset_size: int = 180000
@@ -256,6 +257,7 @@ class DinoAGTrainer3D:
             "phase": "train",
             "target_size": self.cfg.target_size,
             "pixel_limit": self.cfg.pixel_limit,
+            "patch_size": self.cfg.patch_size,
         }
         if self.cfg.world_3d_annotations_path is not None:
             kwargs["world_3d_annotations_path"] = self.cfg.world_3d_annotations_path
@@ -266,28 +268,28 @@ class DinoAGTrainer3D:
     def build_dataloaders(self) -> None:
         train_subset_size = min(self.cfg.train_subset_size, len(self.train_dataset))
         test_subset_size = min(self.cfg.test_subset_size, len(self.test_dataset))
-        train_subset = Subset(self.train_dataset, list(range(train_subset_size)))
-        test_subset = Subset(self.test_dataset, list(range(test_subset_size)))
 
-        # Build video-grouped batch samplers (all frames in a batch share the same video/resolution)
-        # For subsets, we need to filter the video_groups to only include indices in the subset
-        def _build_subset_video_groups(dataset, subset_indices):
-            subset_set = set(subset_indices)
-            groups = {}
-            for vid, indices in dataset.video_groups.items():
+        # Build resolution-bucketed batch samplers
+        # Frames sharing the same (target_w, target_h) go in the same batch
+        def _build_subset_buckets(dataset, max_idx):
+            subset_set = set(range(max_idx))
+            buckets = {}
+            for res, indices in dataset.resolution_buckets.items():
                 filtered = [i for i in indices if i in subset_set]
                 if filtered:
-                    groups[vid] = filtered
-            return groups
+                    buckets[res] = filtered
+            return buckets
 
-        train_video_groups = _build_subset_video_groups(self.train_dataset, range(train_subset_size))
-        train_batch_sampler = VideoGroupedBatchSampler(train_video_groups, drop_last=False)
+        train_buckets = _build_subset_buckets(self.train_dataset, train_subset_size)
+        train_batch_sampler = ResolutionBucketBatchSampler(
+            train_buckets, self.cfg.batch_size, drop_last=False)
 
-        test_video_groups = self.test_dataset.video_groups
-        test_batch_sampler = VideoGroupedBatchSampler(test_video_groups, drop_last=True)
+        test_batch_sampler = ResolutionBucketBatchSampler(
+            self.test_dataset.resolution_buckets, self.cfg.batch_size, drop_last=True)
 
-        test_sub_video_groups = _build_subset_video_groups(self.test_dataset, range(test_subset_size))
-        test_sub_batch_sampler = VideoGroupedBatchSampler(test_sub_video_groups, drop_last=False)
+        test_sub_buckets = _build_subset_buckets(self.test_dataset, test_subset_size)
+        test_sub_batch_sampler = ResolutionBucketBatchSampler(
+            test_sub_buckets, self.cfg.batch_size, drop_last=False)
 
         _persistent = self.cfg.num_workers_train > 0 and self.cfg.persistent_workers
         self.train_loader = DataLoader(

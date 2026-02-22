@@ -1,3 +1,3 @@
-from .ag_dataset_3d import ActionGenomeDataset3D, VideoGroupedBatchSampler, collate_fn
+from .ag_dataset_3d import ActionGenomeDataset3D, ResolutionBucketBatchSampler, collate_fn
 
-__all__ = ["ActionGenomeDataset3D", "VideoGroupedBatchSampler", "collate_fn"]
+__all__ = ["ActionGenomeDataset3D", "ResolutionBucketBatchSampler", "collate_fn"]
