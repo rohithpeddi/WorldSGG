@@ -328,38 +328,27 @@ class Dinov3ModelBackbone(nn.Module):
         self.model_name = model_name
         self.bck_model = AutoModel.from_pretrained(self.model_name)
         self.bck_model.eval()
+        # Read actual hidden_size and patch_size from model config
         self.out_channels = self.bck_model.config.hidden_size
-        self.patch_size = 14 # Default for DINOv2/v3
+        self.patch_size = getattr(self.bck_model.config, 'patch_size', 14)
+        print(f"  Backbone: {model_name}  hidden_size={self.out_channels}  patch_size={self.patch_size}")
 
     def forward(self, x):
         # x shape is (B, 3, Img_H, Img_W)
         B, _, Img_H, Img_W = x.shape
-        H, W = Img_H // self.patch_size, Img_W // self.patch_size
-        
+        H = Img_H // self.patch_size
+        W = Img_W // self.patch_size
+        n_patches = H * W
+
         outputs = self.bck_model(x)
-        features = outputs.last_hidden_state
-        
-        # Remove the CLS token
-        features = features[:, 1:, :] # (B, N, C)
-        
-        # Safely reshape using exact spatial dimensions
-        # Note: If N != H*W due to interpolation or other factors, we might need logic.
-        # But normally H*W = N for ViT if image size is multiple of patch size.
-        # For DINOv2 with register tokens (optional), need to be careful. 
-        # But standard DINOv2 usually has just CLS + patches.
-        # In case of mismatch (e.g. registers), truncate/pad
-        
-        if features.shape[1] != H * W:
-             # Fallback to nearest square or original logic if completely mismatched?
-             # But prompt says: "Calculate H and W dynamically based on the input image shape"
-             target_len = H * W
-             if features.shape[1] > target_len:
-                 features = features[:, :target_len, :]
-             elif features.shape[1] < target_len:
-                 # Should rare happen if input is divisible
-                 pass
-        
-        features = features.permute(0, 2, 1).contiguous().view(B, self.out_channels, H, W)
+        features = outputs.last_hidden_state  # (B, N_total, C)
+        C = features.shape[-1]  # actual hidden dim (may differ from self.out_channels if overridden)
+
+        # Strip CLS + any register tokens: keep only the last n_patches spatial tokens.
+        # DINOv2/v3 token order: [CLS, (registers...), patch_0, patch_1, ...]
+        features = features[:, -n_patches:, :]  # (B, H*W, C)
+
+        features = features.permute(0, 2, 1).contiguous().view(B, C, H, W)
         return features
 
 class _NoResizeRCNNTransform(GeneralizedRCNNTransform):
@@ -389,13 +378,14 @@ class DinoV3Monocular3D(nn.Module):
         # The dataset already resizes to Pi3-compatible dims (multiples of 14).
         # GeneralizedRCNNTransform.resize would shrink/grow images based on min_size,
         # breaking the ViT patch grid. We override resize to be a no-op.
-        # size_divisible=14 ensures batch padding stays on the DINOv2 patch grid.
+        # size_divisible = backbone patch_size so batch padding stays on the patch grid.
+        _ps = self.backbone.base_backbone.patch_size if hasattr(self.backbone, 'base_backbone') else 14
         self.transform = _NoResizeRCNNTransform(
             min_size=800,   # ignored (resize is a no-op)
             max_size=1333,  # ignored (resize is a no-op)
             image_mean=[0.485, 0.456, 0.406],  # DINOv2 mean
             image_std=[0.229, 0.224, 0.225],   # DINOv2 std
-            size_divisible=14,
+            size_divisible=_ps,
         )
         
         # 3D Head components
@@ -536,9 +526,8 @@ class DinoV3Monocular3D(nn.Module):
 
 
 def create_model(num_classes=37, pretrained=True, coco_model=False, use_fpn=True, model="v2"):
-    # Create base backbone
+    # Create base backbone (out_channels is set automatically from model config)
     base_backbone = Dinov3ModelBackbone()
-    base_backbone.out_channels = 768
 
     # Freeze backbone (keep adapter trainable)
     for name, params in base_backbone.named_parameters():
@@ -548,7 +537,7 @@ def create_model(num_classes=37, pretrained=True, coco_model=False, use_fpn=True
     # Wrap with SimpleFeaturePyramid
     if use_fpn:
         backbone = SimpleFeaturePyramid(
-            in_channels=768,
+            in_channels=base_backbone.out_channels,
             out_channels=256,
             scale_factors=(4.0, 2.0, 1.0, 0.5),  # Creates p2, p3, p4, p5
             top_block=LastLevelMaxPool(),  # Adds p6
@@ -572,7 +561,6 @@ def create_model(num_classes=37, pretrained=True, coco_model=False, use_fpn=True
         print("✅ Using SimpleFeaturePyramid (FPN)")
     else:
         backbone = base_backbone
-        backbone.out_channels = 768
         print("Using backbone without FPN")
 
     # Anchor generator
