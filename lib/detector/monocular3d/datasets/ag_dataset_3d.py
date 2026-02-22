@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torchvision.transforms.functional as TF
 from torch.utils.data import Dataset, Sampler
+from tqdm import tqdm
 from transformers import AutoImageProcessor
 
 try:
@@ -190,7 +191,7 @@ class ActionGenomeDataset3D(Dataset):
         self.video_intrinsics: Dict[str, Dict[str, float]] = {}
 
         # ---- 2D boxes ----
-        for frame_name in self.person_bbox.keys():
+        for frame_name in tqdm(self.person_bbox.keys(), desc="Building 2D samples", ascii=True):
             if self.object_bbox[frame_name][0][const.METADATA][const.SET] != self.phase:
                 continue
 
@@ -238,86 +239,52 @@ class ActionGenomeDataset3D(Dataset):
             else:
                 return
 
-        if not (self.world_3d_annotations.lower().endswith('.zip') and os.path.isfile(self.world_3d_annotations)) and not os.path.isdir(self.world_3d_annotations):
-            print(f"3D pkl folder/zip not found: {self.world_3d_annotations} — 3D loss GT will be zeros.")
-        else:
-            n_intrinsics_loaded = 0
-            for video_file, video_3d_data in _iter_3d_pkls():
-                video_id_raw = video_3d_data.get("video_id", video_file.replace(".pkl", ""))
-                video_id = video_id_raw.replace(".mp4", "") if isinstance(video_id_raw, str) else str(video_id_raw)
-
-                # Per-video intrinsics
-                intrinsics = video_3d_data.get("intrinsics", None)
-                if intrinsics is not None:
-                    self.video_intrinsics[video_id] = {
-                        "fx": float(intrinsics.get("fx", 500.0)),
-                        "fy": float(intrinsics.get("fy", 500.0)),
-                        "cx": float(intrinsics.get("cx", 0.0)),
-                        "cy": float(intrinsics.get("cy", 0.0)),
-                    }
-                    n_intrinsics_loaded += 1
-
-                bbox_frames = video_3d_data.get("frames_final", {}).get("bbox_frames", {})
-                for frame_name in bbox_frames.keys():
-                    video_frame_name = f"{video_id}/{frame_name}"
-                    frame_data = bbox_frames[frame_name]
-                    frame_objects = frame_data.get("objects", [])
-
-                    frame_person_3d_bboxes = None
-                    frame_object_3d_bboxes = []
-
-                    for frame_object in frame_objects:
-                        label = frame_object.get("label")
-                        if label is None:
-                            continue
-                        corners = _get_corners_world(frame_object)
-                        if corners is None:
-                            continue
-                        if label == "person":
-                            frame_person_3d_bboxes = corners
-                        else:
-                            class_idx = self.object_classes.index(label) if label in self.object_classes else -1
-                            if class_idx != -1:
-                                frame_object_3d_bboxes.append({"class": class_idx, "bbox_3d": corners})
-
-                    if video_frame_name in self.samples:
-                        self.samples[video_frame_name]["person_boxes_3d"] = frame_person_3d_bboxes
-                        self.samples[video_frame_name]["object_boxes_3d"] = frame_object_3d_bboxes
-
-            print(f"Loaded intrinsics for {n_intrinsics_loaded} videos")
-
         # ---- Build indexable list + pre-compute resolutions ----
         self.frame_names: List[str] = sorted(self.samples.keys())
 
-        # Pre-compute target dimensions for every frame (fast, header-only I/O)
-        # This enables resolution bucketing: group frames with identical (W, H) into one batch
-        print("  Pre-computing frame resolutions for bucketing...")
-        self.frame_target_sizes: List[Tuple[int, int]] = []  # (target_w, target_h) per frame
-        self.resolution_buckets: Dict[Tuple[int, int], List[int]] = defaultdict(list)
-        n_read_errors = 0
+        # Pre-compute target dimensions per VIDEO (all frames in a video share the same resolution).
+        # Read one image header per video instead of every frame (~7K reads vs ~180K).
+        print("  Pre-computing per-video resolutions for bucketing...")
 
+        # Group frame indices by video_id
+        video_to_indices: Dict[str, List[int]] = defaultdict(list)
         for idx, frame_name in enumerate(self.frame_names):
-            img_path = os.path.join(self.frames_path, self.samples[frame_name]['filename'])
+            video_id = frame_name.split("/")[0] if "/" in frame_name else "__unknown__"
+            video_to_indices[video_id].append(idx)
+
+        # Read one sample frame per video to get native resolution
+        video_target_size: Dict[str, Tuple[int, int]] = {}
+        n_read_errors = 0
+        for video_id, indices in tqdm(video_to_indices.items(), desc="Reading video resolutions", ascii=True):
+            sample_frame = self.frame_names[indices[0]]
+            img_path = os.path.join(self.frames_path, self.samples[sample_frame]['filename'])
             try:
                 orig_w, orig_h = _read_image_dims_fast(img_path)
             except Exception:
-                orig_w, orig_h = 640, 480  # safe fallback
+                orig_w, orig_h = 640, 480
                 n_read_errors += 1
 
             if self.target_size is not None:
                 tw, th = self.target_size, self.target_size
             else:
                 tw, th = self._compute_target_size(orig_w, orig_h, self.pixel_limit, self.patch_size)
+            video_target_size[video_id] = (tw, th)
 
-            self.frame_target_sizes.append((tw, th))
-            self.resolution_buckets[(tw, th)].append(idx)
+        # Assign target sizes to all frames and build resolution buckets
+        self.frame_target_sizes: List[Tuple[int, int]] = [None] * len(self.frame_names)
+        self.resolution_buckets: Dict[Tuple[int, int], List[int]] = defaultdict(list)
+        for video_id, indices in video_to_indices.items():
+            tw, th = video_target_size[video_id]
+            for idx in indices:
+                self.frame_target_sizes[idx] = (tw, th)
+                self.resolution_buckets[(tw, th)].append(idx)
 
         n_buckets = len(self.resolution_buckets)
         sizes_str = ", ".join(f"{w}x{h}({len(idxs)})" for (w, h), idxs in
                               sorted(self.resolution_buckets.items(), key=lambda x: -len(x[1]))[:8])
-        print(f"  {n_buckets} resolution buckets (top: {sizes_str})")
+        print(f"  {len(video_to_indices)} videos → {n_buckets} resolution buckets (top: {sizes_str})")
         if n_read_errors:
-            print(f"  WARNING: {n_read_errors} frames failed header read, using fallback dims")
+            print(f"  WARNING: {n_read_errors} videos failed header read, using fallback dims")
 
     @staticmethod
     def _compute_target_size(orig_w: int, orig_h: int, pixel_limit: int = 255000,
