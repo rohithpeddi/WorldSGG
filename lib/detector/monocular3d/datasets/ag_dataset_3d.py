@@ -83,7 +83,7 @@ class ActionGenomeDataset3D(Dataset):
             filter_small_box: bool = False,
             pixel_limit: int = 255000,
             target_size: Optional[int] = None,
-            world_3d_annotations_path: Optional[str] = "/data/rohith/ag/world_annotations/bbox_annotations_3d_obb_camera_intrinsics",
+            world_3d_annotations_path: Optional[str] = "/data/rohith/ag/world_annotations/monocular3d_bbox_annotations",
     ):
         self.data_path = data_path
         self.phase = phase
