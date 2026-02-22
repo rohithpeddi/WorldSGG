@@ -63,7 +63,7 @@ class DummyAccelerator:
         """Move models to GPU, pass other objects through unchanged."""
         out = []
         for obj in args:
-            if isinstance(obj, nn.Module):
+            if isinstance(obj, torch.nn.Module):
                 out.append(obj.to(self.device))
             else:
                 out.append(obj)
