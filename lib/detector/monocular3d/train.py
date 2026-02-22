@@ -52,14 +52,29 @@ def build_parser() -> argparse.ArgumentParser:
     # Dynamically add every TrainConfig field as an optional CLI argument
     for f in dataclass_fields(TrainConfig):
         arg_name = f"--{f.name}"
-        if f.type is bool:
+        field_type = f.type
+
+        # Handle Optional types (e.g., Optional[int] shows as typing.Optional[int])
+        origin = getattr(field_type, "__origin__", None)
+        type_args = getattr(field_type, "__args__", ())
+
+        # Check if it's Optional[X] (Union[X, None])
+        is_optional = False
+        inner_type = field_type
+        if origin is not None and type(None) in type_args:
+            is_optional = True
+            # Get the non-None type
+            inner_type = next((t for t in type_args if t is not type(None)), str)
+
+        if inner_type is bool:
             # Booleans: support --flag / --no-flag
             parser.add_argument(arg_name, type=_str_to_bool, default=None,
                                 help=f"(bool) Override '{f.name}'")
-        elif f.type is int or f.type == "int":
-            parser.add_argument(arg_name, type=int, default=None,
-                                help=f"(int) Override '{f.name}'")
-        elif f.type is float or f.type == "float":
+        elif inner_type is int or inner_type == "int":
+            parser.add_argument(arg_name, type=lambda v: None if v.lower() == "null" else int(v),
+                                default=None,
+                                help=f"(int{', optional' if is_optional else ''}) Override '{f.name}'")
+        elif inner_type is float or inner_type == "float":
             parser.add_argument(arg_name, type=float, default=None,
                                 help=f"(float) Override '{f.name}'")
         else:

@@ -20,6 +20,31 @@ except ImportError:
 from ..constants import Constants as const
 
 
+# ---------------------------------------------------------------------------
+# Numpy version compatibility (pkl saved with numpy 2.x, loaded on 1.x)
+# ---------------------------------------------------------------------------
+class _NumpyCompatUnpickler(pickle.Unpickler):
+    """Handle numpy 2.x pickles on numpy 1.x (numpy._core -> numpy.core)."""
+
+    def find_class(self, module: str, name: str):
+        if module.startswith("numpy._core"):
+            module = module.replace("numpy._core", "numpy.core", 1)
+        return super().find_class(module, name)
+
+
+def _load_pkl_compat(path):
+    """Load a pickle file with numpy version compatibility."""
+    with open(path, "rb") as f:
+        try:
+            return pickle.load(f)
+        except ModuleNotFoundError:
+            f.seek(0)
+            return _NumpyCompatUnpickler(f).load()
+
+
+# ---------------------------------------------------------------------------
+# Helper: extract 8x3 corners from a frame object
+# ---------------------------------------------------------------------------
 def _get_corners_world(frame_object: dict) -> Optional[np.ndarray]:
     """Get 8x3 corners from a frame object. Supports aabb_floor_aligned or obb_camera (top-level corners_world)."""
     # Format 1: aabb_floor_aligned["corners_world"]
@@ -34,14 +59,19 @@ def _get_corners_world(frame_object: dict) -> Optional[np.ndarray]:
         arr = np.array(frame_object["corners_world"], dtype=np.float32)
         if arr.shape == (8, 3):
             return arr
+    # Format 3: obb_corners_final (camera-frame OBB)
+    if "obb_corners_final" in frame_object:
+        arr = np.array(frame_object["obb_corners_final"], dtype=np.float32)
+        if arr.shape == (8, 3):
+            return arr
     return None
 
 
 class ActionGenomeDataset3D(Dataset):
     """
-    Action Genome dataset with direct resize to target_size x target_size.
+    Action Genome dataset with Pi3-compatible image resizing.
     Frames and 2D annotations come from data_path (Action Genome). 3D GT for the loss
-    comes from pkl files (folder of per-video .pkl).
+    comes from pkl files (folder of per-video .pkl) that include camera intrinsics.
     """
 
     def __init__(
@@ -53,7 +83,7 @@ class ActionGenomeDataset3D(Dataset):
             filter_small_box: bool = False,
             pixel_limit: int = 255000,
             target_size: Optional[int] = None,
-            world_3d_annotations_path: Optional[str] = "/data/rohith/ag/world_annotations/bbox_annotations_3d_obb_camera",
+            world_3d_annotations_path: Optional[str] = "/data/rohith/ag/world_annotations/bbox_annotations_3d_obb_camera_intrinsics",
     ):
         self.data_path = data_path
         self.phase = phase
@@ -110,6 +140,9 @@ class ActionGenomeDataset3D(Dataset):
         self.valid_nums = 0
         self.non_gt_human_nums = 0
 
+        # Per-video intrinsics lookup: video_id (no ext) -> {fx, fy, cx, cy}
+        self.video_intrinsics: Dict[str, Dict[str, float]] = {}
+
         # 2D boxes
         for frame_name in self.person_bbox.keys():
             if self.object_bbox[frame_name][0][const.METADATA][const.SET] != self.phase:
@@ -149,23 +182,35 @@ class ActionGenomeDataset3D(Dataset):
                         if not name.endswith('.pkl'):
                             continue
                         with zf.open(name, 'r') as f:
-                            yield os.path.basename(name), pickle.load(f)
+                            yield os.path.basename(name), _NumpyCompatUnpickler(f).load()
             elif os.path.isdir(self.world_3d_annotations):
                 for video_file in os.listdir(self.world_3d_annotations):
                     if not video_file.endswith('.pkl'):
                         continue
                     path = os.path.join(self.world_3d_annotations, video_file)
-                    with open(path, 'rb') as f:
-                        yield video_file, pickle.load(f)
+                    yield video_file, _load_pkl_compat(path)
             else:
                 return
 
         if not (self.world_3d_annotations.lower().endswith('.zip') and os.path.isfile(self.world_3d_annotations)) and not os.path.isdir(self.world_3d_annotations):
             print(f"3D pkl folder/zip not found: {self.world_3d_annotations} — 3D loss GT will be zeros.")
         else:
+            n_intrinsics_loaded = 0
             for video_file, video_3d_data in _iter_3d_pkls():
                 video_id_raw = video_3d_data.get("video_id", video_file.replace(".pkl", ""))
                 video_id = video_id_raw.replace(".mp4", "") if isinstance(video_id_raw, str) else str(video_id_raw)
+
+                # --- Extract per-video intrinsics ---
+                intrinsics = video_3d_data.get("intrinsics", None)
+                if intrinsics is not None:
+                    self.video_intrinsics[video_id] = {
+                        "fx": float(intrinsics.get("fx", 500.0)),
+                        "fy": float(intrinsics.get("fy", 500.0)),
+                        "cx": float(intrinsics.get("cx", 0.0)),
+                        "cy": float(intrinsics.get("cy", 0.0)),
+                    }
+                    n_intrinsics_loaded += 1
+
                 bbox_frames = video_3d_data.get("frames_final", {}).get("bbox_frames", {})
 
                 for frame_name in bbox_frames.keys():
@@ -194,6 +239,8 @@ class ActionGenomeDataset3D(Dataset):
                         self.samples[video_frame_name]["person_boxes_3d"] = frame_person_3d_bboxes
                         self.samples[video_frame_name]["object_boxes_3d"] = frame_object_3d_bboxes
 
+            print(f"Loaded intrinsics for {n_intrinsics_loaded} videos")
+
         # Build indexable list of frame names
         self.frame_names: List[str] = sorted(self.samples.keys())
 
@@ -201,7 +248,7 @@ class ActionGenomeDataset3D(Dataset):
     def _compute_target_size(orig_w: int, orig_h: int, pixel_limit: int = 255000) -> Tuple[int, int]:
         """
         Compute annotation-consistent target size.
-        Matches the scaling logic used during 3D annotation generation:
+        Matches the scaling logic used during 3D annotation generation (Pi3):
         aspect-ratio preserving, dimensions rounded to multiples of 14 (DINOv2 patch size),
         total pixels ≤ pixel_limit.
         """
@@ -232,7 +279,7 @@ class ActionGenomeDataset3D(Dataset):
             pil_image = Image.open(img_path).convert('RGB')
             orig_w, orig_h = pil_image.size
 
-        # Compute target size using the same logic as annotation generation
+        # Compute target size using the same logic as Pi3
         if self.target_size is not None:
             # Legacy: force square resize
             target_w, target_h = self.target_size, self.target_size
@@ -304,11 +351,31 @@ class ActionGenomeDataset3D(Dataset):
                 else:
                     boxes_3d.append(np.zeros((8, 3), dtype=np.float32))
 
+        # --- Intrinsics (scaled to match resized image) ---
+        # Extract video_id from frame_name: "VIDEO_ID/FRAME.png" -> "VIDEO_ID"
+        video_id = frame_name.split("/")[0] if "/" in frame_name else ""
+        vid_intr = self.video_intrinsics.get(video_id, None)
+
+        if vid_intr is not None:
+            # Scale intrinsics by the same resize ratio as the image
+            fx_scaled = vid_intr["fx"] * scale_x
+            fy_scaled = vid_intr["fy"] * scale_y
+            cx_scaled = vid_intr["cx"] * scale_x
+            cy_scaled = vid_intr["cy"] * scale_y
+        else:
+            # Fallback: Pi3-style heuristic (focal = max dim, principal point = center)
+            fx_scaled = float(max(target_w, target_h))
+            fy_scaled = fx_scaled
+            cx_scaled = target_w / 2.0
+            cy_scaled = target_h / 2.0
+
         target = {
             'boxes': torch.tensor(boxes, dtype=torch.float32) if boxes else torch.empty((0, 4), dtype=torch.float32),
             'labels': torch.tensor(labels, dtype=torch.int64) if labels else torch.empty((0,), dtype=torch.int64),
             'boxes_3d': torch.tensor(np.array(boxes_3d), dtype=torch.float32) if boxes_3d else torch.empty((0, 8, 3),
                                                                                                            dtype=torch.float32),
+            'focal_lengths': torch.tensor([fx_scaled, fy_scaled], dtype=torch.float32),
+            'principal_point': torch.tensor([cx_scaled, cy_scaled], dtype=torch.float32),
         }
 
         return img_chw, target

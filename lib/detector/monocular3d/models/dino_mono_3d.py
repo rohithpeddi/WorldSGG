@@ -43,8 +43,8 @@ class FactorizedMonocular3DHead(nn.Module):
         reduced_channels = 128 * 7 * 7  # 6272
         
         # 2. FC Layers
-        # Input: Features + Camera Intrinsics (2: fx, fy) + 2D BBox (4: x1, y1, x2, y2)
-        self.fc1 = nn.Linear(reduced_channels + 6, representation_size) 
+        # Input: Features + Camera Intrinsics (4: fx, fy, cx, cy) + 2D BBox (4: x1, y1, x2, y2)
+        self.fc1 = nn.Linear(reduced_channels + 8, representation_size) 
         self.fc2 = nn.Linear(representation_size, representation_size)
         
         # 3. Disentangled Heads
@@ -54,14 +54,20 @@ class FactorizedMonocular3DHead(nn.Module):
         self.center_offset_pred = nn.Linear(representation_size, 2) # du, dv
         self.mu_pred = nn.Linear(representation_size, 1)           # uncertainty
 
-    def forward(self, x, bbox_2d, camera_focal_lengths):
+    def forward(self, x, bbox_2d, camera_intrinsics):
+        """
+        Args:
+            x: (N, C, 14, 14) ROI features
+            bbox_2d: (N, 4) - x1, y1, x2, y2
+            camera_intrinsics: (N, 4) - fx, fy, cx, cy
+        """
         # x: (N, C, 14, 14)
         x = self.conv_reduce(x)
         x = x.flatten(start_dim=1) # (N, 6272)
         
         # Concatenate geometric context
-        # bbox_2d: (N, 4), camera_focal_lengths: (N, 2)
-        x = torch.cat([x, bbox_2d, camera_focal_lengths], dim=1)
+        # bbox_2d: (N, 4), camera_intrinsics: (N, 4) = [fx, fy, cx, cy]
+        x = torch.cat([x, bbox_2d, camera_intrinsics], dim=1)
         
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
@@ -76,20 +82,25 @@ class FactorizedMonocular3DHead(nn.Module):
         # Normalize rotation
         rot_sin_cos = F.normalize(rot_sin_cos, p=2, dim=1)
         
-        # Compute corners
-        bbox_3d = self.compute_3d_corners(dims, rot_sin_cos, depth, center_offset, bbox_2d, camera_focal_lengths)
+        # Compute corners using real intrinsics
+        focal_lengths = camera_intrinsics[:, :2]    # (N, 2) -> fx, fy
+        principal_point = camera_intrinsics[:, 2:]   # (N, 2) -> cx, cy
+        bbox_3d = self.compute_3d_corners(dims, rot_sin_cos, depth, center_offset, bbox_2d, focal_lengths, principal_point)
         
         return bbox_3d, mu
 
-    def compute_3d_corners(self, dims, rot_sin_cos, depth, center_offset, bbox_2d, focal_lengths):
+    def compute_3d_corners(self, dims, rot_sin_cos, depth, center_offset, bbox_2d, focal_lengths, principal_point):
         """
-        Reconstruct 8 corners from factorized parameters.
-        dims: (N, 3) - l, w, h
-        rot_sin_cos: (N, 2) - sin(theta), cos(theta)
-        depth: (N, 1) - z
-        center_offset: (N, 2) - du, dv (pixels)
-        bbox_2d: (N, 4) - x1, y1, x2, y2
-        focal_lengths: (N, 2) - fx, fy
+        Reconstruct 8 corners from factorized parameters using proper pinhole back-projection.
+
+        Args:
+            dims: (N, 3) - l, w, h
+            rot_sin_cos: (N, 2) - sin(theta), cos(theta)
+            depth: (N, 1) - z
+            center_offset: (N, 2) - du, dv (pixels)
+            bbox_2d: (N, 4) - x1, y1, x2, y2
+            focal_lengths: (N, 2) - fx, fy
+            principal_point: (N, 2) - cx, cy (from camera calibration)
         """
         N = dims.shape[0]
         
@@ -97,114 +108,38 @@ class FactorizedMonocular3DHead(nn.Module):
         cx_2d = (bbox_2d[:, 0] + bbox_2d[:, 2]) / 2.0
         cy_2d = (bbox_2d[:, 1] + bbox_2d[:, 3]) / 2.0
         
-        cx_2d = cx_2d + center_offset[:, 0]
-        cy_2d = cy_2d + center_offset[:, 1]
+        u_final = cx_2d + center_offset[:, 0]
+        v_final = cy_2d + center_offset[:, 1]
         
-        # 2. Back-project to 3D Center (Approximate, assuming principal point at center of ROI/Image? 
-        # Actually standard pinhole: X = (u - cx_img) * Z / fx. 
-        # We don't have cx_img (principal point) passed in currently. 
-        # For simplicity in this "lifting" head, we often just model the offset relative to box center.)
-        # Let's assume the network learns the offset in metric 3D space directly or pixel space.
-        # The prompt says "2D Center Offset (Delta u, Delta v)".
-        
-        # We need specific implementation to go from (u, v, z) -> (X, Y, Z).
-        # Without principal point (px, py), we can assume it's centered or learned.
-        # Simplified: We predict X, Y directly? Or use back-projection logic.
-        # Given "center_offset_pred" is 2D, let's stick to the prompt's implication.
-        
-        # For the purpose of providing 8 corners to the loss function, 
-        # we can construct the box in local frame and rotate/translate it.
-        
-        # Local corners (N, 8, 3)
+        # 2. Local corners (N, 8, 3)
         l, w, h = dims[:, 0], dims[:, 1], dims[:, 2]
         x_corners = torch.stack([l/2, l/2, -l/2, -l/2, l/2, l/2, -l/2, -l/2], dim=1)
-        y_corners = torch.stack([w/2, -w/2, -w/2, w/2, w/2, -w/2, -w/2, w/2], dim=1) # Width is usually Y or X depending on convention
+        y_corners = torch.stack([w/2, -w/2, -w/2, w/2, w/2, -w/2, -w/2, w/2], dim=1)
         z_corners = torch.stack([h/2, h/2, h/2, h/2, -h/2, -h/2, -h/2, -h/2], dim=1)
         
-        # Rotate
-        # rot_sin_cos is (sin, cos) of yaw. 
-        # R_y (if Y is up) or R_z (if Z is up). 
-        # Dataset conventions: Action Genome typically Y-down, Z-forward? Or Z-up?
-        # OVMono3D loss assumes: "yaw r in xy-plane". So Rotation around Z.
+        # 3. Rotate (yaw in xy-plane, consistent with OVMono3D loss)
         sin, cos = rot_sin_cos[:, 0:1], rot_sin_cos[:, 1:2]
-        
-        # x' = x cos - y sin
-        # y' = x sin + y cos
         x_rot = x_corners * cos - y_corners * sin
         y_rot = x_corners * sin + y_corners * cos
         z_rot = z_corners
         
-        # Translate
-        # We need (X, Y, Z) of the center.
-        # Z is predicted directly: `depth`.
-        # X, Y are derived from (cx_2d, cy_2d, depth) via intrinsics.
-        # X = (cx_2d - principal_point_x) * Z / fx
-        # We don't have principal point. Let's assume the model learns X/Y directly if we don't give it to it?
-        # Or, we just use the provided `center_offset` as a proxy for X/Y adjustment?
-        # The prompt says: "The 3D center rarely aligns perfectly with the center of the 2D bounding box".
-        # This implies we use the 2D center to back-project.
+        # 4. Back-project 2D center to 3D using real intrinsics
+        #    Standard pinhole: X = (u - cx) * Z / fx,  Y = (v - cy) * Z / fy
+        z_c = depth  # (N, 1)
+        px = principal_point[:, 0:1]  # (N, 1)
+        py = principal_point[:, 1:2]  # (N, 1)
+        fx = focal_lengths[:, 0:1]    # (N, 1)
+        fy = focal_lengths[:, 1:2]    # (N, 1)
         
-        # Let's approximate principal point as image center (or roi center? no, must be image center).
-        # We don't have image size passed in here easily either. 
-        # Assuming normalized coordinates or relying on the network to compensate.
-        # Let's try to backproject using the 2D center of the *box* + offset.
-        # Principal point approx: 0 if we assume centered coords? No, inputs are pixels.
+        x_c = (u_final.unsqueeze(1) - px) * z_c / fx
+        y_c = (v_final.unsqueeze(1) - py) * z_c / fy
         
-        # Let's proceed with a standard approximation:
-        # X = (cx_2d - W/2) * Z / fx 
-        # Y = (cy_2d - H/2) * Z / fy
-        # But we don't have W, H.
+        # 5. Translate: add 3D center to rotated local corners
+        x_world = x_rot + x_c
+        y_world = y_rot + y_c
+        z_world = z_rot + z_c
         
-        # Alternative: The "offset" is learned in 3D meters directly?
-        # "self.center_offset_pred = nn.Linear(..., 2)" -> (Delta X, Delta Y) meters?
-        # If so:
-        # X = (bbox_2d center x - W/2)/fx * Z + delta_x?
-        
-        # Decision: Use the `center_offset` as (Delta X, Delta Y) in 3D metric space relative to the back-projected 2D box center.
-        # We will assume a principal point of (0,0) for the projection math if we center inputs, 
-        # or just assume the model absorbs the principal point offset into the bias if constant.
-        
-        # Simplest valid implementation for "lifting":
-        # 1. Backproject 2D box center to 3D at depth Z.
-        #    X_c = (cx_2d - 512) * Z / fx  (Assuming 1024/2 = 512 principal point)
-        #    Y_c = (cy_2d - 512) * Z / fy
-        # 2. Add predicted 3D offset (model corrects the alignment).
-        
-        # Since we are training end-to-end, the network will learn to predict the correct 3D center 
-        # regardless of our exact projection logic, provided it's consistent.
-        
-        # Let's use a "Local Ray" approach.
-        # We'll just define the center X, Y, Z.
-        z_c = depth
-        
-        # Use a fixed principal point assumption (e.g. 512, 512 for 1024x1024) if not provided.
-        # Ideally this should be passed in. We'll assume image center for now.
-        # Actually, let's just make the offset be the *entire* X, Y coordinate if we want to be safe, 
-        # but that ignores the 2D box cue.
-        
-        # Let's try to make the offset be strictly 2D pixels (u, v) as the name suggests.
-        # u_final = cx_box + offset_u
-        # v_final = cy_box + offset_v
-        # X = (u_final - px) * Z / fx
-        # Y = (v_final - py) * Z / fy
-        
-        # We'll assume px=py=image_size/2. But we don't know image size here (it varies? no, fixed now).
-        # We set target_size=1024. So px=512.
-        
-        pp = 512.0
-        
-        u_final = cx_2d # center_offset is already added above
-        v_final = cy_2d
-        
-        x_c = (u_final - pp) * z_c / focal_lengths[:, 0:1]
-        y_c = (v_final - pp) * z_c / focal_lengths[:, 1:2]
-        
-        # Add center to corners
-        x_world = x_rot + x_c.unsqueeze(1)
-        y_world = y_rot + y_c.unsqueeze(1)
-        z_world = z_rot + z_c.unsqueeze(1)
-        
-        corners_3d = torch.stack([x_world, y_world, z_world], dim=-1) # (N, 8, 3)
+        corners_3d = torch.stack([x_world, y_world, z_world], dim=-1)  # (N, 8, 3)
         return corners_3d
 
 
@@ -440,37 +375,24 @@ class DinoV2Monocular3D(nn.Module):
         self.rpn = self.base_detector.rpn
         self.roi_heads = self.base_detector.roi_heads
         
-        # FIX #4: Disable dynamic image resizing
-        # We enforce fixed 1024x1024 (or whatever target_size is passed in dataset)
-        # by setting min/max size to a large fixed value or expected value.
-        # Ideally, we should receive this as arg, but let's assume 1024 for now or 
-        # just rely on the dataset to provide correct size and disable internal resizing.
-        # Setting min=800, max=1333 is default. 
-        # We override to avoid ANY resizing if we trust the dataset.
-        # If dataset yields 1024x1024, set both to 1024.
-        self.target_size_config = 1024 # Should match dataset
+        # Image transform: normalize only, no resizing (dataset already resizes to Pi3-compatible dims).
+        # Use large min/max to avoid any internal resizing by GeneralizedRCNNTransform.
         self.transform = GeneralizedRCNNTransform(
-            min_size=self.target_size_config,
-            max_size=self.target_size_config,
-            image_mean=[0.485, 0.456, 0.406], # DINOv2 mean
-            image_std=[0.229, 0.224, 0.225], # DINOv2 std
-            fixed_size=(self.target_size_config, self.target_size_config) # Torchvision > 0.18 ?? 
-            # If fixed_size argument isn't available in this version, min/max works
+            min_size=1,
+            max_size=2048,
+            image_mean=[0.485, 0.456, 0.406],  # DINOv2 mean
+            image_std=[0.229, 0.224, 0.225],   # DINOv2 std
         )
-        # Force the existing transform if needed, but creating new one is safer 
-        # to ensure params are correct.
         
         # 3D Head components
-        # FIX #5: Increase ROI resolution to 14x14
         self.roi_pooler_3d = torchvision.ops.MultiScaleRoIAlign(
             featmap_names=['p2', 'p3', 'p4', 'p5'],
             output_size=14,
             sampling_ratio=2
         )
 
-        # Input channels to head: 256 (FPN output) -> FactorizedHead reduces this
+        # Input channels to head: 256 (FPN output)
         in_channels = 256
-        # FIX #1 & #6: Factorized Head
         self.head_3d = FactorizedMonocular3DHead(in_channels)
 
     def forward(self, images, targets=None):
@@ -498,30 +420,27 @@ class DinoV2Monocular3D(nn.Module):
         losses_3d = {}
 
         if self.training:
-            # FIX #2: Proposal-based training
-            # Instead of using GT boxes directly, we match RPN proposals to GT
-            
-            # targets contains 'boxes' (GT 2D), 'boxes_3d' (GT 3D)
-            # proposals is list of tensors (N_prop, 4)
+            # Proposal-based training: match RPN proposals to GT
+            # targets contains 'boxes' (GT 2D), 'boxes_3d' (GT 3D),
+            #   'focal_lengths' (2,), 'principal_point' (2,)
             
             final_proposals_3d = []
             final_gt_3d = []
             final_gt_2d_for_context = []
+            final_intrinsics = []  # (N, 4) -> [fx, fy, cx, cy]
             
             for i in range(len(proposals)):
-                prop = proposals[i] # (N_p, 4)
-                gt_box = targets[i]['boxes'] # (N_g, 4)
-                gt_3d = targets[i]['boxes_3d'] # (N_g, 8, 3)
+                prop = proposals[i]  # (N_p, 4)
+                gt_box = targets[i]['boxes']  # (N_g, 4)
+                gt_3d = targets[i]['boxes_3d']  # (N_g, 8, 3)
                 
                 # Match proposals to GT
                 if len(gt_box) == 0 or len(prop) == 0:
                     continue
                     
-                ious = torchvision.ops.box_iou(prop, gt_box) # (N_p, N_g)
-                # For each proposal, find best GT
+                ious = torchvision.ops.box_iou(prop, gt_box)  # (N_p, N_g)
                 val, idx = ious.max(dim=1)
                 
-                # Filter IoU > 0.5
                 mask = val >= 0.5
                 valid_props = prop[mask]
                 matched_gt_indices = idx[mask]
@@ -529,63 +448,62 @@ class DinoV2Monocular3D(nn.Module):
                 if len(valid_props) == 0:
                     continue
                 
-                # Subsample if too many? (Optional, standard R-CNN does it)
-                
-                matched_gt_3d = gt_3d[matched_gt_indices] # (K, 8, 3)
+                matched_gt_3d = gt_3d[matched_gt_indices]  # (K, 8, 3)
                 
                 final_proposals_3d.append(valid_props)
                 final_gt_3d.append(matched_gt_3d)
-                # For context, we pass the PROPOSAL as the "2D BBox" input to the network,
-                # because at inference time we only have the proposal/detection.
-                final_gt_2d_for_context.append(valid_props) 
+                final_gt_2d_for_context.append(valid_props)
+                
+                # Per-image intrinsics: expand to match number of valid proposals
+                fl = targets[i].get('focal_lengths', torch.tensor([500.0, 500.0], device=prop.device))
+                pp = targets[i].get('principal_point', torch.tensor([0.0, 0.0], device=prop.device))
+                intr = torch.cat([fl, pp], dim=0)  # (4,)
+                final_intrinsics.append(intr.unsqueeze(0).expand(len(valid_props), -1))
 
             if len(final_proposals_3d) > 0:
-                # ROI Align on proposals
                 box_features = self.roi_pooler_3d(features, final_proposals_3d, images.image_sizes)
                 
-                # Prepare inputs for head
-                # valid_props are concatenated
-                cat_bboxes = torch.cat(final_gt_2d_for_context, dim=0) # (Total_N, 4)
+                cat_bboxes = torch.cat(final_gt_2d_for_context, dim=0)  # (Total_N, 4)
                 cat_gt_3d = torch.cat(final_gt_3d, dim=0)
+                cat_intrinsics = torch.cat(final_intrinsics, dim=0)  # (Total_N, 4)
                 
-                # Camera intrinsics (Default 500.0)
-                focal_lengths = torch.tensor([[500.0, 500.0]], device=features['p2'].device).repeat(cat_bboxes.shape[0], 1)
-                
-                pred_3d, pred_mu = self.head_3d(box_features, cat_bboxes, focal_lengths)
+                pred_3d, pred_mu = self.head_3d(box_features, cat_bboxes, cat_intrinsics)
                 
                 loss_3d, _l3d, _chamfer = ovmono3d_loss(
                     pred_3d.view(-1, 24), cat_gt_3d, pred_mu, use_smooth_l1=True
                 )
                 losses_3d = {'loss_3d': loss_3d}
             else:
-                 # No valid proposals match GT => 0 loss
-                 losses_3d = {'loss_3d': torch.tensor(0.0, device=features['p2'].device, requires_grad=True)}
+                losses_3d = {'loss_3d': torch.tensor(0.0, device=features['p2'].device, requires_grad=True)}
 
         else:
             # Inference
-            # Use final detections from ROI heads
             pred_boxes = [d['boxes'] for d in detections]
             
             if all(len(b) == 0 for b in pred_boxes):
                 for d in detections:
                     d['boxes_3d'] = torch.empty((0, 8, 3), device=d['boxes'].device)
             else:
-                focal_lengths_list = []
+                intrinsics_list = []
                 for i in range(len(pred_boxes)):
-                     N_det = len(pred_boxes[i])
-                     focal_lengths_list.append(
-                         torch.tensor([[500.0, 500.0]], device=pred_boxes[i].device).repeat(N_det, 1)
-                     )
+                    N_det = len(pred_boxes[i])
+                    if targets is not None and i < len(targets):
+                        fl = targets[i].get('focal_lengths', torch.tensor([500.0, 500.0], device=pred_boxes[i].device))
+                        pp = targets[i].get('principal_point', torch.tensor([0.0, 0.0], device=pred_boxes[i].device))
+                    else:
+                        fl = torch.tensor([500.0, 500.0], device=pred_boxes[i].device)
+                        pp = torch.tensor([0.0, 0.0], device=pred_boxes[i].device)
+                    intr = torch.cat([fl, pp], dim=0)  # (4,)
+                    intrinsics_list.append(intr.unsqueeze(0).expand(N_det, -1))
                      
                 with torch.no_grad():
                     box_features = self.roi_pooler_3d(features, pred_boxes, images.image_sizes)
                     
                     cat_boxes = torch.cat(pred_boxes, dim=0)
-                    cat_focal = torch.cat(focal_lengths_list, dim=0)
+                    cat_intrinsics = torch.cat(intrinsics_list, dim=0)
                     
-                    pred_3d, _ = self.head_3d(box_features, cat_boxes, cat_focal)
+                    pred_3d, _ = self.head_3d(box_features, cat_boxes, cat_intrinsics)
                     
-                # Split predictions back
                 boxes_per_image = [len(b) for b in pred_boxes]
                 pred_3d_split = pred_3d.split(boxes_per_image)
                 for i, d in enumerate(detections):

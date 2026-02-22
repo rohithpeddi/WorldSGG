@@ -169,7 +169,8 @@ class TrainConfig:
     persistent_workers: bool = True
 
     # Image
-    target_size: int = 1024
+    target_size: Optional[int] = None  # None = use pixel_limit (Pi3-compatible); int = force square resize
+    pixel_limit: int = 255000          # Pi3's PIXEL_LIMIT for aspect-ratio-preserving resize
 
     # Subsets
     train_subset_size: int = 180000
@@ -251,7 +252,11 @@ class DinoAGTrainer3D:
             )
 
     def build_datasets(self) -> None:
-        kwargs = {"phase": "train", "target_size": self.cfg.target_size}
+        kwargs = {
+            "phase": "train",
+            "target_size": self.cfg.target_size,
+            "pixel_limit": self.cfg.pixel_limit,
+        }
         if self.cfg.world_3d_annotations_path is not None:
             kwargs["world_3d_annotations_path"] = self.cfg.world_3d_annotations_path
         self.train_dataset = ActionGenomeDataset3D(self.cfg.data_path, **kwargs)
