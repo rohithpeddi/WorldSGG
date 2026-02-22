@@ -152,44 +152,6 @@ class FactorizedMonocular3DHead(nn.Module):
         return corners_3d
 
 
-class ConvAdapter(nn.Module):
-    """
-    Trainable convolutional adapter layers placed after frozen backbone.
-    Adapts features for better object detection before RPN.
-    """
-
-    def __init__(self, in_channels=768, num_levels=4, num_layers=2):
-        super().__init__()
-        self.in_channels = in_channels
-
-        # Create adapter layers for each feature level
-        self.adapters = nn.ModuleDict()
-        for i in range(num_levels):
-            layers = []
-            for layer_idx in range(num_layers):
-                if layer_idx == 0:
-                    # First layer: 3x3 conv for spatial adaptation
-                    layers.append(nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False))
-                else:
-                    # Subsequent layers: 1x1 conv for channel mixing
-                    layers.append(nn.Conv2d(in_channels, in_channels, kernel_size=1, bias=False))
-
-                layers.append(nn.BatchNorm2d(in_channels))
-                layers.append(nn.ReLU(inplace=True))
-
-            self.adapters[f'level_{i}'] = nn.Sequential(*layers)
-
-    def forward(self, features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Apply conv adapters to backbone features with residual connection."""
-        adapted_features = {}
-        for level, feat in features.items():
-            level_idx = int(level)
-            adapter = self.adapters[f'level_{level_idx}']
-            # Residual connection: helps preserve frozen backbone features
-            adapted_features[level] = feat + 0.5 * adapter(feat)
-        return adapted_features
-
-
 class LastLevelMaxPool(nn.Module):
     """Pooling to create p6 feature map (for larger object detection)."""
 

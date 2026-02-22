@@ -204,7 +204,6 @@ def evaluate_2d_coco_map(
     dataloader,
     device,
     accelerator=None,
-    frame_batch_size: int = 10,
     iou_thresholds: Optional[List[float]] = None,
 ) -> Dict[str, Any]:
     """
@@ -215,7 +214,6 @@ def evaluate_2d_coco_map(
         dataloader: DataLoader yielding (images, targets).
         device: torch.device for inference.
         accelerator: Optional accelerator (multi-GPU). If set and not main, returns {}.
-        frame_batch_size: Sub-batch size for inference within a dataloader batch.
         iou_thresholds: IoU thresholds for mAP. None = COCO default [0.5:0.95:0.05].
 
     Returns:
@@ -236,35 +234,29 @@ def evaluate_2d_coco_map(
 
     with torch.no_grad():
         for images, targets in tqdm(dataloader, desc="2D COCO mAP", ascii=True):
-            total_frames = len(images)
+            # images is already a list of tensors from the DataLoader batch
+            batch_images = torch.stack(images).to(device)
+            outputs = model(batch_images)
 
-            for start_idx in range(0, total_frames, frame_batch_size):
-                end_idx = min(start_idx + frame_batch_size, total_frames)
-                batch_frames = images[start_idx:end_idx]
+            preds, gts = [], []
+            for output in outputs:
+                preds.append({
+                    "boxes": output["boxes"].detach().cpu(),
+                    "scores": output["scores"].detach().cpu(),
+                    "labels": output["labels"].detach().cpu(),
+                })
 
-                batch_images = torch.stack(batch_frames).to(device)
-                outputs = model(batch_images)
+            for t in targets:
+                gts.append({
+                    "boxes": t["boxes"].detach().cpu(),
+                    "labels": t["labels"].detach().cpu(),
+                })
 
-                preds, gts = [], []
+            min_len = min(len(preds), len(gts))
+            if min_len > 0:
+                map_metric.update(preds[:min_len], gts[:min_len])
 
-                for output in outputs:
-                    preds.append({
-                        "boxes": output["boxes"].detach().cpu(),
-                        "scores": output["scores"].detach().cpu(),
-                        "labels": output["labels"].detach().cpu(),
-                    })
-
-                for i in range(start_idx, end_idx):
-                    gts.append({
-                        "boxes": targets[i]["boxes"].detach().cpu(),
-                        "labels": targets[i]["labels"].detach().cpu(),
-                    })
-
-                min_len = min(len(preds), len(gts))
-                if min_len > 0:
-                    map_metric.update(preds[:min_len], gts[:min_len])
-
-                clear_cuda_cache_for_current_process(sync=False)
+            del batch_images, outputs, preds, gts
 
     if accelerator is not None and not accelerator.is_main_process:
         return {}

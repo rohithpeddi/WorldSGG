@@ -553,7 +553,8 @@ class DinoAGTrainer3D:
         return out
 
     def evaluate_map_coco(self) -> Dict[str, Any]:
-        """COCO-style 2D mAP using the self-contained evaluate_2d_coco_map."""
+        """COCO-style 2D mAP using the self-contained evaluate_2d_coco_map.
+        Uses the full test set for accurate end-of-epoch evaluation."""
         self.model.eval()
         accelerator_arg = self.accelerator if self.cfg.use_accelerator else None
         with torch.no_grad():
