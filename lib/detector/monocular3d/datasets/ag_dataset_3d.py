@@ -4,10 +4,12 @@ import pickle
 import zipfile
 from typing import Tuple, List, Dict, Optional
 
+import random
+
 import numpy as np
 import torch
 import torchvision.transforms.functional as TF
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from transformers import AutoImageProcessor
 
 try:
@@ -244,6 +246,14 @@ class ActionGenomeDataset3D(Dataset):
         # Build indexable list of frame names
         self.frame_names: List[str] = sorted(self.samples.keys())
 
+        # Group frame indices by video_id (all frames in a video share the same resolution)
+        self.video_groups: Dict[str, List[int]] = {}
+        for idx, frame_name in enumerate(self.frame_names):
+            video_id = frame_name.split("/")[0] if "/" in frame_name else "__unknown__"
+            self.video_groups.setdefault(video_id, []).append(idx)
+
+        print(f"  Grouped frames into {len(self.video_groups)} videos")
+
     @staticmethod
     def _compute_target_size(orig_w: int, orig_h: int, pixel_limit: int = 255000) -> Tuple[int, int]:
         """
@@ -379,6 +389,34 @@ class ActionGenomeDataset3D(Dataset):
         }
 
         return img_chw, target
+
+
+class VideoGroupedBatchSampler(Sampler):
+    """
+    Batch sampler that yields ALL frames from a single video as one batch.
+    Each batch = 1 video, guaranteeing all images share the same resolution
+    (since Pi3 resizes all frames of a video identically).
+
+    Each epoch: videos are shuffled, then each video's frames are shuffled.
+    """
+
+    def __init__(self, video_groups: Dict[str, List[int]], drop_last: bool = False):
+        self.video_groups = video_groups
+        self.drop_last = drop_last
+
+    def __iter__(self):
+        video_ids = list(self.video_groups.keys())
+        random.shuffle(video_ids)
+
+        for vid in video_ids:
+            indices = list(self.video_groups[vid])
+            random.shuffle(indices)
+            if self.drop_last and len(indices) == 0:
+                continue
+            yield indices
+
+    def __len__(self):
+        return len(self.video_groups)
 
 
 def collate_fn(batch):

@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.lines import Line2D
 
-from .datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
+from .datasets.ag_dataset_3d import ActionGenomeDataset3D, VideoGroupedBatchSampler, collate_fn
 from .models.dino_mono_3d import DinoV3Monocular3D
 from .utils.json_logger import LocalLogger
 
@@ -269,11 +269,30 @@ class DinoAGTrainer3D:
         train_subset = Subset(self.train_dataset, list(range(train_subset_size)))
         test_subset = Subset(self.test_dataset, list(range(test_subset_size)))
 
+        # Build video-grouped batch samplers (all frames in a batch share the same video/resolution)
+        # For subsets, we need to filter the video_groups to only include indices in the subset
+        def _build_subset_video_groups(dataset, subset_indices):
+            subset_set = set(subset_indices)
+            groups = {}
+            for vid, indices in dataset.video_groups.items():
+                filtered = [i for i in indices if i in subset_set]
+                if filtered:
+                    groups[vid] = filtered
+            return groups
+
+        train_video_groups = _build_subset_video_groups(self.train_dataset, range(train_subset_size))
+        train_batch_sampler = VideoGroupedBatchSampler(train_video_groups, drop_last=False)
+
+        test_video_groups = self.test_dataset.video_groups
+        test_batch_sampler = VideoGroupedBatchSampler(test_video_groups, drop_last=True)
+
+        test_sub_video_groups = _build_subset_video_groups(self.test_dataset, range(test_subset_size))
+        test_sub_batch_sampler = VideoGroupedBatchSampler(test_sub_video_groups, drop_last=False)
+
         _persistent = self.cfg.num_workers_train > 0 and self.cfg.persistent_workers
         self.train_loader = DataLoader(
-            train_subset,
-            batch_size=self.cfg.batch_size,
-            shuffle=True,
+            self.train_dataset,
+            batch_sampler=train_batch_sampler,
             num_workers=self.cfg.num_workers_train,
             collate_fn=collate_fn,
             pin_memory=True,
@@ -283,20 +302,17 @@ class DinoAGTrainer3D:
         _persistent_test = self.cfg.num_workers_test > 0 and self.cfg.persistent_workers
         self.test_loader = DataLoader(
             self.test_dataset,
-            batch_size=self.cfg.batch_size,
-            shuffle=False,
+            batch_sampler=test_batch_sampler,
             num_workers=self.cfg.num_workers_test,
             collate_fn=collate_fn,
-            drop_last=True,
             pin_memory=True,
             persistent_workers=_persistent_test,
             prefetch_factor=self.cfg.prefetch_factor if _persistent_test else None,
         )
         _persistent_test_sub = self.cfg.num_workers_test_subset > 0 and self.cfg.persistent_workers
         self.test_loader_subset = DataLoader(
-            test_subset,
-            batch_size=self.cfg.batch_size,
-            shuffle=False,
+            self.test_dataset,
+            batch_sampler=test_sub_batch_sampler,
             num_workers=self.cfg.num_workers_test_subset,
             collate_fn=collate_fn,
             pin_memory=True,
