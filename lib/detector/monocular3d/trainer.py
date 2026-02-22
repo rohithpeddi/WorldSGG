@@ -60,7 +60,14 @@ class DummyAccelerator:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def prepare(self, *args):
-        return args
+        """Move models to GPU, pass other objects through unchanged."""
+        out = []
+        for obj in args:
+            if isinstance(obj, nn.Module):
+                out.append(obj.to(self.device))
+            else:
+                out.append(obj)
+        return tuple(out)
 
     def accumulate(self, model):
         return contextlib.nullcontext()
