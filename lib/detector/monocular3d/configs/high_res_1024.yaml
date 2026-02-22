@@ -14,7 +14,7 @@ use_compile: true                  # torch.compile for speed
 
 # --- Training ---
 lr: 1.0e-4
-batch_size: 64
+batch_size: 128
 epochs: 70
 gradient_accumulation_steps: 1
 max_grad_norm: 1.0

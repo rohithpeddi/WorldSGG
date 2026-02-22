@@ -27,7 +27,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_MONO3D_DIR)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from lib.detector.detector2d.evaluate import DetectionEvaluator, clear_cuda_cache_for_current_process
+from .evaluate_2d import clear_cuda_cache_for_current_process, evaluate_2d_coco_map
 
 from ..datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
 from ..models.dino_mono_3d import DinoV3Monocular3D
@@ -158,14 +158,8 @@ def compute_3d_attribute_errors(pred_corners: np.ndarray, gt_corners: np.ndarray
 
 
 def evaluate_2d_coco(model, dataloader, device, accelerator=None):
-    """COCO-style 2D mAP via DetectionEvaluator."""
-    evaluator = DetectionEvaluator(
-        device=device,
-        accelerator=accelerator,
-        frame_batch_size=10,
-        iou_thresholds_2d=None,
-    )
-    return evaluator.evaluate_2d_map_coco(model, dataloader)
+    """COCO-style 2D mAP via torchmetrics (self-contained)."""
+    return evaluate_2d_coco_map(model, dataloader, device, accelerator=accelerator)
 
 
 def evaluate_3d_metrics(model, dataloader, device, iou_threshold_2d=0.5):

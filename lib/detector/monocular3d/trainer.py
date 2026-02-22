@@ -32,6 +32,8 @@ from matplotlib.lines import Line2D
 from .datasets.ag_dataset_3d import ActionGenomeDataset3D, ResolutionBucketBatchSampler, collate_fn
 from .models.dino_mono_3d import DinoV3Monocular3D
 from .utils.json_logger import LocalLogger
+from .evaluation.evaluate_3d import evaluate_3d_metrics
+from .evaluation.evaluate_2d import evaluate_2d_coco_map
 
 
 def clear_cuda_cache_for_current_process(sync: bool = True) -> None:
@@ -162,7 +164,7 @@ class TrainConfig:
     # Training
     lr: float = 1e-4
     weight_decay: float = 0.001
-    batch_size: int = 64
+    batch_size: int = 128
     epochs: int = 70
     gradient_accumulation_steps: int = 1
     max_grad_norm: float = 1.0
@@ -551,12 +553,14 @@ class DinoAGTrainer3D:
         return out
 
     def evaluate_map_coco(self) -> Dict[str, Any]:
-        if not hasattr(self, 'evaluator') or self.evaluator is None:
-            self.accelerator.print("⚠️  Evaluator not initialized — skipping COCO mAP evaluation.")
-            return {}
+        """COCO-style 2D mAP using the self-contained evaluate_2d_coco_map."""
         self.model.eval()
+        accelerator_arg = self.accelerator if self.cfg.use_accelerator else None
         with torch.no_grad():
-            coco = self.evaluator.evaluate_2d_map_coco(self.model, self.test_loader)
+            coco = evaluate_2d_coco_map(
+                self.model, self.test_loader, self.model_device,
+                accelerator=accelerator_arg,
+            )
 
         if not coco:
             return {}
@@ -569,6 +573,17 @@ class DinoAGTrainer3D:
             "raw": raw_py,
             "map_per_class": coco.get("map_per_class", None),
         }
+
+    def evaluate_3d(self) -> Dict[str, Any]:
+        """Evaluate 3D metrics (chamfer, corner L2, 3D mAP, center/dims/rotation errors)
+        on the test subset using matched pred-GT pairs."""
+        self.model.eval()
+        with torch.no_grad():
+            metrics_3d = evaluate_3d_metrics(
+                self.model, self.test_loader_subset,
+                self.model_device, iou_threshold_2d=0.5,
+            )
+        return metrics_3d
 
     # ----------------------------
     # Training
@@ -792,9 +807,13 @@ class DinoAGTrainer3D:
         for epoch in range(self.starting_epoch, self.cfg.epochs):
             train_stats = self.train_one_epoch(epoch)
 
-            # End-of-epoch evaluation
-            self.accelerator.print(f"📊 Evaluating COCO mAP at end of epoch {epoch + 1}...")
+            # End-of-epoch evaluation: 2D COCO mAP
+            self.accelerator.print(f"📊 Evaluating 2D COCO mAP at end of epoch {epoch + 1}...")
             epoch_metrics = self.evaluate_map_coco()
+
+            # End-of-epoch evaluation: 3D metrics
+            self.accelerator.print(f"📊 Evaluating 3D metrics at end of epoch {epoch + 1}...")
+            epoch_metrics_3d = self.evaluate_3d()
 
             if self.cfg.plot_each_epoch and self.accelerator.is_main_process:
                 try:
@@ -817,9 +836,19 @@ class DinoAGTrainer3D:
                     "train/object_loss": train_stats["train_object_loss"],
                     "train/rpn_loss": train_stats["train_rpn_loss"],
                     "train/3d_loss": train_stats["train_3d_loss"],
+                    # 2D metrics
                     "epoch/map": epoch_metrics.get("map", 0.0),
                     "epoch/map_50": epoch_metrics.get("map_50", 0.0),
                     "epoch/map_75": epoch_metrics.get("map_75", 0.0),
+                    # 3D metrics
+                    "epoch/chamfer_mean": epoch_metrics_3d.get("chamfer_mean", 0.0),
+                    "epoch/corner_l2_mean": epoch_metrics_3d.get("corner_l2_mean", 0.0),
+                    "epoch/mAP_3d_50": epoch_metrics_3d.get("mAP_3d_50", 0.0),
+                    "epoch/mAP_3d_75": epoch_metrics_3d.get("mAP_3d_75", 0.0),
+                    "epoch/mean_iou_3d": epoch_metrics_3d.get("mean_iou_3d", 0.0),
+                    "epoch/center_l2_mean": epoch_metrics_3d.get("center_l2_mean", 0.0),
+                    "epoch/dims_l1_mean": epoch_metrics_3d.get("dims_l1_mean", 0.0),
+                    "epoch/rotation_deg_mean": epoch_metrics_3d.get("rotation_deg_mean", 0.0),
                     "learning_rate": lr,
                 })
 
@@ -827,7 +856,8 @@ class DinoAGTrainer3D:
                 log_type="epoch",
                 epoch=epoch,
                 learning_rate=lr,
-                mAP=epoch_metrics,
+                mAP_2d=epoch_metrics,
+                metrics_3d=epoch_metrics_3d,
                 **train_stats,
             )
 
@@ -838,7 +868,12 @@ class DinoAGTrainer3D:
             self.accelerator.print(f"  Object: {train_stats['train_object_loss']:.4f}")
             self.accelerator.print(f"  RPN: {train_stats['train_rpn_loss']:.4f}")
             self.accelerator.print(f"  3D: {train_stats['train_3d_loss']:.4f}")
-            self.accelerator.print(f"COCO mAP: {epoch_metrics}")
+            self.accelerator.print(f"2D COCO mAP: {epoch_metrics}")
+            self.accelerator.print(f"3D Metrics:")
+            self.accelerator.print(f"  Matched: {epoch_metrics_3d.get('n_matched', 0)}/{epoch_metrics_3d.get('n_gt_3d', 0)} GT boxes")
+            self.accelerator.print(f"  Chamfer: {epoch_metrics_3d.get('chamfer_mean', 0.0):.4f}  Corner L2: {epoch_metrics_3d.get('corner_l2_mean', 0.0):.4f}")
+            self.accelerator.print(f"  mAP_3d@50: {epoch_metrics_3d.get('mAP_3d_50', 0.0):.4f}  mAP_3d@75: {epoch_metrics_3d.get('mAP_3d_75', 0.0):.4f}  Mean IoU 3D: {epoch_metrics_3d.get('mean_iou_3d', 0.0):.4f}")
+            self.accelerator.print(f"  Center L2: {epoch_metrics_3d.get('center_l2_mean', 0.0):.4f}  Dims L1: {epoch_metrics_3d.get('dims_l1_mean', 0.0):.4f}  Rotation: {epoch_metrics_3d.get('rotation_deg_mean', 0.0):.1f}°")
             self.accelerator.print(f"Learning Rate: {lr:.6f}")
             self.accelerator.print("-" * 80)
 
