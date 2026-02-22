@@ -15,7 +15,7 @@ Entry points:
 
 from .trainer import TrainConfig, DinoAGTrainer3D
 from .datasets import ActionGenomeDataset3D, collate_fn
-from .models import DinoV2Monocular3D, create_model
+from .models import DinoV3Monocular3D, create_model
 from .losses import ovmono3d_loss
 from .constants import Constants
 
@@ -24,7 +24,7 @@ __all__ = [
     "DinoAGTrainer3D",
     "ActionGenomeDataset3D",
     "collate_fn",
-    "DinoV2Monocular3D",
+    "DinoV3Monocular3D",
     "create_model",
     "ovmono3d_loss",
     "Constants",

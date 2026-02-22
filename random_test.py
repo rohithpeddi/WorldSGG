@@ -2,7 +2,8 @@
 import os
 import matplotlib.pyplot as plt
 import pandas as pd
-import seaborn as sns
+
+# import seaborn as sns
 
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
 

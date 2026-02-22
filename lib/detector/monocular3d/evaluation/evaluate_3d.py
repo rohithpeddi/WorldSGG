@@ -30,7 +30,7 @@ if _ROOT not in sys.path:
 from lib.detector.detector2d.evaluate import DetectionEvaluator, clear_cuda_cache_for_current_process
 
 from ..datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
-from ..models.dino_mono_3d import DinoV2Monocular3D
+from ..models.dino_mono_3d import DinoV3Monocular3D
 
 
 def corners_to_aabb(corners: np.ndarray) -> np.ndarray:
@@ -290,7 +290,7 @@ def main():
     # Model
     ds = test_dataset.dataset if hasattr(test_dataset, "dataset") else test_dataset
     num_classes = len(ds.object_classes) if hasattr(ds, "object_classes") else 37
-    model = DinoV2Monocular3D(num_classes=num_classes, pretrained=False, model="v3l")
+    model = DinoV3Monocular3D(num_classes=num_classes, pretrained=False, model="v3l")
     model.to(device)
     model.eval()
 

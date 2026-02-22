@@ -363,7 +363,7 @@ class Dinov3ModelBackbone(nn.Module):
         return features
 
 
-class DinoV2Monocular3D(nn.Module):
+class DinoV3Monocular3D(nn.Module):
 
     def __init__(self, num_classes=37, pretrained=True, model="v3l"):
         super().__init__()

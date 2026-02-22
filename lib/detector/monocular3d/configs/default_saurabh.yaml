@@ -7,11 +7,11 @@
 
 # --- Experiment ---
 experiment_name: "mono3d_default"
-working_dir: "/home/rxp190007/CODE/Scene4Cast/lib/detector/monocular3d"
-save_path: "/home/rxp190007/CODE/Scene4Cast/save_path"
+working_dir: "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/lib/detector/monocular3d"
+save_path: "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/save_path"
 
 # --- Data ---
-data_path: "/data/rohith/ag"
+data_path: "/home/cse/msr/csy227518/scratch/Datasets/action_genome"
 world_3d_annotations_path: null   # null = use data_path/world_annotations/bbox_annotations_3d_final
 
 # --- Model ---
@@ -45,8 +45,8 @@ train_subset_size: 180000
 test_subset_size: 2000
 
 # --- Logging ---
-use_wandb: false
-wandb_project: "DINOv3-Object-Detector-AG-3D"
+use_wandb: true
+wandb_project: "DINOv2-Object-Detector-AG-3D"
 iter_log_every: 10000
 eval_every_iters: 10000000
 

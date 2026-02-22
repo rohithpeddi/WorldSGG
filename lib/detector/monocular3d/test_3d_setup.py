@@ -11,7 +11,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from lib.detector.monocular3d.datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
-from lib.detector.monocular3d.models.dino_mono_3d import DinoV2Monocular3D
+from lib.detector.monocular3d.models.dino_mono_3d import DinoV3Monocular3D
 
 def test_dataset():
     print("Testing Dataset...")
@@ -36,7 +36,7 @@ def test_dataset():
 
 def test_model(dataset=None):
     print("\nTesting Model...")
-    model = DinoV2Monocular3D(num_classes=37, pretrained=False, model="v3l") # Use pretrained=False for speed
+    model = DinoV3Monocular3D(num_classes=37, pretrained=False, model="v3l") # Use pretrained=False for speed
     model.train()
     
     # Create dummy input if dataset not available

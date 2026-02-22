@@ -30,7 +30,7 @@ import matplotlib.patches as patches
 from matplotlib.lines import Line2D
 
 from .datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
-from .models.dino_mono_3d import DinoV2Monocular3D
+from .models.dino_mono_3d import DinoV3Monocular3D
 from .utils.json_logger import LocalLogger
 
 
@@ -306,7 +306,7 @@ class DinoAGTrainer3D:
 
     def build_model(self) -> None:
         num_classes = self.cfg.num_classes or len(self.train_dataset.object_classes)
-        self.model = DinoV2Monocular3D(
+        self.model = DinoV3Monocular3D(
             num_classes=num_classes,
             pretrained=self.cfg.pretrained,
             model=self.cfg.model,
