@@ -280,7 +280,9 @@ class ActionGenomeDataset3D(Dataset):
                 if first_objs:
                     print(f"    [3D debug] first object keys: {list(first_objs[0].keys())}")
 
-            for frame_name, frame_data in bbox_frames.items():
+            for frame_name_bare, frame_data in bbox_frames.items():
+                # Pickle uses bare frame names ('000063.png'), samples use 'video_id.mp4/000063.png'
+                frame_name = f"{video_id}.mp4/{frame_name_bare}"
                 if frame_name not in self.samples:
                     continue
 
