@@ -31,6 +31,7 @@ warmup_fraction: 0.01              # fraction of total steps for warmup
 
 # --- Thresholds ---
 head_3d_mode: "unified"            # "unified" (shared FC) or "separate" (hooked features)
+max_3d_proposals: 64               # max positive proposals for 3D loss per batch
 iou_match_2d_eval: 0.5             # 2D IoU threshold for matching preds to GT in 3D evaluation
 
 # --- Loss Weights ---

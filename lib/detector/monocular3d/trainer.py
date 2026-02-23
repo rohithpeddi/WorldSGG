@@ -176,6 +176,7 @@ class TrainConfig:
 
     # Thresholds
     head_3d_mode: str = "unified"         # '"unified"' or '"separate"' — 3D head architecture
+    max_3d_proposals: int = 64            # Max positive proposals for 3D loss (caps memory from OVMono3D 5× expansion)
     iou_match_2d_eval: float = 0.5        # 2D IoU threshold for matching preds to GT in 3D evaluation
 
     # Loss weights (multiplier for each loss component)
@@ -334,6 +335,7 @@ class DinoAGTrainer3D:
             pretrained=self.cfg.pretrained,
             model=self.cfg.model,
             head_3d_mode=self.cfg.head_3d_mode,
+            max_3d_proposals=self.cfg.max_3d_proposals,
         )
         # Count trainable vs frozen parameters
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)

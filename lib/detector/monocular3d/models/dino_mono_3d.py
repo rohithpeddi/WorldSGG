@@ -138,9 +138,10 @@ class Mono3DRoIHeads(nn.Module):
     Inference: re-pools detected boxes through shared layers, predicts 3D.
     """
 
-    def __init__(self, base_roi_heads, representation_size=1024):
+    def __init__(self, base_roi_heads, representation_size=1024, max_3d_proposals=64):
         super().__init__()
         self.base = base_roi_heads
+        self.max_3d_proposals = max_3d_proposals
         self.pred_3d = _Mono3DPredictionLayers(representation_size)
 
     def forward(self, features, proposals, image_shapes, targets=None):
@@ -212,9 +213,8 @@ class Mono3DRoIHeads(nn.Module):
         valid_gt_3d = cat_gt_3d[valid]
         valid_intr = cat_intr[valid]
 
-        max_3d_samples = 64
-        if len(valid_features) > max_3d_samples:
-            perm = torch.randperm(len(valid_features), device=device)[:max_3d_samples]
+        if len(valid_features) > self.max_3d_proposals:
+            perm = torch.randperm(len(valid_features), device=device)[:self.max_3d_proposals]
             valid_features = valid_features[perm]
             valid_proposals = valid_proposals[perm]
             valid_gt_3d = valid_gt_3d[perm]
@@ -260,9 +260,10 @@ class SeparateMono3DHead(nn.Module):
     Captures matched_idxs/labels by wrapping select_training_samples.
     """
 
-    def __init__(self, base_roi_heads, representation_size=1024):
+    def __init__(self, base_roi_heads, representation_size=1024, max_3d_proposals=64):
         super().__init__()
         self.base_roi_heads = base_roi_heads
+        self.max_3d_proposals = max_3d_proposals
         self.pred_3d = _Mono3DPredictionLayers(representation_size)
         self._hooked_features = None
         self._matched_idxs = None
@@ -331,9 +332,8 @@ class SeparateMono3DHead(nn.Module):
         valid_gt_3d = cat_gt_3d[valid]
         valid_intr = cat_intr[valid]
 
-        max_3d_samples = 64
-        if len(valid_features) > max_3d_samples:
-            perm = torch.randperm(len(valid_features), device=device)[:max_3d_samples]
+        if len(valid_features) > self.max_3d_proposals:
+            perm = torch.randperm(len(valid_features), device=device)[:self.max_3d_proposals]
             valid_features = valid_features[perm]
             valid_proposals = valid_proposals[perm]
             valid_gt_3d = valid_gt_3d[perm]
@@ -574,7 +574,7 @@ class DinoV3Monocular3D(nn.Module):
       images → Transform → Backbone → FPN → RPN → ROI Heads (+3D) → detections
     """
 
-    def __init__(self, num_classes=37, pretrained=True, model="v3l", head_3d_mode="unified"):
+    def __init__(self, num_classes=37, pretrained=True, model="v3l", head_3d_mode="unified", max_3d_proposals=64):
         super().__init__()
         self.head_3d_mode = head_3d_mode
 
@@ -597,13 +597,13 @@ class DinoV3Monocular3D(nn.Module):
         base_roi_heads = self.base_detector.roi_heads
         if head_3d_mode == "unified":
             # Option 3: 3D branch lives INSIDE ROI heads (shares pool + FC)
-            self.roi_heads = Mono3DRoIHeads(base_roi_heads)
+            self.roi_heads = Mono3DRoIHeads(base_roi_heads, max_3d_proposals=max_3d_proposals)
             self.head_3d_separate = None
             print(f"  ✓ 3D head mode: unified (shared FC layers)")
         elif head_3d_mode == "separate":
             # Option 2: standard ROI heads + separate 3D head with hook
             self.roi_heads = base_roi_heads
-            self.head_3d_separate = SeparateMono3DHead(base_roi_heads)
+            self.head_3d_separate = SeparateMono3DHead(base_roi_heads, max_3d_proposals=max_3d_proposals)
             print(f"  ✓ 3D head mode: separate (hooked shared features)")
         else:
             raise ValueError(f"Unknown head_3d_mode: {head_3d_mode!r}. Use 'unified' or 'separate'.")
