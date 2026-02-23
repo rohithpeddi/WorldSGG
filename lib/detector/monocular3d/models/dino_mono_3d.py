@@ -255,7 +255,10 @@ class Mono3DRoIHeads(nn.Module):
                 print(f"  [3D debug] → NaN/Inf detected, returning 0")
             return torch.tensor(0.0, device=device, requires_grad=True)
         # Clamp loss to prevent gradient explosion from outlier GT boxes
+        loss_3d_raw = loss_3d.item()
         loss_3d = torch.clamp(loss_3d, max=10.0)
+        if loss_3d_raw > 10.0:
+            print(f"  [3D clamp] raw={loss_3d_raw:.4f} → clamped=10.0")
         if _log:
             print(f"  [3D debug] → loss_3d={loss_3d.item():.6f} (from {len(valid_features)} samples)")
         return loss_3d
@@ -408,7 +411,10 @@ class SeparateMono3DHead(nn.Module):
             if _log:
                 print(f"  [3D-sep debug] → NaN/Inf detected, returning 0")
             return torch.tensor(0.0, device=device, requires_grad=True)
+        loss_3d_raw = loss_3d.item()
         loss_3d = torch.clamp(loss_3d, max=10.0)
+        if loss_3d_raw > 10.0:
+            print(f"  [3D-sep clamp] raw={loss_3d_raw:.4f} → clamped=10.0")
         if _log:
             print(f"  [3D-sep debug] → loss_3d={loss_3d.item():.6f} (from {len(valid_features)} samples)")
         return loss_3d

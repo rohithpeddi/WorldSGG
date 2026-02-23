@@ -218,6 +218,12 @@ def ovmono3d_loss(
     all_gt = gt_c.repeat(5, 1, 1)                                           # (5*n, 8, 3)
     all_chamfer = _chamfer_pairwise_dist(all_pred, all_gt)                  # (5*n,)
 
+    # Normalize by GT box diagonal² to make loss scale-invariant.
+    # World coords produce squared distances of ~10-100; this brings loss to ~0.1-1.0 range.
+    gt_diag_sq = ((gt_c.max(dim=1).values - gt_c.min(dim=1).values) ** 2).sum(dim=1).clamp(min=1e-4)
+    gt_diag_sq_rep = gt_diag_sq.repeat(5)  # (5*n,)
+    all_chamfer = all_chamfer / gt_diag_sq_rep
+
     # Split back into 5 loss components
     L_xy, L_z, L_whl, L_r, L_all = [
         chunk.mean() for chunk in all_chamfer.split(n_valid)
