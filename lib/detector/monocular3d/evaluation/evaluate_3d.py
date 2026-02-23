@@ -33,31 +33,118 @@ from ..datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
 from ..models.dino_mono_3d import DinoV3Monocular3D
 
 
-def corners_to_aabb(corners: np.ndarray) -> np.ndarray:
-    """Convert 8x3 corners to axis-aligned box [x1, y1, z1, x2, y2, z2]."""
-    if isinstance(corners, torch.Tensor):
-        corners = corners.detach().cpu().numpy()
-    corners = np.asarray(corners, dtype=np.float64)
-    if corners.ndim == 2:
-        corners = corners.reshape(1, 8, 3)
-    mins = corners.min(axis=1)  # (N, 3)
-    maxs = corners.max(axis=1)
-    return np.concatenate([mins, maxs], axis=1)  # (N, 6)
+def _polygon_clip(subject: list, clip: list) -> list:
+    """Sutherland-Hodgman polygon clipping. subject and clip are lists of (x, y) tuples."""
+    def _inside(p, a, b):
+        return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]) >= 0
+
+    def _intersect(p1, p2, a, b):
+        x1, y1 = p1; x2, y2 = p2
+        x3, y3 = a;  x4, y4 = b
+        denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+        if abs(denom) < 1e-12:
+            return p1
+        t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+        return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+
+    output = list(subject)
+    for i in range(len(clip)):
+        if len(output) == 0:
+            return []
+        a, b = clip[i - 1], clip[i]
+        inp = list(output)
+        output = []
+        for j in range(len(inp)):
+            p_cur = inp[j]
+            p_prev = inp[j - 1]
+            if _inside(p_cur, a, b):
+                if not _inside(p_prev, a, b):
+                    output.append(_intersect(p_prev, p_cur, a, b))
+                output.append(p_cur)
+            elif _inside(p_prev, a, b):
+                output.append(_intersect(p_prev, p_cur, a, b))
+    return output
 
 
-def compute_iou_3d_aabb(box1: np.ndarray, box2: np.ndarray) -> float:
-    """3D IoU for axis-aligned [x1, y1, z1, x2, y2, z2]."""
-    x1 = max(float(box1[0]), float(box2[0]))
-    y1 = max(float(box1[1]), float(box2[1]))
-    z1 = max(float(box1[2]), float(box2[2]))
-    x2 = min(float(box1[3]), float(box2[3]))
-    y2 = min(float(box1[4]), float(box2[4]))
-    z2 = min(float(box1[5]), float(box2[5]))
-    inter_vol = max(0.0, x2 - x1) * max(0.0, y2 - y1) * max(0.0, z2 - z1)
-    v1 = (box1[3] - box1[0]) * (box1[4] - box1[1]) * (box1[5] - box1[2])
-    v2 = (box2[3] - box2[0]) * (box2[4] - box2[1]) * (box2[5] - box2[2])
-    union_vol = v1 + v2 - inter_vol
-    return inter_vol / union_vol if union_vol > 0.0 else 0.0
+def _polygon_area(poly: list) -> float:
+    """Shoelace formula for area of a polygon given as list of (x,y)."""
+    n = len(poly)
+    if n < 3:
+        return 0.0
+    area = 0.0
+    for i in range(n):
+        j = (i + 1) % n
+        area += poly[i][0] * poly[j][1]
+        area -= poly[j][0] * poly[i][1]
+    return abs(area) / 2.0
+
+
+def _convex_hull_2d(points: list) -> list:
+    """Andrew's monotone chain convex hull for 2D points."""
+    points = sorted(set(points))
+    if len(points) <= 1:
+        return points
+    lower = []
+    for p in points:
+        while len(lower) >= 2 and _cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    upper = []
+    for p in reversed(points):
+        while len(upper) >= 2 and _cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
+def _cross(o, a, b):
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+
+def _corners_to_bottom_face(corners: np.ndarray) -> list:
+    """Extract the bottom 4 corners (lowest z) as convex hull for OBB IoU in XY plane."""
+    corners = corners.reshape(8, 3)
+    z_vals = corners[:, 2]
+    z_mid = (z_vals.max() + z_vals.min()) / 2.0
+    bottom = corners[z_vals <= z_mid]
+    pts = [(float(p[0]), float(p[1])) for p in bottom]
+    if len(pts) < 3:
+        pts = [(float(p[0]), float(p[1])) for p in corners[:4]]
+    return _convex_hull_2d(pts)
+
+
+def compute_iou_3d_obb(corners1: np.ndarray, corners2: np.ndarray) -> float:
+    """Oriented 3D IoU between two sets of 8 corners (8, 3).
+    Projects to XY plane for polygon intersection, then multiplies by Z overlap."""
+    corners1 = np.asarray(corners1, dtype=np.float64).reshape(8, 3)
+    corners2 = np.asarray(corners2, dtype=np.float64).reshape(8, 3)
+
+    # Z overlap
+    z_min1, z_max1 = corners1[:, 2].min(), corners1[:, 2].max()
+    z_min2, z_max2 = corners2[:, 2].min(), corners2[:, 2].max()
+    z_overlap = max(0.0, min(z_max1, z_max2) - max(z_min1, z_min2))
+    if z_overlap <= 0:
+        return 0.0
+
+    # XY polygon intersection
+    poly1 = _corners_to_bottom_face(corners1)
+    poly2 = _corners_to_bottom_face(corners2)
+    if len(poly1) < 3 or len(poly2) < 3:
+        return 0.0
+
+    inter_poly = _polygon_clip(poly1, poly2)
+    inter_area = _polygon_area(inter_poly)
+
+    area1 = _polygon_area(poly1)
+    area2 = _polygon_area(poly2)
+
+    inter_vol = inter_area * z_overlap
+    h1 = z_max1 - z_min1
+    h2 = z_max2 - z_min2
+    vol1 = area1 * h1
+    vol2 = area2 * h2
+    union_vol = vol1 + vol2 - inter_vol
+    return inter_vol / union_vol if union_vol > 0 else 0.0
 
 
 def compute_iou_2d(box1: np.ndarray, box2: np.ndarray) -> float:
@@ -163,7 +250,7 @@ def evaluate_2d_coco(model, dataloader, device, accelerator=None):
 
 
 def evaluate_3d_metrics(model, dataloader, device, iou_threshold_2d=0.5):
-    """3D metrics on matched pred-GT pairs: Chamfer, corner L2, AABB mAP, attribute errors."""
+    """3D metrics on matched pred-GT pairs: Chamfer, corner L2, OBB mAP, attribute errors."""
     model.eval()
     chamfer_list = []
     corner_l2_list = []
@@ -212,9 +299,7 @@ def evaluate_3d_metrics(model, dataloader, device, iou_threshold_2d=0.5):
                     gt_c = np.asarray(gt_c, dtype=np.float64)
                     chamfer_list.append(chamfer_per_box(pred_c, gt_c))
                     corner_l2_list.append(corner_l2_per_box(pred_c, gt_c))
-                    aabb_pred = corners_to_aabb(pred_c.reshape(1, 8, 3))[0]
-                    aabb_gt = corners_to_aabb(gt_c.reshape(1, 8, 3))[0]
-                    iou_3d_list.append(compute_iou_3d_aabb(aabb_pred, aabb_gt))
+                    iou_3d_list.append(compute_iou_3d_obb(pred_c.reshape(8, 3), gt_c.reshape(8, 3)))
                     attrs = compute_3d_attribute_errors(pred_c, gt_c)
                     center_l2_list.append(attrs["center_l2"])
                     dims_l1_list.append(attrs["dims_l1"])
@@ -360,5 +445,5 @@ the path to a .pth file.
 Notes
 2D mAP is computed over all test samples with torchmetrics (COCO-style).
 3D metrics are computed only on matched pred–GT pairs (2D IoU >= 0.5, same class). If there is no 3D GT or no matches, 3D metrics are zero or N/A.
-3D IoU uses axis-aligned boxes (AABB) derived from the 8 corners, so it is not oriented IoU but is stable and easy to interpret.
+3D IoU uses oriented bounding box (OBB) intersection via polygon clipping in the XY plane with Z-axis overlap.
 """

@@ -459,7 +459,7 @@ Only matched pairs contribute to 3D metrics:
     
     \item \textbf{Corner L2 error}: Mean Euclidean distance over the 8 corners (one-to-one ordering), sensitive to corner assignment consistency.
     
-    \item \textbf{3D IoU (AABB)}: Intersection-over-union computed on axis-aligned bounding boxes (AABB) derived from the 8 corners. While not oriented IoU, this metric is numerically stable and interpretable.  We report $\text{mAP}_{\text{3D}}^{50}$ (fraction of matches with 3D IoU $\geq 0.5$) and $\text{mAP}_{\text{3D}}^{75}$.
+    \item \textbf{3D IoU (OBB)}: Oriented intersection-over-union computed by projecting the 8-corner boxes onto the XY plane as convex polygons, computing polygon intersection via Sutherland-Hodgman clipping, and multiplying by Z-axis overlap.  We report $\text{mAP}_{\text{3D}}^{50}$ (fraction of matches with 3D IoU $\geq 0.5$) and $\text{mAP}_{\text{3D}}^{75}$.
     
     \item \textbf{Per-attribute errors}:
     \begin{itemize}

@@ -2,6 +2,15 @@ dataloader/*.pkl
 .DS_Store
 .idea/*
 
+*.synctex*
+*.synctex.gz
+*.aux
+*.out
+*.log
+*.pdf
+*.fls
+*.fdb_latexmk
+
 
 datasets/preprocess/inpainting/RoseEdit/weights/transformer/*
 datasets/preprocess/inpainting/RoseEdit/models/*

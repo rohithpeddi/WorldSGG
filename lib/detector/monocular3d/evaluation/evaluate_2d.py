@@ -302,8 +302,7 @@ def evaluate_2d_and_3d_fused(
         match_predictions_to_gt_2d,
         chamfer_per_box,
         corner_l2_per_box,
-        corners_to_aabb,
-        compute_iou_3d_aabb,
+        compute_iou_3d_obb,
         compute_3d_attribute_errors,
     )
 
@@ -378,9 +377,7 @@ def evaluate_2d_and_3d_fused(
                     gt_c = np.asarray(gt_c, dtype=np.float64)
                     chamfer_list.append(chamfer_per_box(pred_c, gt_c))
                     corner_l2_list.append(corner_l2_per_box(pred_c, gt_c))
-                    aabb_pred = corners_to_aabb(pred_c.reshape(1, 8, 3))[0]
-                    aabb_gt = corners_to_aabb(gt_c.reshape(1, 8, 3))[0]
-                    iou_3d_list.append(compute_iou_3d_aabb(aabb_pred, aabb_gt))
+                    iou_3d_list.append(compute_iou_3d_obb(pred_c.reshape(8, 3), gt_c.reshape(8, 3)))
                     attrs = compute_3d_attribute_errors(pred_c, gt_c)
                     center_l2_list.append(attrs["center_l2"])
                     dims_l1_list.append(attrs["dims_l1"])
