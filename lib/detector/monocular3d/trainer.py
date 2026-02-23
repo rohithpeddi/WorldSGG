@@ -638,6 +638,7 @@ class DinoAGTrainer3D:
             running_object_loss: float,
             running_rpn_loss: float,
             running_3d_loss: float,
+            running_raw_3d_loss: float,
             running_count: int,
     ) -> None:
         if running_count == 0:
@@ -648,6 +649,7 @@ class DinoAGTrainer3D:
         avg_object_loss = running_object_loss / running_count
         avg_rpn_loss = running_rpn_loss / running_count
         avg_3d_loss = running_3d_loss / running_count
+        avg_raw_3d_loss = running_raw_3d_loss / running_count
         lr = self.scheduler.get_last_lr()[0]
 
         if self.cfg.use_wandb and self.accelerator.is_main_process:
@@ -659,6 +661,7 @@ class DinoAGTrainer3D:
                 "iter/object_loss": avg_object_loss,
                 "iter/rpn_loss": avg_rpn_loss,
                 "iter/3d_loss": avg_3d_loss,
+                "iter/3d_loss_raw": avg_raw_3d_loss,
                 "learning_rate": lr,
             })
 
@@ -671,13 +674,15 @@ class DinoAGTrainer3D:
             iter_object_loss=avg_object_loss,
             iter_rpn_loss=avg_rpn_loss,
             iter_3d_loss=avg_3d_loss,
+            iter_3d_loss_raw=avg_raw_3d_loss,
             learning_rate=lr,
         )
 
         self.accelerator.print(
             f"Iteration {self.global_iteration}: Loss={avg_total_loss:.4f} "
             f"(Cls:{avg_cls_loss:.4f}, Box:{avg_box_loss:.4f}, "
-            f"Object:{avg_object_loss:.4f}, RPN:{avg_rpn_loss:.4f}, 3D:{avg_3d_loss:.4f})"
+            f"Object:{avg_object_loss:.4f}, RPN:{avg_rpn_loss:.4f}, "
+            f"3D:{avg_3d_loss:.4f}, 3D_raw:{avg_raw_3d_loss:.4f})"
         )
 
     def train_one_epoch(self, epoch: int) -> Dict[str, float]:
@@ -706,6 +711,7 @@ class DinoAGTrainer3D:
         # Running accumulators for periodic logging within the epoch
         running_total_loss = running_cls_loss = running_box_loss = 0.0
         running_object_loss = running_rpn_loss = running_3d_loss = 0.0
+        running_raw_3d_loss = 0.0
         running_count = 0
 
         _zero = 0.0
@@ -794,6 +800,8 @@ class DinoAGTrainer3D:
                     _rpn = loss_dict_reduced[
                         "loss_rpn_box_reg"].item() if "loss_rpn_box_reg" in loss_dict_reduced else _zero
                     _l3d = loss_dict_reduced["loss_3d"].item() if "loss_3d" in loss_dict_reduced else _zero
+                    # Raw (unweighted) 3D loss — useful to monitor 3D head quality during ramp
+                    _raw_3d = loss_dict_original["loss_3d"].item() if "loss_3d" in loss_dict_original else _zero
 
                     batch_loss_list.append(_total)
                     batch_loss_cls_list.append(_cls)
@@ -808,15 +816,18 @@ class DinoAGTrainer3D:
                     running_object_loss += _obj
                     running_rpn_loss += _rpn
                     running_3d_loss += _l3d
+                    running_raw_3d_loss += _raw_3d
                     running_count += 1
 
                 if self.global_iteration % self.cfg.iter_log_every == 0 and self.accelerator.is_main_process:
                     self._log_iteration_losses(
                         running_total_loss, running_cls_loss, running_box_loss,
-                        running_object_loss, running_rpn_loss, running_3d_loss, running_count
+                        running_object_loss, running_rpn_loss, running_3d_loss,
+                        running_raw_3d_loss, running_count
                     )
                     running_total_loss = running_cls_loss = running_box_loss = 0.0
                     running_object_loss = running_rpn_loss = running_3d_loss = 0.0
+                    running_raw_3d_loss = 0.0
                     running_count = 0
 
                 if self.global_iteration % self.cfg.eval_every_iters == 0:
