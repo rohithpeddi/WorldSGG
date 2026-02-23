@@ -175,11 +175,21 @@ class Mono3DRoIHeads(nn.Module):
         return result, losses
 
     # ----- Training helper: 3D loss on positive proposals -----
+    _debug_counter = 0
+
     def _compute_3d_loss(self, box_features, proposals, matched_idxs, labels, targets):
         device = box_features.device
+        Mono3DRoIHeads._debug_counter += 1
+        _log = (Mono3DRoIHeads._debug_counter <= 5)  # Log first 5 batches
+
         cat_labels = torch.cat(labels, dim=0)
         pos_mask = cat_labels > 0
+        n_pos = pos_mask.sum().item()
+        if _log:
+            print(f"  [3D debug] total_proposals={len(cat_labels)}, positives={n_pos}")
         if not pos_mask.any():
+            if _log:
+                print(f"  [3D debug] → ZERO LOSS: no positive proposals")
             return torch.tensor(0.0, device=device, requires_grad=True)
 
         pos_features = box_features[pos_mask]
@@ -193,6 +203,10 @@ class Mono3DRoIHeads(nn.Module):
             if not img_pos.any():
                 continue
             gt_3d = targets[i]['boxes_3d']
+            if _log:
+                n_gt = len(gt_3d)
+                n_nonzero = (gt_3d.reshape(n_gt, -1).abs().sum(dim=1) > 1e-6).sum().item()
+                print(f"  [3D debug] img {i}: gt_3d.shape={gt_3d.shape}, non-zero={n_nonzero}/{n_gt}, pos_matches={img_pos.sum().item()}")
             pos_gt_3d.append(gt_3d[matched_idxs[i][img_pos]])
             fl = targets[i].get('focal_lengths', torch.tensor([500.0, 500.0], device=device))
             pp = targets[i].get('principal_point', torch.tensor([0.0, 0.0], device=device))
@@ -204,7 +218,12 @@ class Mono3DRoIHeads(nn.Module):
 
         # Filter zero-padded GT
         valid = cat_gt_3d.reshape(cat_gt_3d.shape[0], -1).abs().sum(dim=1) > 1e-6
+        n_valid = valid.sum().item()
+        if _log:
+            print(f"  [3D debug] matched_gt_3d={len(cat_gt_3d)}, valid(non-zero)={n_valid}")
         if not valid.any():
+            if _log:
+                print(f"  [3D debug] → ZERO LOSS: all matched GT 3D boxes are zero-padded")
             return torch.tensor(0.0, device=device, requires_grad=True)
 
         # Subsample to cap memory: ovmono3d_loss creates 5× the batch for disentangled supervision
@@ -222,6 +241,8 @@ class Mono3DRoIHeads(nn.Module):
 
         pred_corners, pred_mu = self.pred_3d(valid_features, valid_proposals, valid_intr)
         loss_3d, _, _ = ovmono3d_loss(pred_corners.view(-1, 24), valid_gt_3d, pred_mu, use_smooth_l1=True)
+        if _log:
+            print(f"  [3D debug] → loss_3d={loss_3d.item():.6f} (from {len(valid_features)} samples)")
         return loss_3d
 
     # ----- Inference helper: 3D predictions for detected boxes -----
@@ -289,9 +310,16 @@ class SeparateMono3DHead(nn.Module):
     def _capture_hook(self, module, input, output):
         self._hooked_features = output
 
+    _debug_counter = 0
+
     def compute_training_loss(self, targets, device):
         """Compute 3D loss using captured features + matched_idxs from the most recent forward."""
+        SeparateMono3DHead._debug_counter += 1
+        _log = (SeparateMono3DHead._debug_counter <= 5)
+
         if self._hooked_features is None or self._labels is None:
+            if _log:
+                print(f"  [3D-sep debug] → ZERO LOSS: no hooked features or labels")
             return torch.tensor(0.0, device=device, requires_grad=True)
 
         proposals = self._sampled_proposals
@@ -300,7 +328,12 @@ class SeparateMono3DHead(nn.Module):
 
         cat_labels = torch.cat(labels, dim=0)
         pos_mask = cat_labels > 0
+        n_pos = pos_mask.sum().item()
+        if _log:
+            print(f"  [3D-sep debug] total_proposals={len(cat_labels)}, positives={n_pos}")
         if not pos_mask.any():
+            if _log:
+                print(f"  [3D-sep debug] → ZERO LOSS: no positive proposals")
             return torch.tensor(0.0, device=device, requires_grad=True)
 
         pos_features = self._hooked_features[pos_mask]
@@ -313,6 +346,10 @@ class SeparateMono3DHead(nn.Module):
             if not img_pos.any():
                 continue
             gt_3d = targets[i]['boxes_3d']
+            if _log:
+                n_gt = len(gt_3d)
+                n_nonzero = (gt_3d.reshape(n_gt, -1).abs().sum(dim=1) > 1e-6).sum().item()
+                print(f"  [3D-sep debug] img {i}: gt_3d.shape={gt_3d.shape}, non-zero={n_nonzero}/{n_gt}, pos_matches={img_pos.sum().item()}")
             pos_gt_3d.append(gt_3d[matched_idxs[i][img_pos]])
             fl = targets[i].get('focal_lengths', torch.tensor([500.0, 500.0], device=device))
             pp = targets[i].get('principal_point', torch.tensor([0.0, 0.0], device=device))
@@ -323,7 +360,12 @@ class SeparateMono3DHead(nn.Module):
         cat_intr = torch.cat(pos_intr, dim=0)
 
         valid = cat_gt_3d.reshape(cat_gt_3d.shape[0], -1).abs().sum(dim=1) > 1e-6
+        n_valid = valid.sum().item()
+        if _log:
+            print(f"  [3D-sep debug] matched_gt_3d={len(cat_gt_3d)}, valid(non-zero)={n_valid}")
         if not valid.any():
+            if _log:
+                print(f"  [3D-sep debug] → ZERO LOSS: all matched GT 3D boxes are zero-padded")
             return torch.tensor(0.0, device=device, requires_grad=True)
 
         # Subsample to cap memory: ovmono3d_loss creates 5× the batch for disentangled supervision
@@ -341,6 +383,8 @@ class SeparateMono3DHead(nn.Module):
 
         pred_corners, pred_mu = self.pred_3d(valid_features, valid_proposals, valid_intr)
         loss_3d, _, _ = ovmono3d_loss(pred_corners.view(-1, 24), valid_gt_3d, pred_mu, use_smooth_l1=True)
+        if _log:
+            print(f"  [3D-sep debug] → loss_3d={loss_3d.item():.6f} (from {len(valid_features)} samples)")
         return loss_3d
 
     def predict_for_detections(self, detections, features, image_shapes, base_roi_heads):
