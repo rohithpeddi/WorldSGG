@@ -127,10 +127,15 @@ def _corners_from_precomputed(
 
 
 def _chamfer_pairwise_dist(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
-    """Compute per-box Chamfer distance. pred, gt: (N, 8, 3) -> (N,)."""
+    """Compute per-box Chamfer distance using smooth L1 (Huber). pred, gt: (N, 8, 3) -> (N,).
+    
+    Uses smooth L1 instead of L2² for stability: linear growth for large errors
+    prevents catastrophic loss values when predictions are far from GT (training start).
+    """
     diff = pred.unsqueeze(2) - gt.unsqueeze(1)  # (N, 8, 8, 3)
-    dist_sq = (diff * diff).sum(dim=-1)          # (N, 8, 8)
-    return dist_sq.min(dim=2).values.mean(dim=1) + dist_sq.min(dim=1).values.mean(dim=1)
+    # Smooth L1 per-coordinate, then sum over xyz → per-pair distance
+    dist = F.smooth_l1_loss(diff, torch.zeros_like(diff), reduction='none').sum(dim=-1)  # (N, 8, 8)
+    return dist.min(dim=2).values.mean(dim=1) + dist.min(dim=1).values.mean(dim=1)
 
 
 def chamfer_loss_8corners(pred: torch.Tensor, gt: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
