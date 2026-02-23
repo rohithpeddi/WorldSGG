@@ -435,14 +435,20 @@ class DinoAGTrainer3D:
         os.makedirs(save_dir, exist_ok=True)
 
         self.model.eval()
-        if sample_idx >= len(self.test_dataset):
+
+        # Access the raw dataset (unwrap Accelerator/Subset wrappers)
+        ds = self.test_dataset
+        while hasattr(ds, 'dataset'):
+            ds = ds.dataset
+
+        if sample_idx >= len(ds):
             sample_idx = 0
 
-        image_tensor, target = self.test_dataset[sample_idx]
-        sample = self.test_dataset.samples[sample_idx]
+        image_tensor, target = ds[sample_idx]
+        sample = ds.samples[sample_idx] if hasattr(ds, 'samples') else {"filename": f"sample_{sample_idx}"}
 
-        mean = tuple(self.test_dataset.image_mean)
-        std = tuple(self.test_dataset.image_std)
+        mean = tuple(ds.image_mean) if hasattr(ds, 'image_mean') else (0.485, 0.456, 0.406)
+        std = tuple(ds.image_std) if hasattr(ds, 'image_std') else (0.229, 0.224, 0.225)
 
         with torch.no_grad():
             image_batch = image_tensor.unsqueeze(0).to(self.model_device)
@@ -476,8 +482,8 @@ class DinoAGTrainer3D:
             rect = patches.Rectangle((x1, y1), max(0.0, x2 - x1), max(0.0, y2 - y1),
                                      linewidth=2.5, edgecolor=color, facecolor="none")
             ax.add_patch(rect)
-            class_name = self.test_dataset.object_classes[int(lab)] if 0 <= int(lab) < len(
-                self.test_dataset.object_classes) else str(lab)
+            class_name = ds.object_classes[int(lab)] if hasattr(ds, 'object_classes') and 0 <= int(lab) < len(
+                ds.object_classes) else str(lab)
             ax.text(
                 max(0, x1), max(10, y1 - 2), f"{class_name}",
                 fontsize=8, color="black", verticalalignment="top",
@@ -491,8 +497,8 @@ class DinoAGTrainer3D:
             rect = patches.Rectangle((x1, y1), max(0.0, x2 - x1), max(0.0, y2 - y1),
                                      linewidth=2.0, edgecolor=color, facecolor="none")
             ax.add_patch(rect)
-            class_name = self.test_dataset.object_classes[int(lab)] if 0 <= int(lab) < len(
-                self.test_dataset.object_classes) else str(lab)
+            class_name = ds.object_classes[int(lab)] if hasattr(ds, 'object_classes') and 0 <= int(lab) < len(
+                ds.object_classes) else str(lab)
             ax.text(
                 max(0, x1), max(10, y1 - 2), f"{class_name} ({score:.2f})",
                 fontsize=8, color="black", verticalalignment="top",
