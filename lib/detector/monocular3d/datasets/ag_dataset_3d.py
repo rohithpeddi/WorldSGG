@@ -268,6 +268,18 @@ class ActionGenomeDataset3D(Dataset):
             frames_final = video_data.get("frames_final", {})
             bbox_frames = frames_final.get("bbox_frames", {})
 
+            # Debug: print frame name formats for first video to diagnose mismatches
+            if n_3d_videos == 1 and bbox_frames:
+                pkl_keys = list(bbox_frames.keys())[:3]
+                sample_keys = [k for k in self.samples.keys() if k.startswith(video_id)][:3]
+                print(f"    [3D debug] pkl frame keys (first 3): {pkl_keys}")
+                print(f"    [3D debug] sample keys for {video_id} (first 3): {sample_keys}")
+                # Also show what keys the pkl objects have
+                first_frame = next(iter(bbox_frames.values()))
+                first_objs = first_frame.get("objects", [])
+                if first_objs:
+                    print(f"    [3D debug] first object keys: {list(first_objs[0].keys())}")
+
             for frame_name, frame_data in bbox_frames.items():
                 if frame_name not in self.samples:
                     continue
