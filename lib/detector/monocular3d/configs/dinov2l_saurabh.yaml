@@ -7,15 +7,15 @@
 
 # --- Experiment ---
 experiment_name: "mono3d_default"
-working_dir: "/home/rxp190007/CODE/Scene4Cast/lib/detector/monocular3d"
-save_path: "/home/rxp190007/CODE/Scene4Cast/save_path"
+working_dir: "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/lib/detector/monocular3d"
+save_path: "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/save_path"
 
 # --- Data ---
-data_path: "/data/rohith/ag"
+data_path: "/home/cse/msr/csy227518/scratch/Datasets/action_genome"
 world_3d_annotations_path: null   # null = use data_path/world_annotations/bbox_annotations_3d_final
 
 # --- Model ---
-model: "v2"                        # "v2" = DINOv2 ViT-B (86M, fast), "v2l" = ViT-L, "v3l" = DINOv3 ViT-L
+model: "v2l"                       # "v2" = DINOv2 ViT-B (86M, fast), "v2l" = ViT-L, "v3l" = DINOv3 ViT-L
 num_classes: null                  # null = auto-detect from dataset
 pretrained: true
 use_compile: false                 # torch.compile() — PyTorch 2.0+
@@ -42,8 +42,8 @@ persistent_workers: true
 
 # --- Logging ---
 use_wandb: true
-wandb_project: "DINOv2-Object-Detector-AG-3D"
-iter_log_every: 10000
+wandb_project: "DINOv2-large-Object-Detector-AG-3D"
+iter_log_every: 10
 eval_every_iters: 10000000
 
 # --- Visualization ---
