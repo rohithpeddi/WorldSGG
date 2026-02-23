@@ -445,6 +445,13 @@ class DinoV3Monocular3D(nn.Module):
                 
                 if len(valid_props) == 0:
                     continue
+
+                # Cap matched proposals per image to avoid OOM from ROI pooling
+                max_matches_per_image = 32
+                if len(valid_props) > max_matches_per_image:
+                    perm = torch.randperm(len(valid_props), device=valid_props.device)[:max_matches_per_image]
+                    valid_props = valid_props[perm]
+                    matched_gt_indices = matched_gt_indices[perm]
                 
                 matched_gt_3d = gt_3d[matched_gt_indices]  # (K, 8, 3)
                 
