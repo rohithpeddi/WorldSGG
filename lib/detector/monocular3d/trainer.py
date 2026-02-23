@@ -184,7 +184,8 @@ class TrainConfig:
     weight_box: float = 1.0               # Box regression loss
     weight_obj: float = 1.0               # RPN objectness loss
     weight_rpn: float = 1.0               # RPN box regression loss
-    weight_3d: float = 1.0                # 3D head loss
+    weight_3d: float = 1.0                # 3D head loss (final target weight)
+    weight_3d_ramp_epochs: int = 5        # Staged ramp: 0→weight_3d over [ramp_epochs, 2*ramp_epochs]; 2D-only before that
 
     # DataLoader
     num_workers_train: int = 8
@@ -684,6 +685,16 @@ class DinoAGTrainer3D:
         """Run one full training epoch. Returns dict of average loss components."""
         self.model.train()
 
+        # Log staged 3D weight ramp status
+        _ramp = self.cfg.weight_3d_ramp_epochs
+        if _ramp > 0 and epoch < _ramp:
+            self.accelerator.print(f"  ⚡ Epoch {epoch+1}: 3D loss OFF (2D-only phase, epochs 1–{_ramp})")
+        elif _ramp > 0 and epoch < 2 * _ramp:
+            _w = self.cfg.weight_3d * (epoch - _ramp) / _ramp
+            self.accelerator.print(f"  📈 Epoch {epoch+1}: 3D weight = {_w:.3f} (ramping, target={self.cfg.weight_3d})")
+        else:
+            self.accelerator.print(f"  ✅ Epoch {epoch+1}: 3D weight = {self.cfg.weight_3d} (full)")
+
         # Per-epoch loss accumulators
         batch_loss_list = []
         batch_loss_cls_list = []
@@ -717,12 +728,21 @@ class DinoAGTrainer3D:
                     loss_dict_original = self.model(images, targets)
 
                 # Apply per-component loss weights from config
+                # Staged 3D ramp: 2D-only for first R epochs, then linear ramp 0→weight_3d over next R epochs
+                _ramp = self.cfg.weight_3d_ramp_epochs
+                if _ramp > 0 and epoch < 2 * _ramp:
+                    if epoch < _ramp:
+                        _effective_3d_w = 0.0   # Phase 1: 2D-only
+                    else:
+                        _effective_3d_w = self.cfg.weight_3d * (epoch - _ramp) / _ramp  # Phase 2: linear ramp
+                else:
+                    _effective_3d_w = self.cfg.weight_3d  # Phase 3: full weight
                 _loss_weights = {
                     "loss_classifier": self.cfg.weight_cls,
                     "loss_box_reg": self.cfg.weight_box,
                     "loss_objectness": self.cfg.weight_obj,
                     "loss_rpn_box_reg": self.cfg.weight_rpn,
-                    "loss_3d": self.cfg.weight_3d,
+                    "loss_3d": _effective_3d_w,
                 }
                 loss_dict: Dict[str, torch.Tensor] = {}
                 for k, v in loss_dict_original.items():
