@@ -178,6 +178,13 @@ class Mono3DRoIHeads(nn.Module):
     _debug_counter = 0
 
     def _compute_3d_loss(self, box_features, proposals, matched_idxs, labels, targets):
+        # Force float32 — Chamfer squared-distances on world coordinates overflow float16
+        with torch.amp.autocast(device_type='cuda', enabled=False):
+            return self._compute_3d_loss_fp32(
+                box_features.float(), proposals, matched_idxs, labels, targets,
+            )
+
+    def _compute_3d_loss_fp32(self, box_features, proposals, matched_idxs, labels, targets):
         device = box_features.device
         Mono3DRoIHeads._debug_counter += 1
         _log = (Mono3DRoIHeads._debug_counter <= 5)  # Log first 5 batches
@@ -247,6 +254,8 @@ class Mono3DRoIHeads(nn.Module):
             if _log:
                 print(f"  [3D debug] → NaN/Inf detected, returning 0")
             return torch.tensor(0.0, device=device, requires_grad=True)
+        # Clamp loss to prevent gradient explosion from outlier GT boxes
+        loss_3d = torch.clamp(loss_3d, max=10.0)
         if _log:
             print(f"  [3D debug] → loss_3d={loss_3d.item():.6f} (from {len(valid_features)} samples)")
         return loss_3d
@@ -320,6 +329,11 @@ class SeparateMono3DHead(nn.Module):
 
     def compute_training_loss(self, targets, device):
         """Compute 3D loss using captured features + matched_idxs from the most recent forward."""
+        # Force float32 — Chamfer squared-distances on world coordinates overflow float16
+        with torch.amp.autocast(device_type='cuda', enabled=False):
+            return self._compute_training_loss_fp32(targets, device)
+
+    def _compute_training_loss_fp32(self, targets, device):
         SeparateMono3DHead._debug_counter += 1
         _log = (SeparateMono3DHead._debug_counter <= 5)
 
@@ -388,12 +402,13 @@ class SeparateMono3DHead(nn.Module):
             valid_gt_3d = valid_gt_3d[perm]
             valid_intr = valid_intr[perm]
 
-        pred_corners, pred_mu = self.pred_3d(valid_features, valid_proposals, valid_intr)
+        pred_corners, pred_mu = self.pred_3d(valid_features.float(), valid_proposals, valid_intr)
         loss_3d, _, _ = ovmono3d_loss(pred_corners.view(-1, 24), valid_gt_3d, pred_mu, use_smooth_l1=True)
         if not torch.isfinite(loss_3d):
             if _log:
                 print(f"  [3D-sep debug] → NaN/Inf detected, returning 0")
             return torch.tensor(0.0, device=device, requires_grad=True)
+        loss_3d = torch.clamp(loss_3d, max=10.0)
         if _log:
             print(f"  [3D-sep debug] → loss_3d={loss_3d.item():.6f} (from {len(valid_features)} samples)")
         return loss_3d
