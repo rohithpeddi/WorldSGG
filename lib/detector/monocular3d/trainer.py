@@ -412,13 +412,34 @@ class DinoAGTrainer3D:
             self.starting_epoch = int(self.cfg.ckpt.split("_")[-1]) if "_" in self.cfg.ckpt else 0
             return
 
+        # Load checkpoint to CPU to avoid GPU memory spike
         checkpoint_state = torch.load(checkpoint_file, map_location="cpu")
-        self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint_state["model_state_dict"])
-        self.optimizer.load_state_dict(checkpoint_state["optimizer_state_dict"])
-        self.scheduler.load_state_dict(checkpoint_state["scheduler_state_dict"])
-        self.starting_epoch = checkpoint_state.get("epoch", 0) + 1
 
-        self.accelerator.print(f"✓ Loaded checkpoint from epoch {self.starting_epoch}")
+        # 1) Restore model weights, then free the CPU copy immediately
+        self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint_state["model_state_dict"])
+        del checkpoint_state["model_state_dict"]
+        gc.collect()
+        self.accelerator.print("  ✓ Model state loaded")
+
+        # 2) Restore scheduler (small — just scalar state)
+        self.scheduler.load_state_dict(checkpoint_state["scheduler_state_dict"])
+        del checkpoint_state["scheduler_state_dict"]
+        self.accelerator.print("  ✓ Scheduler state loaded")
+
+        # 3) Restore optimizer state (largest: 2× param memory for Adam exp_avg + exp_avg_sq)
+        #    Free the checkpoint dict *before* loading so we don't hold both copies at once.
+        optimizer_state = checkpoint_state.pop("optimizer_state_dict")
+        self.starting_epoch = checkpoint_state.get("epoch", 0) + 1
+        del checkpoint_state  # free everything else (epoch, current_lr, etc.)
+        gc.collect()
+
+        self.optimizer.load_state_dict(optimizer_state)
+        del optimizer_state
+        gc.collect()
+        clear_cuda_cache_for_current_process(sync=True)
+        self.accelerator.print("  ✓ Optimizer state loaded")
+
+        self.accelerator.print(f"✓ Resumed from epoch {self.starting_epoch} (GPU cache cleared)")
 
     def save_checkpoint(self, epoch: int) -> None:
         path_to_checkpoint = os.path.join(self.path_to_experiment, f"checkpoint_{epoch}")
