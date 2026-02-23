@@ -276,6 +276,154 @@ def evaluate_2d_coco_map(
 
 
 # ────────────────────────────────────────────────────────────────────
+#  Fused 2D + 3D evaluation (single forward pass)
+# ────────────────────────────────────────────────────────────────────
+
+def evaluate_2d_and_3d_fused(
+    model,
+    dataloader,
+    device,
+    accelerator=None,
+    iou_thresholds: Optional[List[float]] = None,
+    iou_threshold_2d_match: float = 0.5,
+) -> Dict[str, Any]:
+    """
+    Fused evaluation: computes COCO-style 2D mAP and 3D metrics in ONE forward pass.
+
+    Returns:
+        {
+            "metrics_2d": { "map", "map_50", "map_75", "map_per_class", "raw" },
+            "metrics_3d": { "n_matched", "n_gt_3d", "chamfer_mean", "corner_l2_mean",
+                            "mAP_3d_50", "mAP_3d_75", "mean_iou_3d",
+                            "center_l2_mean", "dims_l1_mean", "rotation_deg_mean" },
+        }
+    """
+    from .evaluate_3d import (
+        match_predictions_to_gt_2d,
+        chamfer_per_box,
+        corner_l2_per_box,
+        corners_to_aabb,
+        compute_iou_3d_aabb,
+        compute_3d_attribute_errors,
+    )
+
+    model.eval()
+
+    # ── 2D accumulator ──
+    map_metric = MeanAveragePrecision(
+        iou_type="bbox",
+        sync_on_compute=False,
+        iou_thresholds=iou_thresholds,
+    )
+
+    # ── 3D accumulators ──
+    chamfer_list, corner_l2_list, iou_3d_list = [], [], []
+    center_l2_list, dims_l1_list, rotation_deg_list = [], [], []
+    n_matched, n_gt_total = 0, 0
+
+    with torch.no_grad():
+        for images, targets in tqdm(dataloader, desc="Eval 2D+3D (fused)", ascii=True):
+            batch_images = torch.stack(images).to(device)
+            outputs = model(batch_images)
+
+            # ── Feed 2D accumulator ──
+            preds_2d, gts_2d = [], []
+            for output in outputs:
+                preds_2d.append({
+                    "boxes": output["boxes"].detach().cpu(),
+                    "scores": output["scores"].detach().cpu(),
+                    "labels": output["labels"].detach().cpu(),
+                })
+            for t in targets:
+                gts_2d.append({
+                    "boxes": t["boxes"].detach().cpu(),
+                    "labels": t["labels"].detach().cpu(),
+                })
+            min_len = min(len(preds_2d), len(gts_2d))
+            if min_len > 0:
+                map_metric.update(preds_2d[:min_len], gts_2d[:min_len])
+
+            # ── Feed 3D accumulator ──
+            for i in range(len(images)):
+                pred_boxes = outputs[i]["boxes"].detach().cpu().numpy()
+                pred_labels = outputs[i]["labels"].detach().cpu().numpy()
+                pred_scores = outputs[i]["scores"].detach().cpu().numpy()
+                pred_3d = outputs[i]["boxes_3d"].detach().cpu().numpy()
+
+                gt_boxes = targets[i]["boxes"].detach().cpu().numpy()
+                gt_labels = targets[i]["labels"].detach().cpu().numpy()
+                gt_3d = targets[i]["boxes_3d"].detach().cpu().numpy()
+
+                n_gt_total += len(gt_boxes)
+
+                # Filter out GT with near-zero 3D annotations
+                valid_gt = (np.abs(gt_3d.reshape(gt_3d.shape[0], -1)).sum(axis=1) > 1e-6)
+                gt_boxes = gt_boxes[valid_gt]
+                gt_labels = gt_labels[valid_gt]
+                gt_3d = gt_3d[valid_gt]
+
+                if len(gt_boxes) == 0 or pred_3d.shape[0] == 0:
+                    continue
+
+                pairs = match_predictions_to_gt_2d(
+                    pred_boxes, pred_labels, pred_scores, pred_3d,
+                    gt_boxes, gt_labels, gt_3d,
+                    iou_threshold=iou_threshold_2d_match,
+                )
+                for pred_c, gt_c in pairs:
+                    gt_flat = gt_c.reshape(-1)
+                    if np.abs(gt_flat).sum() < 1e-6:
+                        continue
+                    pred_c = np.asarray(pred_c, dtype=np.float64)
+                    gt_c = np.asarray(gt_c, dtype=np.float64)
+                    chamfer_list.append(chamfer_per_box(pred_c, gt_c))
+                    corner_l2_list.append(corner_l2_per_box(pred_c, gt_c))
+                    aabb_pred = corners_to_aabb(pred_c.reshape(1, 8, 3))[0]
+                    aabb_gt = corners_to_aabb(gt_c.reshape(1, 8, 3))[0]
+                    iou_3d_list.append(compute_iou_3d_aabb(aabb_pred, aabb_gt))
+                    attrs = compute_3d_attribute_errors(pred_c, gt_c)
+                    center_l2_list.append(attrs["center_l2"])
+                    dims_l1_list.append(attrs["dims_l1"])
+                    rotation_deg_list.append(attrs["rotation_deg"])
+                    n_matched += 1
+
+            del batch_images, outputs
+
+    # ── Compute 2D results ──
+    metrics_2d = {}
+    if accelerator is None or accelerator.is_main_process:
+        raw = map_metric.compute()
+        metrics_2d = {
+            "map": float(raw["map"].item()),
+            "map_50": float(raw["map_50"].item()),
+            "map_75": float(raw["map_75"].item()),
+            "map_per_class": (
+                raw.get("map_per_class", None).cpu().numpy()
+                if raw.get("map_per_class", None) is not None
+                else None
+            ),
+            "raw": raw,
+        }
+
+    # ── Compute 3D results ──
+    iou_3d = np.array(iou_3d_list) if iou_3d_list else np.array([0.0])
+    metrics_3d = {
+        "n_matched": n_matched,
+        "n_gt_3d": n_gt_total,
+        "chamfer_mean": float(np.mean(chamfer_list)) if chamfer_list else 0.0,
+        "corner_l2_mean": float(np.mean(corner_l2_list)) if corner_l2_list else 0.0,
+        "mAP_3d_50": float((iou_3d >= 0.5).mean()),
+        "mAP_3d_75": float((iou_3d >= 0.75).mean()),
+        "mean_iou_3d": float(iou_3d.mean()),
+        "center_l2_mean": float(np.mean(center_l2_list)) if center_l2_list else 0.0,
+        "dims_l1_mean": float(np.mean(dims_l1_list)) if dims_l1_list else 0.0,
+        "rotation_deg_mean": float(np.mean(rotation_deg_list)) if rotation_deg_list else 0.0,
+    }
+
+    return {"metrics_2d": metrics_2d, "metrics_3d": metrics_3d}
+
+
+# ────────────────────────────────────────────────────────────────────
 #  Main
 # ────────────────────────────────────────────────────────────────────
 

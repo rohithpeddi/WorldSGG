@@ -12,7 +12,7 @@ import gc
 import os
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -33,7 +33,7 @@ from .datasets.ag_dataset_3d import ActionGenomeDataset3D, ResolutionBucketBatch
 from .models.dino_mono_3d import DinoV3Monocular3D
 from .utils.json_logger import LocalLogger
 from .evaluation.evaluate_3d import evaluate_3d_metrics
-from .evaluation.evaluate_2d import evaluate_2d_coco_map
+from .evaluation.evaluate_2d import evaluate_2d_coco_map, evaluate_2d_and_3d_fused
 
 
 def clear_cuda_cache_for_current_process(sync: bool = True) -> None:
@@ -586,6 +586,24 @@ class DinoAGTrainer3D:
             )
         return metrics_3d
 
+    def evaluate_all(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Fused 2D + 3D evaluation in a single forward pass over the full test set.
+        Returns (metrics_2d, metrics_3d)."""
+        self.model.eval()
+        accelerator_arg = self.accelerator if self.cfg.use_accelerator else None
+        with torch.no_grad():
+            results = evaluate_2d_and_3d_fused(
+                self.model, self.test_loader, self.model_device,
+                accelerator=accelerator_arg,
+            )
+
+        metrics_2d = results.get("metrics_2d", {})
+        if metrics_2d:
+            raw_py = self._tensor_dict_to_python(metrics_2d.get("raw", {}))
+            metrics_2d["raw"] = raw_py
+
+        return metrics_2d, results.get("metrics_3d", {})
+
     # ----------------------------
     # Training
     # ----------------------------
@@ -808,13 +826,9 @@ class DinoAGTrainer3D:
         for epoch in range(self.starting_epoch, self.cfg.epochs):
             train_stats = self.train_one_epoch(epoch)
 
-            # End-of-epoch evaluation: 2D COCO mAP
-            self.accelerator.print(f"📊 Evaluating 2D COCO mAP at end of epoch {epoch + 1}...")
-            epoch_metrics = self.evaluate_map_coco()
-
-            # End-of-epoch evaluation: 3D metrics
-            self.accelerator.print(f"📊 Evaluating 3D metrics at end of epoch {epoch + 1}...")
-            epoch_metrics_3d = self.evaluate_3d()
+            # End-of-epoch evaluation: fused 2D + 3D in a single forward pass
+            self.accelerator.print(f"📊 Evaluating 2D COCO mAP + 3D metrics at end of epoch {epoch + 1}...")
+            epoch_metrics, epoch_metrics_3d = self.evaluate_all()
 
             if self.cfg.plot_each_epoch and self.accelerator.is_main_process:
                 try:
