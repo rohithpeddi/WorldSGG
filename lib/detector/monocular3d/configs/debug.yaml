@@ -24,12 +24,7 @@ target_size: 224
 # --- DataLoader ---
 num_workers_train: 0
 num_workers_test: 0
-num_workers_test_subset: 0
 persistent_workers: false
-
-# --- Subset sizes ---
-train_subset_size: 100
-test_subset_size: 50
 
 # --- Logging ---
 use_wandb: false

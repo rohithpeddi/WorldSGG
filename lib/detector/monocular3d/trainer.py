@@ -16,6 +16,8 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')  # Avoid /dev/shm open file limit
 import wandb
 from tqdm import tqdm
 
@@ -171,9 +173,8 @@ class TrainConfig:
     warmup_fraction: float = 0.01
 
     # DataLoader
-    num_workers_train: int = 16
-    num_workers_test: int = 16
-    num_workers_test_subset: int = 32
+    num_workers_train: int = 8
+    num_workers_test: int = 8
     prefetch_factor: int = 4
     persistent_workers: bool = True
 
@@ -181,10 +182,6 @@ class TrainConfig:
     target_size: Optional[int] = None  # None = use pixel_limit (Pi3-compatible); int = force square resize
     pixel_limit: int = 255000          # Pi3's PIXEL_LIMIT for aspect-ratio-preserving resize
     patch_size: int = 14               # Must match backbone patch_size (14 for DINOv2, 16 for some ViT-L)
-
-    # Subsets
-    train_subset_size: int = 180000
-    test_subset_size: int = 2000
 
     # Logging
     use_wandb: bool = True
@@ -226,7 +223,6 @@ class DinoAGTrainer3D:
         self.test_dataset = None
         self.train_loader = None
         self.test_loader = None
-        self.test_loader_subset = None
 
         self.model = None
         self.optimizer = None
@@ -282,30 +278,16 @@ class DinoAGTrainer3D:
     def build_dataloaders(self) -> None:
         """Create DataLoaders with resolution-bucketed batch samplers."""
         self.accelerator.print("  [2/5] Building dataloaders (resolution-bucketed)...")
-        train_subset_size = min(self.cfg.train_subset_size, len(self.train_dataset))
-        test_subset_size = min(self.cfg.test_subset_size, len(self.test_dataset))
 
         # Build resolution-bucketed batch samplers
         # Frames sharing the same (target_w, target_h) go in the same batch
-        def _build_subset_buckets(dataset, max_idx):
-            subset_set = set(range(max_idx))
-            buckets = {}
-            for res, indices in dataset.resolution_buckets.items():
-                filtered = [i for i in indices if i in subset_set]
-                if filtered:
-                    buckets[res] = filtered
-            return buckets
-
-        train_buckets = _build_subset_buckets(self.train_dataset, train_subset_size)
         train_batch_sampler = ResolutionBucketBatchSampler(
-            train_buckets, self.cfg.batch_size, drop_last=False)
+            self.train_dataset.resolution_buckets, self.cfg.batch_size, drop_last=False)
 
         test_batch_sampler = ResolutionBucketBatchSampler(
             self.test_dataset.resolution_buckets, self.cfg.batch_size, drop_last=True)
 
-        test_sub_buckets = _build_subset_buckets(self.test_dataset, test_subset_size)
-        test_sub_batch_sampler = ResolutionBucketBatchSampler(
-            test_sub_buckets, self.cfg.batch_size, drop_last=False)
+
 
         _persistent = self.cfg.num_workers_train > 0 and self.cfg.persistent_workers
         self.train_loader = DataLoader(
@@ -327,16 +309,7 @@ class DinoAGTrainer3D:
             persistent_workers=_persistent_test,
             prefetch_factor=self.cfg.prefetch_factor if _persistent_test else None,
         )
-        _persistent_test_sub = self.cfg.num_workers_test_subset > 0 and self.cfg.persistent_workers
-        self.test_loader_subset = DataLoader(
-            self.test_dataset,
-            batch_sampler=test_sub_batch_sampler,
-            num_workers=self.cfg.num_workers_test_subset,
-            collate_fn=collate_fn,
-            pin_memory=True,
-            persistent_workers=_persistent_test_sub,
-            prefetch_factor=self.cfg.prefetch_factor if _persistent_test_sub else None,
-        )
+
 
     def build_model(self) -> None:
         """Initialize the DINOv2 + Faster R-CNN + 3D head model."""
@@ -385,14 +358,12 @@ class DinoAGTrainer3D:
             self.optimizer,
             self.train_loader,
             self.test_loader,
-            self.test_loader_subset,
             self.scheduler,
         ) = self.accelerator.prepare(
             self.model,
             self.optimizer,
             self.train_loader,
             self.test_loader,
-            self.test_loader_subset,
             self.scheduler,
         )
 
@@ -575,16 +546,7 @@ class DinoAGTrainer3D:
             "map_per_class": coco.get("map_per_class", None),
         }
 
-    def evaluate_3d(self) -> Dict[str, Any]:
-        """Evaluate 3D metrics (chamfer, corner L2, 3D mAP, center/dims/rotation errors)
-        on the test subset using matched pred-GT pairs."""
-        self.model.eval()
-        with torch.no_grad():
-            metrics_3d = evaluate_3d_metrics(
-                self.model, self.test_loader_subset,
-                self.model_device, iou_threshold_2d=0.5,
-            )
-        return metrics_3d
+
 
     def evaluate_all(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Fused 2D + 3D evaluation in a single forward pass over the full test set.

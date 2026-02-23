@@ -24,7 +24,6 @@ target_size: 512                   # lower res for ViT-B
 # --- DataLoader ---
 num_workers_train: 8
 num_workers_test: 8
-num_workers_test_subset: 16
 
 # --- Logging ---
 use_wandb: true

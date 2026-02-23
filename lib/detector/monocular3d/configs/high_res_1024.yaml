@@ -23,14 +23,9 @@ max_grad_norm: 1.0
 target_size: 1024
 
 # --- DataLoader ---
-num_workers_train: 16
-num_workers_test: 16
-num_workers_test_subset: 32
+num_workers_train: 8
+num_workers_test: 8
 prefetch_factor: 4
-
-# --- Subset sizes ---
-train_subset_size: 180000
-test_subset_size: 2000
 
 # --- Logging ---
 use_wandb: true
