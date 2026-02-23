@@ -27,8 +27,15 @@ class LocalLogger:
 
         # Load existing logs or initialize an empty list
         if os.path.isfile(self.path_to_file):
-            with open(self.path_to_file, "r") as f:
-                self.logs = json.load(f)
+            try:
+                with open(self.path_to_file, "r") as f:
+                    self.logs = json.load(f)
+            except (json.JSONDecodeError, ValueError):
+                # Previous run may have crashed mid-write, corrupting the file
+                backup = self.path_to_file + ".corrupted"
+                os.replace(self.path_to_file, backup)
+                print(f"⚠️  Corrupted log file backed up to {backup}, starting fresh.")
+                self.logs = []
         else:
             self.logs = []
 
