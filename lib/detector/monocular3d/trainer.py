@@ -657,7 +657,7 @@ class DinoAGTrainer3D:
             f"Object:{avg_object_loss:.4f}, RPN:{avg_rpn_loss:.4f}, 3D:{avg_3d_loss:.4f})"
         )
 
-    def 33train_one_epoch(self, epoch: int) -> Dict[str, float]:
+    def train_one_epoch(self, epoch: int) -> Dict[str, float]:
         """Run one full training epoch. Returns dict of average loss components."""
         self.model.train()
 
