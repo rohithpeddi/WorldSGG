@@ -731,6 +731,14 @@ class DinoAGTrainer3D:
                 # Scale loss by gradient accumulation steps for correct effective batch size
                 losses = sum(loss / self.cfg.gradient_accumulation_steps for loss in loss_dict.values())
 
+                # Skip batch if loss is NaN/Inf (prevents optimizer state corruption)
+                if not torch.isfinite(losses):
+                    self.optimizer.zero_grad(set_to_none=True)
+                    if self.accelerator.is_main_process:
+                        tqdm.write(f"  ⚠ Skipping iteration {self.global_iteration}: NaN/Inf loss detected")
+                    self.global_iteration += 1
+                    continue
+
                 # Reduce across processes (no-op for single GPU)
                 loss_dict_reduced = reduce_dict(loss_dict)
                 losses_reduced = sum(loss / self.cfg.gradient_accumulation_steps for loss in loss_dict_reduced.values())

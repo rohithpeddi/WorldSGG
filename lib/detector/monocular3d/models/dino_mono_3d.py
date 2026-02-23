@@ -216,11 +216,12 @@ class Mono3DRoIHeads(nn.Module):
         cat_gt_3d = torch.cat(pos_gt_3d, dim=0)
         cat_intr = torch.cat(pos_intr, dim=0)
 
-        # Filter zero-padded GT
-        valid = cat_gt_3d.reshape(cat_gt_3d.shape[0], -1).abs().sum(dim=1) > 1e-6
+        # Filter zero-padded GT and extreme values (world coords can overflow float16 in Chamfer)
+        gt_mag = cat_gt_3d.reshape(cat_gt_3d.shape[0], -1).abs().sum(dim=1)
+        valid = (gt_mag > 1e-6) & (gt_mag < 1e6)
         n_valid = valid.sum().item()
         if _log:
-            print(f"  [3D debug] matched_gt_3d={len(cat_gt_3d)}, valid(non-zero)={n_valid}")
+            print(f"  [3D debug] matched_gt_3d={len(cat_gt_3d)}, valid(non-zero & bounded)={n_valid}")
         if not valid.any():
             if _log:
                 print(f"  [3D debug] → ZERO LOSS: all matched GT 3D boxes are zero-padded")
@@ -241,6 +242,11 @@ class Mono3DRoIHeads(nn.Module):
 
         pred_corners, pred_mu = self.pred_3d(valid_features, valid_proposals, valid_intr)
         loss_3d, _, _ = ovmono3d_loss(pred_corners.view(-1, 24), valid_gt_3d, pred_mu, use_smooth_l1=True)
+        # Guard against NaN/Inf from numerical instabilities (large world coords, degenerate boxes)
+        if not torch.isfinite(loss_3d):
+            if _log:
+                print(f"  [3D debug] → NaN/Inf detected, returning 0")
+            return torch.tensor(0.0, device=device, requires_grad=True)
         if _log:
             print(f"  [3D debug] → loss_3d={loss_3d.item():.6f} (from {len(valid_features)} samples)")
         return loss_3d
@@ -359,10 +365,11 @@ class SeparateMono3DHead(nn.Module):
         cat_gt_3d = torch.cat(pos_gt_3d, dim=0)
         cat_intr = torch.cat(pos_intr, dim=0)
 
-        valid = cat_gt_3d.reshape(cat_gt_3d.shape[0], -1).abs().sum(dim=1) > 1e-6
+        gt_mag = cat_gt_3d.reshape(cat_gt_3d.shape[0], -1).abs().sum(dim=1)
+        valid = (gt_mag > 1e-6) & (gt_mag < 1e6)
         n_valid = valid.sum().item()
         if _log:
-            print(f"  [3D-sep debug] matched_gt_3d={len(cat_gt_3d)}, valid(non-zero)={n_valid}")
+            print(f"  [3D-sep debug] matched_gt_3d={len(cat_gt_3d)}, valid(non-zero & bounded)={n_valid}")
         if not valid.any():
             if _log:
                 print(f"  [3D-sep debug] → ZERO LOSS: all matched GT 3D boxes are zero-padded")
@@ -383,6 +390,10 @@ class SeparateMono3DHead(nn.Module):
 
         pred_corners, pred_mu = self.pred_3d(valid_features, valid_proposals, valid_intr)
         loss_3d, _, _ = ovmono3d_loss(pred_corners.view(-1, 24), valid_gt_3d, pred_mu, use_smooth_l1=True)
+        if not torch.isfinite(loss_3d):
+            if _log:
+                print(f"  [3D-sep debug] → NaN/Inf detected, returning 0")
+            return torch.tensor(0.0, device=device, requires_grad=True)
         if _log:
             print(f"  [3D-sep debug] → loss_3d={loss_3d.item():.6f} (from {len(valid_features)} samples)")
         return loss_3d
