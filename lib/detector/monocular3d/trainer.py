@@ -793,6 +793,7 @@ class DinoAGTrainer3D:
         self.build_model()             # [3/5] DINOv2 backbone + FPN + Faster R-CNN + 3D head
         self.build_optimizer_and_scheduler()  # [4/5] AdamW + warmup→cosine schedule
         self.prepare_with_accelerator()       # [5/5] Device placement + speed toggles
+        self.init_trackers()                   # Initialize W&B + Accelerator trackers
         self.maybe_resume()            # Resume from checkpoint if --ckpt specified
 
         self.accelerator.print("\n" + "═" * 60)
