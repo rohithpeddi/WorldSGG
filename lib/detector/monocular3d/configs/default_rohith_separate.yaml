@@ -23,7 +23,7 @@ use_compile: false                 # torch.compile() — PyTorch 2.0+
 # --- Training ---
 lr: 1.0e-4
 weight_decay: 0.001
-batch_size: 128
+batch_size: 100
 epochs: 70
 gradient_accumulation_steps: 1
 max_grad_norm: 1.0
@@ -54,7 +54,7 @@ persistent_workers: true
 
 # --- Logging ---
 use_wandb: true
-wandb_project: "DINOv2-Object-Detector-AG-3D"
+wandb_project: "DINOv2-separate-Object-Detector-AG-3D"
 iter_log_every: 10
 eval_every_iters: 10000000
 
