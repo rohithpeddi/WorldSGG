@@ -807,7 +807,9 @@ class DinoAGTrainer3D:
                     )
                     self.accelerator.print(f"✓ Prediction visualization saved for epoch {epoch + 1}")
                 except Exception as e:
-                    self.accelerator.print(f"⚠️  Failed to save visualization: {e}")
+                    import traceback
+                    self.accelerator.print(f"⚠️  Failed to save visualization: {type(e).__name__}: {e}")
+                    self.accelerator.print(traceback.format_exc())
 
             lr = self.scheduler.get_last_lr()[0]
             if self.cfg.use_wandb and self.accelerator.is_main_process:
