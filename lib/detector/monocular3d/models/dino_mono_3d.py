@@ -354,9 +354,10 @@ class DinoV3Monocular3D(nn.Module):
                (batch)    (frozen)   (p2-p6)  (proposals)  (2D det)  (3D corners)
     """
 
-    def __init__(self, num_classes=37, pretrained=True, model="v3l", iou_match_3d=0.3):
+    def __init__(self, num_classes=37, pretrained=True, model="v3l", iou_match_3d=0.3, max_3d_proposals=8):
         super().__init__()
         self.iou_match_3d = iou_match_3d
+        self.max_3d_proposals = max_3d_proposals
         # Create the base Faster R-CNN detector with DINOv2 backbone + FPN
         self.base_detector = create_model(num_classes=num_classes, pretrained=pretrained, use_fpn=True, model=model)
 
@@ -447,9 +448,8 @@ class DinoV3Monocular3D(nn.Module):
                     continue
 
                 # Cap matched proposals per image to avoid OOM from ROI pooling
-                max_matches_per_image = 32
-                if len(valid_props) > max_matches_per_image:
-                    perm = torch.randperm(len(valid_props), device=valid_props.device)[:max_matches_per_image]
+                if len(valid_props) > self.max_3d_proposals:
+                    perm = torch.randperm(len(valid_props), device=valid_props.device)[:self.max_3d_proposals]
                     valid_props = valid_props[perm]
                     matched_gt_indices = matched_gt_indices[perm]
                 
