@@ -175,9 +175,8 @@ class TrainConfig:
     warmup_fraction: float = 0.01
 
     # Thresholds
-    iou_match_3d: float = 0.3            # IoU threshold for matching RPN proposals to GT for 3D loss
+    head_3d_mode: str = "unified"         # '"unified"' or '"separate"' — 3D head architecture
     iou_match_2d_eval: float = 0.5        # 2D IoU threshold for matching preds to GT in 3D evaluation
-    max_3d_proposals: int = 8             # Max matched proposals per image for 3D head (prevents OOM)
 
     # Loss weights (multiplier for each loss component)
     weight_cls: float = 1.0               # Classification loss
@@ -334,8 +333,7 @@ class DinoAGTrainer3D:
             num_classes=num_classes,
             pretrained=self.cfg.pretrained,
             model=self.cfg.model,
-            iou_match_3d=self.cfg.iou_match_3d,
-            max_3d_proposals=self.cfg.max_3d_proposals,
+            head_3d_mode=self.cfg.head_3d_mode,
         )
         # Count trainable vs frozen parameters
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
