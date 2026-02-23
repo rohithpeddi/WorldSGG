@@ -1,6 +1,22 @@
 import os
 import json
+import numpy as np
 from datetime import datetime
+
+
+class NumpyEncoder(json.JSONEncoder):
+    """JSON encoder that handles numpy arrays and scalar types."""
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        return super().default(obj)
+
 
 class LocalLogger:
     def __init__(self, path_to_log_folder, filename="train_log.json"):
@@ -30,7 +46,7 @@ class LocalLogger:
 
         # Write the full list to file
         with open(self.path_to_file, "w") as f:
-            json.dump(self.logs, f, indent=4)
+            json.dump(self.logs, f, indent=4, cls=NumpyEncoder)
 
     def log_epoch(self, epoch, train_loss, train_cls_loss, train_box_loss, 
                   train_object_loss, train_rpn_loss, mAP, learning_rate):
