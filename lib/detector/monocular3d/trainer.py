@@ -27,6 +27,8 @@ from accelerate import Accelerator
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader, Subset
 
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend — avoids Tkinter threading crash on headless servers
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.lines import Line2D
@@ -171,6 +173,17 @@ class TrainConfig:
     gradient_accumulation_steps: int = 1
     max_grad_norm: float = 1.0
     warmup_fraction: float = 0.01
+
+    # Thresholds
+    iou_match_3d: float = 0.3            # IoU threshold for matching RPN proposals to GT for 3D loss
+    iou_match_2d_eval: float = 0.5        # 2D IoU threshold for matching preds to GT in 3D evaluation
+
+    # Loss weights (multiplier for each loss component)
+    weight_cls: float = 1.0               # Classification loss
+    weight_box: float = 1.0               # Box regression loss
+    weight_obj: float = 1.0               # RPN objectness loss
+    weight_rpn: float = 1.0               # RPN box regression loss
+    weight_3d: float = 1.0                # 3D head loss
 
     # DataLoader
     num_workers_train: int = 8
@@ -320,6 +333,7 @@ class DinoAGTrainer3D:
             num_classes=num_classes,
             pretrained=self.cfg.pretrained,
             model=self.cfg.model,
+            iou_match_3d=self.cfg.iou_match_3d,
         )
         # Count trainable vs frozen parameters
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -572,6 +586,7 @@ class DinoAGTrainer3D:
             results = evaluate_2d_and_3d_fused(
                 self.model, self.test_loader, self.model_device,
                 accelerator=accelerator_arg,
+                iou_threshold_2d_match=self.cfg.iou_match_2d_eval,
             )
 
         metrics_2d = results.get("metrics_2d", {})
@@ -642,7 +657,7 @@ class DinoAGTrainer3D:
             f"Object:{avg_object_loss:.4f}, RPN:{avg_rpn_loss:.4f}, 3D:{avg_3d_loss:.4f})"
         )
 
-    def train_one_epoch(self, epoch: int) -> Dict[str, float]:
+    def 33train_one_epoch(self, epoch: int) -> Dict[str, float]:
         """Run one full training epoch. Returns dict of average loss components."""
         self.model.train()
 
@@ -678,10 +693,17 @@ class DinoAGTrainer3D:
                 with self.accelerator.autocast():  # mixed precision forward pass
                     loss_dict_original = self.model(images, targets)
 
-                box_weight = 1.0
+                # Apply per-component loss weights from config
+                _loss_weights = {
+                    "loss_classifier": self.cfg.weight_cls,
+                    "loss_box_reg": self.cfg.weight_box,
+                    "loss_objectness": self.cfg.weight_obj,
+                    "loss_rpn_box_reg": self.cfg.weight_rpn,
+                    "loss_3d": self.cfg.weight_3d,
+                }
                 loss_dict: Dict[str, torch.Tensor] = {}
                 for k, v in loss_dict_original.items():
-                    loss_dict[k] = box_weight * v if k in ("loss_box_reg", "loss_rpn_box_reg") else v
+                    loss_dict[k] = _loss_weights.get(k, 1.0) * v
 
                 # Scale loss by gradient accumulation steps for correct effective batch size
                 losses = sum(loss / self.cfg.gradient_accumulation_steps for loss in loss_dict.values())

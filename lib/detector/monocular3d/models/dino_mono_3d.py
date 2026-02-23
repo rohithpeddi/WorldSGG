@@ -354,8 +354,9 @@ class DinoV3Monocular3D(nn.Module):
                (batch)    (frozen)   (p2-p6)  (proposals)  (2D det)  (3D corners)
     """
 
-    def __init__(self, num_classes=37, pretrained=True, model="v3l"):
+    def __init__(self, num_classes=37, pretrained=True, model="v3l", iou_match_3d=0.3):
         super().__init__()
+        self.iou_match_3d = iou_match_3d
         # Create the base Faster R-CNN detector with DINOv2 backbone + FPN
         self.base_detector = create_model(num_classes=num_classes, pretrained=pretrained, use_fpn=True, model=model)
 
@@ -437,8 +438,8 @@ class DinoV3Monocular3D(nn.Module):
                 ious = torchvision.ops.box_iou(prop, gt_box)  # (N_p, N_g) IoU matrix
                 val, idx = ious.max(dim=1)  # Best GT match for each proposal
                 
-                # Keep proposals with IoU >= 0.3 (lower threshold so 3D loss kicks in early)
-                mask = val >= 0.3
+                # Keep proposals with IoU >= threshold (configurable via iou_match_3d)
+                mask = val >= self.iou_match_3d
                 valid_props = prop[mask]
                 matched_gt_indices = idx[mask]
                 
