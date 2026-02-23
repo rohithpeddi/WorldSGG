@@ -6,7 +6,7 @@
 # =============================================================================
 
 # --- Experiment ---
-experiment_name: "mono3d_default"
+experiment_name: "mono3d_default_separate"
 working_dir: "/home/rxp190007/CODE/Scene4Cast/lib/detector/monocular3d"
 save_path: "/home/rxp190007/CODE/Scene4Cast/save_path"
 
