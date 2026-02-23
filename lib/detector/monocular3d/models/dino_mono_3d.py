@@ -206,8 +206,22 @@ class Mono3DRoIHeads(nn.Module):
         if not valid.any():
             return torch.tensor(0.0, device=device, requires_grad=True)
 
-        pred_corners, pred_mu = self.pred_3d(pos_features[valid], pos_proposals[valid], cat_intr[valid])
-        loss_3d, _, _ = ovmono3d_loss(pred_corners.view(-1, 24), cat_gt_3d[valid], pred_mu, use_smooth_l1=True)
+        # Subsample to cap memory: ovmono3d_loss creates 5× the batch for disentangled supervision
+        valid_features = pos_features[valid]
+        valid_proposals = pos_proposals[valid]
+        valid_gt_3d = cat_gt_3d[valid]
+        valid_intr = cat_intr[valid]
+
+        max_3d_samples = 64
+        if len(valid_features) > max_3d_samples:
+            perm = torch.randperm(len(valid_features), device=device)[:max_3d_samples]
+            valid_features = valid_features[perm]
+            valid_proposals = valid_proposals[perm]
+            valid_gt_3d = valid_gt_3d[perm]
+            valid_intr = valid_intr[perm]
+
+        pred_corners, pred_mu = self.pred_3d(valid_features, valid_proposals, valid_intr)
+        loss_3d, _, _ = ovmono3d_loss(pred_corners.view(-1, 24), valid_gt_3d, pred_mu, use_smooth_l1=True)
         return loss_3d
 
     # ----- Inference helper: 3D predictions for detected boxes -----
@@ -311,8 +325,22 @@ class SeparateMono3DHead(nn.Module):
         if not valid.any():
             return torch.tensor(0.0, device=device, requires_grad=True)
 
-        pred_corners, pred_mu = self.pred_3d(pos_features[valid], pos_proposals[valid], cat_intr[valid])
-        loss_3d, _, _ = ovmono3d_loss(pred_corners.view(-1, 24), cat_gt_3d[valid], pred_mu, use_smooth_l1=True)
+        # Subsample to cap memory: ovmono3d_loss creates 5× the batch for disentangled supervision
+        valid_features = pos_features[valid]
+        valid_proposals = pos_proposals[valid]
+        valid_gt_3d = cat_gt_3d[valid]
+        valid_intr = cat_intr[valid]
+
+        max_3d_samples = 64
+        if len(valid_features) > max_3d_samples:
+            perm = torch.randperm(len(valid_features), device=device)[:max_3d_samples]
+            valid_features = valid_features[perm]
+            valid_proposals = valid_proposals[perm]
+            valid_gt_3d = valid_gt_3d[perm]
+            valid_intr = valid_intr[perm]
+
+        pred_corners, pred_mu = self.pred_3d(valid_features, valid_proposals, valid_intr)
+        loss_3d, _, _ = ovmono3d_loss(pred_corners.view(-1, 24), valid_gt_3d, pred_mu, use_smooth_l1=True)
         return loss_3d
 
     def predict_for_detections(self, detections, features, image_shapes, base_roi_heads):
