@@ -437,8 +437,8 @@ class DinoV3Monocular3D(nn.Module):
                 ious = torchvision.ops.box_iou(prop, gt_box)  # (N_p, N_g) IoU matrix
                 val, idx = ious.max(dim=1)  # Best GT match for each proposal
                 
-                # Keep proposals with IoU >= 0.5 (positive matches for 3D training)
-                mask = val >= 0.5
+                # Keep proposals with IoU >= 0.3 (lower threshold so 3D loss kicks in early)
+                mask = val >= 0.3
                 valid_props = prop[mask]
                 matched_gt_indices = idx[mask]
                 
