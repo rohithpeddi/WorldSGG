@@ -445,7 +445,16 @@ class DinoAGTrainer3D:
             sample_idx = 0
 
         image_tensor, target = ds[sample_idx]
-        sample = ds.samples[sample_idx] if hasattr(ds, 'samples') else {"filename": f"sample_{sample_idx}"}
+
+        # ds.samples may be a dict or a list
+        if hasattr(ds, 'samples'):
+            if isinstance(ds.samples, dict):
+                keys = list(ds.samples.keys())
+                sample = ds.samples[keys[sample_idx]] if sample_idx < len(keys) else {"filename": f"sample_{sample_idx}"}
+            else:
+                sample = ds.samples[sample_idx]
+        else:
+            sample = {"filename": f"sample_{sample_idx}"}
 
         mean = tuple(ds.image_mean) if hasattr(ds, 'image_mean') else (0.485, 0.456, 0.406)
         std = tuple(ds.image_std) if hasattr(ds, 'image_std') else (0.229, 0.224, 0.225)
