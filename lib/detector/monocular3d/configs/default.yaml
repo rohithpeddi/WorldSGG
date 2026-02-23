@@ -41,8 +41,8 @@ prefetch_factor: 4
 persistent_workers: true
 
 # --- Logging ---
-use_wandb: false
-wandb_project: "DINOv3-Object-Detector-AG-3D"
+use_wandb: true
+wandb_project: "DINOv2-Object-Detector-AG-3D"
 iter_log_every: 10000
 eval_every_iters: 10000000
 
@@ -53,5 +53,5 @@ plot_score_thresh: 0.1
 
 # --- Misc ---
 use_collate: true
-use_accelerator: false
+use_accelerator: true
 ckpt: null                         # path to checkpoint folder for resume
