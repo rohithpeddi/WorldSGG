@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import torch
 import torch.multiprocessing
+
 torch.multiprocessing.set_sharing_strategy('file_system')  # Avoid /dev/shm open file limit
 import wandb
 from tqdm import tqdm
@@ -28,6 +29,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader, Subset
 
 import matplotlib
+
 matplotlib.use('Agg')  # Non-interactive backend — avoids Tkinter threading crash on headless servers
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -175,17 +177,17 @@ class TrainConfig:
     warmup_fraction: float = 0.01
 
     # Thresholds
-    head_3d_mode: str = "unified"         # '"unified"' or '"separate"' — 3D head architecture
-    max_3d_proposals: int = 64            # Max positive proposals for 3D loss (caps memory from OVMono3D 5× expansion)
-    iou_match_2d_eval: float = 0.5        # 2D IoU threshold for matching preds to GT in 3D evaluation
+    head_3d_mode: str = "unified"  # '"unified"' or '"separate"' — 3D head architecture
+    max_3d_proposals: int = 64  # Max positive proposals for 3D loss (caps memory from OVMono3D 5× expansion)
+    iou_match_2d_eval: float = 0.5  # 2D IoU threshold for matching preds to GT in 3D evaluation
 
     # Loss weights (multiplier for each loss component)
-    weight_cls: float = 1.0               # Classification loss
-    weight_box: float = 1.0               # Box regression loss
-    weight_obj: float = 1.0               # RPN objectness loss
-    weight_rpn: float = 1.0               # RPN box regression loss
-    weight_3d: float = 1.0                # 3D head loss (final target weight)
-    weight_3d_ramp_epochs: int = 5        # Staged ramp: 0→weight_3d over [ramp_epochs, 2*ramp_epochs]; 2D-only before that
+    weight_cls: float = 1.0  # Classification loss
+    weight_box: float = 1.0  # Box regression loss
+    weight_obj: float = 1.0  # RPN objectness loss
+    weight_rpn: float = 1.0  # RPN box regression loss
+    weight_3d: float = 1.0  # 3D head loss (final target weight)
+    weight_3d_ramp_epochs: int = 5  # Staged ramp: 0→weight_3d over [ramp_epochs, 2*ramp_epochs]; 2D-only before that
 
     # DataLoader
     num_workers_train: int = 8
@@ -195,8 +197,8 @@ class TrainConfig:
 
     # Image
     target_size: Optional[int] = None  # None = use pixel_limit (Pi3-compatible); int = force square resize
-    pixel_limit: int = 255000          # Pi3's PIXEL_LIMIT for aspect-ratio-preserving resize
-    patch_size: int = 14               # Must match backbone patch_size (14 for DINOv2, 16 for some ViT-L)
+    pixel_limit: int = 255000  # Pi3's PIXEL_LIMIT for aspect-ratio-preserving resize
+    patch_size: int = 14  # Must match backbone patch_size (14 for DINOv2, 16 for some ViT-L)
 
     # Logging
     use_wandb: bool = True
@@ -302,8 +304,6 @@ class DinoAGTrainer3D:
         test_batch_sampler = ResolutionBucketBatchSampler(
             self.test_dataset.resolution_buckets, self.cfg.batch_size, drop_last=True)
 
-
-
         _persistent = self.cfg.num_workers_train > 0 and self.cfg.persistent_workers
         self.train_loader = DataLoader(
             self.train_dataset,
@@ -325,7 +325,6 @@ class DinoAGTrainer3D:
             prefetch_factor=self.cfg.prefetch_factor if _persistent_test else None,
         )
 
-
     def build_model(self) -> None:
         """Initialize the DINOv2 + Faster R-CNN + 3D head model."""
         self.accelerator.print("  [3/5] Building model...")
@@ -341,7 +340,8 @@ class DinoAGTrainer3D:
         # Count trainable vs frozen parameters
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.model.parameters())
-        self.accelerator.print(f"    ✓ Parameters: {trainable:,} trainable / {total:,} total ({100*trainable/total:.1f}% trainable)")
+        self.accelerator.print(
+            f"    ✓ Parameters: {trainable:,} trainable / {total:,} total ({100 * trainable / total:.1f}% trainable)")
         if self.cfg.use_compile:
             self.accelerator.print("    Compiling model with torch.compile()...")
             self.model = torch.compile(self.model, mode="reduce-overhead")
@@ -389,9 +389,9 @@ class DinoAGTrainer3D:
         self.model_device = next(self.model.parameters()).device
 
         # Speed toggles: enable cuDNN autotuner, TF32, and Flash Attention
-        torch.backends.cudnn.benchmark = True        # Auto-tune convolution algorithms
+        torch.backends.cudnn.benchmark = True  # Auto-tune convolution algorithms
         torch.backends.cuda.matmul.allow_tf32 = True  # TF32 for matrix multiplications
-        torch.backends.cudnn.allow_tf32 = True         # TF32 for cuDNN operations
+        torch.backends.cudnn.allow_tf32 = True  # TF32 for cuDNN operations
         try:
             torch.backends.cuda.enable_flash_sdp(True)
             torch.backends.cuda.enable_mem_efficient_sdp(True)
@@ -488,7 +488,8 @@ class DinoAGTrainer3D:
         if hasattr(ds, 'samples'):
             if isinstance(ds.samples, dict):
                 keys = list(ds.samples.keys())
-                sample = ds.samples[keys[sample_idx]] if sample_idx < len(keys) else {"filename": f"sample_{sample_idx}"}
+                sample = ds.samples[keys[sample_idx]] if sample_idx < len(keys) else {
+                    "filename": f"sample_{sample_idx}"}
             else:
                 sample = ds.samples[sample_idx]
         else:
@@ -599,8 +600,6 @@ class DinoAGTrainer3D:
             "map_per_class": coco.get("map_per_class", None),
         }
 
-
-
     def evaluate_all(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Fused 2D + 3D evaluation in a single forward pass over the full test set.
         Returns (metrics_2d, metrics_3d)."""
@@ -688,12 +687,13 @@ class DinoAGTrainer3D:
         # Log staged 3D weight ramp status
         _ramp = self.cfg.weight_3d_ramp_epochs
         if _ramp > 0 and epoch < _ramp:
-            self.accelerator.print(f"  ⚡ Epoch {epoch+1}: 3D loss OFF (2D-only phase, epochs 1–{_ramp})")
+            self.accelerator.print(f"  ⚡ Epoch {epoch + 1}: 3D loss OFF (2D-only phase, epochs 1–{_ramp})")
         elif _ramp > 0 and epoch < 2 * _ramp:
             _w = self.cfg.weight_3d * (epoch - _ramp) / _ramp
-            self.accelerator.print(f"  📈 Epoch {epoch+1}: 3D weight = {_w:.3f} (ramping, target={self.cfg.weight_3d})")
+            self.accelerator.print(
+                f"  📈 Epoch {epoch + 1}: 3D weight = {_w:.3f} (ramping, target={self.cfg.weight_3d})")
         else:
-            self.accelerator.print(f"  ✅ Epoch {epoch+1}: 3D weight = {self.cfg.weight_3d} (full)")
+            self.accelerator.print(f"  ✅ Epoch {epoch + 1}: 3D weight = {self.cfg.weight_3d} (full)")
 
         # Per-epoch loss accumulators
         batch_loss_list = []
@@ -711,10 +711,10 @@ class DinoAGTrainer3D:
         _zero = 0.0
         first_iter = True
         for images, targets in tqdm(
-            self.train_loader,
-            desc=f"Epoch {epoch+1}/{self.cfg.epochs} [Train]",
-            ascii=True,
-            dynamic_ncols=True,
+                self.train_loader,
+                desc=f"Epoch {epoch + 1}/{self.cfg.epochs} [Train]",
+                ascii=True,
+                dynamic_ncols=True,
         ):
             if first_iter:
                 self.accelerator.print("First batch: loading data and first CUDA run (can take 2–5 min)...")
@@ -732,7 +732,7 @@ class DinoAGTrainer3D:
                 _ramp = self.cfg.weight_3d_ramp_epochs
                 if _ramp > 0 and epoch < 2 * _ramp:
                     if epoch < _ramp:
-                        _effective_3d_w = 0.0   # Phase 1: 2D-only
+                        _effective_3d_w = 0.0  # Phase 1: 2D-only
                     else:
                         _effective_3d_w = self.cfg.weight_3d * (epoch - _ramp) / _ramp  # Phase 2: linear ramp
                 else:
@@ -786,10 +786,13 @@ class DinoAGTrainer3D:
 
                 if self.accelerator.is_main_process:
                     _total = losses_reduced.item()
-                    _cls = loss_dict_reduced["loss_classifier"].item() if "loss_classifier" in loss_dict_reduced else _zero
+                    _cls = loss_dict_reduced[
+                        "loss_classifier"].item() if "loss_classifier" in loss_dict_reduced else _zero
                     _box = loss_dict_reduced["loss_box_reg"].item() if "loss_box_reg" in loss_dict_reduced else _zero
-                    _obj = loss_dict_reduced["loss_objectness"].item() if "loss_objectness" in loss_dict_reduced else _zero
-                    _rpn = loss_dict_reduced["loss_rpn_box_reg"].item() if "loss_rpn_box_reg" in loss_dict_reduced else _zero
+                    _obj = loss_dict_reduced[
+                        "loss_objectness"].item() if "loss_objectness" in loss_dict_reduced else _zero
+                    _rpn = loss_dict_reduced[
+                        "loss_rpn_box_reg"].item() if "loss_rpn_box_reg" in loss_dict_reduced else _zero
                     _l3d = loss_dict_reduced["loss_3d"].item() if "loss_3d" in loss_dict_reduced else _zero
 
                     batch_loss_list.append(_total)
@@ -861,16 +864,16 @@ class DinoAGTrainer3D:
         self.accelerator.print("═" * 60)
 
         # ---- Setup Phase ----
-        self.build_datasets()          # [1/5] Load AG annotations + build frame index
-        self.build_dataloaders()       # [2/5] Resolution-bucketed batch samplers
-        self.build_model()             # [3/5] DINOv2 backbone + FPN + Faster R-CNN + 3D head
+        self.build_datasets()  # [1/5] Load AG annotations + build frame index
+        self.build_dataloaders()  # [2/5] Resolution-bucketed batch samplers
+        self.build_model()  # [3/5] DINOv2 backbone + FPN + Faster R-CNN + 3D head
         self.build_optimizer_and_scheduler()  # [4/5] AdamW + warmup→cosine schedule
-        self.prepare_with_accelerator()       # [5/5] Device placement + speed toggles
-        self.init_trackers()                   # Initialize W&B + Accelerator trackers
-        self.maybe_resume()            # Resume from checkpoint if --ckpt specified
+        self.prepare_with_accelerator()  # [5/5] Device placement + speed toggles
+        self.init_trackers()  # Initialize W&B + Accelerator trackers
+        self.maybe_resume()  # Resume from checkpoint if --ckpt specified
 
         self.accelerator.print("\n" + "═" * 60)
-        self.accelerator.print(f"  Starting training: epochs {self.starting_epoch+1}→{self.cfg.epochs}")
+        self.accelerator.print(f"  Starting training: epochs {self.starting_epoch + 1}→{self.cfg.epochs}")
         self.accelerator.print("═" * 60 + "\n")
 
         # ---- Training Loop ----
@@ -961,18 +964,26 @@ class DinoAGTrainer3D:
                 match_rate = (n_matched / n_gt * 100) if n_gt > 0 else 0.0
                 self.accelerator.print(f"  Matched Pairs:    {n_matched}/{n_gt} GT boxes ({match_rate:.1f}%)")
                 self.accelerator.print(f"  ┌─ Box Quality ─────────────────────────────────┐")
-                self.accelerator.print(f"  │  Chamfer Distance:   {epoch_metrics_3d.get('chamfer_mean', 0.0):10.4f}          │")
-                self.accelerator.print(f"  │  Corner L2 (mean):   {epoch_metrics_3d.get('corner_l2_mean', 0.0):10.4f}          │")
-                self.accelerator.print(f"  │  Mean IoU 3D:        {epoch_metrics_3d.get('mean_iou_3d', 0.0):10.4f}          │")
+                self.accelerator.print(
+                    f"  │  Chamfer Distance:   {epoch_metrics_3d.get('chamfer_mean', 0.0):10.4f}          │")
+                self.accelerator.print(
+                    f"  │  Corner L2 (mean):   {epoch_metrics_3d.get('corner_l2_mean', 0.0):10.4f}          │")
+                self.accelerator.print(
+                    f"  │  Mean IoU 3D:        {epoch_metrics_3d.get('mean_iou_3d', 0.0):10.4f}          │")
                 self.accelerator.print(f"  └────────────────────────────────────────────────┘")
                 self.accelerator.print(f"  ┌─ 3D mAP ────────────────────────────────────────┐")
-                self.accelerator.print(f"  │  mAP_3d@50:          {epoch_metrics_3d.get('mAP_3d_50', 0.0):10.4f}          │")
-                self.accelerator.print(f"  │  mAP_3d@75:          {epoch_metrics_3d.get('mAP_3d_75', 0.0):10.4f}          │")
+                self.accelerator.print(
+                    f"  │  mAP_3d@50:          {epoch_metrics_3d.get('mAP_3d_50', 0.0):10.4f}          │")
+                self.accelerator.print(
+                    f"  │  mAP_3d@75:          {epoch_metrics_3d.get('mAP_3d_75', 0.0):10.4f}          │")
                 self.accelerator.print(f"  └────────────────────────────────────────────────┘")
                 self.accelerator.print(f"  ┌─ Per-Attribute Errors ─────────────────────────┐")
-                self.accelerator.print(f"  │  Center L2:          {epoch_metrics_3d.get('center_l2_mean', 0.0):10.4f}          │")
-                self.accelerator.print(f"  │  Dimensions L1:      {epoch_metrics_3d.get('dims_l1_mean', 0.0):10.4f}          │")
-                self.accelerator.print(f"  │  Rotation Error:     {epoch_metrics_3d.get('rotation_deg_mean', 0.0):9.1f}°         │")
+                self.accelerator.print(
+                    f"  │  Center L2:          {epoch_metrics_3d.get('center_l2_mean', 0.0):10.4f}          │")
+                self.accelerator.print(
+                    f"  │  Dimensions L1:      {epoch_metrics_3d.get('dims_l1_mean', 0.0):10.4f}          │")
+                self.accelerator.print(
+                    f"  │  Rotation Error:     {epoch_metrics_3d.get('rotation_deg_mean', 0.0):9.1f}°         │")
                 self.accelerator.print(f"  └────────────────────────────────────────────────┘")
             else:
                 self.accelerator.print(f"  ⚠️  No 3D metrics available")
