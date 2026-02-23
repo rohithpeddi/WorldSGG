@@ -245,7 +245,69 @@ class ActionGenomeDataset3D(Dataset):
             else:
                 return
 
-        # ---- Phase 2: Build indexable list + pre-compute target resolutions ----
+        # Load 3D annotations from pickle files into samples
+        n_3d_videos = 0
+        n_3d_frames = 0
+        n_3d_objects = 0
+
+        for pkl_name, video_data in tqdm(_iter_3d_pkls(), desc=f"  [{self.phase}] Loading 3D annotations", ascii=True):
+            video_id = os.path.splitext(pkl_name)[0]  # e.g. "001YG.pkl" -> "001YG"
+            n_3d_videos += 1
+
+            # Extract intrinsics (fx, fy, cx, cy) for this video
+            intr = video_data.get("intrinsics", None)
+            if intr is not None:
+                self.video_intrinsics[video_id] = {
+                    "fx": float(intr.get("fx", 500.0)),
+                    "fy": float(intr.get("fy", 500.0)),
+                    "cx": float(intr.get("cx", 320.0)),
+                    "cy": float(intr.get("cy", 240.0)),
+                }
+
+            # Extract per-frame 3D object corners
+            frames_final = video_data.get("frames_final", {})
+            bbox_frames = frames_final.get("bbox_frames", {})
+
+            for frame_name, frame_data in bbox_frames.items():
+                if frame_name not in self.samples:
+                    continue
+
+                objects_3d = frame_data.get("objects", [])
+                obj_3d_list = []
+                person_3d = None
+
+                for obj in objects_3d:
+                    label = obj.get("label", None)
+                    # Extract 3D corners (try known key formats)
+                    corners = None
+                    for key in ("corners_world", "obb_corners_final", "corners_final"):
+                        if key in obj:
+                            corners = np.array(obj[key], dtype=np.float32).reshape(8, 3)
+                            break
+
+                    if corners is None:
+                        continue
+
+                    # Person class (label="person" or class index 1)
+                    if label == "person" or label == "__person__":
+                        if person_3d is None:
+                            person_3d = corners
+                    else:
+                        # Map label string to class index
+                        if label in self.object_classes:
+                            cls_idx = self.object_classes.index(label)
+                        else:
+                            continue  # Unknown class, skip
+                        obj_3d_list.append({'class': cls_idx, 'bbox_3d': corners})
+                        n_3d_objects += 1
+
+                if person_3d is not None or len(obj_3d_list) > 0:
+                    self.samples[frame_name]['person_boxes_3d'] = person_3d
+                    self.samples[frame_name]['object_boxes_3d'] = obj_3d_list
+                    n_3d_frames += 1
+
+        print(f"    ✓ 3D annotations: {n_3d_videos} videos, {n_3d_frames} frames, {n_3d_objects} objects")
+
         self.frame_names: List[str] = sorted(self.samples.keys())
 
         # Pre-compute target dimensions per VIDEO (all frames in a video share the same resolution).
