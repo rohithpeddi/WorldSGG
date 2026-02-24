@@ -161,9 +161,11 @@ class Mono3DRoIHeads(nn.Module):
             loss_cls, loss_box = fastrcnn_loss(class_logits, box_regression, labels, regression_targets)
             losses["loss_classifier"] = loss_cls
             losses["loss_box_reg"] = loss_box
-            losses["loss_3d"] = self._compute_3d_loss(
+            loss_3d, loss_3d_raw = self._compute_3d_loss(
                 box_features, proposals, matched_idxs, labels, targets,
             )
+            losses["loss_3d"] = loss_3d
+            losses["loss_3d_raw"] = loss_3d_raw
         else:
             boxes, scores, labels_out = self.base.postprocess_detections(
                 class_logits, box_regression, proposals, image_shapes,
@@ -197,7 +199,7 @@ class Mono3DRoIHeads(nn.Module):
         if not pos_mask.any():
             if _log:
                 print(f"  [3D debug] → ZERO LOSS: no positive proposals")
-            return torch.tensor(0.0, device=device, requires_grad=True)
+            return torch.tensor(0.0, device=device, requires_grad=True), torch.tensor(0.0, device=device)
 
         pos_features = box_features[pos_mask]
         cat_proposals = torch.cat(proposals, dim=0)
@@ -232,7 +234,7 @@ class Mono3DRoIHeads(nn.Module):
         if not valid.any():
             if _log:
                 print(f"  [3D debug] → ZERO LOSS: all matched GT 3D boxes are zero-padded")
-            return torch.tensor(0.0, device=device, requires_grad=True)
+            return torch.tensor(0.0, device=device, requires_grad=True), torch.tensor(0.0, device=device)
 
         # Subsample to cap memory: ovmono3d_loss creates 5× the batch for disentangled supervision
         valid_features = pos_features[valid]
@@ -253,13 +255,13 @@ class Mono3DRoIHeads(nn.Module):
         if not torch.isfinite(loss_3d):
             if _log:
                 print(f"  [3D debug] → NaN/Inf detected, returning 0")
-            return torch.tensor(0.0, device=device, requires_grad=True)
+            return torch.tensor(0.0, device=device, requires_grad=True), torch.tensor(0.0, device=device)
         # Clamp loss to prevent gradient explosion from outlier GT boxes
-        loss_3d_raw = loss_3d.item()
+        loss_3d_raw = loss_3d.detach()
         loss_3d = torch.clamp(loss_3d, max=10.0)
         if _log:
-            print(f"  [3D debug] → loss_3d={loss_3d.item():.6f} (from {len(valid_features)} samples)")
-        return loss_3d
+            print(f"  [3D debug] → loss_3d={loss_3d.item():.6f} raw={loss_3d_raw.item():.6f} (from {len(valid_features)} samples)")
+        return loss_3d, loss_3d_raw
 
     # ----- Inference helper: 3D predictions for detected boxes -----
     def _predict_3d_for_detections(self, result, features, image_shapes, targets=None):
@@ -355,7 +357,7 @@ class SeparateMono3DHead(nn.Module):
         if not pos_mask.any():
             if _log:
                 print(f"  [3D-sep debug] → ZERO LOSS: no positive proposals")
-            return torch.tensor(0.0, device=device, requires_grad=True)
+            return torch.tensor(0.0, device=device, requires_grad=True), torch.tensor(0.0, device=device)
 
         pos_features = self._hooked_features[pos_mask]
         cat_proposals = torch.cat(proposals, dim=0)
@@ -388,7 +390,7 @@ class SeparateMono3DHead(nn.Module):
         if not valid.any():
             if _log:
                 print(f"  [3D-sep debug] → ZERO LOSS: all matched GT 3D boxes are zero-padded")
-            return torch.tensor(0.0, device=device, requires_grad=True)
+            return torch.tensor(0.0, device=device, requires_grad=True), torch.tensor(0.0, device=device)
 
         # Subsample to cap memory: ovmono3d_loss creates 5× the batch for disentangled supervision
         valid_features = pos_features[valid]
@@ -408,14 +410,14 @@ class SeparateMono3DHead(nn.Module):
         if not torch.isfinite(loss_3d):
             if _log:
                 print(f"  [3D-sep debug] → NaN/Inf detected, returning 0")
-            return torch.tensor(0.0, device=device, requires_grad=True)
-        loss_3d_raw = loss_3d.item()
+            return torch.tensor(0.0, device=device, requires_grad=True), torch.tensor(0.0, device=device)
+        loss_3d_raw = loss_3d.detach()
         loss_3d = torch.clamp(loss_3d, max=10.0)
-        if loss_3d_raw > 10.0:
-            print(f"  [3D-sep clamp] raw={loss_3d_raw:.4f} → clamped=10.0")
+        if loss_3d_raw.item() > 10.0:
+            print(f"  [3D-sep clamp] raw={loss_3d_raw.item():.4f} → clamped=10.0")
         if _log:
-            print(f"  [3D-sep debug] → loss_3d={loss_3d.item():.6f} (from {len(valid_features)} samples)")
-        return loss_3d
+            print(f"  [3D-sep debug] → loss_3d={loss_3d.item():.6f} raw={loss_3d_raw.item():.6f} (from {len(valid_features)} samples)")
+        return loss_3d, loss_3d_raw
 
     def predict_for_detections(self, detections, features, image_shapes, base_roi_heads, targets=None):
         """Run 3D prediction on detected boxes using shared ROI pool + FC."""
@@ -717,7 +719,9 @@ class DinoV3Monocular3D(nn.Module):
 
             if self.training:
                 device = features[list(features.keys())[0]].device
-                detector_losses["loss_3d"] = self.head_3d_separate.compute_training_loss(targets, device)
+                loss_3d, loss_3d_raw = self.head_3d_separate.compute_training_loss(targets, device)
+                detector_losses["loss_3d"] = loss_3d
+                detector_losses["loss_3d_raw"] = loss_3d_raw
             else:
                 self.head_3d_separate.predict_for_detections(
                     detections, features, images.image_sizes, self.roi_heads, targets,

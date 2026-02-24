@@ -752,6 +752,8 @@ class DinoAGTrainer3D:
                 }
                 loss_dict: Dict[str, torch.Tensor] = {}
                 for k, v in loss_dict_original.items():
+                    if k.endswith("_raw"):
+                        continue  # skip raw logging-only values from weighted loss
                     loss_dict[k] = _loss_weights.get(k, 1.0) * v
 
                 # Scale loss by gradient accumulation steps for correct effective batch size
@@ -801,7 +803,7 @@ class DinoAGTrainer3D:
                         "loss_rpn_box_reg"].item() if "loss_rpn_box_reg" in loss_dict_reduced else _zero
                     _l3d = loss_dict_reduced["loss_3d"].item() if "loss_3d" in loss_dict_reduced else _zero
                     # Raw (unweighted) 3D loss — useful to monitor 3D head quality during ramp
-                    _raw_3d = loss_dict_original["loss_3d"].item() if "loss_3d" in loss_dict_original else _zero
+                    _raw_3d = loss_dict_original["loss_3d_raw"].item() if "loss_3d_raw" in loss_dict_original else _zero
 
                     batch_loss_list.append(_total)
                     batch_loss_cls_list.append(_cls)
