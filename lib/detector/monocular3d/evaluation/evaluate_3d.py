@@ -4,7 +4,7 @@ Evaluation script for DINOv2 Monocular 3D detector.
 
 Reports:
   - 2D: COCO-style mAP (map, map_50, map_75, map_per_class).
-  - 3D: Chamfer distance, corner L2 error, axis-aligned 3D IoU (mAP_3d_50, mAP_3d_75),
+  - 3D: Chamfer distance, corner L2 error, axis-aligned 3D IoU (iou3d_hit_50, iou3d_hit_75),
         and per-attribute errors (center, dimensions, rotation) on matched pred-GT pairs.
 
 Matching: For each image, predictions are matched to GT by 2D box IoU and same label.
@@ -250,7 +250,7 @@ def evaluate_2d_coco(model, dataloader, device, accelerator=None):
 
 
 def evaluate_3d_metrics(model, dataloader, device, iou_threshold_2d=0.5):
-    """3D metrics on matched pred-GT pairs: Chamfer, corner L2, OBB mAP, attribute errors."""
+    """3D metrics on matched pred-GT pairs: Chamfer, corner L2, OBB IoU hit rates, attribute errors."""
     model.eval()
     chamfer_list = []
     corner_l2_list = []
@@ -276,11 +276,11 @@ def evaluate_3d_metrics(model, dataloader, device, iou_threshold_2d=0.5):
                 gt_labels = targets[i]["labels"].detach().cpu().numpy()
                 gt_3d = targets[i]["boxes_3d"].detach().cpu().numpy()  # (M, 8, 3)
 
-                n_gt_total += len(gt_boxes)
                 valid_gt = (np.abs(gt_3d.reshape(gt_3d.shape[0], -1)).sum(axis=1) > 1e-6)
                 gt_boxes = gt_boxes[valid_gt]
                 gt_labels = gt_labels[valid_gt]
                 gt_3d = gt_3d[valid_gt]
+                n_gt_total += len(gt_boxes)  # count only GT with valid 3D annotations
                 if len(gt_boxes) == 0:
                     continue
 
@@ -307,10 +307,10 @@ def evaluate_3d_metrics(model, dataloader, device, iou_threshold_2d=0.5):
                     n_matched += 1
             clear_cuda_cache_for_current_process(sync=False)
 
-    # mAP at 0.5 and 0.75 (over matched pairs: count as TP if IoU >= thresh)
+    # Hit rate at IoU thresholds (fraction of matched pairs with IoU >= thresh)
     iou_3d = np.array(iou_3d_list) if iou_3d_list else np.array([0.0])
-    ap_50 = (iou_3d >= 0.5).mean()
-    ap_75 = (iou_3d >= 0.75).mean()
+    hit_50 = (iou_3d >= 0.5).mean()
+    hit_75 = (iou_3d >= 0.75).mean()
     mean_iou_3d = float(iou_3d.mean())
 
     return {
@@ -318,8 +318,8 @@ def evaluate_3d_metrics(model, dataloader, device, iou_threshold_2d=0.5):
         "n_gt_3d": n_gt_total,
         "chamfer_mean": float(np.mean(chamfer_list)) if chamfer_list else 0.0,
         "corner_l2_mean": float(np.mean(corner_l2_list)) if corner_l2_list else 0.0,
-        "mAP_3d_50": ap_50,
-        "mAP_3d_75": ap_75,
+        "iou3d_hit_50": hit_50,   # hit rate, not mAP
+        "iou3d_hit_75": hit_75,   # hit rate, not mAP
         "mean_iou_3d": mean_iou_3d,
         "center_l2_mean": float(np.mean(center_l2_list)) if center_l2_list else 0.0,
         "dims_l1_mean": float(np.mean(dims_l1_list)) if dims_l1_list else 0.0,
@@ -405,7 +405,7 @@ def main():
         metrics["3d"] = metrics_3d
         print(f"  Matched pairs: {metrics_3d['n_matched']}  GT 3D boxes: {metrics_3d['n_gt_3d']}")
         print(f"  Chamfer (mean): {metrics_3d['chamfer_mean']:.4f}  Corner L2 (mean): {metrics_3d['corner_l2_mean']:.4f}")
-        print(f"  mAP_3d@50: {metrics_3d['mAP_3d_50']:.4f}  mAP_3d@75: {metrics_3d['mAP_3d_75']:.4f}  Mean IoU 3D: {metrics_3d['mean_iou_3d']:.4f}")
+        print(f"  IoU3D Hit@50: {metrics_3d['iou3d_hit_50']:.4f}  IoU3D Hit@75: {metrics_3d['iou3d_hit_75']:.4f}  Mean IoU 3D: {metrics_3d['mean_iou_3d']:.4f}")
         print(f"  Center L2: {metrics_3d['center_l2_mean']:.4f}  Dims L1: {metrics_3d['dims_l1_mean']:.4f}  Rotation (deg): {metrics_3d['rotation_deg_mean']:.4f}")
 
     if args.output:

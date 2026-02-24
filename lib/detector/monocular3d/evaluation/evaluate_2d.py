@@ -120,7 +120,8 @@ def evaluate_precision_recall(
     with torch.no_grad():
         for images, targets in tqdm(dataloader, desc="2D Precision/Recall", ascii=True):
             images = torch.stack([img for img in images]).to(device)
-            outputs = model(images)
+            targets_dev = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
+            outputs = model(images, targets_dev)
 
             for i in range(len(images)):
                 pred_boxes = outputs[i]["boxes"].detach().cpu().numpy()
@@ -236,7 +237,8 @@ def evaluate_2d_coco_map(
         for images, targets in tqdm(dataloader, desc="2D COCO mAP", ascii=True):
             # images is already a list of tensors from the DataLoader batch
             batch_images = torch.stack(images).to(device)
-            outputs = model(batch_images)
+            targets_dev = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
+            outputs = model(batch_images, targets_dev)
 
             preds, gts = [], []
             for output in outputs:
@@ -294,7 +296,7 @@ def evaluate_2d_and_3d_fused(
         {
             "metrics_2d": { "map", "map_50", "map_75", "map_per_class", "raw" },
             "metrics_3d": { "n_matched", "n_gt_3d", "chamfer_mean", "corner_l2_mean",
-                            "mAP_3d_50", "mAP_3d_75", "mean_iou_3d",
+                            "iou3d_hit_50", "iou3d_hit_75", "mean_iou_3d",
                             "center_l2_mean", "dims_l1_mean", "rotation_deg_mean" },
         }
     """
@@ -323,7 +325,8 @@ def evaluate_2d_and_3d_fused(
     with torch.no_grad():
         for images, targets in tqdm(dataloader, desc="Eval 2D+3D (fused)", ascii=True):
             batch_images = torch.stack(images).to(device)
-            outputs = model(batch_images)
+            targets_dev = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
+            outputs = model(batch_images, targets_dev)
 
             # ── Feed 2D accumulator ──
             preds_2d, gts_2d = [], []
@@ -353,13 +356,13 @@ def evaluate_2d_and_3d_fused(
                 gt_labels = targets[i]["labels"].detach().cpu().numpy()
                 gt_3d = targets[i]["boxes_3d"].detach().cpu().numpy()
 
-                n_gt_total += len(gt_boxes)
-
                 # Filter out GT with near-zero 3D annotations
                 valid_gt = (np.abs(gt_3d.reshape(gt_3d.shape[0], -1)).sum(axis=1) > 1e-6)
                 gt_boxes = gt_boxes[valid_gt]
                 gt_labels = gt_labels[valid_gt]
                 gt_3d = gt_3d[valid_gt]
+
+                n_gt_total += len(gt_boxes)  # count only GT with valid 3D annotations
 
                 if len(gt_boxes) == 0 or pred_3d.shape[0] == 0:
                     continue
@@ -409,8 +412,8 @@ def evaluate_2d_and_3d_fused(
         "n_gt_3d": n_gt_total,
         "chamfer_mean": float(np.mean(chamfer_list)) if chamfer_list else 0.0,
         "corner_l2_mean": float(np.mean(corner_l2_list)) if corner_l2_list else 0.0,
-        "mAP_3d_50": float((iou_3d >= 0.5).mean()),
-        "mAP_3d_75": float((iou_3d >= 0.75).mean()),
+        "iou3d_hit_50": float((iou_3d >= 0.5).mean()),  # hit rate, not mAP
+        "iou3d_hit_75": float((iou_3d >= 0.75).mean()),  # hit rate, not mAP
         "mean_iou_3d": float(iou_3d.mean()),
         "center_l2_mean": float(np.mean(center_l2_list)) if center_l2_list else 0.0,
         "dims_l1_mean": float(np.mean(dims_l1_list)) if dims_l1_list else 0.0,

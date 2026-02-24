@@ -163,7 +163,7 @@ accelerate launch --num_processes 4 \
 **Per epoch** (end-of-epoch evaluation):
 - Training losses: `train/total_loss`, `train/cls_loss`, `train/box_loss`, `train/object_loss`, `train/rpn_loss`, `train/3d_loss`
 - 2D COCO mAP: `epoch/map`, `epoch/map_50`, `epoch/map_75`
-- 3D metrics: `epoch/chamfer_mean`, `epoch/corner_l2_mean`, `epoch/mAP_3d_50`, `epoch/mAP_3d_75`, `epoch/mean_iou_3d`
+- 3D metrics: `epoch/chamfer_mean`, `epoch/corner_l2_mean`, `epoch/iou3d_hit_50`, `epoch/iou3d_hit_75`, `epoch/mean_iou_3d`
 - 3D attribute errors: `epoch/center_l2_mean`, `epoch/dims_l1_mean`, `epoch/rotation_deg_mean`
 
 ### Local Logging

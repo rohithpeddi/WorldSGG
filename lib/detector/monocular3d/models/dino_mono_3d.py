@@ -89,7 +89,7 @@ class _Mono3DPredictionLayers(nn.Module):
         x = F.relu(self.context_fc(torch.cat([shared_features, bbox_2d, camera_intrinsics], dim=1)))
         dims = F.softplus(self.dim_pred(x))
         rot_sin_cos = F.normalize(self.rot_pred(x), p=2, dim=1)
-        depth = self.depth_pred(x)
+        depth = F.softplus(self.depth_pred(x)) + 1e-4  # ensure strictly positive depth
         center_offset = self.center_offset_pred(x)
         mu = self.mu_pred(x).squeeze(-1)
         corners = _compute_3d_corners(
@@ -170,7 +170,7 @@ class Mono3DRoIHeads(nn.Module):
             )
             for i in range(len(boxes)):
                 result.append({"boxes": boxes[i], "labels": labels_out[i], "scores": scores[i]})
-            self._predict_3d_for_detections(result, features, image_shapes)
+            self._predict_3d_for_detections(result, features, image_shapes, targets)
 
         return result, losses
 
@@ -262,7 +262,7 @@ class Mono3DRoIHeads(nn.Module):
         return loss_3d
 
     # ----- Inference helper: 3D predictions for detected boxes -----
-    def _predict_3d_for_detections(self, result, features, image_shapes):
+    def _predict_3d_for_detections(self, result, features, image_shapes, targets=None):
         det_boxes = [r["boxes"] for r in result]
         if all(len(b) == 0 for b in det_boxes):
             for r in result:
@@ -274,7 +274,7 @@ class Mono3DRoIHeads(nn.Module):
 
         det_features = self.base.box_roi_pool(features, det_boxes, image_shapes)
         det_features = self.base.box_head(det_features)
-        cat_intr = _gather_intrinsics(None, det_boxes, device, image_shapes)
+        cat_intr = _gather_intrinsics(targets, det_boxes, device, image_shapes)
         cat_boxes = torch.cat([b for b in det_boxes if len(b) > 0], dim=0)
 
         with torch.no_grad():
@@ -417,7 +417,7 @@ class SeparateMono3DHead(nn.Module):
             print(f"  [3D-sep debug] → loss_3d={loss_3d.item():.6f} (from {len(valid_features)} samples)")
         return loss_3d
 
-    def predict_for_detections(self, detections, features, image_shapes, base_roi_heads):
+    def predict_for_detections(self, detections, features, image_shapes, base_roi_heads, targets=None):
         """Run 3D prediction on detected boxes using shared ROI pool + FC."""
         det_boxes = [d["boxes"] for d in detections]
         if all(len(b) == 0 for b in det_boxes):
@@ -430,7 +430,7 @@ class SeparateMono3DHead(nn.Module):
 
         det_feats = base_roi_heads.box_roi_pool(features, det_boxes, image_shapes)
         det_feats = base_roi_heads.box_head(det_feats)
-        cat_intr = _gather_intrinsics(None, det_boxes, device, image_shapes)
+        cat_intr = _gather_intrinsics(targets, det_boxes, device, image_shapes)
         cat_boxes = torch.cat([b for b in det_boxes if len(b) > 0], dim=0)
 
         with torch.no_grad():
@@ -468,6 +468,7 @@ class SimpleFeaturePyramid(nn.Module):
             scale_factors=(4.0, 2.0, 1.0, 0.5),
             top_block=None,
             norm="BN",
+            patch_size=14,
     ):
         """
         Args:
@@ -476,6 +477,7 @@ class SimpleFeaturePyramid(nn.Module):
             scale_factors: List of scaling factors for pyramid levels
             top_block: Optional top block to add p6 feature
             norm: Normalization type ('BN' or 'LN')
+            patch_size: Backbone patch size (used as true base stride)
         """
         super().__init__()
 
@@ -484,9 +486,9 @@ class SimpleFeaturePyramid(nn.Module):
         self.scale_factors = scale_factors
         self.top_block = top_block
 
-        # Calculate strides (assuming patch_size=16, base stride=16)
-        base_stride = 16
-        strides = [int(base_stride / scale) for scale in scale_factors]
+        # Calculate strides from actual backbone patch_size (not hardcoded 16)
+        base_stride = patch_size
+        strides = [base_stride / scale for scale in scale_factors]
 
         # Create pyramid stages
         self.stages = nn.ModuleList()
@@ -534,18 +536,18 @@ class SimpleFeaturePyramid(nn.Module):
             stage = nn.Sequential(*layers)
             self.stages.append(stage)
 
-            # Feature map naming: p2, p3, p4, p5 (stride = 2^stage)
-            stage_num = int(torch.log2(torch.tensor(strides[idx])).item())
-            feat_name = f"p{stage_num}"
+            # Sequential level naming: p2, p3, p4, p5 (stride may not be a power of 2)
+            feat_name = f"p{idx + 2}"
             self._out_feature_strides[feat_name] = strides[idx]
             self._out_features.append(feat_name)
 
         # Add top block features (p6)
         if self.top_block is not None:
-            last_stage = int(torch.log2(torch.tensor(strides[-1])).item())
-            for s in range(last_stage, last_stage + self.top_block.num_levels):
-                self._out_feature_strides[f"p{s + 1}"] = 2 ** (s + 1)
-                self._out_features.append(f"p{s + 1}")
+            last_level = len(scale_factors) + 1  # p5 → next is p6
+            for s in range(self.top_block.num_levels):
+                feat_name = f"p{last_level + s + 1}"
+                self._out_feature_strides[feat_name] = strides[-1] * (2 ** (s + 1))
+                self._out_features.append(feat_name)
 
         self._out_feature_channels = {k: out_channels for k in self._out_features}
         self.out_channels = out_channels
@@ -718,7 +720,7 @@ class DinoV3Monocular3D(nn.Module):
                 detector_losses["loss_3d"] = self.head_3d_separate.compute_training_loss(targets, device)
             else:
                 self.head_3d_separate.predict_for_detections(
-                    detections, features, images.image_sizes, self.roi_heads,
+                    detections, features, images.image_sizes, self.roi_heads, targets,
                 )
 
         # ---- Combine all losses ----
@@ -729,6 +731,8 @@ class DinoV3Monocular3D(nn.Module):
         if self.training:
             return losses
         else:
+            # Post-process: clip boxes to real image boundaries (undo padding)
+            detections = self.transform.postprocess(detections, images.image_sizes, original_image_sizes)
             return detections
 
 
@@ -762,6 +766,7 @@ def create_model(num_classes=37, pretrained=True, coco_model=False, use_fpn=True
             scale_factors=(4.0, 2.0, 1.0, 0.5),  # Creates p2, p3, p4, p5
             top_block=LastLevelMaxPool(),  # Adds p6
             norm="BN",
+            patch_size=base_backbone.patch_size,  # Use actual backbone patch_size as stride
         )
 
         class BackboneWithFPN(nn.Module):
@@ -785,9 +790,11 @@ def create_model(num_classes=37, pretrained=True, coco_model=False, use_fpn=True
     # Anchor generator
     if use_fpn:
         featmap_names = backbone.fpn._out_features
+        # Standard FPN: one anchor size per level (matched to level's receptive field)
+        # p2→32, p3→64, p4→128, p5→256, p6→512  ×  3 aspect ratios = 3 anchors/loc/level
         anchor_generator = AnchorGenerator(
-            sizes=((16, 32, 64, 128, 256, 512, 1024),) * len(featmap_names),
-            aspect_ratios=((0.5, 1.0, 2.0),) * len(featmap_names)
+            sizes=((32,), (64,), (128,), (256,), (512,)),
+            aspect_ratios=((0.5, 1.0, 2.0),) * 5
         )
         roi_pooler = torchvision.ops.MultiScaleRoIAlign(
             featmap_names=featmap_names,

@@ -925,8 +925,8 @@ class DinoAGTrainer3D:
                     # 3D metrics
                     "epoch/chamfer_mean": epoch_metrics_3d.get("chamfer_mean", 0.0),
                     "epoch/corner_l2_mean": epoch_metrics_3d.get("corner_l2_mean", 0.0),
-                    "epoch/mAP_3d_50": epoch_metrics_3d.get("mAP_3d_50", 0.0),
-                    "epoch/mAP_3d_75": epoch_metrics_3d.get("mAP_3d_75", 0.0),
+                    "epoch/iou3d_hit_50": epoch_metrics_3d.get("iou3d_hit_50", 0.0),
+                    "epoch/iou3d_hit_75": epoch_metrics_3d.get("iou3d_hit_75", 0.0),
                     "epoch/mean_iou_3d": epoch_metrics_3d.get("mean_iou_3d", 0.0),
                     "epoch/center_l2_mean": epoch_metrics_3d.get("center_l2_mean", 0.0),
                     "epoch/dims_l1_mean": epoch_metrics_3d.get("dims_l1_mean", 0.0),
@@ -982,11 +982,11 @@ class DinoAGTrainer3D:
                 self.accelerator.print(
                     f"  │  Mean IoU 3D:        {epoch_metrics_3d.get('mean_iou_3d', 0.0):10.4f}          │")
                 self.accelerator.print(f"  └────────────────────────────────────────────────┘")
-                self.accelerator.print(f"  ┌─ 3D mAP ────────────────────────────────────────┐")
+                self.accelerator.print(f"  ┌─ 3D IoU Hit Rate ───────────────────────────────┐")
                 self.accelerator.print(
-                    f"  │  mAP_3d@50:          {epoch_metrics_3d.get('mAP_3d_50', 0.0):10.4f}          │")
+                    f"  │  IoU3D Hit@50:        {epoch_metrics_3d.get('iou3d_hit_50', 0.0):10.4f}          │")
                 self.accelerator.print(
-                    f"  │  mAP_3d@75:          {epoch_metrics_3d.get('mAP_3d_75', 0.0):10.4f}          │")
+                    f"  │  IoU3D Hit@75:        {epoch_metrics_3d.get('iou3d_hit_75', 0.0):10.4f}          │")
                 self.accelerator.print(f"  └────────────────────────────────────────────────┘")
                 self.accelerator.print(f"  ┌─ Per-Attribute Errors ─────────────────────────┐")
                 self.accelerator.print(

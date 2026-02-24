@@ -2,15 +2,15 @@
 OVMono3D-style 3D detection loss: uncertainty-weighted L3D with
 geometry-level disentangled attribute losses and Chamfer (holistic) loss.
 
-L = sqrt(2) * exp(-mu) * L3D + mu
-L3D = sum_a L3D^(a) + L3D^all
+L_i = sqrt(2) * exp(-mu_i) * L3D_i + mu_i   (per-sample, then averaged)
+L3D_i = sum_a L3D_i^(a) + L3D_i^all
 
 Disentangled (geometry-level): For each attribute group a (xy, z, dims, r),
   - Take prediction for attribute a and ground truth for all other attributes.
   - Reconstruct a full 3D box (8 corners) from this mixed set.
-  - L3D^(a) = Chamfer(reconstructed_box, GT_box).
+  - L3D^(a) = Chamfer_SL1(reconstructed_box, GT_box).
 
-L3D^all: Chamfer(pred_corners, gt_corners).
+L3D^all: Chamfer_SL1(pred_corners, gt_corners).
 
 We use oriented box representation: center (3), dims (l, w, h) in object frame,
 yaw r in xy-plane. Attributes are derived from corners via PCA in xy for
@@ -76,6 +76,18 @@ def corners_to_attributes(corners: torch.Tensor) -> dict:
     length = lx.max(dim=1)[0] - lx.min(dim=1)[0]
     width = ly.max(dim=1)[0] - ly.min(dim=1)[0]
     height = lz.max(dim=1)[0] - lz.min(dim=1)[0]
+
+    # Canonicalize: enforce length >= width to remove 90° PCA ambiguity.
+    # When length ≈ width, PCA's principal axis is ill-defined and can flip
+    # unpredictably. By always assigning the longer extent to "length" (and
+    # rotating yaw by π/2 to compensate), we get a stable decomposition.
+    swap = width > length
+    if swap.any():
+        new_length = torch.where(swap, width, length)
+        new_width = torch.where(swap, length, width)
+        length, width = new_length, new_width
+        r = torch.where(swap, _wrap_angle(r + (3.14159265358979 / 2.0)), r)
+
     dims = torch.stack([length, width, height], dim=1)  # (N, 3)
     dims = dims.clamp(min=1e-4)  # avoid degenerate boxes
 
@@ -140,9 +152,9 @@ def _chamfer_pairwise_dist(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor
 
 def chamfer_loss_8corners(pred: torch.Tensor, gt: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
     """
-    Chamfer loss between two sets of 8 corners.
+    Chamfer loss between two sets of 8 corners using smooth L1 (Huber) distance.
     pred: (N, 8, 3), gt: (N, 8, 3).
-    For each box: (1/8) sum_i min_j ||p_i - q_j||^2 + (1/8) sum_j min_i ||p_i - q_j||^2.
+    For each box: (1/8) sum_i min_j SL1(p_i, q_j) + (1/8) sum_j min_i SL1(p_i, q_j).
     """
     per_box = _chamfer_pairwise_dist(pred, gt)
     if reduction == "mean":
@@ -161,12 +173,13 @@ def ovmono3d_loss(
     """
     OVMono3D full loss with geometry-level disentangled supervision.
 
-    L = sqrt(2)*exp(-mu)*L3D + mu
-    L3D = L_xy + L_z + L_whl + L_r + L_all
+    L_i = sqrt(2)*exp(-mu_i)*L3D_i + mu_i   (per-sample, then averaged)
+    L3D_i = L_xy_i + L_z_i + L_whl_i + L_r_i + L_all_i
 
-    Optimized: GT attributes and trig values are computed ONCE and reused
-    across all 4 disentangled attribute losses. All 5 Chamfer computations
-    are batched into a single fused call.
+    Chamfer distance uses smooth L1 (Huber) instead of L2² for stability.
+    GT attributes and trig values are computed ONCE and reused across all
+    4 disentangled attribute losses. All 5 Chamfer computations are batched
+    into a single fused call.
 
     pred_corners_flat: (N, 24), gt_corners: (N, 8, 3), pred_mu: (N,) or (N, 1).
 
@@ -178,9 +191,12 @@ def ovmono3d_loss(
 
     pred_corners = pred_corners_flat.view(N, 8, 3)
 
-    # Filter out zero/invalid GT boxes (padding from mismatched 3D annotations)
+    # Filter out invalid GT boxes: zero-padding, NaN/Inf, or extreme magnitudes
     gt_flat = gt_corners.view(N, -1)
-    valid = (gt_flat.abs().sum(dim=1) > 1e-6)  # Non-zero corners mask
+    non_zero = gt_flat.abs().sum(dim=1) > 1e-6
+    finite = torch.isfinite(gt_flat).all(dim=1)
+    reasonable = gt_flat.abs().max(dim=1).values < 1e6
+    valid = non_zero & finite & reasonable
     if valid.sum() == 0:
         return (
             torch.tensor(0.0, device=device, requires_grad=True),
@@ -224,23 +240,27 @@ def ovmono3d_loss(
     all_chamfer = _chamfer_pairwise_dist(all_pred, all_gt)                  # (5*n,)
 
     # Normalize by GT box diagonal² to make loss scale-invariant.
-    # World coords produce squared distances of ~10-100; this brings loss to ~0.1-1.0 range.
+    # World coords produce large smooth-L1 distances; this brings loss to ~0.1-1.0 range.
     gt_diag_sq = ((gt_c.max(dim=1).values - gt_c.min(dim=1).values) ** 2).sum(dim=1).clamp(min=1e-4)
     gt_diag_sq_rep = gt_diag_sq.repeat(5)  # (5*n,)
     all_chamfer = all_chamfer / gt_diag_sq_rep
 
-    # Split back into 5 loss components
-    L_xy, L_z, L_whl, L_r, L_all = [
-        chunk.mean() for chunk in all_chamfer.split(n_valid)
-    ]
+    # Split back into 5 per-sample loss components (each is (n_valid,))
+    L_xy, L_z, L_whl, L_r, L_all = all_chamfer.split(n_valid)
 
-    L3D = L_xy + L_z + L_whl + L_r + L_all
+    # Per-sample L3D before any reduction
+    L3D_per_sample = L_xy + L_z + L_whl + L_r + L_all  # (n_valid,)
 
-    # Uncertainty weighting: L = sqrt(2) * exp(-mu) * L3D + mu
-    # This learns to down-weight noisy samples automatically
-    mu = pred_mu[valid].float().mean()
-    mu = torch.clamp(mu, -5.0, 10.0)  # Clamp for numerical stability
-    loss_total = (2.0 ** 0.5) * torch.exp(-mu) * L3D + mu
+    # Per-sample uncertainty weighting: L_i = sqrt(2) * exp(-mu_i) * L3D_i + mu_i
+    # Each box's mu_i individually modulates its own loss, so the network can
+    # learn to down-weight noisy/hard samples rather than using a global knob.
+    mu = pred_mu[valid].float().view(-1)  # (n_valid,)
+    mu = torch.clamp(mu, -5.0, 10.0)
+    loss_per_sample = (2.0 ** 0.5) * torch.exp(-mu) * L3D_per_sample + mu
+    loss_total = loss_per_sample.mean()
 
-    return loss_total, L3D.detach(), L_all.detach()
+    # Scalar summaries for logging
+    L3D = L3D_per_sample.mean()
+
+    return loss_total, L3D.detach(), L_all.mean().detach()
 
