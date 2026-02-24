@@ -57,8 +57,10 @@ def _compute_3d_corners(dims, rot_sin_cos, depth, center_offset, bbox_2d, focal_
     fx, fy = focal_lengths[:, 0:1], focal_lengths[:, 1:2]
     fx = fx.clamp(min=1.0)  # guard against zero-padded intrinsics
     fy = fy.clamp(min=1.0)
-    x_c = (u_final.unsqueeze(1) - px) * z_c / fx
-    y_c = (v_final.unsqueeze(1) - py) * z_c / fy
+    # Divide by focal length first to keep intermediates within float16 range.
+    # (offset * depth) can overflow 65,504; (offset / f) * depth stays safe.
+    x_c = ((u_final.unsqueeze(1) - px) / fx) * z_c
+    y_c = ((v_final.unsqueeze(1) - py) / fy) * z_c
 
     return torch.stack([x_rot + x_c, y_rot + y_c, z_corners + z_c], dim=-1)  # (N, 8, 3)
 
@@ -69,8 +71,9 @@ def _compute_3d_corners(dims, rot_sin_cos, depth, center_offset, bbox_2d, focal_
 class _Mono3DPredictionLayers(nn.Module):
     """Lightweight 3D prediction branch: shared_features(1024)+bbox(4)+intrinsics(4) → 3D corners."""
 
-    def __init__(self, representation_size=1024):
+    def __init__(self, representation_size=1024, input_reference_size=1000.0):
         super().__init__()
+        self.input_reference_size = input_reference_size
         self.context_fc = nn.Linear(representation_size + 8, 512)
         self.dim_pred = nn.Linear(512, 3)
         self.rot_pred = nn.Linear(512, 2)
@@ -122,8 +125,11 @@ class _Mono3DPredictionLayers(nn.Module):
         Returns:
             corners: (N, 8, 3), mu: (N,)
         """
-        x = F.relu(self.context_fc(torch.cat([shared_features, bbox_2d, camera_intrinsics], dim=1)))
-        dims = F.softplus(self.dim_pred(x))
+        # Normalize pixel-scale inputs to ~O(1) range (same as ViT features)
+        bbox_norm = bbox_2d / self.input_reference_size
+        intr_norm = camera_intrinsics / self.input_reference_size
+        x = F.relu(self.context_fc(torch.cat([shared_features, bbox_norm, intr_norm], dim=1)))
+        dims = F.softplus(self.dim_pred(x)) + 1e-4  # ensure strictly positive dimensions
         rot_raw = self.rot_pred(x)
         rot_sin_cos = rot_raw / torch.sqrt((rot_raw ** 2).sum(dim=1, keepdim=True) + 1e-6)
         depth = F.softplus(self.depth_pred(x)) + 1e-4  # ensure strictly positive depth
@@ -214,9 +220,9 @@ class _Mono3DPredictionLayersV2(_Mono3DPredictionLayers):
     and adds LayerNorm for stability.
     """
 
-    def __init__(self, representation_size=1024):
+    def __init__(self, representation_size=1024, input_reference_size=1000.0):
         # V1 __init__ creates all prediction layers + calls _init_weights
-        super().__init__(representation_size)
+        super().__init__(representation_size, input_reference_size)
         # Override context_fc for wider input (+5 depth stats)
         self.context_fc = nn.Linear(representation_size + 8 + 5, 512)
         self.ln = nn.LayerNorm(512)  # V2 adds LayerNorm for better stability
@@ -241,10 +247,13 @@ class _Mono3DPredictionLayersV2(_Mono3DPredictionLayers):
         """
         if depth_stats is None:
             depth_stats = torch.zeros((shared_features.shape[0], 5), device=shared_features.device)
+        # Normalize pixel-scale inputs to ~O(1) range (same as ViT features)
+        bbox_norm = bbox_2d / self.input_reference_size
+        intr_norm = camera_intrinsics / self.input_reference_size
         x = F.relu(self.ln(self.context_fc(
-            torch.cat([shared_features, bbox_2d, camera_intrinsics, depth_stats], dim=1)
+            torch.cat([shared_features, bbox_norm, intr_norm, depth_stats], dim=1)
         )))
-        dims = F.softplus(self.dim_pred(x))
+        dims = F.softplus(self.dim_pred(x)) + 1e-4  # ensure strictly positive dimensions
         rot_raw = self.rot_pred(x)
         rot_sin_cos = rot_raw / torch.sqrt((rot_raw ** 2).sum(dim=1, keepdim=True) + 1e-6)
         depth = F.softplus(self.depth_pred(x)) + 1e-4
@@ -296,15 +305,16 @@ class Mono3DRoIHeads(nn.Module):
     Inference: re-pools detected boxes through shared layers, predicts 3D.
     """
 
-    def __init__(self, base_roi_heads, representation_size=1024, max_3d_proposals=64, head_3d_version="v1"):
+    def __init__(self, base_roi_heads, representation_size=1024, max_3d_proposals=64, head_3d_version="v1",
+                 input_reference_size=1000.0):
         super().__init__()
         self.base = base_roi_heads
         self.max_3d_proposals = max_3d_proposals
         self.head_3d_version = head_3d_version
         if head_3d_version == "v2":
-            self.pred_3d = _Mono3DPredictionLayersV2(representation_size)
+            self.pred_3d = _Mono3DPredictionLayersV2(representation_size, input_reference_size)
         else:
-            self.pred_3d = _Mono3DPredictionLayers(representation_size)
+            self.pred_3d = _Mono3DPredictionLayers(representation_size, input_reference_size)
 
     def forward(self, features, proposals, image_shapes, targets=None):
         # ----- Training: match, pool, shared FC, 2D loss + 3D loss -----
@@ -481,15 +491,16 @@ class SeparateMono3DHead(nn.Module):
     Captures matched_idxs/labels by wrapping select_training_samples.
     """
 
-    def __init__(self, base_roi_heads, representation_size=1024, max_3d_proposals=64, head_3d_version="v1"):
+    def __init__(self, base_roi_heads, representation_size=1024, max_3d_proposals=64, head_3d_version="v1",
+                 input_reference_size=1000.0):
         super().__init__()
         self.base_roi_heads = base_roi_heads
         self.max_3d_proposals = max_3d_proposals
         self.head_3d_version = head_3d_version
         if head_3d_version == "v2":
-            self.pred_3d = _Mono3DPredictionLayersV2(representation_size)
+            self.pred_3d = _Mono3DPredictionLayersV2(representation_size, input_reference_size)
         else:
-            self.pred_3d = _Mono3DPredictionLayers(representation_size)
+            self.pred_3d = _Mono3DPredictionLayers(representation_size, input_reference_size)
         self._hooked_features = None
         self._matched_idxs = None
         self._labels = None
@@ -839,7 +850,7 @@ class DinoV3Monocular3D(nn.Module):
     """
 
     def __init__(self, num_classes=37, pretrained=True, model="v3l", head_3d_mode="unified",
-                 max_3d_proposals=64, head_3d_version="v1"):
+                 max_3d_proposals=64, head_3d_version="v1", input_reference_size=1000.0):
         super().__init__()
         self.head_3d_mode = head_3d_mode
         self.head_3d_version = head_3d_version
@@ -863,13 +874,15 @@ class DinoV3Monocular3D(nn.Module):
         base_roi_heads = self.base_detector.roi_heads
         if head_3d_mode == "unified":
             self.roi_heads = Mono3DRoIHeads(base_roi_heads, max_3d_proposals=max_3d_proposals,
-                                            head_3d_version=head_3d_version)
+                                            head_3d_version=head_3d_version,
+                                            input_reference_size=input_reference_size)
             self.head_3d_separate = None
             print(f"  ✓ 3D head mode: unified (shared FC layers), version: {head_3d_version}")
         elif head_3d_mode == "separate":
             self.roi_heads = base_roi_heads
             self.head_3d_separate = SeparateMono3DHead(base_roi_heads, max_3d_proposals=max_3d_proposals,
-                                                       head_3d_version=head_3d_version)
+                                                       head_3d_version=head_3d_version,
+                                                       input_reference_size=input_reference_size)
             print(f"  ✓ 3D head mode: separate (hooked features), version: {head_3d_version}")
         else:
             raise ValueError(f"Unknown head_3d_mode: {head_3d_mode!r}. Use 'unified' or 'separate'.")

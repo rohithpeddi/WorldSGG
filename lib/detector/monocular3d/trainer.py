@@ -183,6 +183,7 @@ class TrainConfig:
     # 3D head architecture
     head_3d_version: str = "v1"  # "v1" = baseline, "v2" = with per-ROI depth stats
     depth_maps_dir: Optional[str] = None  # Path to pre-computed depth maps (required for head_3d_version="v2")
+    input_reference_size: float = 1000.0  # Divisor to normalize raw pixel inputs (bbox, intrinsics) to ~O(1) range
 
     # DataLoader
     num_workers_train: int = 8
@@ -334,6 +335,7 @@ class DinoAGTrainer3D:
             head_3d_mode=self.cfg.head_3d_mode,
             max_3d_proposals=self.cfg.max_3d_proposals,
             head_3d_version=self.cfg.head_3d_version,
+            input_reference_size=self.cfg.input_reference_size,
         )
         # Count trainable vs frozen parameters
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)

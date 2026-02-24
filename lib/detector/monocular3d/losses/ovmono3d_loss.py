@@ -264,12 +264,13 @@ def ovmono3d_loss(
     all_gt = gt_c.repeat(5, 1, 1)                                           # (5*n, 8, 3)
     all_chamfer = _chamfer_pairwise_dist(all_pred, all_gt)                  # (5*n,)
 
-    # Normalize by GT box diagonal² to make loss scale-invariant.
-    # Clamp min=0.25 (diagonal≥0.5m) prevents small objects (phone, doorknob)
-    # from amplifying the loss 30-100× via tiny denominators.
-    gt_diag_sq = ((gt_c.max(dim=1).values - gt_c.min(dim=1).values) ** 2).sum(dim=1).clamp(min=0.25)
-    gt_diag_sq_rep = gt_diag_sq.repeat(5)  # (5*n,)
-    all_chamfer = all_chamfer / gt_diag_sq_rep
+    # Normalize by GT box diagonal to make loss scale-invariant.
+    # Use linear diagonal (not squared) to match Smooth L1's linear units.
+    # Clamp min=0.5 (diagonal≥0.5m) prevents small objects from amplifying loss.
+    diag_sq = ((gt_c.max(dim=1).values - gt_c.min(dim=1).values) ** 2).sum(dim=1)
+    gt_diag = torch.sqrt(diag_sq).clamp(min=0.5)
+    gt_diag_rep = gt_diag.repeat(5)  # (5*n,)
+    all_chamfer = all_chamfer / gt_diag_rep
 
     # Split back into 5 per-sample loss components (each is (n_valid,))
     L_xy, L_z, L_whl, L_r, L_all = all_chamfer.split(n_valid)
