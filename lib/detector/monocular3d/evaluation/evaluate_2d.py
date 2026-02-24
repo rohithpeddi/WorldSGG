@@ -48,22 +48,9 @@ if _ROOT not in sys.path:
 
 from ..datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
 from ..models.dino_mono_3d import DinoV3Monocular3D
+from ..utils.cuda_utils import clear_cuda_cache_for_current_process
 
 
-# ────────────────────────────────────────────────────────────────────
-#  Utility
-# ────────────────────────────────────────────────────────────────────
-
-def clear_cuda_cache_for_current_process(sync: bool = True) -> None:
-    """Clear CUDA cache for all visible devices in this process."""
-    gc.collect()
-    if not torch.cuda.is_available():
-        return
-    if sync:
-        torch.cuda.synchronize()
-    for dev in range(torch.cuda.device_count()):
-        with torch.cuda.device(dev):
-            torch.cuda.empty_cache()
 
 
 # ────────────────────────────────────────────────────────────────────

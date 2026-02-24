@@ -201,46 +201,30 @@ def _compute_depth_stats_flat(depth_maps, boxes, device):
     return stats
 
 
-class _Mono3DPredictionLayersV2(nn.Module):
+class _Mono3DPredictionLayersV2(_Mono3DPredictionLayers):
     """V2 3D prediction branch: adds per-ROI depth stats (5 dims) from pre-computed depth maps.
 
     Input: shared_features(1024) + bbox(4) + intrinsics(4) + depth_stats(5) = 1037 → 3D corners.
     Depth stats: [median, mean, std, min, max] from DepthAnything within each proposal bbox.
+
+    Inherits all prediction layers from V1; only overrides the context FC (wider input)
+    and adds LayerNorm for stability.
     """
 
     def __init__(self, representation_size=1024):
-        super().__init__()
-        # 5 extra dims for depth stats: median, mean, std, min, max
+        # V1 __init__ creates all prediction layers + calls _init_weights
+        super().__init__(representation_size)
+        # Override context_fc for wider input (+5 depth stats)
         self.context_fc = nn.Linear(representation_size + 8 + 5, 512)
-        self.ln = nn.LayerNorm(512)  # V2 uses LayerNorm for better stability
-        self.dim_pred = nn.Linear(512, 3)
-        self.rot_pred = nn.Linear(512, 2)
-        self.depth_pred = nn.Linear(512, 1)
-        self.center_offset_pred = nn.Linear(512, 2)
-        self.mu_pred = nn.Linear(512, 1)
+        self.ln = nn.LayerNorm(512)  # V2 adds LayerNorm for better stability
         self._init_weights()
 
     def _init_weights(self):
-        """Same targeted init as V1, extended for the larger input."""
-        nn.init.xavier_uniform_(self.context_fc.weight)
-        nn.init.zeros_(self.context_fc.bias)
-
-        # depth: softplus(1.5) ≈ 1.8m — slightly deeper than V1 for indoor scenes
+        """Same targeted init as V1, with adjusted depth bias for indoor scenes."""
+        super()._init_weights()
+        # Override depth bias: softplus(1.5) ≈ 1.8m — slightly deeper than V1's 1.0
         nn.init.normal_(self.depth_pred.weight, std=0.001)
         nn.init.constant_(self.depth_pred.bias, 1.5)
-
-        nn.init.normal_(self.dim_pred.weight, std=0.001)
-        nn.init.zeros_(self.dim_pred.bias)
-
-        nn.init.normal_(self.rot_pred.weight, std=0.001)
-        with torch.no_grad():
-            self.rot_pred.bias.copy_(torch.tensor([0.0, 1.0]))
-
-        nn.init.normal_(self.center_offset_pred.weight, std=0.001)
-        nn.init.zeros_(self.center_offset_pred.bias)
-
-        nn.init.normal_(self.mu_pred.weight, std=0.001)
-        nn.init.zeros_(self.mu_pred.bias)
 
     def forward(self, shared_features, bbox_2d, camera_intrinsics, depth_stats=None):
         """

@@ -38,19 +38,10 @@ from matplotlib.lines import Line2D
 from .datasets.ag_dataset_3d import ActionGenomeDataset3D, ResolutionBucketBatchSampler, collate_fn
 from .models.dino_mono_3d import DinoV3Monocular3D
 from .utils.json_logger import LocalLogger
+from .utils.cuda_utils import clear_cuda_cache_for_current_process
 from .evaluation.evaluate_3d import evaluate_3d_metrics
 from .evaluation.evaluate_2d import evaluate_2d_coco_map, evaluate_2d_and_3d_fused
 
-
-def clear_cuda_cache_for_current_process(sync: bool = True) -> None:
-    gc.collect()
-    if not torch.cuda.is_available():
-        return
-    if sync:
-        torch.cuda.synchronize()
-    for dev in range(torch.cuda.device_count()):
-        with torch.cuda.device(dev):
-            torch.cuda.empty_cache()
 
 
 # ============================

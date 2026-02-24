@@ -27,7 +27,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_MONO3D_DIR)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from .evaluate_2d import clear_cuda_cache_for_current_process, evaluate_2d_coco_map
+from .evaluate_2d import compute_iou_2d, evaluate_2d_coco_map
+from ..utils.cuda_utils import clear_cuda_cache_for_current_process
 
 from ..datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
 from ..models.dino_mono_3d import DinoV3Monocular3D
@@ -147,21 +148,6 @@ def compute_iou_3d_obb(corners1: np.ndarray, corners2: np.ndarray) -> float:
     return inter_vol / union_vol if union_vol > 0 else 0.0
 
 
-def compute_iou_2d(box1: np.ndarray, box2: np.ndarray) -> float:
-    """2D IoU for [x1, y1, x2, y2]."""
-    if isinstance(box1, torch.Tensor):
-        box1 = box1.detach().cpu().numpy()
-    if isinstance(box2, torch.Tensor):
-        box2 = box2.detach().cpu().numpy()
-    xi1, yi1 = max(box1[0], box2[0]), max(box1[1], box2[1])
-    xi2, yi2 = min(box1[2], box2[2]), min(box1[3], box2[3])
-    inter = max(0.0, xi2 - xi1) * max(0.0, yi2 - yi1)
-    a1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-    a2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-    union = a1 + a2 - inter
-    return inter / union if union > 0.0 else 0.0
-
-
 def chamfer_per_box(pred: np.ndarray, gt: np.ndarray) -> float:
     """Chamfer distance for one box: pred (8,3), gt (8,3)."""
     diff = pred[:, None, :] - gt[None, :, :]  # (8, 8, 3)
@@ -242,11 +228,6 @@ def compute_3d_attribute_errors(pred_corners: np.ndarray, gt_corners: np.ndarray
     rotation_deg = float(np.rad2deg(np.abs(r_diff)))
 
     return {"center_l2": center_l2, "dims_l1": dims_l1, "rotation_deg": rotation_deg}
-
-
-def evaluate_2d_coco(model, dataloader, device, accelerator=None):
-    """COCO-style 2D mAP via torchmetrics (self-contained)."""
-    return evaluate_2d_coco_map(model, dataloader, device, accelerator=accelerator)
 
 
 def evaluate_3d_metrics(model, dataloader, device, iou_threshold_2d=0.5):
@@ -390,7 +371,7 @@ def main():
 
     if not args.no_2d:
         print("Evaluating 2D COCO mAP...")
-        coco_2d = evaluate_2d_coco(model, test_loader, device, accelerator=None)
+        coco_2d = evaluate_2d_coco_map(model, test_loader, device, accelerator=None)
         metrics["2d"] = {
             "map": coco_2d.get("map", 0.0),
             "map_50": coco_2d.get("map_50", 0.0),
