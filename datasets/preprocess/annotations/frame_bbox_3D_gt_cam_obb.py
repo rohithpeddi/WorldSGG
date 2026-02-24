@@ -162,6 +162,7 @@ def rerun_frame_vis_camera_obb(
             rr.log(f"{BASE}/image", rr.Image(img))
 
     print(f"[camera-frame-obb-vis] running for {video_id}. Scrub the 'frame' timeline in Rerun.")
+    input("[camera-frame-obb-vis] Press Enter to exit...")
 
 
 class FrameToWorldAnnotationsOBB(FrameToWorldAnnotationsBase):
