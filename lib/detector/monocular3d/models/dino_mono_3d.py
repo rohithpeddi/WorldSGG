@@ -55,6 +55,8 @@ def _compute_3d_corners(dims, rot_sin_cos, depth, center_offset, bbox_2d, focal_
     z_c = depth
     px, py = principal_point[:, 0:1], principal_point[:, 1:2]
     fx, fy = focal_lengths[:, 0:1], focal_lengths[:, 1:2]
+    fx = fx.clamp(min=1.0)  # guard against zero-padded intrinsics
+    fy = fy.clamp(min=1.0)
     x_c = (u_final.unsqueeze(1) - px) * z_c / fx
     y_c = (v_final.unsqueeze(1) - py) * z_c / fy
 
@@ -122,7 +124,8 @@ class _Mono3DPredictionLayers(nn.Module):
         """
         x = F.relu(self.context_fc(torch.cat([shared_features, bbox_2d, camera_intrinsics], dim=1)))
         dims = F.softplus(self.dim_pred(x))
-        rot_sin_cos = F.normalize(self.rot_pred(x), p=2, dim=1)
+        rot_raw = self.rot_pred(x)
+        rot_sin_cos = rot_raw / torch.sqrt((rot_raw ** 2).sum(dim=1, keepdim=True) + 1e-6)
         depth = F.softplus(self.depth_pred(x)) + 1e-4  # ensure strictly positive depth
         center_offset = self.center_offset_pred(x)
         mu = self.mu_pred(x).squeeze(-1)
@@ -242,7 +245,8 @@ class _Mono3DPredictionLayersV2(_Mono3DPredictionLayers):
             torch.cat([shared_features, bbox_2d, camera_intrinsics, depth_stats], dim=1)
         )))
         dims = F.softplus(self.dim_pred(x))
-        rot_sin_cos = F.normalize(self.rot_pred(x), p=2, dim=1)
+        rot_raw = self.rot_pred(x)
+        rot_sin_cos = rot_raw / torch.sqrt((rot_raw ** 2).sum(dim=1, keepdim=True) + 1e-6)
         depth = F.softplus(self.depth_pred(x)) + 1e-4
         center_offset = self.center_offset_pred(x)
         mu = self.mu_pred(x).squeeze(-1)

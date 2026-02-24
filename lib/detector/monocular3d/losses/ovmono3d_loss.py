@@ -44,20 +44,18 @@ def corners_to_attributes(corners: torch.Tensor) -> dict:
 
     # Covariance of xy per sample: (N, 2, 2)
     cov = torch.bmm(xy.transpose(1, 2), xy) / 8.0
-    # Eigen decomposition for 2x2: main eigenvector gives yaw
+    # Stable analytic PCA via double-angle formula (avoids sqrt(0) -> NaN grads)
     a, b, c = cov[:, 0, 0], cov[:, 0, 1], cov[:, 1, 1]
-    delta = (a - c) * (a - c) / 4 + b * b
-    delta = torch.clamp(delta, min=1e-12)
-    sqrt_d = torch.sqrt(delta)
-    # Eigenvector for larger eigenvalue
-    lam = (a + c) / 2 + sqrt_d
-    ev_x = b
-    ev_y = lam - a
-    # Normalize
-    nrm = torch.sqrt(ev_x * ev_x + ev_y * ev_y).clamp(min=1e-8)
-    ev_x = ev_x / nrm
-    ev_y = ev_y / nrm
-    r = torch.atan2(ev_y, ev_x)  # (N,) in [-pi, pi]
+    dy = 2.0 * b
+    dx = a - c
+
+    # Guard against perfectly square & axis-aligned boxes (dy=0, dx=0).
+    # atan2(0,0) produces NaN gradients. Zero out gradient for these cases.
+    degenerate = (dy.abs() < 1e-6) & (dx.abs() < 1e-6)
+    dx = torch.where(degenerate, torch.ones_like(dx) * 1e-6, dx)
+    dy = torch.where(degenerate, torch.zeros_like(dy), dy)
+
+    r = 0.5 * torch.atan2(dy, dx)  # (N,) in [-pi/2, pi/2]
 
     # Project corners onto local frame
     cos_r = torch.cos(r).unsqueeze(1).unsqueeze(2)  # (N, 1, 1)
@@ -286,7 +284,13 @@ def ovmono3d_loss(
     # Each box's mu_i individually modulates its own loss, so the network can
     # learn to down-weight noisy/hard samples rather than using a global knob.
     mu = pred_mu[valid].float().view(-1)  # (n_valid,)
-    mu = torch.clamp(mu, -5.0, 10.0)
+
+    # STE clamp: cap forward value to prevent exp(-mu) overflow, but allow
+    # unrestricted gradients so out-of-range mu can recover (hard clamp
+    # gives gradient=0 outside bounds, permanently freezing the parameter).
+    mu_safe = torch.clamp(mu, -5.0, 10.0)
+    mu = mu_safe.detach() + mu - mu.detach()
+
     loss_per_sample = (2.0 ** 0.5) * torch.exp(-mu) * L3D_per_sample + mu
 
     # Guard 3: Filter out any remaining NaN/Inf per-sample losses
