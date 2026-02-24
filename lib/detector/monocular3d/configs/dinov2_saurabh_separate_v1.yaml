@@ -1,0 +1,74 @@
+# =============================================================================
+# V1: DINOv2-Base (ViT-B/14) — Separate head, loss-fixed 3D training
+# =============================================================================
+# V1 loss fixes + separate 3D head:
+#   - head_3d_mode=separate, weight_3d=0.1, ramp disabled, diagonal min=0.25
+# =============================================================================
+
+# --- Experiment ---
+experiment_name: "v1_dinov2b_separate"
+working_dir: "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/lib/detector/monocular3d"
+save_path: "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/save_path"
+
+# --- Data ---
+data_path: "/home/cse/msr/csy227518/scratch/Datasets/action_genome"
+world_3d_annotations_path: null   # null = use dataset default (monocular3d_bbox_annotations, camera-space)
+
+# --- Model ---
+model: "v2"                        # DINOv2 ViT-B/14 (86M params)
+num_classes: null
+pretrained: true
+use_compile: false
+
+# --- Training ---
+lr: 1.0e-4
+weight_decay: 0.001
+batch_size: 128
+epochs: 70
+gradient_accumulation_steps: 1
+max_grad_norm: 1.0
+warmup_fraction: 0.01
+
+# --- Thresholds ---
+head_3d_mode: "separate"           # "unified" (shared FC) or "separate" (hooked features)
+max_3d_proposals: 64
+iou_match_2d_eval: 0.5
+
+# --- Loss Weights (V1 fixes) ---
+weight_cls: 1.0
+weight_box: 1.0
+weight_obj: 1.0
+weight_rpn: 1.0
+weight_3d: 0.1                     # Lowered: prevents 3D from dominating 2D training
+weight_3d_ramp_epochs: 0           # Disabled: train 3D from epoch 1
+
+# --- 3D Head ---
+head_3d_version: "v1"
+depth_maps_dir: null
+
+# --- Image ---
+target_size: null
+pixel_limit: 255000
+patch_size: 14
+
+# --- DataLoader ---
+num_workers_train: 8
+num_workers_test: 8
+prefetch_factor: 4
+persistent_workers: true
+
+# --- Logging ---
+use_wandb: true
+wandb_project: "DINOv2-separate-Object-Detector-AG-3D"
+iter_log_every: 10
+eval_every_iters: 10000000
+
+# --- Visualization ---
+plot_each_epoch: true
+plot_sample_idx: 120
+plot_score_thresh: 0.1
+
+# --- Misc ---
+use_collate: true
+use_accelerator: true
+ckpt: null
