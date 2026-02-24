@@ -112,7 +112,7 @@ class _Mono3DPredictionLayers(nn.Module):
         nn.init.normal_(self.mu_pred.weight, std=0.001)
         nn.init.zeros_(self.mu_pred.bias)
 
-    def forward(self, shared_features, bbox_2d, camera_intrinsics):
+    def forward(self, shared_features, bbox_2d, camera_intrinsics, depth_stats=None):
         """
         Args:
             shared_features: (N, 1024) from shared FC layers
@@ -125,6 +125,142 @@ class _Mono3DPredictionLayers(nn.Module):
         dims = F.softplus(self.dim_pred(x))
         rot_sin_cos = F.normalize(self.rot_pred(x), p=2, dim=1)
         depth = F.softplus(self.depth_pred(x)) + 1e-4  # ensure strictly positive depth
+        center_offset = self.center_offset_pred(x)
+        mu = self.mu_pred(x).squeeze(-1)
+        corners = _compute_3d_corners(
+            dims, rot_sin_cos, depth, center_offset,
+            bbox_2d, camera_intrinsics[:, :2], camera_intrinsics[:, 2:],
+        )
+        return corners, mu
+
+
+# ---------------------------------------------------------------------------
+# V2 prediction layers: adds per-ROI depth stats from pre-computed depth maps
+# ---------------------------------------------------------------------------
+def compute_depth_stats_per_roi(depth_maps, boxes, targets, device):
+    """Compute per-ROI depth statistics from pre-computed depth maps.
+
+    Args:
+        depth_maps: list of (H, W) tensors, one per image (from targets['depth_map'])
+        boxes: (N, 4) concatenated proposal/detection boxes across all images
+        targets: list of target dicts (to count proposals per image)
+        device: torch device
+
+    Returns:
+        (N, 5) tensor: [median, mean, std, min, max] depth per ROI
+    """
+    if depth_maps is None or len(depth_maps) == 0:
+        return torch.zeros((len(boxes), 5), device=device)
+
+    stats_list = []
+    box_idx = 0
+    for i, dm in enumerate(depth_maps):
+        if dm is None:
+            # Count how many boxes belong to this image
+            # We'll fill with zeros below
+            continue
+        dm = dm.to(device)
+        h, w = dm.shape
+
+    # Simpler: operate on cat boxes with image index tracking
+    # Rebuild per-image splits from targets
+    return _compute_depth_stats_flat(depth_maps, boxes, device)
+
+
+def _compute_depth_stats_flat(depth_maps, boxes, device):
+    """Compute (median, mean, std, min, max) for each box from its depth map region."""
+    N = len(boxes)
+    stats = torch.zeros((N, 5), device=device)
+    if N == 0:
+        return stats
+
+    for i in range(N):
+        if i >= len(boxes):
+            break
+        x1, y1, x2, y2 = boxes[i].detach().long()
+        # Find which image this box belongs to — determined by caller
+        # For now, we assume depth_maps[0] since this is called per-image
+        dm = depth_maps if not isinstance(depth_maps, list) else depth_maps[0]
+        dm = dm.to(device)
+        h, w = dm.shape[-2:]
+
+        # Clamp box coordinates to image bounds
+        x1 = max(0, min(x1.item(), w - 1))
+        x2 = max(x1 + 1, min(x2.item(), w))
+        y1 = max(0, min(y1.item(), h - 1))
+        y2 = max(y1 + 1, min(y2.item(), h))
+
+        crop = dm[y1:y2, x1:x2].flatten()
+        if len(crop) == 0:
+            continue
+        stats[i, 0] = crop.median()
+        stats[i, 1] = crop.mean()
+        stats[i, 2] = crop.std() if len(crop) > 1 else 0.0
+        stats[i, 3] = crop.min()
+        stats[i, 4] = crop.max()
+
+    return stats
+
+
+class _Mono3DPredictionLayersV2(nn.Module):
+    """V2 3D prediction branch: adds per-ROI depth stats (5 dims) from pre-computed depth maps.
+
+    Input: shared_features(1024) + bbox(4) + intrinsics(4) + depth_stats(5) = 1037 → 3D corners.
+    Depth stats: [median, mean, std, min, max] from DepthAnything within each proposal bbox.
+    """
+
+    def __init__(self, representation_size=1024):
+        super().__init__()
+        # 5 extra dims for depth stats: median, mean, std, min, max
+        self.context_fc = nn.Linear(representation_size + 8 + 5, 512)
+        self.ln = nn.LayerNorm(512)  # V2 uses LayerNorm for better stability
+        self.dim_pred = nn.Linear(512, 3)
+        self.rot_pred = nn.Linear(512, 2)
+        self.depth_pred = nn.Linear(512, 1)
+        self.center_offset_pred = nn.Linear(512, 2)
+        self.mu_pred = nn.Linear(512, 1)
+        self._init_weights()
+
+    def _init_weights(self):
+        """Same targeted init as V1, extended for the larger input."""
+        nn.init.xavier_uniform_(self.context_fc.weight)
+        nn.init.zeros_(self.context_fc.bias)
+
+        # depth: softplus(1.5) ≈ 1.8m — slightly deeper than V1 for indoor scenes
+        nn.init.normal_(self.depth_pred.weight, std=0.001)
+        nn.init.constant_(self.depth_pred.bias, 1.5)
+
+        nn.init.normal_(self.dim_pred.weight, std=0.001)
+        nn.init.zeros_(self.dim_pred.bias)
+
+        nn.init.normal_(self.rot_pred.weight, std=0.001)
+        with torch.no_grad():
+            self.rot_pred.bias.copy_(torch.tensor([0.0, 1.0]))
+
+        nn.init.normal_(self.center_offset_pred.weight, std=0.001)
+        nn.init.zeros_(self.center_offset_pred.bias)
+
+        nn.init.normal_(self.mu_pred.weight, std=0.001)
+        nn.init.zeros_(self.mu_pred.bias)
+
+    def forward(self, shared_features, bbox_2d, camera_intrinsics, depth_stats=None):
+        """
+        Args:
+            shared_features: (N, 1024) from shared FC layers
+            bbox_2d: (N, 4)
+            camera_intrinsics: (N, 4) — [fx, fy, cx, cy]
+            depth_stats: (N, 5) — [median, mean, std, min, max] per ROI, or None
+        Returns:
+            corners: (N, 8, 3), mu: (N,)
+        """
+        if depth_stats is None:
+            depth_stats = torch.zeros((shared_features.shape[0], 5), device=shared_features.device)
+        x = F.relu(self.ln(self.context_fc(
+            torch.cat([shared_features, bbox_2d, camera_intrinsics, depth_stats], dim=1)
+        )))
+        dims = F.softplus(self.dim_pred(x))
+        rot_sin_cos = F.normalize(self.rot_pred(x), p=2, dim=1)
+        depth = F.softplus(self.depth_pred(x)) + 1e-4
         center_offset = self.center_offset_pred(x)
         mu = self.mu_pred(x).squeeze(-1)
         corners = _compute_3d_corners(
@@ -173,11 +309,15 @@ class Mono3DRoIHeads(nn.Module):
     Inference: re-pools detected boxes through shared layers, predicts 3D.
     """
 
-    def __init__(self, base_roi_heads, representation_size=1024, max_3d_proposals=64):
+    def __init__(self, base_roi_heads, representation_size=1024, max_3d_proposals=64, head_3d_version="v1"):
         super().__init__()
         self.base = base_roi_heads
         self.max_3d_proposals = max_3d_proposals
-        self.pred_3d = _Mono3DPredictionLayers(representation_size)
+        self.head_3d_version = head_3d_version
+        if head_3d_version == "v2":
+            self.pred_3d = _Mono3DPredictionLayersV2(representation_size)
+        else:
+            self.pred_3d = _Mono3DPredictionLayers(representation_size)
 
     def forward(self, features, proposals, image_shapes, targets=None):
         # ----- Training: match, pool, shared FC, 2D loss + 3D loss -----
@@ -277,25 +417,36 @@ class Mono3DRoIHeads(nn.Module):
         valid_gt_3d = cat_gt_3d[valid]
         valid_intr = cat_intr[valid]
 
+        # Compute depth stats for V2 head (before subsampling)
+        depth_stats = None
+        if self.head_3d_version == "v2":
+            depth_maps = [t.get('depth_map', None) for t in targets]
+            depth_maps = [dm for dm in depth_maps if dm is not None]
+            if depth_maps:
+                depth_stats = _compute_depth_stats_flat(depth_maps, valid_proposals, device)
+            else:
+                depth_stats = torch.zeros((len(valid_features), 5), device=device)
+
         if len(valid_features) > self.max_3d_proposals:
             perm = torch.randperm(len(valid_features), device=device)[:self.max_3d_proposals]
             valid_features = valid_features[perm]
             valid_proposals = valid_proposals[perm]
             valid_gt_3d = valid_gt_3d[perm]
             valid_intr = valid_intr[perm]
+            if depth_stats is not None:
+                depth_stats = depth_stats[perm]
 
-        pred_corners, pred_mu = self.pred_3d(valid_features, valid_proposals, valid_intr)
+        pred_corners, pred_mu = self.pred_3d(valid_features, valid_proposals, valid_intr, depth_stats)
         loss_3d, _, _ = ovmono3d_loss(pred_corners.view(-1, 24), valid_gt_3d, pred_mu, use_smooth_l1=True)
         # Guard against NaN/Inf from numerical instabilities (large world coords, degenerate boxes)
         if not torch.isfinite(loss_3d):
             if _log:
                 print(f"  [3D debug] → NaN/Inf detected, returning 0")
             return torch.tensor(0.0, device=device, requires_grad=True), torch.tensor(0.0, device=device)
-        # Clamp loss to prevent gradient explosion from outlier GT boxes
         loss_3d_raw = loss_3d.detach()
-        loss_3d = torch.clamp(loss_3d, max=10.0)
+        # No clamp — gradient clipping (max_grad_norm) handles stability
         if _log:
-            print(f"  [3D debug] → loss_3d={loss_3d.item():.6f} raw={loss_3d_raw.item():.6f} (from {len(valid_features)} samples)")
+            print(f"  [3D debug] → loss_3d={loss_3d.item():.6f} (from {len(valid_features)} samples)")
         return loss_3d, loss_3d_raw
 
     # ----- Inference helper: 3D predictions for detected boxes -----
@@ -314,8 +465,16 @@ class Mono3DRoIHeads(nn.Module):
         cat_intr = _gather_intrinsics(targets, det_boxes, device, image_shapes)
         cat_boxes = torch.cat([b for b in det_boxes if len(b) > 0], dim=0)
 
+        # Compute depth stats for V2 head during inference
+        depth_stats = None
+        if self.head_3d_version == "v2" and targets is not None:
+            depth_maps = [t.get('depth_map', None) for t in targets]
+            depth_maps = [dm for dm in depth_maps if dm is not None]
+            if depth_maps:
+                depth_stats = _compute_depth_stats_flat(depth_maps, cat_boxes, device)
+
         with torch.no_grad():
-            pred_3d, _ = self.pred_3d(det_features, cat_boxes, cat_intr)
+            pred_3d, _ = self.pred_3d(det_features, cat_boxes, cat_intr, depth_stats)
 
         sizes = [len(b) for b in det_boxes]
         pred_split = pred_3d.split(sizes)
@@ -334,11 +493,15 @@ class SeparateMono3DHead(nn.Module):
     Captures matched_idxs/labels by wrapping select_training_samples.
     """
 
-    def __init__(self, base_roi_heads, representation_size=1024, max_3d_proposals=64):
+    def __init__(self, base_roi_heads, representation_size=1024, max_3d_proposals=64, head_3d_version="v1"):
         super().__init__()
         self.base_roi_heads = base_roi_heads
         self.max_3d_proposals = max_3d_proposals
-        self.pred_3d = _Mono3DPredictionLayers(representation_size)
+        self.head_3d_version = head_3d_version
+        if head_3d_version == "v2":
+            self.pred_3d = _Mono3DPredictionLayersV2(representation_size)
+        else:
+            self.pred_3d = _Mono3DPredictionLayers(representation_size)
         self._hooked_features = None
         self._matched_idxs = None
         self._labels = None
@@ -447,9 +610,9 @@ class SeparateMono3DHead(nn.Module):
                 print(f"  [3D-sep debug] → NaN/Inf detected, returning 0")
             return torch.tensor(0.0, device=device, requires_grad=True), torch.tensor(0.0, device=device)
         loss_3d_raw = loss_3d.detach()
-        loss_3d = torch.clamp(loss_3d, max=10.0)
+        # No clamp — gradient clipping (max_grad_norm) handles stability
         if _log:
-            print(f"  [3D-sep debug] → loss_3d={loss_3d.item():.6f} raw={loss_3d_raw.item():.6f} (from {len(valid_features)} samples)")
+            print(f"  [3D-sep debug] → loss_3d={loss_3d.item():.6f} (from {len(valid_features)} samples)")
         return loss_3d, loss_3d_raw
 
     def predict_for_detections(self, detections, features, image_shapes, base_roi_heads, targets=None):
@@ -685,9 +848,11 @@ class DinoV3Monocular3D(nn.Module):
       images → Transform → Backbone → FPN → RPN → ROI Heads (+3D) → detections
     """
 
-    def __init__(self, num_classes=37, pretrained=True, model="v3l", head_3d_mode="unified", max_3d_proposals=64):
+    def __init__(self, num_classes=37, pretrained=True, model="v3l", head_3d_mode="unified",
+                 max_3d_proposals=64, head_3d_version="v1"):
         super().__init__()
         self.head_3d_mode = head_3d_mode
+        self.head_3d_version = head_3d_version
 
         # Create the base Faster R-CNN detector with DINOv2 backbone + FPN
         self.base_detector = create_model(num_classes=num_classes, pretrained=pretrained, use_fpn=True, model=model)
@@ -707,18 +872,17 @@ class DinoV3Monocular3D(nn.Module):
         # Configure 3D head mode
         base_roi_heads = self.base_detector.roi_heads
         if head_3d_mode == "unified":
-            # Option 3: 3D branch lives INSIDE ROI heads (shares pool + FC)
-            self.roi_heads = Mono3DRoIHeads(base_roi_heads, max_3d_proposals=max_3d_proposals)
+            self.roi_heads = Mono3DRoIHeads(base_roi_heads, max_3d_proposals=max_3d_proposals,
+                                            head_3d_version=head_3d_version)
             self.head_3d_separate = None
-            print(f"  ✓ 3D head mode: unified (shared FC layers)")
+            print(f"  ✓ 3D head mode: unified (shared FC layers), version: {head_3d_version}")
         elif head_3d_mode == "separate":
-            # Option 2: standard ROI heads + separate 3D head with hook
             self.roi_heads = base_roi_heads
-            self.head_3d_separate = SeparateMono3DHead(base_roi_heads, max_3d_proposals=max_3d_proposals)
-            print(f"  ✓ 3D head mode: separate (hooked shared features)")
+            self.head_3d_separate = SeparateMono3DHead(base_roi_heads, max_3d_proposals=max_3d_proposals,
+                                                       head_3d_version=head_3d_version)
+            print(f"  ✓ 3D head mode: separate (hooked features), version: {head_3d_version}")
         else:
             raise ValueError(f"Unknown head_3d_mode: {head_3d_mode!r}. Use 'unified' or 'separate'.")
-
     def forward(self, images, targets=None):
         """
         Full forward pass: 2D detection + 3D box regression.

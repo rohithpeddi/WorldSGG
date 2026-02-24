@@ -1,24 +1,24 @@
 # =============================================================================
-# Monocular3D Training — Default Configuration
+# V1: DINOv3-Large (ViT-L/16) — Loss-fixed 3D training
 # =============================================================================
-# This is the base config with all standard training defaults.
-# Override any field via CLI: python train.py --config configs/default.yaml --lr 5e-5
+# Derived from dinov3l_saurabh.yaml with V1 loss fixes:
+#   - weight_3d=0.1, ramp disabled, loss clamp removed, diagonal min=0.25
 # =============================================================================
 
 # --- Experiment ---
-experiment_name: "dinov3_large_unified"
+experiment_name: "v1_dinov3l"
 working_dir: "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/lib/detector/monocular3d"
 save_path: "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/save_path"
 
 # --- Data ---
 data_path: "/home/cse/msr/csy227518/scratch/Datasets/action_genome"
-world_3d_annotations_path: null   # null = use data_path/world_annotations/bbox_annotations_3d_final
+world_3d_annotations_path: null
 
 # --- Model ---
-model: "v3l"                       # "v2" = DINOv2 ViT-B (86M, fast), "v2l" = ViT-L, "v3l" = DINOv3 ViT-L
-num_classes: null                  # null = auto-detect from dataset
+model: "v3l"                       # DINOv3 ViT-L/16
+num_classes: null
 pretrained: true
-use_compile: false                 # torch.compile() — PyTorch 2.0+
+use_compile: false
 
 # --- Training ---
 lr: 1.0e-4
@@ -27,25 +27,29 @@ batch_size: 64
 epochs: 70
 gradient_accumulation_steps: 1
 max_grad_norm: 1.0
-warmup_fraction: 0.01              # fraction of total steps for warmup
+warmup_fraction: 0.01
 
 # --- Thresholds ---
-head_3d_mode: "unified"            # "unified" (shared FC) or "separate" (hooked features)
-max_3d_proposals: 64               # max positive proposals for 3D loss per batch
-iou_match_2d_eval: 0.5             # 2D IoU threshold for matching preds to GT in 3D evaluation
+head_3d_mode: "unified"
+max_3d_proposals: 64
+iou_match_2d_eval: 0.5
 
-# --- Loss Weights ---
-weight_cls: 1.0                    # Classification loss weight
-weight_box: 1.0                    # Box regression loss weight
-weight_obj: 1.0                    # RPN objectness loss weight
-weight_rpn: 1.0                    # RPN box regression loss weight
-weight_3d: 1.0                     # 3D head loss weight (final target)
-weight_3d_ramp_epochs: 3           # Staged ramp: 2D-only for first N epochs, then linear 0→weight_3d over next N
+# --- Loss Weights (V1 fixes) ---
+weight_cls: 1.0
+weight_box: 1.0
+weight_obj: 1.0
+weight_rpn: 1.0
+weight_3d: 0.1
+weight_3d_ramp_epochs: 0
+
+# --- 3D Head ---
+head_3d_version: "v1"
+depth_maps_dir: null
 
 # --- Image ---
-target_size: null                  # null = use Pi3-compatible pixel_limit resize (aspect-ratio preserving)
-pixel_limit: 255000                # Pi3's PIXEL_LIMIT: dims rounded to multiples of patch_size
-patch_size: 14                     # Must match backbone patch_size (14 for DINOv2)
+target_size: null
+pixel_limit: 255000
+patch_size: 14
 
 # --- DataLoader ---
 num_workers_train: 8
@@ -67,4 +71,4 @@ plot_score_thresh: 0.1
 # --- Misc ---
 use_collate: true
 use_accelerator: true
-ckpt: null                         # path to checkpoint folder for resume
+ckpt: null

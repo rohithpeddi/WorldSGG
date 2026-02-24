@@ -129,6 +129,7 @@ class ActionGenomeDataset3D(Dataset):
             target_size: Optional[int] = None,
             patch_size: int = 14,
             world_3d_annotations_path: Optional[str] = "/data/rohith/ag/world_annotations/monocular3d_bbox_annotations",
+            depth_maps_dir: Optional[str] = None,
     ):
         self.data_path = data_path
         self.phase = phase
@@ -145,6 +146,9 @@ class ActionGenomeDataset3D(Dataset):
             self.world_3d_annotations = world_3d_annotations_path
         else:
             self.world_3d_annotations = os.path.join(self.data_path, const.WORLD_ANNOTATIONS, "bbox_annotations_3d_final")
+
+        # Pre-computed depth maps (optional, for V2 3D head)
+        self.depth_maps_dir = depth_maps_dir
 
         print(f"\n{'='*60}")
         print(f"  ActionGenomeDataset3D [{phase.upper()}]")
@@ -501,6 +505,30 @@ class ActionGenomeDataset3D(Dataset):
             'focal_lengths': torch.tensor([fx_scaled, fy_scaled], dtype=torch.float32),
             'principal_point': torch.tensor([cx_scaled, cy_scaled], dtype=torch.float32),
         }
+
+        # ---- Step 8 (optional): Load pre-computed depth map for V2 3D head ----
+        if self.depth_maps_dir is not None:
+            # Frame name: "001YG.mp4/000063.png" → stem = "001YG.mp4/000063"
+            stem = os.path.splitext(frame_name)[0]
+            # Try UniDepth (.npz with 'depth' key) first, then DepthAnything (.npy) fallback
+            depth_npz = os.path.join(self.depth_maps_dir, stem + '.npz')
+            depth_npy = os.path.join(self.depth_maps_dir, stem + '.npy')
+            depth_orig = None
+            if os.path.exists(depth_npz):
+                data = np.load(depth_npz)
+                depth_orig = data['depth'].astype(np.float32)  # UniDepth: metric depth
+            elif os.path.exists(depth_npy):
+                depth_orig = np.load(depth_npy).astype(np.float32)  # DepthAnything: relative depth
+
+            if depth_orig is not None:
+                # Resize depth map to match target image dims
+                depth_tensor = torch.from_numpy(depth_orig).unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
+                depth_resized = torch.nn.functional.interpolate(
+                    depth_tensor, size=(target_h, target_w), mode='bilinear', align_corners=False
+                ).squeeze(0).squeeze(0)  # (target_h, target_w)
+                target['depth_map'] = depth_resized
+            else:
+                target['depth_map'] = torch.zeros((target_h, target_w), dtype=torch.float32)
 
         return img_chw, target
 

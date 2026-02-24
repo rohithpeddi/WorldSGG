@@ -189,6 +189,10 @@ class TrainConfig:
     weight_3d: float = 1.0  # 3D head loss (final target weight)
     weight_3d_ramp_epochs: int = 5  # Staged ramp: 0→weight_3d over [ramp_epochs, 2*ramp_epochs]; 2D-only before that
 
+    # 3D head architecture
+    head_3d_version: str = "v1"  # "v1" = baseline, "v2" = with per-ROI depth stats
+    depth_maps_dir: Optional[str] = None  # Path to pre-computed depth maps (required for head_3d_version="v2")
+
     # DataLoader
     num_workers_train: int = 8
     num_workers_test: int = 8
@@ -287,6 +291,8 @@ class DinoAGTrainer3D:
         }
         if self.cfg.world_3d_annotations_path is not None:
             kwargs["world_3d_annotations_path"] = self.cfg.world_3d_annotations_path
+        if self.cfg.depth_maps_dir is not None:
+            kwargs["depth_maps_dir"] = self.cfg.depth_maps_dir
         self.train_dataset = ActionGenomeDataset3D(self.cfg.data_path, **kwargs)
         kwargs["phase"] = "test"
         self.test_dataset = ActionGenomeDataset3D(self.cfg.data_path, **kwargs)
@@ -336,6 +342,7 @@ class DinoAGTrainer3D:
             model=self.cfg.model,
             head_3d_mode=self.cfg.head_3d_mode,
             max_3d_proposals=self.cfg.max_3d_proposals,
+            head_3d_version=self.cfg.head_3d_version,
         )
         # Count trainable vs frozen parameters
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)

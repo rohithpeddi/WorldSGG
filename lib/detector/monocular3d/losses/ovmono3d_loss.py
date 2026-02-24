@@ -240,8 +240,9 @@ def ovmono3d_loss(
     all_chamfer = _chamfer_pairwise_dist(all_pred, all_gt)                  # (5*n,)
 
     # Normalize by GT box diagonal² to make loss scale-invariant.
-    # World coords produce large smooth-L1 distances; this brings loss to ~0.1-1.0 range.
-    gt_diag_sq = ((gt_c.max(dim=1).values - gt_c.min(dim=1).values) ** 2).sum(dim=1).clamp(min=1e-4)
+    # Clamp min=0.25 (diagonal≥0.5m) prevents small objects (phone, doorknob)
+    # from amplifying the loss 30-100× via tiny denominators.
+    gt_diag_sq = ((gt_c.max(dim=1).values - gt_c.min(dim=1).values) ** 2).sum(dim=1).clamp(min=0.25)
     gt_diag_sq_rep = gt_diag_sq.repeat(5)  # (5*n,)
     all_chamfer = all_chamfer / gt_diag_sq_rep
 

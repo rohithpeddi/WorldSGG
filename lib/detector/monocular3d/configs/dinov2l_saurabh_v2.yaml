@@ -1,12 +1,11 @@
 # =============================================================================
-# V1: DINOv2-Large (ViT-L/14) — Loss-fixed 3D training
+# V2: DINOv2-Large (ViT-L/14) — Depth-enhanced 3D head
 # =============================================================================
-# Derived from dinov2l_saurabh.yaml with V1 loss fixes:
-#   - weight_3d=0.1, ramp disabled, loss clamp removed, diagonal min=0.25
+# Same as dinov2l_saurabh.yaml + V2 3D head with per-ROI depth stats.
 # =============================================================================
 
 # --- Experiment ---
-experiment_name: "v1_dinov2l"
+experiment_name: "v2_dinov2l"
 working_dir: "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/lib/detector/monocular3d"
 save_path: "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/save_path"
 
@@ -15,7 +14,7 @@ data_path: "/home/cse/msr/csy227518/scratch/Datasets/action_genome"
 world_3d_annotations_path: null
 
 # --- Model ---
-model: "v2l"                       # DINOv2 ViT-L/14 (304M params)
+model: "v2l"
 num_classes: null
 pretrained: true
 use_compile: false
@@ -34,7 +33,7 @@ head_3d_mode: "unified"
 max_3d_proposals: 64
 iou_match_2d_eval: 0.5
 
-# --- Loss Weights (V1 fixes) ---
+# --- Loss Weights (V1 fixes included) ---
 weight_cls: 1.0
 weight_box: 1.0
 weight_obj: 1.0
@@ -42,9 +41,9 @@ weight_rpn: 1.0
 weight_3d: 0.1
 weight_3d_ramp_epochs: 0
 
-# --- 3D Head ---
-head_3d_version: "v1"
-depth_maps_dir: null
+# --- 3D Head (V2: depth-enhanced) ---
+head_3d_version: "v2"
+depth_maps_dir: "/home/cse/msr/csy227518/scratch/Datasets/action_genome/ag4D/unidepth"
 
 # --- Image ---
 target_size: null

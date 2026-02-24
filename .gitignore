@@ -10,7 +10,7 @@ dataloader/*.pkl
 *.pdf
 *.fls
 *.fdb_latexmk
-
+docs/
 
 datasets/preprocess/inpainting/RoseEdit/weights/transformer/*
 datasets/preprocess/inpainting/RoseEdit/models/*
