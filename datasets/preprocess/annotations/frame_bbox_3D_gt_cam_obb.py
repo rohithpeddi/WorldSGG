@@ -50,10 +50,6 @@ def rerun_frame_vis_camera_obb(
     """
     rr.init(app_id, spawn=True)
     
-    # Wait for the Rerun viewer to fully start before logging data
-    import time
-    time.sleep(3)
-    
     # Use RDF (Right-Down-Forward) for OpenCV camera convention
     rr.log("/", rr.ViewCoordinates.RDF)
     BASE = "camera_frame"
