@@ -40,7 +40,7 @@ weight_box: 1.0                    # Box regression loss weight
 weight_obj: 1.0                    # RPN objectness loss weight
 weight_rpn: 1.0                    # RPN box regression loss weight
 weight_3d: 1.0                     # 3D head loss weight (final target)
-weight_3d_ramp_epochs: 3           # Staged ramp: 2D-only for first N epochs, then linear 0→weight_3d over next N
+weight_3d_ramp_epochs: 0           # Disabled: train 3D from epoch 1
 
 # --- Image ---
 target_size: null                  # null = use Pi3-compatible pixel_limit resize (aspect-ratio preserving)

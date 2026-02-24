@@ -4,7 +4,7 @@ Evaluation script for DINOv2 Monocular 3D detector.
 
 Reports:
   - 2D: COCO-style mAP (map, map_50, map_75, map_per_class).
-  - 3D: Chamfer distance, corner L2 error, axis-aligned 3D IoU (iou3d_hit_50, iou3d_hit_75),
+  - 3D: Chamfer distance, corner L2 error, oriented 3D IoU (iou3d_hit_50, iou3d_hit_75),
         and per-attribute errors (center, dimensions, rotation) on matched pred-GT pairs.
 
 Matching: For each image, predictions are matched to GT by 2D box IoU and same label.

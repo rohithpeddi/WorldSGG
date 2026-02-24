@@ -714,12 +714,13 @@ class DinoAGTrainer3D:
 
         _zero = 0.0
         first_iter = True
-        for images, targets in tqdm(
+        pbar = tqdm(
                 self.train_loader,
                 desc=f"Epoch {epoch + 1}/{self.cfg.epochs} [Train]",
                 ascii=True,
                 dynamic_ncols=True,
-        ):
+        )
+        for images, targets in pbar:
             if first_iter:
                 self.accelerator.print("First batch: loading data and first CUDA run (can take 2–5 min)...")
                 first_iter = False
@@ -818,6 +819,9 @@ class DinoAGTrainer3D:
                     running_3d_loss += _l3d
                     running_raw_3d_loss += _raw_3d
                     running_count += 1
+
+                    # Live loss display on tqdm bar
+                    pbar.set_postfix(L=f"{_total:.3f}", cls=f"{_cls:.3f}", box=f"{_box:.3f}", l3d=f"{_l3d:.4f}", raw3d=f"{_raw_3d:.4f}")
 
                 if self.global_iteration % self.cfg.iter_log_every == 0 and self.accelerator.is_main_process:
                     self._log_iteration_losses(

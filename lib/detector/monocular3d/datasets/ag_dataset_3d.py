@@ -314,7 +314,6 @@ class ActionGenomeDataset3D(Dataset):
 
         # Read one sample frame per video to get native resolution
         video_target_size: Dict[str, Tuple[int, int]] = {}
-        n_read_errors = 0
         for video_id, indices in tqdm(video_to_indices.items(), desc=f"  [{self.phase}] Reading resolutions", ascii=True):
             sample_frame = self.frame_names[indices[0]]
             img_path = os.path.join(self.frames_path, self.samples[sample_frame]['filename'])
@@ -335,8 +334,6 @@ class ActionGenomeDataset3D(Dataset):
         sizes_str = ", ".join(f"{w}x{h}({len(idxs)})" for (w, h), idxs in
                               sorted(self.resolution_buckets.items(), key=lambda x: -len(x[1]))[:8])
         print(f"  {len(video_to_indices)} videos → {n_buckets} resolution buckets (top: {sizes_str})")
-        if n_read_errors:
-            print(f"  WARNING: {n_read_errors} videos failed header read, using fallback dims")
 
     @staticmethod
     def _compute_target_size(orig_w: int, orig_h: int, pixel_limit: int = 255000,
