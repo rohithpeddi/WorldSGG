@@ -91,7 +91,14 @@ def corners_to_attributes(corners: torch.Tensor) -> dict:
     dims = torch.stack([length, width, height], dim=1)  # (N, 3)
     dims = dims.clamp(min=1e-4)  # avoid degenerate boxes
 
-    return {"center": center, "dims": dims, "r": r}
+    # Flag boxes where PCA produced NaN/Inf (degenerate/coplanar corners)
+    attr_valid = (
+        torch.isfinite(center).all(dim=1)
+        & torch.isfinite(dims).all(dim=1)
+        & torch.isfinite(r)
+    )
+
+    return {"center": center, "dims": dims, "r": r, "valid": attr_valid}
 
 
 def attributes_to_corners(center: torch.Tensor, dims: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
@@ -212,6 +219,26 @@ def ovmono3d_loss(
     pred_attr = corners_to_attributes(pred_c)
     gt_attr = corners_to_attributes(gt_c)
 
+    # Guard 1: Filter out boxes where PCA produced NaN/Inf attributes
+    # (degenerate/coplanar corners from early random predictions)
+    pca_valid = pred_attr["valid"] & gt_attr["valid"]
+    if not pca_valid.any():
+        return (
+            torch.tensor(0.0, device=device, requires_grad=True),
+            torch.tensor(0.0, device=device),
+            torch.tensor(0.0, device=device),
+        )
+    if not pca_valid.all():
+        pred_c = pred_c[pca_valid]
+        gt_c = gt_c[pca_valid]
+        pred_attr = {k: v[pca_valid] if k != "valid" else v for k, v in pred_attr.items()}
+        gt_attr = {k: v[pca_valid] if k != "valid" else v for k, v in gt_attr.items()}
+        n_valid = pred_c.shape[0]
+        # Also re-slice pred_mu valid mask
+        valid = valid.clone()
+        valid_indices = valid.nonzero(as_tuple=True)[0]
+        valid[valid_indices[~pca_valid]] = False
+
     # Pre-compute GT trig values ONCE (reused across 3 of 4 disentangled losses)
     gt_cos_r = torch.cos(gt_attr["r"])
     gt_sin_r = torch.sin(gt_attr["r"])
@@ -252,16 +279,28 @@ def ovmono3d_loss(
     # Per-sample L3D before any reduction
     L3D_per_sample = L_xy + L_z + L_whl + L_r + L_all  # (n_valid,)
 
+    # Guard 2: Clamp extreme per-sample losses (prevents single bad box from dominating)
+    L3D_per_sample = torch.clamp(L3D_per_sample, max=100.0)
+
     # Per-sample uncertainty weighting: L_i = sqrt(2) * exp(-mu_i) * L3D_i + mu_i
     # Each box's mu_i individually modulates its own loss, so the network can
     # learn to down-weight noisy/hard samples rather than using a global knob.
     mu = pred_mu[valid].float().view(-1)  # (n_valid,)
     mu = torch.clamp(mu, -5.0, 10.0)
     loss_per_sample = (2.0 ** 0.5) * torch.exp(-mu) * L3D_per_sample + mu
-    loss_total = loss_per_sample.mean()
 
-    # Scalar summaries for logging
-    L3D = L3D_per_sample.mean()
+    # Guard 3: Filter out any remaining NaN/Inf per-sample losses
+    finite_mask = torch.isfinite(loss_per_sample)
+    if not finite_mask.any():
+        return (
+            torch.tensor(0.0, device=device, requires_grad=True),
+            torch.tensor(0.0, device=device),
+            torch.tensor(0.0, device=device),
+        )
+    loss_total = loss_per_sample[finite_mask].mean()
 
-    return loss_total, L3D.detach(), L_all.mean().detach()
+    # Scalar summaries for logging (use finite samples only)
+    L3D = L3D_per_sample[finite_mask].mean()
+
+    return loss_total, L3D.detach(), L_all[finite_mask].mean().detach() if finite_mask.any() else L_all.mean().detach()
 
