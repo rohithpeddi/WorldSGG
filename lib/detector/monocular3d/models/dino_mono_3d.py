@@ -1,4 +1,3 @@
-
 import os
 from typing import Dict, List, Optional, Tuple
 
@@ -21,9 +20,9 @@ if _hf_token:
 # Model registry: config key → HuggingFace model ID
 # ---------------------------------------------------------------------------
 MODEL_REGISTRY: Dict[str, str] = {
-    "v2":    "facebook/dinov2-base",       # ViT-B/14  86M   hidden_size=768
-    "v2l":   "facebook/dinov2-large",      # ViT-L/14  304M  hidden_size=1024
-    "v3l":   "facebook/dinov3-vitl16-pretrain-lvd1689m",   # hidden_size=1024
+    "v2": "facebook/dinov2-base",  # ViT-B/14  86M   hidden_size=768
+    "v2l": "facebook/dinov2-large",  # ViT-L/14  304M  hidden_size=1024
+    "v3l": "facebook/dinov3-vitl16-pretrain-lvd1689m",  # hidden_size=1024
 }
 
 # Import loss
@@ -45,9 +44,9 @@ def _compute_3d_corners(dims, rot_sin_cos, depth, center_offset, bbox_2d, focal_
     v_final = cy_2d + center_offset[:, 1]
 
     l, w, h = dims[:, 0], dims[:, 1], dims[:, 2]
-    x_corners = torch.stack([l/2, l/2, -l/2, -l/2, l/2, l/2, -l/2, -l/2], dim=1)
-    y_corners = torch.stack([w/2, -w/2, -w/2, w/2, w/2, -w/2, -w/2, w/2], dim=1)
-    z_corners = torch.stack([h/2, h/2, h/2, h/2, -h/2, -h/2, -h/2, -h/2], dim=1)
+    x_corners = torch.stack([l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2], dim=1)
+    y_corners = torch.stack([w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2], dim=1)
+    z_corners = torch.stack([h / 2, h / 2, h / 2, h / 2, -h / 2, -h / 2, -h / 2, -h / 2], dim=1)
 
     sin, cos = rot_sin_cos[:, 0:1], rot_sin_cos[:, 1:2]
     x_rot = x_corners * cos - y_corners * sin
@@ -326,7 +325,7 @@ class Mono3DRoIHeads(nn.Module):
                 self.base.select_training_samples(proposals, targets)
 
         box_features = self.base.box_roi_pool(features, proposals, image_shapes)
-        box_features = self.base.box_head(box_features)          # (Total, 1024)
+        box_features = self.base.box_head(box_features)  # (Total, 1024)
         class_logits, box_regression = self.base.box_predictor(box_features)
 
         result: List[Dict[str, torch.Tensor]] = []
@@ -390,7 +389,8 @@ class Mono3DRoIHeads(nn.Module):
             if _log:
                 n_gt = len(gt_3d)
                 n_nonzero = (gt_3d.reshape(n_gt, -1).abs().sum(dim=1) > 1e-6).sum().item()
-                print(f"  [3D debug] img {i}: gt_3d.shape={gt_3d.shape}, non-zero={n_nonzero}/{n_gt}, pos_matches={img_pos.sum().item()}")
+                print(
+                    f"  [3D debug] img {i}: gt_3d.shape={gt_3d.shape}, non-zero={n_nonzero}/{n_gt}, pos_matches={img_pos.sum().item()}")
             pos_gt_3d.append(gt_3d[matched_idxs[i][img_pos]])
             fl = targets[i].get('focal_lengths', torch.tensor([500.0, 500.0], device=device))
             pp = targets[i].get('principal_point', torch.tensor([0.0, 0.0], device=device))
@@ -570,7 +570,8 @@ class SeparateMono3DHead(nn.Module):
             if _log:
                 n_gt = len(gt_3d)
                 n_nonzero = (gt_3d.reshape(n_gt, -1).abs().sum(dim=1) > 1e-6).sum().item()
-                print(f"  [3D-sep debug] img {i}: gt_3d.shape={gt_3d.shape}, non-zero={n_nonzero}/{n_gt}, pos_matches={img_pos.sum().item()}")
+                print(
+                    f"  [3D-sep debug] img {i}: gt_3d.shape={gt_3d.shape}, non-zero={n_nonzero}/{n_gt}, pos_matches={img_pos.sum().item()}")
             pos_gt_3d.append(gt_3d[matched_idxs[i][img_pos]])
             fl = targets[i].get('focal_lengths', torch.tensor([500.0, 500.0], device=device))
             pp = targets[i].get('principal_point', torch.tensor([0.0, 0.0], device=device))
@@ -818,6 +819,7 @@ class Dinov3ModelBackbone(nn.Module):
         features = features.permute(0, 2, 1).contiguous().view(B, C, H, W)
         return features
 
+
 class _NoOpRCNNTransform(GeneralizedRCNNTransform):
     """GeneralizedRCNNTransform that ONLY batches — no resize, no normalization.
     The dataset already produces normalized images at the correct Pi3-compatible
@@ -836,7 +838,7 @@ class DinoV3Monocular3D(nn.Module):
     """
     Full Monocular 3D Object Detector combining:
       - DINOv2 frozen backbone (ViT) for feature extraction
-      - SimpleFPN for multi-scale feature pyramid
+      - SimpleFPN for multiscale feature pyramid
       - Faster R-CNN (RPN + ROI heads) for 2D detection
       - Configurable 3D head (unified or separate)
 
@@ -883,6 +885,7 @@ class DinoV3Monocular3D(nn.Module):
             print(f"  ✓ 3D head mode: separate (hooked features), version: {head_3d_version}")
         else:
             raise ValueError(f"Unknown head_3d_mode: {head_3d_mode!r}. Use 'unified' or 'separate'.")
+
     def forward(self, images, targets=None):
         """
         Full forward pass: 2D detection + 3D box regression.

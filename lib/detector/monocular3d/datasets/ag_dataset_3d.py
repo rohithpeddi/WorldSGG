@@ -86,31 +86,6 @@ def _read_image_dims_fast(path: str) -> Tuple[int, int]:
         return img.size  # (w, h)
 
 
-# ---------------------------------------------------------------------------
-# Helper: extract 8x3 corners from a frame object
-# ---------------------------------------------------------------------------
-def _get_corners_world(frame_object: dict) -> Optional[np.ndarray]:
-    """Get 8x3 corners from a frame object."""
-    # Format 1: aabb_floor_aligned["corners_world"]
-    if "aabb_floor_aligned" in frame_object:
-        aligned = frame_object["aabb_floor_aligned"]
-        if isinstance(aligned, dict) and "corners_world" in aligned:
-            arr = np.array(aligned["corners_world"], dtype=np.float32)
-            if arr.shape == (8, 3):
-                return arr
-    # Format 2: top-level "corners_world"
-    if "corners_world" in frame_object:
-        arr = np.array(frame_object["corners_world"], dtype=np.float32)
-        if arr.shape == (8, 3):
-            return arr
-    # Format 3: obb_corners_final
-    if "obb_corners_final" in frame_object:
-        arr = np.array(frame_object["obb_corners_final"], dtype=np.float32)
-        if arr.shape == (8, 3):
-            return arr
-    return None
-
-
 class ActionGenomeDataset3D(Dataset):
     """
     Action Genome dataset with resolution bucketing for efficient batching.
@@ -343,16 +318,8 @@ class ActionGenomeDataset3D(Dataset):
         for video_id, indices in tqdm(video_to_indices.items(), desc=f"  [{self.phase}] Reading resolutions", ascii=True):
             sample_frame = self.frame_names[indices[0]]
             img_path = os.path.join(self.frames_path, self.samples[sample_frame]['filename'])
-            try:
-                orig_w, orig_h = _read_image_dims_fast(img_path)
-            except Exception:
-                orig_w, orig_h = 640, 480
-                n_read_errors += 1
-
-            if self.target_size is not None:
-                tw, th = self.target_size, self.target_size
-            else:
-                tw, th = self._compute_target_size(orig_w, orig_h, self.pixel_limit, self.patch_size)
+            orig_w, orig_h = _read_image_dims_fast(img_path)
+            tw, th = self._compute_target_size(orig_w, orig_h, self.pixel_limit, self.patch_size)
             video_target_size[video_id] = (tw, th)
 
         # Assign target sizes to all frames and build resolution buckets
