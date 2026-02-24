@@ -54,16 +54,10 @@ def _slim_bbox_frame_object(obj: dict) -> dict:
         slim["label"] = obj["label"]
 
     # 3D corners — try all known formats
-    for key in ("corners_world", "obb_corners_final", "corners_final"):
-        if key in obj:
-            slim[key] = obj[key]
-            break
-
-    # aabb_floor_aligned.corners_world
-    if "aabb_floor_aligned" in obj:
-        aabb = obj["aabb_floor_aligned"]
-        if isinstance(aabb, dict) and "corners_world" in aabb:
-            slim["aabb_floor_aligned"] = {"corners_world": aabb["corners_world"]}
+    if "obb_corners_final" in obj:
+        slim["obb_corners_final"] = obj["obb_corners_final"]
+    else:
+        raise Exception (f"Missing obb_corners_final in object: {obj.get('label', 'unknown')}")
 
     return slim
 

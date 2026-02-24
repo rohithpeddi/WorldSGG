@@ -140,12 +140,7 @@ class ActionGenomeDataset3D(Dataset):
         self.target_size = target_size  # If set, forces square resize (legacy)
         self.patch_size = patch_size    # Must match backbone patch_size
         self.frames_path = os.path.join(self.data_path, const.FRAMES)
-
-        # 3D GT
-        if world_3d_annotations_path is not None:
-            self.world_3d_annotations = world_3d_annotations_path
-        else:
-            self.world_3d_annotations = os.path.join(self.data_path, const.WORLD_ANNOTATIONS, "bbox_annotations_3d_final")
+        self.world_3d_annotations = world_3d_annotations_path
 
         # Pre-computed depth maps (optional, for V2 3D head)
         self.depth_maps_dir = depth_maps_dir
@@ -297,12 +292,7 @@ class ActionGenomeDataset3D(Dataset):
                 for obj in objects_3d:
                     label = obj.get("label", None)
                     # Extract 3D corners (try known key formats)
-                    corners = None
-                    for key in ("corners_world", "obb_corners_final", "corners_final"):
-                        if key in obj:
-                            corners = np.array(obj[key], dtype=np.float32).reshape(8, 3)
-                            break
-
+                    corners = np.array(obj["obb_corners_final"], dtype=np.float32).reshape(8, 3)
                     if corners is None:
                         continue
 
