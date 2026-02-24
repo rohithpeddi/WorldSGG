@@ -413,8 +413,6 @@ class SeparateMono3DHead(nn.Module):
             return torch.tensor(0.0, device=device, requires_grad=True), torch.tensor(0.0, device=device)
         loss_3d_raw = loss_3d.detach()
         loss_3d = torch.clamp(loss_3d, max=10.0)
-        if loss_3d_raw.item() > 10.0:
-            print(f"  [3D-sep clamp] raw={loss_3d_raw.item():.4f} → clamped=10.0")
         if _log:
             print(f"  [3D-sep debug] → loss_3d={loss_3d.item():.6f} raw={loss_3d_raw.item():.6f} (from {len(valid_features)} samples)")
         return loss_3d, loss_3d_raw
