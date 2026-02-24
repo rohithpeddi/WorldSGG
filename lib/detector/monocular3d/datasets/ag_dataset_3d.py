@@ -289,12 +289,21 @@ class ActionGenomeDataset3D(Dataset):
                 obj_3d_list = []
                 person_3d = None
 
+                # OBB generator shortens compound class names; map them back
+                _LABEL_REMAP = {
+                    "closet": "closet/cabinet",
+                    "cup": "cup/glass/bottle",
+                    "paper": "paper/notebook",
+                    "sofa": "sofa/couch",
+                    "phone": "phone/camera",
+                }
+
                 for obj in objects_3d:
                     label = obj.get("label", None)
-                    # Extract 3D corners (try known key formats)
+                    # Normalize shortened PKL labels to full dataset class names
+                    label = _LABEL_REMAP.get(label, label)
+                    # Extract 3D corners
                     corners = np.array(obj["obb_corners_final"], dtype=np.float32).reshape(8, 3)
-                    if corners is None:
-                        continue
 
                     # Person class (label="person" or class index 1)
                     if label == "person" or label == "__person__":
