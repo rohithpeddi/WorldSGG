@@ -76,6 +76,41 @@ class _Mono3DPredictionLayers(nn.Module):
         self.depth_pred = nn.Linear(512, 1)
         self.center_offset_pred = nn.Linear(512, 2)
         self.mu_pred = nn.Linear(512, 1)
+        self._init_weights()
+
+    def _init_weights(self):
+        """Targeted initialization for consistent initial 3D predictions.
+
+        Without this, default Kaiming-uniform init causes 4-order-of-magnitude
+        variance in the initial 3D loss across runs because:
+          - depth_pred: softplus(random) can produce huge depths → huge corners
+          - dim_pred:   softplus(random) can produce huge box dimensions
+          - mu_pred:    negative mu → exp(-mu) exponentially amplifies L3D
+        """
+        # Shared FC: Xavier for ReLU-activated layer
+        nn.init.xavier_uniform_(self.context_fc.weight)
+        nn.init.zeros_(self.context_fc.bias)
+
+        # depth: softplus(1.0) ≈ 1.31m — moderate initial depth
+        nn.init.normal_(self.depth_pred.weight, std=0.001)
+        nn.init.constant_(self.depth_pred.bias, 1.0)
+
+        # dims: softplus(0) ≈ 0.69 — moderate initial dimensions (~0.7m)
+        nn.init.normal_(self.dim_pred.weight, std=0.001)
+        nn.init.zeros_(self.dim_pred.bias)
+
+        # rotation: bias → (sin=0, cos=1) = identity rotation
+        nn.init.normal_(self.rot_pred.weight, std=0.001)
+        with torch.no_grad():
+            self.rot_pred.bias.copy_(torch.tensor([0.0, 1.0]))
+
+        # center offset: zero initially (no 2D offset)
+        nn.init.normal_(self.center_offset_pred.weight, std=0.001)
+        nn.init.zeros_(self.center_offset_pred.bias)
+
+        # mu (uncertainty): exp(-0) = 1, no loss amplification
+        nn.init.normal_(self.mu_pred.weight, std=0.001)
+        nn.init.zeros_(self.mu_pred.bias)
 
     def forward(self, shared_features, bbox_2d, camera_intrinsics):
         """
