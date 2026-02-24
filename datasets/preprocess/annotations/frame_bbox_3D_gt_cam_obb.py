@@ -394,12 +394,34 @@ class FrameToWorldAnnotationsOBB(FrameToWorldAnnotationsBase):
         frames_final["conf"] = rgbd_info.get("conf", None)
         frames_final["points"] = rgbd_info["points"]
 
+        # --- DEBUG: diagnose empty visualization ---
+        pts = frames_final["points"]
+        print(f"[DEBUG] points shape: {pts.shape}, dtype: {pts.dtype}")
+        print(f"[DEBUG] points finite: {np.isfinite(pts).all()}, "
+              f"NaN count: {np.isnan(pts).sum()}, "
+              f"range: [{np.nanmin(pts):.3f}, {np.nanmax(pts):.3f}]")
+        print(f"[DEBUG] frame_stems count: {len(frames_final['frame_stems'])}")
+        print(f"[DEBUG] colors: {frames_final['colors'].shape if frames_final.get('colors') is not None else None}")
+        print(f"[DEBUG] conf: {frames_final['conf'].shape if frames_final.get('conf') is not None else None}")
+        bbox_frames = frames_final.get("bbox_frames", {})
+        print(f"[DEBUG] bbox_frames keys: {len(bbox_frames)}, "
+              f"total objects: {sum(len(v.get('objects', [])) for v in bbox_frames.values())}")
+        # Check if images exist
+        sample_stem = frames_final["frame_stems"][0] if frames_final["frame_stems"] else "???"
+        sample_img_path = self.frame_annotated_dir_path / video_id / f"{sample_stem}.png"
+        print(f"[DEBUG] sample image path: {sample_img_path}, exists: {sample_img_path.exists()}")
+        # --- END DEBUG ---
+
         rerun_frame_vis_camera_obb(
             video_id,
             frames_final=frames_final,
             frame_annotated_dir_path=self.frame_annotated_dir_path,
             app_id=app_id,
         )
+
+        # Give the spawned Rerun viewer time to receive all data before Python exits
+        import time
+        time.sleep(2)
 
 
 # --------------------------------------------------------------------------------------
