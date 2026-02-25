@@ -2,7 +2,7 @@
 # V1: DINOv3-Large (ViT-L/16) — Separate head, loss-fixed 3D training
 # =============================================================================
 # V1 loss fixes + separate 3D head:
-#   - head_3d_mode=separate, weight_3d=0.1, ramp disabled, diagonal min=0.25
+#   - head_3d_mode=separate, weight_3d=1.0, ramp disabled, diagonal min=0.25
 # =============================================================================
 
 # --- Experiment ---
@@ -39,7 +39,7 @@ weight_cls: 1.0
 weight_box: 1.0
 weight_obj: 1.0
 weight_rpn: 1.0
-weight_3d: 0.1                     # Lowered: prevents 3D from dominating 2D training
+weight_3d: 1.0                     # Lowered: prevents 3D from dominating 2D training
 weight_3d_ramp_epochs: 0           # Disabled: train 3D from epoch 1
 
 # --- 3D Head ---
