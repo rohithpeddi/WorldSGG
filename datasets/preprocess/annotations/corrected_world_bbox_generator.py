@@ -1084,12 +1084,6 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                 rrb.Spatial3DView(
                     origin=f"{BASE}",
                     name="3D Scene",
-                    background=[30, 30, 40],
-                    line_grid=rrb.LineGrid3D(
-                        visible=True,
-                        spacing=0.5,
-                        color=[80, 80, 100, 100],
-                    ),
                 ),
                 rrb.Spatial2DView(
                     origin=f"{BASE}/cam/pinhole",
