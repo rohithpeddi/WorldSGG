@@ -465,16 +465,10 @@ class Corrected4DBBoxGenerator(FrameToWorldBase):
 
         for pkl_path in tqdm(correction_files, desc="Corrected 4D"):
             video_id = pkl_path.stem + ".mp4"
-            try:
-                out = self.generate_corrected_video_4d_annotations(
-                    video_id, overwrite=overwrite,
-                )
-                results[video_id] = out is not None
-            except Exception as e:
-                print(f"[corrected-4d][{video_id}] error: {e}")
-                import traceback
-                traceback.print_exc()
-                results[video_id] = False
+            out = self.generate_corrected_video_4d_annotations(
+                video_id, overwrite=overwrite,
+            )
+            results[video_id] = out is not None
 
         return results
 
@@ -491,16 +485,10 @@ class Corrected4DBBoxGenerator(FrameToWorldBase):
             video_id = data["video_id"]
             if get_video_belongs_to_split(video_id) != split:
                 continue
-            try:
-                out = self.generate_corrected_video_4d_annotations(
-                    video_id, overwrite=overwrite,
-                )
-                results[video_id] = out is not None
-            except Exception as e:
-                print(f"[corrected-4d][{video_id}] error: {e}")
-                import traceback
-                traceback.print_exc()
-                results[video_id] = False
+            out = self.generate_corrected_video_4d_annotations(
+                video_id, overwrite=overwrite,
+            )
+            results[video_id] = out is not None
         return results
 
     # ------------------------------------------------------------------

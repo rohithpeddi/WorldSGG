@@ -473,16 +473,10 @@ class CorrectedFrameBBoxGenerator(FrameToWorldAnnotationsBase):
             video_id = data["video_id"]
             if get_video_belongs_to_split(video_id) != split:
                 continue
-            try:
-                out = self.build_corrected_frames_final_and_store(
-                    video_id, overwrite=overwrite,
-                )
-                results[video_id] = out is not None
-            except Exception as e:
-                print(f"[corrected-final][{video_id}] error: {e}")
-                import traceback
-                traceback.print_exc()
-                results[video_id] = False
+            out = self.build_corrected_frames_final_and_store(
+                video_id, overwrite=overwrite,
+            )
+            results[video_id] = out is not None
         return results
 
     def generate_all_camera(
@@ -498,16 +492,10 @@ class CorrectedFrameBBoxGenerator(FrameToWorldAnnotationsBase):
             video_id = data["video_id"]
             if get_video_belongs_to_split(video_id) != split:
                 continue
-            try:
-                out = self.build_corrected_frames_camera_and_store(
-                    video_id, overwrite=overwrite,
-                )
-                results[video_id] = out is not None
-            except Exception as e:
-                print(f"[corrected-cam][{video_id}] error: {e}")
-                import traceback
-                traceback.print_exc()
-                results[video_id] = False
+            out = self.build_corrected_frames_camera_and_store(
+                video_id, overwrite=overwrite,
+            )
+            results[video_id] = out is not None
         return results
 
     def generate_from_corrections_only(
@@ -533,21 +521,15 @@ class CorrectedFrameBBoxGenerator(FrameToWorldAnnotationsBase):
 
         for pkl_path in tqdm(correction_files, desc=f"Corrected Frame [{mode}]"):
             video_id = pkl_path.stem + ".mp4"
-            try:
-                if mode in ("final", "both"):
-                    self.build_corrected_frames_final_and_store(
-                        video_id, overwrite=overwrite,
-                    )
-                if mode in ("camera", "both"):
-                    self.build_corrected_frames_camera_and_store(
-                        video_id, overwrite=overwrite,
-                    )
-                results[video_id] = True
-            except Exception as e:
-                print(f"[corrected-frame][{video_id}] error: {e}")
-                import traceback
-                traceback.print_exc()
-                results[video_id] = False
+            if mode in ("final", "both"):
+                self.build_corrected_frames_final_and_store(
+                    video_id, overwrite=overwrite,
+                )
+            if mode in ("camera", "both"):
+                self.build_corrected_frames_camera_and_store(
+                    video_id, overwrite=overwrite,
+                )
+            results[video_id] = True
         return results
 
     # ------------------------------------------------------------------

@@ -816,11 +816,7 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
         )
 
         # 4) Load dynamic points for annotated frames
-        try:
-            P = self._load_points_for_video(video_id)
-        except Exception as e:
-            print(f"[corrected-bbox][{video_id}] failed to load points: {e}")
-            return False
+        P = self._load_points_for_video(video_id)
 
         points_S = P["points"]
         conf_S = P["conf"]
@@ -844,11 +840,10 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
         )
 
         # 6) Load GDino detections for this video
-        gdino_predictions = None
-        try:
-            gdino_predictions = self.get_video_gdino_annotations(video_id)
+        gdino_predictions = self.get_video_gdino_annotations(video_id)
+        if gdino_predictions is not None:
             print(f"[corrected-bbox][{video_id}] loaded GDino detections for {len(gdino_predictions)} frames")
-        except (ValueError, FileNotFoundError):
+        else:
             print(f"[corrected-bbox][{video_id}] no GDino detections available")
 
         # 7) Build corrected per-frame bboxes (GT + GDino fill)
@@ -904,19 +899,13 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
             video_id = data["video_id"]
             if get_video_belongs_to_split(video_id) != split:
                 continue
-            try:
-                vid_gt, full_gt = self.get_video_gt_annotations(video_id)
-                success = self.generate_corrected_video_bb_annotations(
-                    video_id=video_id,
-                    video_gt_annotations=full_gt,
-                    overwrite=overwrite,
-                )
-                results[video_id] = success
-            except Exception as e:
-                print(f"[corrected-bbox][{video_id}] error: {e}")
-                import traceback
-                traceback.print_exc()
-                results[video_id] = False
+            vid_gt, full_gt = self.get_video_gt_annotations(video_id)
+            success = self.generate_corrected_video_bb_annotations(
+                video_id=video_id,
+                video_gt_annotations=full_gt,
+                overwrite=overwrite,
+            )
+            results[video_id] = success
         return results
 
     def generate_from_corrections_only(
@@ -940,19 +929,13 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
         for pkl_path in tqdm(correction_files, desc="Corrected BBox"):
             video_key = pkl_path.stem
             video_id = video_key.replace("_", ".") + ".mp4"
-            try:
-                vid_gt, full_gt = self.get_video_gt_annotations(video_id)
-                success = self.generate_corrected_video_bb_annotations(
-                    video_id=video_id,
-                    video_gt_annotations=full_gt,
-                    overwrite=overwrite,
-                )
-                results[video_id] = success
-            except Exception as e:
-                print(f"[corrected-bbox][{video_id}] error: {e}")
-                import traceback
-                traceback.print_exc()
-                results[video_id] = False
+            vid_gt, full_gt = self.get_video_gt_annotations(video_id)
+            success = self.generate_corrected_video_bb_annotations(
+                video_id=video_id,
+                video_gt_annotations=full_gt,
+                overwrite=overwrite,
+            )
+            results[video_id] = success
         return results
 
     # ------------------------------------------------------------------
