@@ -1071,10 +1071,35 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                 floor_verts = gv0
             floor_faces = gf0
 
-        # 5) Init rerun
+        # 5) Init rerun with a beautiful layout
+        import rerun.blueprint as rrb
+
         rr.init(app_id, spawn=True)
         BASE = "world"
         rr.log(BASE, rr.ViewCoordinates.RUB, static=True)
+
+        # Blueprint: large 3D panel left (75%), image panel right (25%)
+        blueprint = rrb.Blueprint(
+            rrb.Horizontal(
+                rrb.Spatial3DView(
+                    origin=f"{BASE}",
+                    name="3D Scene",
+                    background=[30, 30, 40],
+                    line_grid=rrb.LineGrid3D(
+                        visible=True,
+                        spacing=0.5,
+                        color=[80, 80, 100, 100],
+                    ),
+                ),
+                rrb.Spatial2DView(
+                    origin=f"{BASE}/cam/pinhole",
+                    name="Camera View",
+                ),
+                column_shares=[3, 1],
+            ),
+            collapse_panels=True,
+        )
+        rr.send_blueprint(blueprint)
 
         # 6) World coordinate frame (static)
         axis_len = 1.0
