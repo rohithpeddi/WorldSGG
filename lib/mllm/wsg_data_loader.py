@@ -89,12 +89,23 @@ class WorldSGGroundTruthLoader:
     """Load world scene graph PKLs and provide per-frame GT relationships.
 
     Each PKL (produced by ``world_scene_graph_generator.py``) contains per-frame
-    objects with ``visible``, ``source``, and ``rel_source`` fields.  The
-    ``scope`` parameter controls which objects are included:
+    objects with ``visible``, ``source``, ``rel_source``, and ``bbox_source``
+    fields.  The ``scope`` parameter controls which objects are included:
 
-    - ``"standard"``: only ``visible == True`` objects (GT-observed)
-    - ``"world"``:    all objects (observed + missing/RAG-predicted)
-    - ``"missing"``:  only ``visible == False`` objects (RAG-predicted)
+    Visibility rule
+    ~~~~~~~~~~~~~~~
+    An object is considered **visible in the frame** if either:
+      - ``visible == True`` (observed in GT annotations), OR
+      - ``bbox_source == "gdino"`` (detected by Grounding-DINO)
+
+    An object is **missing** only when it is absent from both GT annotations
+    and GDino detections.
+
+    Scope definitions
+    ~~~~~~~~~~~~~~~~~
+    - ``"standard"``: visible objects (GT-observed OR GDino-detected)
+    - ``"world"``:    all objects (visible + missing)
+    - ``"missing"``:  only truly missing objects (not in GT AND not in GDino)
     """
 
     def __init__(self, world_sg_dir: str):
@@ -188,12 +199,18 @@ class WorldSGGroundTruthLoader:
         gt: Dict[str, Dict[str, Any]] = {}
 
         for obj in frame_data.get("objects", []):
-            visible = obj.get("visible", True)
+            # Use precomputed is_visible flag from the PKL (set by
+            # world_scene_graph_generator.py).  Falls back to computing
+            # it if the field is missing (backward compat with older PKLs).
+            if "is_visible" in obj:
+                is_visible = obj["is_visible"]
+            else:
+                is_visible = obj.get("visible", True) or obj.get("bbox_source", "none") == "gdino"
 
             # Scope filtering
-            if scope == "standard" and not visible:
+            if scope == "standard" and not is_visible:
                 continue
-            if scope == "missing" and visible:
+            if scope == "missing" and is_visible:
                 continue
             # scope == "world" → include all
 

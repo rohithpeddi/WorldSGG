@@ -550,6 +550,53 @@ class CorrectedFrameBBoxGenerator(FrameToWorldAnnotationsBase):
                 results[video_id] = False
         return results
 
+    # ------------------------------------------------------------------
+    # Visualization (from saved PKLs, no recomputation)
+    # ------------------------------------------------------------------
+
+    def visualize_from_saved(
+        self,
+        video_id: str,
+        *,
+        mode: str = "final",
+        app_id: str = "Corrected-FrameBBox",
+        img_maxsize: int = 480,
+        vis_floor: bool = True,
+    ) -> None:
+        """Launch rerun visualization from a saved corrected frame bbox PKL.
+
+        Parameters
+        ----------
+        mode : str
+            ``"final"`` to visualize final-frame PKL,
+            ``"world"`` to visualize the source world bbox PKL.
+        """
+        from corrected_bbox_vis import rerun_visualize_corrected_bboxes
+
+        if mode == "final":
+            pkl_path = self.bbox_3d_obb_corrected_final_root_dir / f"{video_id[:-4]}.pkl"
+            frames_key = "frames_final.bbox_frames"
+        else:
+            pkl_path = self.bbox_3d_obb_corrected_root_dir / f"{video_id[:-4]}.pkl"
+            frames_key = "frames"
+
+        if not pkl_path.exists():
+            raise FileNotFoundError(
+                f"[vis] Missing corrected frame bbox PKL: {pkl_path}\n"
+                f"Run generation first."
+            )
+
+        rerun_visualize_corrected_bboxes(
+            video_id=video_id,
+            pkl_path=str(pkl_path),
+            dynamic_scene_dir_path=str(self.dynamic_scene_dir_path),
+            idx_to_frame_idx_path_fn=self.idx_to_frame_idx_path,
+            app_id=app_id,
+            img_maxsize=img_maxsize,
+            vis_floor=vis_floor,
+            frames_key=frames_key,
+        )
+
 
 # =====================================================================
 # CLI
@@ -606,6 +653,10 @@ def parse_args():
         "--corrections-only", action="store_true",
         help="Only process videos that have corrected world bboxes",
     )
+    parser.add_argument(
+        "--visualize", action="store_true",
+        help="Visualize saved corrected bboxes with rerun (requires --video)",
+    )
     return parser.parse_args()
 
 
@@ -616,6 +667,13 @@ def main():
         ag_root_directory=args.ag_root_directory,
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
     )
+
+    if args.visualize:
+        if not args.video:
+            print("ERROR: --visualize requires --video")
+            return
+        generator.visualize_from_saved(args.video, mode=args.mode)
+        return
 
     if args.video:
         if args.mode in ("final", "both"):

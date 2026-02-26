@@ -503,6 +503,40 @@ class Corrected4DBBoxGenerator(FrameToWorldBase):
                 results[video_id] = False
         return results
 
+    # ------------------------------------------------------------------
+    # Visualization (from saved PKLs, no recomputation)
+    # ------------------------------------------------------------------
+
+    def visualize_from_saved(
+        self,
+        video_id: str,
+        *,
+        app_id: str = "Corrected-4DBBox",
+        img_maxsize: int = 480,
+        vis_floor: bool = True,
+    ) -> None:
+        """Launch rerun visualization from a saved corrected 4D bbox PKL."""
+        sys.path.insert(0, os.path.dirname(__file__))
+        from corrected_bbox_vis import rerun_visualize_corrected_bboxes
+
+        pkl_path = self.bbox_4d_corrected_root_dir / f"{video_id[:-4]}.pkl"
+        if not pkl_path.exists():
+            raise FileNotFoundError(
+                f"[vis] Missing corrected 4D bbox PKL: {pkl_path}\n"
+                f"Run generation first."
+            )
+
+        rerun_visualize_corrected_bboxes(
+            video_id=video_id,
+            pkl_path=str(pkl_path),
+            dynamic_scene_dir_path=str(self.dynamic_scene_dir_path),
+            idx_to_frame_idx_path_fn=self.idx_to_frame_idx_path,
+            app_id=app_id,
+            img_maxsize=img_maxsize,
+            vis_floor=vis_floor,
+            frames_key="frames",
+        )
+
 
 # =====================================================================
 # CLI
@@ -556,6 +590,10 @@ def parse_args():
         "--corrections-only", action="store_true",
         help="Only process videos that have corrected world bboxes",
     )
+    parser.add_argument(
+        "--visualize", action="store_true",
+        help="Visualize saved corrected 4D bboxes with rerun (requires --video)",
+    )
     return parser.parse_args()
 
 
@@ -566,6 +604,13 @@ def main():
         ag_root_directory=args.ag_root_directory,
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
     )
+
+    if args.visualize:
+        if not args.video:
+            print("ERROR: --visualize requires --video")
+            return
+        generator.visualize_from_saved(args.video)
+        return
 
     if args.video:
         generator.generate_corrected_video_4d_annotations(

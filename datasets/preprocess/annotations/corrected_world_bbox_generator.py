@@ -941,6 +941,39 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                 results[video_id] = False
         return results
 
+    # ------------------------------------------------------------------
+    # Visualization (from saved PKLs, no recomputation)
+    # ------------------------------------------------------------------
+
+    def visualize_from_saved(
+        self,
+        video_id: str,
+        *,
+        app_id: str = "Corrected-WorldBBox",
+        img_maxsize: int = 480,
+        vis_floor: bool = True,
+    ) -> None:
+        """Launch rerun visualization from a saved corrected world bbox PKL."""
+        from corrected_bbox_vis import rerun_visualize_corrected_bboxes
+
+        pkl_path = self.bbox_3d_obb_corrected_root_dir / f"{video_id[:-4]}.pkl"
+        if not pkl_path.exists():
+            raise FileNotFoundError(
+                f"[vis] Missing corrected bbox PKL: {pkl_path}\n"
+                f"Run generation first."
+            )
+
+        rerun_visualize_corrected_bboxes(
+            video_id=video_id,
+            pkl_path=str(pkl_path),
+            dynamic_scene_dir_path=str(self.dynamic_scene_dir_path),
+            idx_to_frame_idx_path_fn=self.idx_to_frame_idx_path,
+            app_id=app_id,
+            img_maxsize=img_maxsize,
+            vis_floor=vis_floor,
+            frames_key="frames",
+        )
+
 
 # =====================================================================
 # CLI
@@ -1000,6 +1033,10 @@ def parse_args():
         "--gdino-score-threshold", type=float, default=0.3,
         help="Min GDino detection score for 2D→3D lift (default: 0.3)",
     )
+    parser.add_argument(
+        "--visualize", action="store_true",
+        help="Visualize saved corrected bboxes with rerun (requires --video)",
+    )
     return parser.parse_args()
 
 
@@ -1012,6 +1049,13 @@ def main():
         manual_corrections_dir=args.manual_corrections_dir,
     )
     generator.gdino_score_threshold = args.gdino_score_threshold
+
+    if args.visualize:
+        if not args.video:
+            print("ERROR: --visualize requires --video")
+            return
+        generator.visualize_from_saved(args.video)
+        return
 
     if args.video:
         # Single video mode

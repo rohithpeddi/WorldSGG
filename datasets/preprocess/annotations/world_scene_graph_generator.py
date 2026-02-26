@@ -285,6 +285,13 @@ def _merge_single_object(
     else:
         merged["source"] = merged["bbox_source"]
 
+    # Precomputed visibility flag for evaluation scopes.
+    # An object is "visible in the frame" if either:
+    #   1. It is annotated as visible in GT (visible == True), OR
+    #   2. It was detected by Grounding-DINO (bbox_source == "gdino")
+    # An object is "missing" only when absent from BOTH GT and GDino.
+    merged["is_visible"] = merged["visible"] or merged["bbox_source"] == "gdino"
+
     return merged
 
 
