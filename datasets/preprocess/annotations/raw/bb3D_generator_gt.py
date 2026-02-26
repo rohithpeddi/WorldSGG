@@ -33,7 +33,7 @@ from datasets.preprocess.human.pipeline.kp_utils import (
 )
 
 from annotation_utils import _npz_open
-from datasets.preprocess.annotations.bb3D_base import BBox3DBase
+from datasets.preprocess.annotations.raw.bb3D_base import BBox3DBase
 from datasets.preprocess.annotations.annotation_utils import (
     get_video_belongs_to_split,
     _faces_u32,

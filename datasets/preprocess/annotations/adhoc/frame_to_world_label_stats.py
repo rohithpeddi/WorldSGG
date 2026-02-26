@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 
 from torch.utils.data import DataLoader
 
-from datasets.preprocess.annotations.frame_to_world_base import FrameToWorldBase
+from datasets.preprocess.annotations.raw.frame_to_world_base import FrameToWorldBase
 from dataloader.standard.action_genome.ag_dataset import StandardAG
 
 

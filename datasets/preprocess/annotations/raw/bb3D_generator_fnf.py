@@ -35,7 +35,7 @@ from datasets.preprocess.human.pipeline.kp_utils import (
 
 
 # =====================================================================
-from datasets.preprocess.annotations.bb3D_base import BBox3DBase
+from datasets.preprocess.annotations.raw.bb3D_base import BBox3DBase
 from datasets.preprocess.annotations.annotation_utils import (
     _load_pkl_if_exists,
     _is_empty_array,

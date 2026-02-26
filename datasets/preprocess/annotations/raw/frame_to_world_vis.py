@@ -27,7 +27,7 @@ from annotation_utils import (
     _pinhole_from_fov,
     _is_empty_array,
 )
-from datasets.preprocess.annotations.frame_to_world_base import (
+from datasets.preprocess.annotations.raw.frame_to_world_base import (
     FrameToWorldBase,
     compute_final_world_transform,
     rerun_frame_vis_results,

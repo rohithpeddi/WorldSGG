@@ -4,7 +4,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__) + '/..')
 
-from datasets.preprocess.annotations.bb3D_generator_gt import BBox3DGenerator
+from datasets.preprocess.annotations.raw.bb3D_generator_gt import BBox3DGenerator
 
 import argparse
 import os

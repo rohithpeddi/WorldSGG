@@ -13,7 +13,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from datasets.preprocess.annotations.frame_to_world_base import FrameToWorldBase
+from datasets.preprocess.annotations.raw.frame_to_world_base import FrameToWorldBase
 
 sys.path.insert(0, os.path.dirname(__file__) + "/..")
 

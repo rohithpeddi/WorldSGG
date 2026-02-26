@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 from torch.utils.data import DataLoader
 
-from datasets.preprocess.annotations.frame_bbox_3D_base import FrameToWorldAnnotationsBase, rerun_frame_vis_final_only
+from datasets.preprocess.annotations.raw.frame_bbox_3D_base import FrameToWorldAnnotationsBase, rerun_frame_vis_final_only
 
 sys.path.insert(0, os.path.dirname(__file__) + "/..")
 
