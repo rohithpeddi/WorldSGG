@@ -1112,27 +1112,47 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
             if keep.sum() > 0:
                 rr.log(f"{BASE}/points", rr.Points3D(pts[keep], colors=cols[keep]))
 
-            # Bbox cuboids
+            # Bbox cuboids — clear previous frame's entities first
+            rr.log(f"{BASE}/bbox", rr.Clear(recursive=True))
+
             if frame_name in frames_map:
                 objs = frames_map[frame_name].get("objects", [])
+
+                # Separate GT and GDino objects for batch logging
+                gt_centers, gt_halfs, gt_quats, gt_colors, gt_labels = [], [], [], [], []
+                gd_centers, gd_halfs, gd_quats, gd_colors, gd_labels = [], [], [], [], []
+
                 for oi, obj in enumerate(objs):
                     corners = self._extract_corners(obj)
                     if corners is None:
                         continue
                     label = obj.get("label", f"obj_{oi}")
                     src = obj.get("source", "gt")
-                    col = [0, 180, 255] if src == "gdino" else [255, 180, 0]
-                    center, half_sizes, quat = self._corners_to_box_params(corners)
-                    rr.log(
-                        f"{BASE}/bbox/{label}_{oi}",
-                        rr.Boxes3D(
-                            centers=[center],
-                            half_sizes=[half_sizes],
-                            quaternions=[rr.Quaternion(xyzw=quat)],
-                            colors=[col],
-                            labels=[label],
-                        ),
-                    )
+                    center, half_sizes, q = self._corners_to_box_params(corners)
+
+                    if src == "gdino":
+                        gd_centers.append(center)
+                        gd_halfs.append(half_sizes)
+                        gd_quats.append(rr.Quaternion(xyzw=q))
+                        gd_colors.append([0, 180, 255])
+                        gd_labels.append(f"{label} (gdino)")
+                    else:
+                        gt_centers.append(center)
+                        gt_halfs.append(half_sizes)
+                        gt_quats.append(rr.Quaternion(xyzw=q))
+                        gt_colors.append([255, 180, 0])
+                        gt_labels.append(label)
+
+                if gt_centers:
+                    rr.log(f"{BASE}/bbox/gt", rr.Boxes3D(
+                        centers=gt_centers, half_sizes=gt_halfs,
+                        quaternions=gt_quats, colors=gt_colors, labels=gt_labels,
+                    ))
+                if gd_centers:
+                    rr.log(f"{BASE}/bbox/gdino", rr.Boxes3D(
+                        centers=gd_centers, half_sizes=gd_halfs,
+                        quaternions=gd_quats, colors=gd_colors, labels=gd_labels,
+                    ))
 
             # Camera frustum (apply corrected transform to camera pose)
             if cam_S is not None and t_idx < cam_S.shape[0]:
