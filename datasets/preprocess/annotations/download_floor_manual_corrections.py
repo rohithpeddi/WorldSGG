@@ -96,7 +96,7 @@ from typing import Any, Dict, List, Optional, Set
 # Add parent directory for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from firebase_service import FirebaseService
+from analysis.FirebaseService import FirebaseService
 
 
 class ManualCorrectionDownloader:
