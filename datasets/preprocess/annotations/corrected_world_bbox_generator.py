@@ -348,29 +348,51 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
     # ------------------------------------------------------------------
 
     def _load_points_for_video(self, video_id: str) -> Dict[str, Any]:
-        """Load dynamic scene predictions for annotated frames."""
-        (frame_idx_frame_path_map,
-         sample_idx,
-         _,
-         _,
-         annotated_frame_idx_in_sample_idx) = self.idx_to_frame_idx_path(video_id)
+        video_dynamic_3d_scene_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
 
-        pred_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
-        with _npz_open(pred_path) as npz:
-            points = npz["points"].astype(np.float32)  # (S,H,W,3)
-            conf = npz["conf"].astype(np.float32) if "conf" in npz else None
-            frame_stems = [
-                Path(frame_idx_frame_path_map[sample_idx[i]]).stem
-                for i in annotated_frame_idx_in_sample_idx
-            ]
-            # Slice to annotated frames only
-            points_S = points[annotated_frame_idx_in_sample_idx]
-            conf_S = conf[annotated_frame_idx_in_sample_idx] if conf is not None else None
+        with _npz_open(video_dynamic_3d_scene_path) as video_dynamic_predictions:
+            points = video_dynamic_predictions["points"].astype(np.float32)  # (S,H,W,3)
+            imgs_f32 = video_dynamic_predictions["images"]
+            confidence = video_dynamic_predictions["conf"]
+            camera_poses = video_dynamic_predictions["camera_poses"]
+            colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
+
+            conf = None
+            if "conf" in video_dynamic_predictions:
+                conf = video_dynamic_predictions["conf"]
+                if conf.ndim == 4 and conf.shape[-1] == 1:
+                    conf = conf[..., 0]
+
+            S, H, W, _ = points.shape
+
+            (frame_idx_frame_path_map, sample_idx, video_sampled_frame_id_list,
+             annotated_frame_id_list, annotated_frame_idx_in_sample_idx) = self.idx_to_frame_idx_path(video_id)
+            assert S == len(sample_idx), "dynamic predictions length must match annotated sampled range"
+
+            sampled_idx_frame_name_map = {}
+            frame_name_sampled_idx_map = {}
+            for idx_in_s, frame_idx in enumerate(sample_idx):
+                frame_name = f"{video_sampled_frame_id_list[frame_idx]:06d}.png"
+                sampled_idx_frame_name_map[idx_in_s] = frame_name
+                frame_name_sampled_idx_map[frame_name] = idx_in_s
+
+            annotated_idx_in_sampled_idx = []
+            for frame_name in annotated_frame_id_list:
+                if frame_name in frame_name_sampled_idx_map:
+                    annotated_idx_in_sampled_idx.append(frame_name_sampled_idx_map[frame_name])
+
+            points_sub = points[annotated_idx_in_sampled_idx]
+            conf_sub = conf[annotated_idx_in_sampled_idx] if conf is not None else None
+            stems_sub = [sampled_idx_frame_name_map[idx][:-4] for idx in annotated_idx_in_sampled_idx]
+            colors_sub = colors[annotated_idx_in_sampled_idx]
+            camera_poses_sub = camera_poses[annotated_idx_in_sampled_idx]
 
         return {
-            "points": points_S,
-            "conf": conf_S,
-            "frame_stems": frame_stems,
+            "points": points_sub,
+            "conf": conf_sub,
+            "frame_stems": stems_sub,
+            "colors": colors_sub,
+            "camera_poses": camera_poses_sub
         }
 
     # ------------------------------------------------------------------
@@ -1075,7 +1097,7 @@ def main():
 def main_sample():
     """Process a single sample video, then launch rerun visualization."""
     args = parse_args()
-    video_id = args.video or "001YG.mp4"
+    video_id = args.video or "0A8CF.mp4"
 
     generator = CorrectedWorldBBoxGenerator(
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
