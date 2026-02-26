@@ -104,13 +104,15 @@ def _compute_obb_pca(points: np.ndarray) -> Optional[Dict[str, Any]]:
 
 def _compute_obb_floor_parallel(
     points_floor: np.ndarray,
-    R_floor: np.ndarray,
-    t_floor: np.ndarray,
-    s_floor: float,
+    floor_to_world_fn,
 ) -> Dict[str, Any]:
     """
     Compute OBB parallel to the floor plane.
     Uses cv2.minAreaRect on XZ projection (Y is up/normal in floor frame).
+
+    Args:
+        points_floor: (N, 3) points already in floor/canonical frame.
+        floor_to_world_fn: callable that maps (N, 3) floor coords → (N, 3) world coords.
     """
     pts_2d = points_floor[:, [0, 2]].astype(np.float32)
     rect = cv2.minAreaRect(pts_2d[:, None, :])
@@ -131,8 +133,8 @@ def _compute_obb_floor_parallel(
         corners_floor.append([x, y_max, z])
     corners_floor = np.array(corners_floor, dtype=np.float32)
 
-    # Transform back to world
-    corners_world = (corners_floor @ R_floor.T) * s_floor + t_floor
+    # Transform back to world using the proper inverse
+    corners_world = floor_to_world_fn(corners_floor)
 
     return {
         "rect_2d": {"center": center_2d, "size": size_2d, "angle": angle},
@@ -421,8 +423,6 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
         W: int,
         floor_align_fn,
         floor_to_world_fn,
-        R_floor: np.ndarray,
-        t_floor: np.ndarray,
         source_tag: str = "gt",
     ) -> Optional[Dict[str, Any]]:
         """
@@ -467,7 +467,7 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
 
             # 2. OBB (floor-parallel)
             obb_floor_res = _compute_obb_floor_parallel(
-                pts_floor, R_floor, t_floor, 1.0
+                pts_floor, floor_to_world_fn=floor_to_world_fn,
             )
 
             # 3. OBB (arbitrary, PCA)
@@ -664,7 +664,7 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
 
                     # 2. OBB (floor-parallel)
                     obb_floor_res = _compute_obb_floor_parallel(
-                        pts_floor, R_floor, t_floor, 1.0
+                        pts_floor, floor_to_world_fn=_corrected_floor_to_world,
                     )
 
                     # 3. OBB (arbitrary, PCA)
@@ -775,8 +775,6 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                         W=W,
                         floor_align_fn=_corrected_floor_align_points,
                         floor_to_world_fn=_corrected_floor_to_world,
-                        R_floor=R_floor,
-                        t_floor=t_floor,
                         source_tag="gdino",
                     )
 
@@ -1046,7 +1044,7 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
             if T_4x4.shape != (4, 4):
                 T_4x4 = T_4x4.reshape(4, 4)
 
-        # 4) Floor mesh — apply the full corrected transform
+        # 4) Floor mesh — keep in raw world frame (same as points & bboxes)
         gv = saved.get("gv")
         gf = saved.get("gf")
         gc = saved.get("gc")
@@ -1055,20 +1053,9 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
         if gv is not None and gf is not None:
             gv0 = np.asarray(gv, dtype=np.float32)
             gf0 = _faces_u32(np.asarray(gf))
-            if T_4x4 is not None:
-                # Transform raw floor vertices through corrected transform
-                ones = np.ones((gv0.shape[0], 1), dtype=np.float64)
-                gv_h = np.hstack([gv0.astype(np.float64), ones])  # (V, 4)
-                gv_corr = (T_4x4 @ gv_h.T).T[:, :3]
-                floor_verts = gv_corr.astype(np.float32)
-            elif original_gfs is not None:
-                # Fallback: just auto-align
-                s_g = float(original_gfs.get("s", 1.0))
-                R_g = _as_np(original_gfs.get("R", np.eye(3)), np.float32)
-                t_g = _as_np(original_gfs.get("t", np.zeros(3)), np.float32)
-                floor_verts = s_g * (gv0 @ R_g.T) + t_g
-            else:
-                floor_verts = gv0
+            # gv is already in world frame — no transform needed.
+            # Points, bboxes (corners_world), and floor mesh all stay in world frame.
+            floor_verts = gv0
             floor_faces = gf0
 
         # 5) Init rerun with a beautiful layout
@@ -1173,11 +1160,9 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                         quaternions=gd_quats, colors=gd_colors, labels=gd_labels,
                     ))
 
-            # Camera frustum (apply corrected transform to camera pose)
+            # Camera frustum (raw world frame — same as points & bboxes)
             if cam_S is not None and t_idx < cam_S.shape[0]:
                 cam = cam_S[t_idx].astype(np.float64)
-                if T_4x4 is not None:
-                    cam = T_4x4 @ cam  # transform camera into corrected space
                 R_wc, t_wc = cam[:3, :3].astype(np.float32), cam[:3, 3].astype(np.float32)
                 img = colors_S[t_idx]
                 H_img, W_img = img.shape[:2]
