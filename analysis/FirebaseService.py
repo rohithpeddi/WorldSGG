@@ -3,7 +3,8 @@ import firebase_admin
 from firebase_admin import credentials, db
 import requests
 
-CREDENTIALS_PATH = r"E:\PRIVATE_KEY\worldsg.json"
+# CREDENTIALS_PATH = r"E:\PRIVATE_KEY\worldsg.json"
+CREDENTIALS_PATH = "/data/rohith/ag/PRIVATE_KEY/worldsg.json"
 DATABASE_URL = "https://worldsg-default-rtdb.firebaseio.com"
 
 # Initialize Firebase Admin SDK with service account

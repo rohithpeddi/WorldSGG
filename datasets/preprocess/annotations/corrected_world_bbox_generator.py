@@ -980,7 +980,7 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
 # =====================================================================
 
 def load_dataset(ag_root_directory: str):
-    from dataloader.standard.action_genome.ag_dataset import StandardAG
+    from dataloader.ag_dataset import StandardAG
     from torch.utils.data import DataLoader
 
     train_dataset = StandardAG(
