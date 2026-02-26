@@ -186,7 +186,21 @@ def build_corrected_transform(
     if final_alignment is not None:
         combined = final_alignment.get("combined_transform", None)
         if combined is not None:
-            T = np.array(combined, dtype=np.float64).reshape(4, 4)
+            # combined_transform can be:
+            #   (a) a dict with {rotation_matrix, scale, translation}
+            #   (b) a flat/nested 4×4 array
+            if isinstance(combined, dict):
+                R_ct = np.asarray(combined["rotation_matrix"], dtype=np.float64)  # (3,3)
+                s_ct = np.asarray(combined.get("scale", [1, 1, 1]), dtype=np.float64)  # (3,)
+                t_ct = np.asarray(combined["translation"], dtype=np.float64)  # (3,)
+
+                # Build 4×4: upper-left = diag(scale) @ R, last col = translation
+                T = np.eye(4, dtype=np.float64)
+                T[:3, :3] = np.diag(s_ct) @ R_ct
+                T[:3, 3] = t_ct
+            else:
+                T = np.array(combined, dtype=np.float64).reshape(4, 4)
+
             R = T[:3, :3].astype(np.float32)
             t = T[:3, 3].astype(np.float32)
             return {
