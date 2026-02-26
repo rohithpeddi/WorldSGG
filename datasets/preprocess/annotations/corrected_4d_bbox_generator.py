@@ -495,35 +495,104 @@ class Corrected4DBBoxGenerator(FrameToWorldBase):
     # Visualization (from saved PKLs, no recomputation)
     # ------------------------------------------------------------------
 
+    _CUBOID_EDGES = [
+        (0, 1), (1, 3), (3, 2), (2, 0),
+        (4, 5), (5, 7), (7, 6), (6, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    ]
+
+    @staticmethod
+    def _extract_corners_4d(obj: Dict[str, Any]) -> Optional[np.ndarray]:
+        """Extract 8×3 corners from a 4D object dict (FINAL coords)."""
+        for key in ("obb_floor_parallel_final", "aabb_final"):
+            sub = obj.get(key)
+            if isinstance(sub, dict):
+                c = sub.get("corners_final")
+                if c is not None:
+                    c = np.asarray(c, dtype=np.float32)
+                    if c.shape == (8, 3):
+                        return c
+        c = obj.get("corners_final")
+        if c is not None:
+            c = np.asarray(c, dtype=np.float32)
+            if c.shape == (8, 3):
+                return c
+        return None
+
     def visualize_from_saved(
         self,
         video_id: str,
         *,
         app_id: str = "Corrected-4DBBox",
-        img_maxsize: int = 480,
-        vis_floor: bool = True,
     ) -> None:
-        """Launch rerun visualization from a saved corrected 4D bbox PKL."""
-        sys.path.insert(0, os.path.dirname(__file__))
-        from corrected_bbox_vis import rerun_visualize_corrected_bboxes
+        """Launch rerun visualization of saved corrected 4D bboxes."""
+        import rerun as rr
+        from scipy.spatial.transform import Rotation as SciRot
 
         pkl_path = self.bbox_4d_corrected_root_dir / f"{video_id[:-4]}.pkl"
         if not pkl_path.exists():
-            raise FileNotFoundError(
-                f"[vis] Missing corrected 4D bbox PKL: {pkl_path}\n"
-                f"Run generation first."
-            )
+            raise FileNotFoundError(f"[vis] Missing corrected 4D bbox PKL: {pkl_path}")
 
-        rerun_visualize_corrected_bboxes(
-            video_id=video_id,
-            pkl_path=str(pkl_path),
-            dynamic_scene_dir_path=str(self.dynamic_scene_dir_path),
-            idx_to_frame_idx_path_fn=self.idx_to_frame_idx_path,
-            app_id=app_id,
-            img_maxsize=img_maxsize,
-            vis_floor=vis_floor,
-            frames_key="frames",
-        )
+        with open(pkl_path, "rb") as f:
+            saved = pickle.load(f)
+
+        frames_map = saved.get("frames", {})
+        frame_names = saved.get("frame_names", sorted(frames_map.keys()))
+        static_labels = set(saved.get("static_labels", []))
+
+        # Load dynamic predictions for images + cameras
+        pred_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
+        with _npz_open(pred_path) as npz:
+            imgs_f32 = npz["images"]
+            colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
+            camera_poses = npz["camera_poses"] if "camera_poses" in npz else None
+
+        rr.init(app_id, spawn=True)
+        BASE = "world"
+        rr.log(BASE, rr.ViewCoordinates.RUB, static=True)
+
+        for t_idx, fname in enumerate(frame_names):
+            rr.set_time_sequence("frame", t_idx)
+
+            objs = frames_map.get(fname, {}).get("objects", [])
+            for oi, obj in enumerate(objs):
+                corners = self._extract_corners_4d(obj)
+                if corners is None:
+                    continue
+                label = obj.get("label", f"obj_{oi}")
+                filled = obj.get("world4d_filled", False)
+                src = obj.get("source", "gt")
+                if src == "gdino":
+                    col = [0, 180, 255]
+                elif filled:
+                    col = [100, 255, 100]
+                elif label in static_labels:
+                    col = [255, 220, 80]
+                else:
+                    col = [255, 140, 0]
+                strips = [corners[[e0, e1]] for e0, e1 in self._CUBOID_EDGES]
+                rr.log(f"{BASE}/bbox/{label}_{oi}", rr.LineStrips3D(strips, colors=[col] * 12))
+
+            # Camera + image
+            if camera_poses is not None and t_idx < camera_poses.shape[0]:
+                cam = camera_poses[t_idx].astype(np.float32)
+                R_wc, t_wc = cam[:3, :3], cam[:3, 3]
+                img = colors[t_idx] if t_idx < colors.shape[0] else None
+                if img is not None:
+                    H_img, W_img = img.shape[:2]
+                    fy = 0.5 * H_img / np.tan(0.5 * 0.96)
+                    quat = SciRot.from_matrix(R_wc).as_quat().astype(np.float32)
+                    rr.log(f"{BASE}/cam", rr.Transform3D(
+                        translation=t_wc, rotation=rr.Quaternion(xyzw=quat),
+                    ))
+                    rr.log(f"{BASE}/cam/pinhole", rr.Pinhole(
+                        focal_length=(fy, fy),
+                        principal_point=(W_img / 2.0, H_img / 2.0),
+                        resolution=(W_img, H_img),
+                    ))
+                    rr.log(f"{BASE}/cam/pinhole/image", rr.Image(img))
+
+        print(f"[vis] Rerun running for {video_id}. Scrub the 'frame' timeline.")
 
 
 # =====================================================================

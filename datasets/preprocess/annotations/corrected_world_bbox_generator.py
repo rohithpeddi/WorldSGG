@@ -964,34 +964,172 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
     # Visualization (from saved PKLs, no recomputation)
     # ------------------------------------------------------------------
 
+    # Cuboid edges: 8 corners → 12 edges
+    _CUBOID_EDGES = [
+        (0, 1), (1, 3), (3, 2), (2, 0),  # bottom
+        (4, 5), (5, 7), (7, 6), (6, 4),  # top
+        (0, 4), (1, 5), (2, 6), (3, 7),  # verticals
+    ]
+
+    @staticmethod
+    def _extract_corners(obj: Dict[str, Any]) -> Optional[np.ndarray]:
+        """Extract 8×3 corners from an object dict (OBB preferred, AABB fallback)."""
+        for key in ("obb_floor_parallel", "aabb_floor_aligned"):
+            sub = obj.get(key)
+            if isinstance(sub, dict):
+                for ck in ("corners_world", "corners_final"):
+                    c = sub.get(ck)
+                    if c is not None:
+                        c = np.asarray(c, dtype=np.float32)
+                        if c.shape == (8, 3):
+                            return c
+        for ck in ("corners_world", "corners_final"):
+            c = obj.get(ck)
+            if c is not None:
+                c = np.asarray(c, dtype=np.float32)
+                if c.shape == (8, 3):
+                    return c
+        return None
+
     def visualize_from_saved(
         self,
         video_id: str,
         *,
         app_id: str = "Corrected-WorldBBox",
-        img_maxsize: int = 480,
-        vis_floor: bool = True,
     ) -> None:
-        """Launch rerun visualization from a saved corrected world bbox PKL."""
-        from corrected_bbox_vis import rerun_visualize_corrected_bboxes
+        """Launch rerun visualization of saved corrected world bboxes."""
+        import rerun as rr
 
         pkl_path = self.bbox_3d_obb_corrected_root_dir / f"{video_id[:-4]}.pkl"
         if not pkl_path.exists():
-            raise FileNotFoundError(
-                f"[vis] Missing corrected bbox PKL: {pkl_path}\n"
-                f"Run generation first."
-            )
+            raise FileNotFoundError(f"[vis] Missing corrected bbox PKL: {pkl_path}")
 
-        rerun_visualize_corrected_bboxes(
-            video_id=video_id,
-            pkl_path=str(pkl_path),
-            dynamic_scene_dir_path=str(self.dynamic_scene_dir_path),
-            idx_to_frame_idx_path_fn=self.idx_to_frame_idx_path,
-            app_id=app_id,
-            img_maxsize=img_maxsize,
-            vis_floor=vis_floor,
-            frames_key="frames",
-        )
+        # 1) Load saved PKL
+        with open(pkl_path, "rb") as f:
+            saved = pickle.load(f)
+
+        frames_map = saved.get("frames", {})
+        cft = saved.get("corrected_floor_transform", {})
+        original_gfs = cft.get("original_global_floor_sim") if isinstance(cft, dict) else None
+
+        # 2) Load dynamic predictions (points, colors, cameras)
+        P = self._load_points_for_video(video_id)
+        points_S = P["points"]      # (N, H, W, 3)
+        colors_S = P["colors"]      # (N, H, W, 3) uint8
+        cam_S = P["camera_poses"]   # (N, 4, 4)
+        stems = P["frame_stems"]    # list of str
+        conf_S = P["conf"]          # (N, H, W) or None
+        N = len(stems)
+
+        # 3) Corrected floor transform (4×4 combined_transform)
+        T_4x4 = None
+        if isinstance(cft, dict) and "combined_transform_4x4" in cft:
+            T_4x4 = np.asarray(cft["combined_transform_4x4"], dtype=np.float64)
+            if T_4x4.shape != (4, 4):
+                T_4x4 = T_4x4.reshape(4, 4)
+
+        # 4) Floor mesh — apply the full corrected transform
+        gv = saved.get("gv")
+        gf = saved.get("gf")
+        gc = saved.get("gc")
+        floor_verts = None
+        floor_faces = None
+        if gv is not None and gf is not None:
+            gv0 = np.asarray(gv, dtype=np.float32)
+            gf0 = _faces_u32(np.asarray(gf))
+            if T_4x4 is not None:
+                # Transform raw floor vertices through corrected transform
+                ones = np.ones((gv0.shape[0], 1), dtype=np.float64)
+                gv_h = np.hstack([gv0.astype(np.float64), ones])  # (V, 4)
+                gv_corr = (T_4x4 @ gv_h.T).T[:, :3]
+                floor_verts = gv_corr.astype(np.float32)
+            elif original_gfs is not None:
+                # Fallback: just auto-align
+                s_g = float(original_gfs.get("s", 1.0))
+                R_g = _as_np(original_gfs.get("R", np.eye(3)), np.float32)
+                t_g = _as_np(original_gfs.get("t", np.zeros(3)), np.float32)
+                floor_verts = s_g * (gv0 @ R_g.T) + t_g
+            else:
+                floor_verts = gv0
+            floor_faces = gf0
+
+        # 5) Init rerun
+        rr.init(app_id, spawn=True)
+        BASE = "world"
+        rr.log(BASE, rr.ViewCoordinates.RUB, static=True)
+
+        # 6) World coordinate frame (static)
+        axis_len = 1.0
+        rr.log(f"{BASE}/origin/x", rr.Arrows3D(
+            origins=[[0, 0, 0]], vectors=[[axis_len, 0, 0]], colors=[[255, 0, 0]],
+        ), static=True)
+        rr.log(f"{BASE}/origin/y", rr.Arrows3D(
+            origins=[[0, 0, 0]], vectors=[[0, axis_len, 0]], colors=[[0, 255, 0]],
+        ), static=True)
+        rr.log(f"{BASE}/origin/z", rr.Arrows3D(
+            origins=[[0, 0, 0]], vectors=[[0, 0, axis_len]], colors=[[0, 0, 255]],
+        ), static=True)
+
+        # 7) Frame loop
+        for t_idx in range(N):
+            frame_name = f"{stems[t_idx]}.png"
+            rr.set_time_sequence("frame", t_idx)
+
+            # Floor mesh (static, logged once per frame to keep timeline)
+            if floor_verts is not None:
+                fkw = {}
+                if gc is not None:
+                    fkw["vertex_colors"] = np.asarray(gc, dtype=np.uint8)
+                rr.log(f"{BASE}/floor", rr.Mesh3D(
+                    vertex_positions=floor_verts, triangle_indices=floor_faces, **fkw,
+                ))
+
+            # Point cloud (raw dynamic points — NOT corrected)
+            pts = points_S[t_idx].reshape(-1, 3)
+            cols = colors_S[t_idx].reshape(-1, 3)
+            keep = np.isfinite(pts).all(axis=1)
+            if conf_S is not None:
+                cfs = conf_S[t_idx].reshape(-1)
+                keep &= cfs > np.percentile(cfs[np.isfinite(cfs)], 5) if np.isfinite(cfs).any() else keep
+            if keep.sum() > 0:
+                rr.log(f"{BASE}/points", rr.Points3D(pts[keep], colors=cols[keep]))
+
+            # Bbox wireframes
+            if frame_name in frames_map:
+                objs = frames_map[frame_name].get("objects", [])
+                for oi, obj in enumerate(objs):
+                    corners = self._extract_corners(obj)
+                    if corners is None:
+                        continue
+                    label = obj.get("label", f"obj_{oi}")
+                    src = obj.get("source", "gt")
+                    col = [0, 180, 255] if src == "gdino" else [255, 180, 0]
+                    strips = [corners[[e0, e1]] for e0, e1 in self._CUBOID_EDGES]
+                    rr.log(f"{BASE}/bbox/{label}_{oi}", rr.LineStrips3D(strips, colors=[col] * 12))
+
+            # Camera frustum (apply corrected transform to camera pose)
+            if cam_S is not None and t_idx < cam_S.shape[0]:
+                cam = cam_S[t_idx].astype(np.float64)
+                if T_4x4 is not None:
+                    cam = T_4x4 @ cam  # transform camera into corrected space
+                R_wc, t_wc = cam[:3, :3].astype(np.float32), cam[:3, 3].astype(np.float32)
+                img = colors_S[t_idx]
+                H_img, W_img = img.shape[:2]
+                fov_y = 0.96
+                fy = float(0.5 * H_img / np.tan(0.5 * fov_y))
+                fx = fy
+                cx, cy = W_img / 2.0, H_img / 2.0
+                quat = SciRot.from_matrix(R_wc).as_quat().astype(np.float32)
+                rr.log(f"{BASE}/cam", rr.Transform3D(
+                    translation=t_wc, rotation=rr.Quaternion(xyzw=quat),
+                ))
+                rr.log(f"{BASE}/cam/pinhole", rr.Pinhole(
+                    focal_length=(fx, fy), principal_point=(cx, cy),
+                    resolution=(W_img, H_img),
+                ))
+                rr.log(f"{BASE}/cam/pinhole/image", rr.Image(img))
+
+        print(f"[vis] Rerun running for {video_id}. Scrub the 'frame' timeline.")
 
 
 # =====================================================================

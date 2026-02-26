@@ -536,16 +536,41 @@ class CorrectedFrameBBoxGenerator(FrameToWorldAnnotationsBase):
     # Visualization (from saved PKLs, no recomputation)
     # ------------------------------------------------------------------
 
+    _CUBOID_EDGES = [
+        (0, 1), (1, 3), (3, 2), (2, 0),
+        (4, 5), (5, 7), (7, 6), (6, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    ]
+
+    @staticmethod
+    def _extract_corners_frame(obj: Dict[str, Any]) -> Optional[np.ndarray]:
+        """Extract 8×3 corners from a frame-level object dict."""
+        for key in ("obb_floor_parallel", "aabb_floor_aligned",
+                     "obb_floor_parallel_final", "aabb_final"):
+            sub = obj.get(key)
+            if isinstance(sub, dict):
+                for ck in ("corners_final", "corners_world"):
+                    c = sub.get(ck)
+                    if c is not None:
+                        c = np.asarray(c, dtype=np.float32)
+                        if c.shape == (8, 3):
+                            return c
+        for ck in ("corners_final", "corners_world"):
+            c = obj.get(ck)
+            if c is not None:
+                c = np.asarray(c, dtype=np.float32)
+                if c.shape == (8, 3):
+                    return c
+        return None
+
     def visualize_from_saved(
         self,
         video_id: str,
         *,
         mode: str = "final",
         app_id: str = "Corrected-FrameBBox",
-        img_maxsize: int = 480,
-        vis_floor: bool = True,
     ) -> None:
-        """Launch rerun visualization from a saved corrected frame bbox PKL.
+        """Launch rerun visualization of saved corrected frame bboxes.
 
         Parameters
         ----------
@@ -553,7 +578,8 @@ class CorrectedFrameBBoxGenerator(FrameToWorldAnnotationsBase):
             ``"final"`` to visualize final-frame PKL,
             ``"world"`` to visualize the source world bbox PKL.
         """
-        from corrected_bbox_vis import rerun_visualize_corrected_bboxes
+        import rerun as rr
+        from scipy.spatial.transform import Rotation as SciRot
 
         if mode == "final":
             pkl_path = self.bbox_3d_obb_corrected_final_root_dir / f"{video_id[:-4]}.pkl"
@@ -563,21 +589,67 @@ class CorrectedFrameBBoxGenerator(FrameToWorldAnnotationsBase):
             frames_key = "frames"
 
         if not pkl_path.exists():
-            raise FileNotFoundError(
-                f"[vis] Missing corrected frame bbox PKL: {pkl_path}\n"
-                f"Run generation first."
-            )
+            raise FileNotFoundError(f"[vis] Missing corrected frame bbox PKL: {pkl_path}")
 
-        rerun_visualize_corrected_bboxes(
-            video_id=video_id,
-            pkl_path=str(pkl_path),
-            dynamic_scene_dir_path=str(self.dynamic_scene_dir_path),
-            idx_to_frame_idx_path_fn=self.idx_to_frame_idx_path,
-            app_id=app_id,
-            img_maxsize=img_maxsize,
-            vis_floor=vis_floor,
-            frames_key=frames_key,
-        )
+        with open(pkl_path, "rb") as f:
+            saved = pickle.load(f)
+
+        # Navigate to the right frames dict
+        if "." in frames_key:
+            parts = frames_key.split(".")
+            frames_map = saved
+            for p in parts:
+                frames_map = frames_map.get(p, {})
+        else:
+            frames_map = saved.get(frames_key, {})
+
+        # Load dynamic predictions for images + cameras
+        pred_path = self.dynamic_scene_dir_path / f"{video_id[:-4]}_10" / "predictions.npz"
+        with _npz_open(pred_path) as npz:
+            imgs_f32 = npz["images"]
+            colors = (imgs_f32 * 255.0).clip(0, 255).astype(np.uint8)
+            camera_poses = npz["camera_poses"] if "camera_poses" in npz else None
+
+        frame_names = sorted(frames_map.keys())
+
+        rr.init(app_id, spawn=True)
+        BASE = "world"
+        rr.log(BASE, rr.ViewCoordinates.RUB, static=True)
+
+        for t_idx, fname in enumerate(frame_names):
+            rr.set_time_sequence("frame", t_idx)
+
+            objs = frames_map.get(fname, {}).get("objects", [])
+            for oi, obj in enumerate(objs):
+                corners = self._extract_corners_frame(obj)
+                if corners is None:
+                    continue
+                label = obj.get("label", f"obj_{oi}")
+                src = obj.get("source", "gt")
+                col = [0, 180, 255] if src == "gdino" else [255, 180, 0]
+                strips = [corners[[e0, e1]] for e0, e1 in self._CUBOID_EDGES]
+                rr.log(f"{BASE}/bbox/{label}_{oi}", rr.LineStrips3D(strips, colors=[col] * 12))
+
+            # Camera + image
+            if camera_poses is not None and t_idx < camera_poses.shape[0]:
+                cam = camera_poses[t_idx].astype(np.float32)
+                R_wc, t_wc = cam[:3, :3], cam[:3, 3]
+                img = colors[t_idx] if t_idx < colors.shape[0] else None
+                if img is not None:
+                    H_img, W_img = img.shape[:2]
+                    fy = 0.5 * H_img / np.tan(0.5 * 0.96)
+                    quat = SciRot.from_matrix(R_wc).as_quat().astype(np.float32)
+                    rr.log(f"{BASE}/cam", rr.Transform3D(
+                        translation=t_wc, rotation=rr.Quaternion(xyzw=quat),
+                    ))
+                    rr.log(f"{BASE}/cam/pinhole", rr.Pinhole(
+                        focal_length=(fy, fy),
+                        principal_point=(W_img / 2.0, H_img / 2.0),
+                        resolution=(W_img, H_img),
+                    ))
+                    rr.log(f"{BASE}/cam/pinhole/image", rr.Image(img))
+
+        print(f"[vis] Rerun running for {video_id} (mode={mode}). Scrub the 'frame' timeline.")
 
 
 # =====================================================================
