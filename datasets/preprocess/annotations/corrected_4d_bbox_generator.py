@@ -618,33 +618,36 @@ def main():
         )
         return
 
-    if args.corrections_only:
-        results = generator.generate_from_corrections_only(
-            overwrite=args.overwrite,
-        )
-        success = sum(1 for v in results.values() if v)
-        print(f"\n[Summary] {success}/{len(results)} videos processed successfully")
-        return
+    # Default: process only videos that have corrected world bboxes
+    # (skip-if-exists is handled inside generate_corrected_video_4d_annotations)
+    results = generator.generate_from_corrections_only(
+        overwrite=args.overwrite,
+    )
+    success = sum(1 for v in results.values() if v)
+    print(f"\n[Summary] {success}/{len(results)} videos processed successfully")
 
-    # Full dataset mode
-    _, _, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
 
-    if args.split:
-        generator.generate_all(
-            dataloader_train, args.split, overwrite=args.overwrite,
-        )
-        generator.generate_all(
-            dataloader_test, args.split, overwrite=args.overwrite,
-        )
-    else:
-        for split in ["01", "02", "03", "04", "05"]:
-            generator.generate_all(
-                dataloader_train, split, overwrite=args.overwrite,
-            )
-            generator.generate_all(
-                dataloader_test, split, overwrite=args.overwrite,
-            )
+def main_sample():
+    """Process a single sample video, then launch rerun visualization."""
+    args = parse_args()
+    video_id = args.video or "001YG.mp4"
+
+    generator = Corrected4DBBoxGenerator(
+        ag_root_directory=args.ag_root_directory,
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
+    )
+
+    # Generate (skips if already exists unless --overwrite)
+    out = generator.generate_corrected_video_4d_annotations(
+        video_id, overwrite=args.overwrite,
+    )
+    print(f"[main_sample] Generation result for {video_id}: {'SUCCESS' if out is not None else 'FAILED'}")
+
+    if out is not None:
+        generator.visualize_from_saved(video_id)
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    main_sample()
+

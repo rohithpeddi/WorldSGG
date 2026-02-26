@@ -1068,24 +1068,39 @@ def main():
         print(f"Result: {'SUCCESS' if success else 'FAILED'}")
         return
 
-    if args.corrections_only:
-        results = generator.generate_from_corrections_only(overwrite=args.overwrite)
-        success = sum(1 for v in results.values() if v)
-        print(f"\n[Summary] {success}/{len(results)} videos processed successfully")
-        return
+    # Default: process only videos that have manual corrections
+    # (skip-if-exists is handled inside generate_corrected_video_bb_annotations)
+    results = generator.generate_from_corrections_only(overwrite=args.overwrite)
+    success = sum(1 for v in results.values() if v)
+    print(f"\n[Summary] {success}/{len(results)} videos processed successfully")
 
-    # Full dataset mode
-    _, _, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
 
-    if args.split:
-        generator.generate_all(dataloader_train, args.split, overwrite=args.overwrite)
-        generator.generate_all(dataloader_test, args.split, overwrite=args.overwrite)
-    else:
-        # Process all splits
-        for split in ["01", "02", "03", "04", "05"]:
-            generator.generate_all(dataloader_train, split, overwrite=args.overwrite)
-            generator.generate_all(dataloader_test, split, overwrite=args.overwrite)
+def main_sample():
+    """Process a single sample video, then launch rerun visualization."""
+    args = parse_args()
+    video_id = args.video or "001YG.mp4"
+
+    generator = CorrectedWorldBBoxGenerator(
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
+        ag_root_directory=args.ag_root_directory,
+        manual_corrections_dir=args.manual_corrections_dir,
+    )
+    generator.gdino_score_threshold = args.gdino_score_threshold
+
+    # Generate (skips if already exists unless --overwrite)
+    vid_gt, full_gt = generator.get_video_gt_annotations(video_id)
+    success = generator.generate_corrected_video_bb_annotations(
+        video_id=video_id,
+        video_gt_annotations=full_gt,
+        overwrite=args.overwrite,
+    )
+    print(f"[main_sample] Generation result for {video_id}: {'SUCCESS' if success else 'FAILED'}")
+
+    if success:
+        generator.visualize_from_saved(video_id)
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    main_sample()
+

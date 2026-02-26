@@ -686,49 +686,43 @@ def main():
             )
         return
 
-    if args.corrections_only:
-        results = generator.generate_from_corrections_only(
-            mode=args.mode, overwrite=args.overwrite,
-        )
-        success = sum(1 for v in results.values() if v)
-        print(f"\n[Summary] {success}/{len(results)} videos processed successfully")
-        return
+    # Default: process only videos that have corrected world bboxes
+    # (skip-if-exists is handled inside build_corrected_frames_*_and_store)
+    results = generator.generate_from_corrections_only(
+        mode=args.mode, overwrite=args.overwrite,
+    )
+    success = sum(1 for v in results.values() if v)
+    print(f"\n[Summary] {success}/{len(results)} videos processed successfully")
 
-    # Full dataset mode
-    _, _, dataloader_train, dataloader_test = load_dataset(args.ag_root_directory)
 
-    if args.split:
-        if args.mode in ("final", "both"):
-            generator.generate_all_final(
-                dataloader_train, args.split, overwrite=args.overwrite,
-            )
-            generator.generate_all_final(
-                dataloader_test, args.split, overwrite=args.overwrite,
-            )
-        if args.mode in ("camera", "both"):
-            generator.generate_all_camera(
-                dataloader_train, args.split, overwrite=args.overwrite,
-            )
-            generator.generate_all_camera(
-                dataloader_test, args.split, overwrite=args.overwrite,
-            )
-    else:
-        for split in ["01", "02", "03", "04", "05"]:
-            if args.mode in ("final", "both"):
-                generator.generate_all_final(
-                    dataloader_train, split, overwrite=args.overwrite,
-                )
-                generator.generate_all_final(
-                    dataloader_test, split, overwrite=args.overwrite,
-                )
-            if args.mode in ("camera", "both"):
-                generator.generate_all_camera(
-                    dataloader_train, split, overwrite=args.overwrite,
-                )
-                generator.generate_all_camera(
-                    dataloader_test, split, overwrite=args.overwrite,
-                )
+def main_sample():
+    """Process a single sample video, then launch rerun visualization."""
+    args = parse_args()
+    video_id = args.video or "001YG.mp4"
+
+    generator = CorrectedFrameBBoxGenerator(
+        ag_root_directory=args.ag_root_directory,
+        dynamic_scene_dir_path=args.dynamic_scene_dir_path,
+    )
+
+    # Generate both final and camera (skips if already exists unless --overwrite)
+    out_final = generator.build_corrected_frames_final_and_store(
+        video_id, overwrite=args.overwrite,
+    )
+    out_cam = generator.build_corrected_frames_camera_and_store(
+        video_id, overwrite=args.overwrite,
+    )
+    print(
+        f"[main_sample] Generation result for {video_id}: "
+        f"final={'OK' if out_final else 'SKIP'}, "
+        f"camera={'OK' if out_cam else 'SKIP'}"
+    )
+
+    if out_final is not None:
+        generator.visualize_from_saved(video_id, mode="final")
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    main_sample()
+
