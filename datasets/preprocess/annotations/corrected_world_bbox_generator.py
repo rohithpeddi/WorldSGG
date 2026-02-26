@@ -301,7 +301,7 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
         if manual_corrections_dir:
             self.manual_corrections_dir = Path(manual_corrections_dir)
         else:
-            self.manual_corrections_dir = Path("/data/rohith/ag/manual_corrections")
+            self.manual_corrections_dir = Path("/data/rohith/ag/world_annotations/manual_corrections")
 
         # Output directories for corrected annotations
         self.bbox_3d_obb_corrected_root_dir = (
@@ -1020,7 +1020,7 @@ def parse_args():
     )
     parser.add_argument(
         "--manual_corrections_dir", type=str,
-        default="/data/rohith/ag/manual_corrections",
+        default="/data/rohith/ag/world_annotations/manual_corrections",
     )
     parser.add_argument("--split", type=str, default=None)
     parser.add_argument("--video", type=str, default=None, help="Process single video")

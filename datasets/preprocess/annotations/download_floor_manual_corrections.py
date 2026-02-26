@@ -114,7 +114,7 @@ class ManualCorrectionDownloader:
         if output_dir:
             self.output_dir = Path(output_dir)
         else:
-            self.output_dir = Path("/data/rohith/ag/manual_corrections")
+            self.output_dir = Path("/data/rohith/ag/world_annotations/manual_corrections")
 
         os.makedirs(self.output_dir, exist_ok=True)
         print(f"[ManualCorrectionDownloader] Output directory: {self.output_dir}")
@@ -338,7 +338,7 @@ def main():
         "--output-dir",
         type=str,
         default=None,
-        help="Output directory for PKL files (default: /data/rohith/ag/manual_corrections)"
+        help="Output directory for PKL files (default: /data/rohith/ag/world_annotations/manual_corrections)"
     )
     args = parser.parse_args()
 
