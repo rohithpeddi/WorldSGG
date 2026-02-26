@@ -313,6 +313,9 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
         self.erosion_kernel_sizes = [0, 3, 5, 7, 9]
         self.min_points_per_scale = 50
 
+        # GDino score threshold for 2D→3D lift
+        self.gdino_score_threshold = 0.3
+
     # ------------------------------------------------------------------
     # Manual correction loading
     # ------------------------------------------------------------------
@@ -369,6 +372,120 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
     # Core: Build corrected bboxes for a video
     # ------------------------------------------------------------------
 
+    def _lift_2d_bbox_to_3d(
+        self,
+        *,
+        label: str,
+        bbox_xyxy: List[float],
+        pts_hw3: np.ndarray,
+        conf_hw: Optional[np.ndarray],
+        conf_thr: float,
+        frame_non_zero_pts: np.ndarray,
+        H: int,
+        W: int,
+        floor_align_fn,
+        floor_to_world_fn,
+        R_floor: np.ndarray,
+        t_floor: np.ndarray,
+        source_tag: str = "gt",
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Lift a 2D bounding box to 3D using point cloud selection + multiscale erosion.
+
+        This is the shared core for both GT and GDino 2D→3D lifting.
+        Uses the 2D bbox as a pixel mask to select 3D points, then computes
+        AABB and OBB variants.
+
+        Returns an object dict or None if insufficient points.
+        """
+        frame_label_mask = _mask_from_bbox(H, W, bbox_xyxy)
+
+        multi_scale_candidates = []
+        for ksz in self.erosion_kernel_sizes:
+            if ksz == 0:
+                sel_mask = frame_label_mask.astype(bool)
+            else:
+                mask_u8 = frame_label_mask.astype(np.uint8)
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksz, ksz))
+                eroded = cv2.erode(mask_u8, kernel, iterations=1)
+                sel_mask = eroded.astype(bool)
+
+            sel = sel_mask & frame_non_zero_pts
+            if conf_hw is not None:
+                sel &= (conf_hw > conf_thr)
+            num_sel = int(sel.sum())
+            if num_sel < self.min_points_per_scale:
+                continue
+
+            obj_pts_world = pts_hw3[sel].reshape(-1, 3).astype(np.float32)
+            pts_floor = floor_align_fn(obj_pts_world)
+
+            # 1. AABB (floor-aligned)
+            mins = pts_floor.min(axis=0)
+            maxs = pts_floor.max(axis=0)
+            size = (maxs - mins).clip(1e-6)
+            volume = float(size[0] * size[1] * size[2])
+
+            corners_floor_aabb = _corners_from_mins_maxs(mins, maxs)
+            corners_world_aabb = floor_to_world_fn(corners_floor_aabb)
+
+            # 2. OBB (floor-parallel)
+            obb_floor_res = _compute_obb_floor_parallel(
+                pts_floor, R_floor, t_floor, 1.0
+            )
+
+            # 3. OBB (arbitrary, PCA)
+            obb_res = _compute_obb_pca(obj_pts_world)
+
+            multi_scale_candidates.append({
+                "kernel_size": int(ksz),
+                "num_points": num_sel,
+                "volume": volume,
+                "mins_floor": mins.tolist(),
+                "maxs_floor": maxs.tolist(),
+                "corners_world": corners_world_aabb.tolist(),
+                "aabb_floor_aligned": {
+                    "volume": volume,
+                    "corners_world": corners_world_aabb.tolist(),
+                    "corners_floor": corners_floor_aabb.tolist(),
+                },
+                "obb_floor_parallel": obb_floor_res,
+                "obb_arbitrary": obb_res,
+            })
+
+        if not multi_scale_candidates:
+            return {
+                "label": label,
+                "bbox_xyxy": bbox_xyxy,
+                "aabb_floor_aligned": None,
+                "obb_floor_parallel": None,
+                "obb_arbitrary": None,
+                "candidates": [],
+                "source": source_tag,
+            }
+
+        # Pick best candidate (smallest volume with sufficient points)
+        multi_scale_candidates.sort(key=lambda x: x.get("volume", float("inf")))
+        best = multi_scale_candidates[0]
+
+        return {
+            "label": label,
+            "bbox_xyxy": bbox_xyxy,
+            "aabb_floor_aligned": {
+                "mins_floor": best["mins_floor"],
+                "maxs_floor": best["maxs_floor"],
+                "corners_world": best["corners_world"],
+                "corners_floor": best["aabb_floor_aligned"]["corners_floor"],
+                "source": f"pc-aabb-multiscale-corrected-{source_tag}",
+                "kernel_size": best["kernel_size"],
+                "volume": float(best["volume"]),
+            },
+            "obb_floor_parallel": best.get("obb_floor_parallel"),
+            "obb_arbitrary": best.get("obb_arbitrary"),
+            "candidates": multi_scale_candidates,
+            "source": source_tag,
+        }
+
     def _build_corrected_bboxes_for_video(
         self,
         *,
@@ -381,10 +498,18 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
         stem_to_idx: Dict[str, int],
         video_to_frame_to_label_mask: Dict[str, Dict[str, Dict[str, np.ndarray]]],
         corrected_transform: Dict[str, Any],
+        gdino_predictions: Optional[Dict[str, Dict[str, Any]]] = None,
+        gdino_score_threshold: float = 0.3,
     ) -> Dict[str, Dict[str, Any]]:
         """
         Build per-frame AABB and OBB bounding boxes using the corrected
         floor transform.
+
+        For each annotated frame:
+          1) Process GT annotations (as before)
+          2) If gdino_predictions is provided, also process GDino detections
+             for labels NOT already covered by GT in this frame.
+             Only GDino detections with score >= gdino_score_threshold are used.
         """
         out_frames: Dict[str, Dict[str, Any]] = {}
         S, H, W, _ = points_S.shape
@@ -397,12 +522,10 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
 
         def _corrected_floor_align_points(points_world: np.ndarray) -> np.ndarray:
             """Transform world points to corrected canonical frame."""
-            # x_canonical = R @ x_world + t
             return (points_world @ R_floor.T) + t_floor[None, :]
 
         def _corrected_floor_to_world(points_canonical: np.ndarray) -> np.ndarray:
             """Transform canonical frame points back to world."""
-            # x_world = R^{-1} @ (x_canonical - t)
             R_inv = np.linalg.inv(R_floor)
             return (points_canonical - t_floor[None, :]) @ R_inv.T
 
@@ -429,6 +552,9 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                     p5 = np.percentile(cfs_valid, 5)
                     conf_thr = float(max(1e-3, p5))
 
+            # Track which labels are covered by GT in this frame
+            gt_labels_in_frame = set()
+
             for item in frame_items:
                 # Resolve label + original bbox
                 if "person_bbox" in item:
@@ -451,6 +577,8 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                     elif label == "phone/camera":
                         label = "phone"
                     gt_xyxy = [float(v) for v in item["bbox"]]
+
+                gt_labels_in_frame.add(label)
 
                 # Resize bbox to dynamic prediction resolution
                 gt_xyxy = _resize_bbox_to(gt_xyxy, (orig_W, orig_H), (W, H))
@@ -530,6 +658,7 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                         "obb_floor_parallel": None,
                         "obb_arbitrary": None,
                         "candidates": [],
+                        "source": "gt",
                     })
                 else:
                     # Pick best candidate (smallest volume with sufficient points)
@@ -551,7 +680,74 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                         "obb_floor_parallel": best.get("obb_floor_parallel"),
                         "obb_arbitrary": best.get("obb_arbitrary"),
                         "candidates": multi_scale_candidates,
+                        "source": "gt",
                     })
+
+            # ----------------------------------------------------------
+            # GDino 2D→3D lift: process detections for labels NOT in GT
+            # ----------------------------------------------------------
+            if gdino_predictions is not None:
+                gdino_frame = gdino_predictions.get(frame_name, {})
+                gd_boxes = gdino_frame.get("boxes", [])
+                gd_labels = gdino_frame.get("labels", [])
+                gd_scores = gdino_frame.get("scores", [])
+
+                # Group GDino detections by label, keep highest-score per label
+                gdino_best_per_label: Dict[str, Tuple[List[float], float]] = {}
+                for gd_box, gd_label, gd_score in zip(gd_boxes, gd_labels, gd_scores):
+                    gd_score = float(gd_score)
+                    if gd_score < gdino_score_threshold:
+                        continue
+                    # Normalize GDino label to match GT label conventions
+                    gd_label_norm = gd_label
+                    if gd_label_norm == "closet/cabinet":
+                        gd_label_norm = "closet"
+                    elif gd_label_norm == "cup/glass/bottle":
+                        gd_label_norm = "cup"
+                    elif gd_label_norm == "paper/notebook":
+                        gd_label_norm = "paper"
+                    elif gd_label_norm == "sofa/couch":
+                        gd_label_norm = "sofa"
+                    elif gd_label_norm == "phone/camera":
+                        gd_label_norm = "phone"
+
+                    # Skip labels already covered by GT
+                    if gd_label_norm in gt_labels_in_frame:
+                        continue
+
+                    # Keep highest-score detection per label
+                    if (gd_label_norm not in gdino_best_per_label
+                            or gd_score > gdino_best_per_label[gd_label_norm][1]):
+                        gd_box_list = [float(v) for v in gd_box]
+                        gdino_best_per_label[gd_label_norm] = (gd_box_list, gd_score)
+
+                # Lift each GDino detection to 3D
+                for gd_label, (gd_box_xyxy, gd_score) in gdino_best_per_label.items():
+                    # Resize GDino bbox to point cloud resolution
+                    gd_box_resized = _resize_bbox_to(
+                        gd_box_xyxy, (orig_W, orig_H), (W, H)
+                    )
+
+                    obj_result = self._lift_2d_bbox_to_3d(
+                        label=gd_label,
+                        bbox_xyxy=gd_box_resized,
+                        pts_hw3=pts_hw3,
+                        conf_hw=conf_hw,
+                        conf_thr=conf_thr,
+                        frame_non_zero_pts=frame_non_zero_pts,
+                        H=H,
+                        W=W,
+                        floor_align_fn=_corrected_floor_align_points,
+                        floor_to_world_fn=_corrected_floor_to_world,
+                        R_floor=R_floor,
+                        t_floor=t_floor,
+                        source_tag="gdino",
+                    )
+
+                    if obj_result is not None:
+                        obj_result["gdino_bbox_xyxy"] = gd_box_xyxy
+                        obj_result["gdino_score"] = gd_score
+                        frame_rec["objects"].append(obj_result)
 
             if frame_rec["objects"]:
                 out_frames[frame_name] = frame_rec
@@ -633,7 +829,15 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
             gt_annotations=video_gt_annotations,
         )
 
-        # 6) Build corrected per-frame bboxes
+        # 6) Load GDino detections for this video
+        gdino_predictions = None
+        try:
+            gdino_predictions = self.get_video_gdino_annotations(video_id)
+            print(f"[corrected-bbox][{video_id}] loaded GDino detections for {len(gdino_predictions)} frames")
+        except (ValueError, FileNotFoundError):
+            print(f"[corrected-bbox][{video_id}] no GDino detections available")
+
+        # 7) Build corrected per-frame bboxes (GT + GDino fill)
         print(f"[corrected-bbox][{video_id}] building corrected multiscale 3D bboxes...")
         out_frames = self._build_corrected_bboxes_for_video(
             video_id=video_id,
@@ -645,6 +849,8 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
             stem_to_idx=stem_to_idx,
             video_to_frame_to_label_mask=video_to_frame_to_label_mask,
             corrected_transform=corrected_transform,
+            gdino_predictions=gdino_predictions,
+            gdino_score_threshold=self.gdino_score_threshold,
         )
 
         # 7) Save results
@@ -790,6 +996,10 @@ def parse_args():
         "--corrections-only", action="store_true",
         help="Only process videos that have manual corrections (no dataloader needed)",
     )
+    parser.add_argument(
+        "--gdino-score-threshold", type=float, default=0.3,
+        help="Min GDino detection score for 2D→3D lift (default: 0.3)",
+    )
     return parser.parse_args()
 
 
@@ -801,6 +1011,7 @@ def main():
         ag_root_directory=args.ag_root_directory,
         manual_corrections_dir=args.manual_corrections_dir,
     )
+    generator.gdino_score_threshold = args.gdino_score_threshold
 
     if args.video:
         # Single video mode
