@@ -13,9 +13,9 @@ from datasets.preprocess.annotations.raw.frame_bbox_3D_base import FrameToWorldA
 
 sys.path.insert(0, os.path.dirname(__file__) + "/..")
 
-from dataloader.standard.action_genome.ag_dataset import StandardAG
+from dataloader.ag_dataset import StandardAG
 
-from annotation_utils import (
+from datasets.preprocess.annotations.annotation_utils import (
     _faces_u32,
 )
 

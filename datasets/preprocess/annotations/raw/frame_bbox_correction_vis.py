@@ -12,8 +12,8 @@ import numpy as np
 import rerun as rr
 from torch.utils.data import DataLoader
 
-from dataloader.standard.action_genome.ag_dataset import StandardAG
-from annotation_utils import (
+from dataloader.ag_dataset import StandardAG
+from datasets.preprocess.annotations.annotation_utils import (
     get_video_belongs_to_split,
     _load_pkl_if_exists,
     _npz_open,

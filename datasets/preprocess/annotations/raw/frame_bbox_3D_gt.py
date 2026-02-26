@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from torch.utils.data import DataLoader
 
-from dataloader.standard.action_genome.ag_dataset import StandardAG
+from dataloader.ag_dataset import StandardAG
 from datasets.preprocess.annotations.raw.frame_bbox_3D_base import FrameToWorldAnnotationsBase, rerun_frame_vis_final_only
 
 

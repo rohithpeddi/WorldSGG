@@ -23,9 +23,8 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(__file__) + '/..')
 
 # from AG / human pipeline codebase
-from dataloader.standard.action_genome.ag_dataset import StandardAG
+from dataloader.ag_dataset import StandardAG
 
-from annotation_utils import _npz_open, _box_edges_from_corners, _log_box_lines_rr
 from datasets.preprocess.annotations.annotation_utils import (
     get_video_belongs_to_split,
     _faces_u32,
@@ -35,7 +34,10 @@ from datasets.preprocess.annotations.annotation_utils import (
     _mask_from_bbox,
     _resize_mask_to,
     _finite_and_nonzero,
-    _as_np
+    _as_np,
+    _log_box_lines_rr,
+    _box_edges_from_corners,
+    _npz_open
 )
 
 # Helper for OBB calculation
@@ -886,7 +888,7 @@ def parse_args():
 
 def main_sample():
     args = parse_args()
-    video_id = "00T1E.mp4"
+    video_id = "05124.mp4"
     gen = BBox3DGeneratorOBB(
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
         ag_root_directory=args.ag_root_directory,

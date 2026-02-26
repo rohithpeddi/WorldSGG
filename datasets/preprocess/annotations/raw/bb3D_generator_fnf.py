@@ -19,7 +19,7 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(__file__) + '/..')
 
 # from AG / human pipeline codebase
-from dataloader.standard.action_genome.ag_dataset import StandardAG
+from dataloader.ag_dataset import StandardAG
 
 from datasets.preprocess.human.pipeline.ag_pipeline import AgPipeline
 from datasets.preprocess.human.data_config import SMPLX_PATH

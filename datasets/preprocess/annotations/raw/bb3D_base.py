@@ -8,7 +8,7 @@ import numpy as np
 import rerun as rr
 from tqdm import tqdm
 
-from annotation_utils import (
+from datasets.preprocess.annotations.annotation_utils import (
     _xywh_to_xyxy,
     _area_xyxy,
     _iou_xyxy,

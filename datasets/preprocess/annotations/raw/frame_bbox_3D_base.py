@@ -11,14 +11,14 @@ import rerun as rr
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from annotation_utils import (
+from datasets.preprocess.annotations.annotation_utils import (
     get_video_belongs_to_split,
     _load_pkl_if_exists,
     _npz_open,
     _faces_u32,
     _is_empty_array,
 )
-from dataloader.standard.action_genome.ag_dataset import StandardAG
+from dataloader.ag_dataset import StandardAG
 
 
 def rerun_frame_vis_final_only(

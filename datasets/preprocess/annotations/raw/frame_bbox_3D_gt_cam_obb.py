@@ -17,7 +17,7 @@ import numpy as np
 import pickle
 import rerun as rr
 
-from dataloader.standard.action_genome.ag_dataset import StandardAG
+from dataloader.ag_dataset import StandardAG
 from datasets.preprocess.annotations.raw.frame_bbox_3D_base import FrameToWorldAnnotationsBase
 
 
