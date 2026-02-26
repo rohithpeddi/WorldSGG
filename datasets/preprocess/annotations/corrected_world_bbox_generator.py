@@ -964,13 +964,6 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
     # Visualization (from saved PKLs, no recomputation)
     # ------------------------------------------------------------------
 
-    # Cuboid edges: 8 corners → 12 edges
-    _CUBOID_EDGES = [
-        (0, 1), (1, 3), (3, 2), (2, 0),  # bottom
-        (4, 5), (5, 7), (7, 6), (6, 4),  # top
-        (0, 4), (1, 5), (2, 6), (3, 7),  # verticals
-    ]
-
     @staticmethod
     def _extract_corners(obj: Dict[str, Any]) -> Optional[np.ndarray]:
         """Extract 8×3 corners from an object dict (OBB preferred, AABB fallback)."""
@@ -990,6 +983,31 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                 if c.shape == (8, 3):
                     return c
         return None
+
+    @staticmethod
+    def _corners_to_box_params(
+        corners: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Derive (center, half_sizes, quaternion_xyzw) from 8×3 corners.
+
+        Uses SVD to find the three principal axes of the cuboid, which works
+        regardless of the corner ordering convention.
+        """
+        center = corners.mean(axis=0)
+        centred = corners - center  # (8, 3)
+        # SVD gives principal axes as rows of Vt
+        _, _, Vt = np.linalg.svd(centred, full_matrices=False)
+        # Project corners onto each axis → half-extent = max projection
+        projections = centred @ Vt.T  # (8, 3)
+        half_sizes = np.abs(projections).max(axis=0)  # (3,)
+        # Build rotation matrix (rows of Vt = axes)
+        R = Vt.T  # (3, 3) — columns are the box axes
+        # Ensure proper rotation (det = +1)
+        if np.linalg.det(R) < 0:
+            R[:, -1] *= -1
+        quat = SciRot.from_matrix(R).as_quat().astype(np.float32)  # xyzw
+        return center.astype(np.float32), half_sizes.astype(np.float32), quat
 
     def visualize_from_saved(
         self,
@@ -1094,7 +1112,7 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
             if keep.sum() > 0:
                 rr.log(f"{BASE}/points", rr.Points3D(pts[keep], colors=cols[keep]))
 
-            # Bbox wireframes
+            # Bbox cuboids
             if frame_name in frames_map:
                 objs = frames_map[frame_name].get("objects", [])
                 for oi, obj in enumerate(objs):
@@ -1104,8 +1122,17 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                     label = obj.get("label", f"obj_{oi}")
                     src = obj.get("source", "gt")
                     col = [0, 180, 255] if src == "gdino" else [255, 180, 0]
-                    strips = [corners[[e0, e1]] for e0, e1 in self._CUBOID_EDGES]
-                    rr.log(f"{BASE}/bbox/{label}_{oi}", rr.LineStrips3D(strips, colors=[col] * 12))
+                    center, half_sizes, quat = self._corners_to_box_params(corners)
+                    rr.log(
+                        f"{BASE}/bbox/{label}_{oi}",
+                        rr.Boxes3D(
+                            centers=[center],
+                            half_sizes=[half_sizes],
+                            quaternions=[rr.Quaternion(xyzw=quat)],
+                            colors=[col],
+                            labels=[label],
+                        ),
+                    )
 
             # Camera frustum (apply corrected transform to camera pose)
             if cam_S is not None and t_idx < cam_S.shape[0]:
