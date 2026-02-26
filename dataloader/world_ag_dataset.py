@@ -349,6 +349,153 @@ class WorldAG(Dataset):
         return torch.tensor(indices, dtype=torch.long)
 
     # ------------------------------------------------------------------
+    # GL-STGN tensor preparation
+    # ------------------------------------------------------------------
+
+    def get_glstgn_tensors(self, index: int, max_objects: int = 64) -> Dict[str, Any]:
+        """
+        Build padded per-frame tensors for the GL-STGN pipeline.
+
+        Returns dict with:
+            video_id: str
+            T: int — number of frames
+            N_max: int — max objects across frames (capped at max_objects)
+            corners_seq: List of (N_max, 8, 3) float32 — 3D bbox corners
+            valid_mask_seq: List of (N_max,) bool — True for real objects
+            visibility_mask_seq: List of (N_max,) bool — True if in FOV
+            object_classes_seq: List of (N_max,) long — object class indices
+            person_idx_seq: List of (K_t,) long — person indices in pairs
+            object_idx_seq: List of (K_t,) long — object indices in pairs
+            gt_attention_seq: List of (K_t,) long — GT attention class
+            gt_spatial_seq: List of List[List[int]] — GT spatial rel indices
+            gt_contacting_seq: List of List[List[int]] — GT contacting rel indices
+            gt_annotations: original annotations (for evaluator compatibility)
+        """
+        video_id = self.video_list[index]
+        frame_names = self.frame_names_list[index]
+        gt_annotations = self.gt_annotations[index]
+        T = len(frame_names)
+
+        # First pass: determine N_max across all frames
+        n_objects_per_frame = []
+        for frame_ann in gt_annotations:
+            # frame_ann[0] is person, frame_ann[1:] are objects
+            n_objects_per_frame.append(len(frame_ann))  # person + objects
+        N_max = min(max(n_objects_per_frame), max_objects)
+
+        corners_seq = []
+        valid_mask_seq = []
+        visibility_mask_seq = []
+        object_classes_seq = []
+        person_idx_seq = []
+        object_idx_seq = []
+        gt_attention_seq = []
+        gt_spatial_seq = []
+        gt_contacting_seq = []
+
+        for t, frame_ann in enumerate(gt_annotations):
+            N_t = min(len(frame_ann), N_max)
+
+            corners = np.zeros((N_max, 8, 3), dtype=np.float32)
+            valid_mask = np.zeros(N_max, dtype=bool)
+            vis_mask = np.zeros(N_max, dtype=bool)
+            obj_classes = np.zeros(N_max, dtype=np.int64)
+
+            person_indices = []
+            object_indices = []
+            att_labels = []
+            spa_labels = []
+            con_labels = []
+
+            # Person entry is at index 0
+            person_entry = frame_ann[0]
+            person_bbox = person_entry.get(const.PERSON_BOUNDING_BOX, None)
+
+            # Person always occupies slot 0
+            valid_mask[0] = True
+            vis_mask[0] = True  # Person is always visible when frame exists
+            obj_classes[0] = 1  # Person class (index 1 typically)
+
+            # Use person 3D corners if available from other objects' geometry
+            # For now, person corners stay zero (person has 2D bbox only in AG)
+
+            # Objects at indices 1..N_t-1
+            for i in range(1, N_t):
+                obj = frame_ann[i]
+
+                valid_mask[i] = True
+                vis_mask[i] = obj.get(const.VISIBLE, True)
+                obj_classes[i] = obj.get(const.CLASS, 0)
+
+                # 3D corners
+                c = obj.get("corners_final", None)
+                if c is not None:
+                    c = np.asarray(c, dtype=np.float32)
+                    if c.shape == (8, 3):
+                        corners[i] = c
+
+                # Relationship labels (person → object)
+                att_rel = obj.get(const.ATTENTION_RELATIONSHIP, None)
+                spa_rel = obj.get(const.SPATIAL_RELATIONSHIP, None)
+                con_rel = obj.get(const.CONTACTING_RELATIONSHIP, None)
+
+                if att_rel is not None and len(att_rel) > 0:
+                    person_indices.append(0)
+                    object_indices.append(i)
+
+                    # Attention: single-label (take first)
+                    if isinstance(att_rel, torch.Tensor):
+                        att_labels.append(att_rel[0].item())
+                    else:
+                        att_labels.append(int(att_rel[0]) if len(att_rel) > 0 else 0)
+
+                    # Spatial: multi-label
+                    if isinstance(spa_rel, torch.Tensor):
+                        spa_labels.append(spa_rel.tolist())
+                    else:
+                        spa_labels.append(list(spa_rel) if spa_rel else [])
+
+                    # Contacting: multi-label
+                    if isinstance(con_rel, torch.Tensor):
+                        con_labels.append(con_rel.tolist())
+                    else:
+                        con_labels.append(list(con_rel) if con_rel else [])
+
+            corners_seq.append(torch.from_numpy(corners))
+            valid_mask_seq.append(torch.from_numpy(valid_mask))
+            visibility_mask_seq.append(torch.from_numpy(vis_mask))
+            object_classes_seq.append(torch.from_numpy(obj_classes))
+
+            person_idx_seq.append(
+                torch.tensor(person_indices, dtype=torch.long)
+            )
+            object_idx_seq.append(
+                torch.tensor(object_indices, dtype=torch.long)
+            )
+            gt_attention_seq.append(
+                torch.tensor(att_labels, dtype=torch.long)
+            )
+            gt_spatial_seq.append(spa_labels)
+            gt_contacting_seq.append(con_labels)
+
+        return {
+            "video_id": video_id,
+            "T": T,
+            "N_max": N_max,
+            "frame_names": frame_names,
+            "corners_seq": corners_seq,
+            "valid_mask_seq": valid_mask_seq,
+            "visibility_mask_seq": visibility_mask_seq,
+            "object_classes_seq": object_classes_seq,
+            "person_idx_seq": person_idx_seq,
+            "object_idx_seq": object_idx_seq,
+            "gt_attention_seq": gt_attention_seq,
+            "gt_spatial_seq": gt_spatial_seq,
+            "gt_contacting_seq": gt_contacting_seq,
+            "gt_annotations": gt_annotations,
+        }
+
+    # ------------------------------------------------------------------
     # PyTorch Dataset interface
     # ------------------------------------------------------------------
 
