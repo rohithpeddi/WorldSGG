@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # Reuse the SpatialPositionalEncoding from GL-STGN
-from lib.supervised.worldsgg.gl_stgn.graph_transformer import SpatialPositionalEncoding
+from lib.supervised.worldsgg.worldsgg_base import SpatialPositionalEncoding
 
 
 class ContextualDiffusion(nn.Module):

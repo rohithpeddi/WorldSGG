@@ -19,16 +19,13 @@ import torch
 import torch.nn as nn
 from typing import Dict, List
 
-from .config import LKSConfig
 from .lks_memory import LKSMemoryBuffer
 from .lks_tokenizer import LKSTokenizer
 
-# Reuse from GL-STGN
-from lib.supervised.worldsgg.gl_stgn.global_structural_encoder import GlobalStructuralEncoder
-from lib.supervised.worldsgg.gl_stgn.prediction_heads import NodePredictor, EdgePredictor
-
-# Reuse SpatialGNN from Amnesic GNN (same stateless GNN)
-from lib.supervised.worldsgg.amnesic_gnn.spatial_gnn import SpatialGNN
+# Shared components from worldsgg_base
+from lib.supervised.worldsgg.worldsgg_base import (
+    GlobalStructuralEncoder, NodePredictor, EdgePredictor, SpatialGNN,
+)
 
 
 class LKSGNN(nn.Module):
@@ -49,7 +46,7 @@ class LKSGNN(nn.Module):
 
     def __init__(
         self,
-        config: LKSConfig,
+        config,
         num_object_classes: int = 37,
         attention_class_num: int = 3,
         spatial_class_num: int = 6,

@@ -1,20 +1,15 @@
 """
-GL-STGN Loss
-=============
+GL-STGN Loss — VLM Noisy Label Training
+=========================================
 
-Split loss formulation for the GL-STGN model:
-  L_total = L_visible + λ * L_unseen
+L_total = L_manual(Visible) + λ_vlm * L_pseudo(Unseen) + λ_smooth * L_smooth
 
-Where:
-  - L_visible: losses for relationship pairs where both objects are in FOV
-  - L_unseen:  losses for pairs where ≥1 object is out of FOV
-  - λ (lambda_unseen): weight to force the model to learn from the memory bank
-
-Each loss component includes:
-  - Attention: CrossEntropy (3 classes, single-label)
-  - Spatial: BCE (6 classes, multi-label)
-  - Contacting: BCE (17 classes, multi-label)
-  - Optional: Node classification CE loss (for sgcls/sgdet modes)
+Changes from baseline loss:
+  1. λ_vlm discounting (0.2 vs old 2.0) — VLM labels are gentle regularizers
+  2. Label smoothing on unseen GT — tells model "VLM might be wrong"
+  3. Physics veto — zero out loss for geometrically impossible VLM labels
+  4. Memory shielding — .detach() handled in model forward, not here
+  5. Temporal inertia — penalizes jittery unseen predictions
 """
 
 import torch
@@ -23,32 +18,50 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional
 
 from constants import Constants as const
+from lib.supervised.worldsgg.worldsgg_base import PhysicsVeto, LabelSmoother
 
 
 class GLSTGNLoss(nn.Module):
     """
-    Split loss for GL-STGN training.
+    Split loss for GL-STGN training with VLM noisy label handling.
 
     Args:
-        lambda_unseen: Weight multiplier for unseen-object relationship loss.
-        bce_loss: If True, use BCE for spatial/contacting. Else, use MultiLabelMarginLoss.
-        mode: Task mode (predcls/sgcls/sgdet) — controls whether object loss is included.
+        lambda_vlm: Weight for unseen (VLM) edge loss (should be << 1.0).
+        label_smoothing: Epsilon for VLM label smoothing.
+        use_physics_veto: Enable geometric masking.
+        physics_veto_thresh: Distance threshold for physics veto.
+        lambda_smooth: Weight for temporal inertia regularization.
+        movement_thresh: Skip smoothing if object moved > this (meters).
+        bce_loss: Use BCE (True) or MultiLabelMarginLoss (False).
+        mode: Task mode (predcls/sgcls/sgdet).
     """
 
     def __init__(
         self,
-        lambda_unseen: float = 2.0,
+        lambda_vlm: float = 0.2,
+        label_smoothing: float = 0.2,
+        use_physics_veto: bool = True,
+        physics_veto_thresh: float = 2.0,
+        lambda_smooth: float = 0.1,
+        movement_thresh: float = 0.3,
         bce_loss: bool = True,
         mode: str = "predcls",
     ):
         super().__init__()
-        self.lambda_unseen = lambda_unseen
+        self.lambda_vlm = lambda_vlm
+        self.label_smoothing = label_smoothing
+        self.lambda_smooth = lambda_smooth
+        self.movement_thresh = movement_thresh
         self.bce_loss = bce_loss
         self.mode = mode
 
         self._ce_loss = nn.CrossEntropyLoss()
         self._bce_loss = nn.BCELoss()
-        self._mlm_loss = nn.MultiLabelMarginLoss()
+        self._kl_loss = nn.KLDivLoss(reduction='batchmean')
+
+        # VLM noisy label utilities
+        self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
+        self._physics_veto = PhysicsVeto(dist_thresh=physics_veto_thresh) if use_physics_veto else None
 
     def forward(
         self,
@@ -61,38 +74,24 @@ class GLSTGNLoss(nn.Module):
         person_idx_seq: Optional[List[torch.Tensor]] = None,
         object_idx_seq: Optional[List[torch.Tensor]] = None,
         valid_mask_seq: Optional[List[torch.Tensor]] = None,
+        corners_seq: Optional[List[torch.Tensor]] = None,
     ) -> Dict[str, torch.Tensor]:
         """
-        Compute split visible/unseen loss.
+        Compute split visible/unseen loss with VLM noise handling.
 
-        Args:
-            predictions: dict from GLSTGN.forward() with per-frame lists:
-                - attention_distribution: List of (K_t, 3)
-                - spatial_distribution: List of (K_t, 6)
-                - contacting_distribution: List of (K_t, 17)
-                - node_logits: List of (N_t, num_classes)
-            gt_attention: List of (K_t,) LongTensor — GT attention class per pair.
-            gt_spatial: List of List[List[int]] — GT spatial rel indices per pair.
-            gt_contacting: List of List[List[int]] — GT contacting rel indices per pair.
-            gt_node_labels: Optional List of (N_t,) LongTensor — GT object classes.
-            visibility_mask_seq: List of (N_t,) bool — per-object visibility.
-            person_idx_seq: List of (K_t,) — person indices in pairs.
-            object_idx_seq: List of (K_t,) — object indices in pairs.
-            valid_mask_seq: List of (N_t,) bool — valid object mask.
-
-        Returns:
-            dict of named losses ready for backpropagation.
+        New vs baseline: corners_seq for physics veto, smoothed unseen targets,
+        λ_vlm weighting, and temporal inertia.
         """
         device = predictions["attention_distribution"][0].device
         T = len(predictions["attention_distribution"])
 
-        # Accumulators
-        all_att_pred_vis, all_att_gt_vis = [], []
-        all_att_pred_unseen, all_att_gt_unseen = [], []
-        all_spa_pred_vis, all_spa_gt_vis = [], []
-        all_spa_pred_unseen, all_spa_gt_unseen = [], []
-        all_con_pred_vis, all_con_gt_vis = [], []
-        all_con_pred_unseen, all_con_gt_unseen = [], []
+        # Accumulators for visible (manual GT) and unseen (VLM pseudo) pairs
+        vis_att_p, vis_att_g = [], []
+        vis_spa_p, vis_spa_g = [], []
+        vis_con_p, vis_con_g = [], []
+        unseen_att_p, unseen_att_g = [], []
+        unseen_spa_p, unseen_spa_g = [], []
+        unseen_con_p, unseen_con_g = [], []
         all_node_pred, all_node_gt = [], []
 
         for t in range(T):
@@ -104,9 +103,7 @@ class GLSTGNLoss(nn.Module):
             if K_t == 0:
                 continue
 
-            att_gt_t = gt_attention[t].to(device)  # (K_t,)
-
-            # Build spatial GT
+            att_gt_t = gt_attention[t].to(device)
             spa_gt_t = self._build_multi_label_gt(gt_spatial[t], 6, device)
             con_gt_t = self._build_multi_label_gt(gt_contacting[t], 17, device)
 
@@ -115,34 +112,65 @@ class GLSTGNLoss(nn.Module):
                 vis_t = visibility_mask_seq[t]
                 p_idx = person_idx_seq[t]
                 o_idx = object_idx_seq[t]
-
-                # A pair is "visible" if BOTH person and object are visible
-                pair_visible = vis_t[p_idx] & vis_t[o_idx]  # (K_t,)
+                pair_visible = vis_t[p_idx] & vis_t[o_idx]
                 pair_unseen = ~pair_visible
 
+                # --- Visible pairs: manual GT (pristine) ---
                 if pair_visible.any():
-                    all_att_pred_vis.append(att_pred_t[pair_visible])
-                    all_att_gt_vis.append(att_gt_t[pair_visible])
-                    all_spa_pred_vis.append(spa_pred_t[pair_visible])
-                    all_spa_gt_vis.append(spa_gt_t[pair_visible])
-                    all_con_pred_vis.append(con_pred_t[pair_visible])
-                    all_con_gt_vis.append(con_gt_t[pair_visible])
+                    vis_att_p.append(att_pred_t[pair_visible])
+                    vis_att_g.append(att_gt_t[pair_visible])
+                    vis_spa_p.append(spa_pred_t[pair_visible])
+                    vis_spa_g.append(spa_gt_t[pair_visible])
+                    vis_con_p.append(con_pred_t[pair_visible])
+                    vis_con_g.append(con_gt_t[pair_visible])
 
+                # --- Unseen pairs: VLM pseudo-labels (noisy) ---
                 if pair_unseen.any():
-                    all_att_pred_unseen.append(att_pred_t[pair_unseen])
-                    all_att_gt_unseen.append(att_gt_t[pair_unseen])
-                    all_spa_pred_unseen.append(spa_pred_t[pair_unseen])
-                    all_spa_gt_unseen.append(spa_gt_t[pair_unseen])
-                    all_con_pred_unseen.append(con_pred_t[pair_unseen])
-                    all_con_gt_unseen.append(con_gt_t[pair_unseen])
+                    unseen_att_pred = att_pred_t[pair_unseen]
+                    unseen_att_gt = att_gt_t[pair_unseen]
+                    unseen_spa_pred = spa_pred_t[pair_unseen]
+                    unseen_spa_gt = spa_gt_t[pair_unseen]
+                    unseen_con_pred = con_pred_t[pair_unseen]
+                    unseen_con_gt = con_gt_t[pair_unseen]
+
+                    # Physics veto: zero out geometrically impossible edges
+                    if self._physics_veto is not None and corners_seq is not None:
+                        # Get unseen pair indices relative to full node set
+                        unseen_pidx = p_idx[pair_unseen]
+                        unseen_oidx = o_idx[pair_unseen]
+                        keep = self._physics_veto.compute_veto_mask(
+                            corners_seq[t], unseen_pidx, unseen_oidx, unseen_con_pred
+                        )
+                        if keep.any():
+                            unseen_att_pred = unseen_att_pred[keep]
+                            unseen_att_gt = unseen_att_gt[keep]
+                            unseen_spa_pred = unseen_spa_pred[keep]
+                            unseen_spa_gt = unseen_spa_gt[keep]
+                            unseen_con_pred = unseen_con_pred[keep]
+                            unseen_con_gt = unseen_con_gt[keep]
+                        else:
+                            # All vetoed → skip this frame's unseen
+                            continue
+
+                    # Label smoothing for VLM targets
+                    if self._label_smoother is not None:
+                        unseen_spa_gt = self._label_smoother.smooth_bce_target(unseen_spa_gt)
+                        unseen_con_gt = self._label_smoother.smooth_bce_target(unseen_con_gt)
+
+                    if len(unseen_att_pred) > 0:
+                        unseen_att_p.append(unseen_att_pred)
+                        unseen_att_g.append(unseen_att_gt)
+                        unseen_spa_p.append(unseen_spa_pred)
+                        unseen_spa_g.append(unseen_spa_gt)
+                        unseen_con_p.append(unseen_con_pred)
+                        unseen_con_g.append(unseen_con_gt)
             else:
-                # No visibility info → treat all as visible
-                all_att_pred_vis.append(att_pred_t)
-                all_att_gt_vis.append(att_gt_t)
-                all_spa_pred_vis.append(spa_pred_t)
-                all_spa_gt_vis.append(spa_gt_t)
-                all_con_pred_vis.append(con_pred_t)
-                all_con_gt_vis.append(con_gt_t)
+                vis_att_p.append(att_pred_t)
+                vis_att_g.append(att_gt_t)
+                vis_spa_p.append(spa_pred_t)
+                vis_spa_g.append(spa_gt_t)
+                vis_con_p.append(con_pred_t)
+                vis_con_g.append(con_gt_t)
 
             # Node classification
             if gt_node_labels is not None and self.mode in [const.SGCLS, const.SGDET]:
@@ -159,104 +187,117 @@ class GLSTGNLoss(nn.Module):
         # --- Compute losses ---
         losses = {}
 
-        # Visible losses
+        # Visible losses (standard CE/BCE on clean manual labels)
         loss_vis = self._compute_relationship_losses(
-            all_att_pred_vis, all_att_gt_vis,
-            all_spa_pred_vis, all_spa_gt_vis,
-            all_con_pred_vis, all_con_gt_vis,
-            device,
+            vis_att_p, vis_att_g, vis_spa_p, vis_spa_g, vis_con_p, vis_con_g, device,
         )
-        for k, v in loss_vis.items():
-            losses[f"vis_{k}"] = v
+        losses[const.ATTENTION_RELATION_LOSS] = loss_vis.get("att", torch.tensor(0.0, device=device))
+        losses[const.SPATIAL_RELATION_LOSS] = loss_vis.get("spa", torch.tensor(0.0, device=device))
+        losses[const.CONTACTING_RELATION_LOSS] = loss_vis.get("con", torch.tensor(0.0, device=device))
 
-        # Unseen losses
+        # Unseen losses (λ_vlm weighted, smoothed, vetoed)
         loss_unseen = self._compute_relationship_losses(
-            all_att_pred_unseen, all_att_gt_unseen,
-            all_spa_pred_unseen, all_spa_gt_unseen,
-            all_con_pred_unseen, all_con_gt_unseen,
-            device,
+            unseen_att_p, unseen_att_g, unseen_spa_p, unseen_spa_g,
+            unseen_con_p, unseen_con_g, device, smoothed_bce=True,
         )
-        for k, v in loss_unseen.items():
-            losses[f"unseen_{k}"] = v * self.lambda_unseen
+        losses["unseen_att"] = loss_unseen.get("att", torch.tensor(0.0, device=device)) * self.lambda_vlm
+        losses["unseen_spa"] = loss_unseen.get("spa", torch.tensor(0.0, device=device)) * self.lambda_vlm
+        losses["unseen_con"] = loss_unseen.get("con", torch.tensor(0.0, device=device)) * self.lambda_vlm
 
-        # Node classification loss
+        # Node loss
         if all_node_pred:
-            node_pred_cat = torch.cat(all_node_pred, dim=0)
-            node_gt_cat = torch.cat(all_node_gt, dim=0)
-            losses[const.OBJECT_LOSS] = self._ce_loss(node_pred_cat, node_gt_cat)
+            losses[const.OBJECT_LOSS] = self._ce_loss(
+                torch.cat(all_node_pred), torch.cat(all_node_gt)
+            )
 
-        # Total loss (for convenience)
-        losses["total"] = sum(losses.values())
+        # Temporal inertia loss (anti-jitter for unseen predictions)
+        if self.lambda_smooth > 0:
+            losses["smooth"] = self._compute_smoothness_loss(predictions, visibility_mask_seq, corners_seq) * self.lambda_smooth
+
+        # Total
+        losses["total"] = sum(v for v in losses.values() if isinstance(v, torch.Tensor) and v.requires_grad)
 
         return losses
 
-    def _compute_relationship_losses(
-        self,
-        att_preds, att_gts,
-        spa_preds, spa_gts,
-        con_preds, con_gts,
-        device,
-    ) -> Dict[str, torch.Tensor]:
+    def _compute_relationship_losses(self, att_p, att_g, spa_p, spa_g, con_p, con_g, device, smoothed_bce=False):
         """Compute attention/spatial/contacting losses from accumulated tensors."""
         losses = {}
         zero = torch.tensor(0.0, device=device, requires_grad=True)
 
-        # Attention (CE loss)
-        if att_preds:
-            att_p = torch.cat(att_preds, dim=0)
-            att_g = torch.cat(att_gts, dim=0)
-            if len(att_g) > 0:
-                losses[const.ATTENTION_RELATION_LOSS] = self._ce_loss(att_p, att_g)
+        if att_p:
+            all_att_pred = torch.cat(att_p)
+            all_att_gt = torch.cat(att_g)
+            if self._label_smoother is not None and smoothed_bce:
+                # For CE: use KL divergence with smoothed targets
+                smoothed_att = self._label_smoother.smooth_ce_target(all_att_gt, 3)
+                losses["att"] = self._kl_loss(F.log_softmax(all_att_pred, dim=-1), smoothed_att)
             else:
-                losses[const.ATTENTION_RELATION_LOSS] = zero
+                losses["att"] = self._ce_loss(all_att_pred, all_att_gt)
         else:
-            losses[const.ATTENTION_RELATION_LOSS] = zero
+            losses["att"] = zero
 
-        # Spatial (BCE loss)
-        if spa_preds:
-            spa_p = torch.cat(spa_preds, dim=0)
-            spa_g = torch.cat(spa_gts, dim=0)
-            if len(spa_g) > 0:
-                losses[const.SPATIAL_RELATION_LOSS] = self._bce_loss(spa_p, spa_g)
-            else:
-                losses[const.SPATIAL_RELATION_LOSS] = zero
+        if spa_p:
+            all_spa_pred = torch.cat(spa_p)
+            all_spa_gt = torch.cat(spa_g)
+            # BCE targets may already be smoothed for unseen
+            losses["spa"] = self._bce_loss(all_spa_pred, all_spa_gt)
         else:
-            losses[const.SPATIAL_RELATION_LOSS] = zero
+            losses["spa"] = zero
 
-        # Contacting (BCE loss)
-        if con_preds:
-            con_p = torch.cat(con_preds, dim=0)
-            con_g = torch.cat(con_gts, dim=0)
-            if len(con_g) > 0:
-                losses[const.CONTACTING_RELATION_LOSS] = self._bce_loss(con_p, con_g)
-            else:
-                losses[const.CONTACTING_RELATION_LOSS] = zero
+        if con_p:
+            all_con_pred = torch.cat(con_p)
+            all_con_gt = torch.cat(con_g)
+            losses["con"] = self._bce_loss(all_con_pred, all_con_gt)
         else:
-            losses[const.CONTACTING_RELATION_LOSS] = zero
+            losses["con"] = zero
 
         return losses
 
-    def _build_multi_label_gt(
-        self,
-        gt_list: List,
-        num_classes: int,
-        device: torch.device,
-    ) -> torch.Tensor:
+    def _compute_smoothness_loss(self, predictions, visibility_mask_seq, corners_seq):
         """
-        Convert list of GT index lists to multi-hot BCE targets.
+        Temporal inertia: penalize distribution changes for unseen objects between frames.
 
-        Args:
-            gt_list: List of K items, each a list of active class indices.
-            num_classes: Total number of classes.
-            device: Target device.
-
-        Returns:
-            (K, num_classes) float tensor with 1s at active positions.
+        KL(P_t || P_{t-1}) for unseen objects, masked by physical movement.
         """
+        device = predictions["attention_distribution"][0].device
+        T = len(predictions["attention_distribution"])
+        smooth_loss = torch.tensor(0.0, device=device)
+        count = 0
+
+        for t in range(1, T):
+            att_curr = predictions["attention_distribution"][t]
+            att_prev = predictions["attention_distribution"][t - 1]
+
+            if att_curr.shape[0] == 0 or att_prev.shape[0] == 0:
+                continue
+
+            # Only penalize if same number of predictions (same object set)
+            if att_curr.shape != att_prev.shape:
+                continue
+
+            # Movement masking: skip if wireframe proves physical movement
+            if corners_seq is not None and t > 0:
+                centroids_curr = corners_seq[t].mean(dim=1)
+                centroids_prev = corners_seq[t - 1].mean(dim=1)
+                if centroids_curr.shape == centroids_prev.shape:
+                    movement = torch.norm(centroids_curr - centroids_prev, dim=-1)
+                    # Average movement — skip entire frame if lots of motion
+                    if movement.mean() > self.movement_thresh:
+                        continue
+
+            # KL divergence between consecutive distributions
+            p_curr = F.log_softmax(att_curr, dim=-1)
+            p_prev = F.softmax(att_prev.detach(), dim=-1)
+            smooth_loss = smooth_loss + F.kl_div(p_curr, p_prev, reduction='batchmean')
+            count += 1
+
+        return smooth_loss / max(count, 1)
+
+    def _build_multi_label_gt(self, gt_list, num_classes, device):
+        """Convert list of GT index lists to multi-hot BCE targets."""
         K = len(gt_list)
         if K == 0:
             return torch.zeros(0, num_classes, device=device)
-
         target = torch.zeros(K, num_classes, dtype=torch.float32, device=device)
         for i, indices in enumerate(gt_list):
             if isinstance(indices, torch.Tensor):

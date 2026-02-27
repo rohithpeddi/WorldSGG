@@ -16,13 +16,13 @@ import torch
 import torch.nn as nn
 from typing import Dict
 
-from .config import AmnesicGNNConfig
 from .amnesic_tokenizer import AmnesicTokenizer
 from .spatial_gnn import SpatialGNN
 
 # Reuse from GL-STGN
-from lib.supervised.worldsgg.gl_stgn.global_structural_encoder import GlobalStructuralEncoder
-from lib.supervised.worldsgg.gl_stgn.prediction_heads import NodePredictor, EdgePredictor
+from lib.supervised.worldsgg.worldsgg_base import (
+    GlobalStructuralEncoder, NodePredictor, EdgePredictor,
+)
 
 
 class AmnesicGNN(nn.Module):
@@ -42,7 +42,7 @@ class AmnesicGNN(nn.Module):
 
     def __init__(
         self,
-        config: AmnesicGNNConfig,
+        config,
         num_object_classes: int = 37,
         attention_class_num: int = 3,
         spatial_class_num: int = 6,

@@ -16,11 +16,11 @@ import torch
 import torch.nn as nn
 from typing import Any, Dict, List, Optional
 
-from .config import GLSTGNConfig
-from .global_structural_encoder import GlobalStructuralEncoder
 from .memory_bank import PersistentWorldMemoryBank
 from .graph_transformer import RelationalGraphTransformer
-from .prediction_heads import NodePredictor, EdgePredictor
+from lib.supervised.worldsgg.worldsgg_base import (
+    GlobalStructuralEncoder, NodePredictor, EdgePredictor,
+)
 
 
 class GLSTGN(nn.Module):
@@ -201,13 +201,29 @@ class GLSTGN(nn.Module):
                 valid_mask=valid_t,
             )  # (N_t, d_memory)
 
-            # --- Step 4: Predict scene graph ---
-            # Node classification
+            # --- Step 4: Memory Shielding ---
+            # For visible pairs: enriched flows gradients to GRU (normal)
+            # For unseen pairs: enriched.detach() → only MLP trains, GRU protected
+            enriched_detached = enriched.detach()
+
+            # --- Step 5: Predict scene graph ---
+            # Node classification (uses full enriched)
             node_logits = self.node_predictor(enriched)  # (N_t, num_classes)
 
-            # Edge prediction
+            # Edge prediction — use detached for unseen pairs
+            # The loss module handles which edges are "unseen" based on visibility_mask
+            # But we also produce detached edge predictions to enable the loss to
+            # apply memory shielding selectively
             edge_out = self.edge_predictor(
                 enriched_states=enriched,
+                person_idx=person_idx_t,
+                object_idx=object_idx_t,
+                corners=corners_t,
+            )
+
+            # Also produce detached predictions for unseen edges
+            edge_out_detached = self.edge_predictor(
+                enriched_states=enriched_detached,
                 person_idx=person_idx_t,
                 object_idx=object_idx_t,
                 corners=corners_t,
@@ -220,9 +236,25 @@ class GLSTGN(nn.Module):
             outputs["contacting_distribution"].append(edge_out["contacting_distribution"])
             outputs["memory_states"].append(memory.detach().clone())
 
+            # Detached predictions for memory-shielded unseen loss
+            if "attention_distribution_detached" not in outputs:
+                outputs["attention_distribution_detached"] = []
+                outputs["spatial_distribution_detached"] = []
+                outputs["contacting_distribution_detached"] = []
+            outputs["attention_distribution_detached"].append(edge_out_detached["attention_distribution"])
+            outputs["spatial_distribution_detached"].append(edge_out_detached["spatial_distribution"])
+            outputs["contacting_distribution_detached"].append(edge_out_detached["contacting_distribution"])
+
         return outputs
 
     def reset_memory(self):
         """Reset memory bank state (call between videos)."""
         # Memory is created fresh in forward() when memory=None
         pass
+
+    def detach_memory(self):
+        """Detach memory for BPTT truncation (called between chunks)."""
+        # Memory is local to forward(), so this is a no-op.
+        # BPTT truncation is handled by the training loop.
+        pass
+

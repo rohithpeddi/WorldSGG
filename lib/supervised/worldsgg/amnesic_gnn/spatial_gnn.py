@@ -11,7 +11,7 @@ when there is zero temporal memory.
 import torch
 import torch.nn as nn
 
-from lib.supervised.worldsgg.gl_stgn.graph_transformer import SpatialPositionalEncoding
+from lib.supervised.worldsgg.worldsgg_base import SpatialPositionalEncoding
 
 
 class SpatialGNN(nn.Module):

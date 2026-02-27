@@ -1,36 +1,44 @@
 """
-LKS Buffer Loss
-=================
+LKS Buffer Loss — VLM Noisy Label Training
+============================================
 
-Standard CE/BCE loss with stratified Vis-Vis / Vis-Unseen / Unseen-Unseen
-evaluation. Identical structure to AmnesicGNNLoss — reused for Baseline 1.
+Same stratified structure as AmnesicGNNLoss (they test the same hypothesis).
+
+  Vis-Vis: full loss on clean manual labels
+  Vis-Unseen / Unseen-Unseen: λ_vlm weighted, smoothed, physics-vetoed
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Dict, List, Optional
 
 from constants import Constants as const
+from lib.supervised.worldsgg.worldsgg_base import PhysicsVeto, LabelSmoother
 
 
 class LKSLoss(nn.Module):
-    """
-    Standard loss with three-bucket stratified evaluation.
 
-    Same as AmnesicGNNLoss — no λ weighting, uniform loss across buckets.
-    The stratified metrics reveal where passive memory helps vs. fails.
-
-    Args:
-        bce_loss: Use BCE for spatial/contacting.
-        mode: Task mode.
-    """
-
-    def __init__(self, bce_loss: bool = True, mode: str = "predcls"):
+    def __init__(
+        self,
+        lambda_vlm: float = 0.2,
+        label_smoothing: float = 0.2,
+        use_physics_veto: bool = True,
+        physics_veto_thresh: float = 2.0,
+        bce_loss: bool = True,
+        mode: str = "predcls",
+    ):
         super().__init__()
+        self.lambda_vlm = lambda_vlm
         self.bce_loss = bce_loss
         self.mode = mode
+
         self._ce_loss = nn.CrossEntropyLoss()
         self._bce_loss = nn.BCELoss()
+        self._kl_loss = nn.KLDivLoss(reduction='batchmean')
+
+        self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
+        self._physics_veto = PhysicsVeto(dist_thresh=physics_veto_thresh) if use_physics_veto else None
 
     def forward(
         self,
@@ -42,9 +50,9 @@ class LKSLoss(nn.Module):
         person_idx: torch.Tensor,
         object_idx: torch.Tensor,
         valid_mask: torch.Tensor,
+        corners: torch.Tensor = None,
         gt_node_labels: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Compute loss for a single frame with stratified tracking."""
         device = predictions["attention_distribution"].device
         K = predictions["attention_distribution"].shape[0]
         zero = torch.tensor(0.0, device=device, requires_grad=True)
@@ -69,20 +77,68 @@ class LKSLoss(nn.Module):
         vis_unseen = p_vis ^ o_vis
         unseen_unseen = ~p_vis & ~o_vis
 
-        for bucket_name, mask in [("vis_vis", vis_vis), ("vis_unseen", vis_unseen), ("unseen_unseen", unseen_unseen)]:
+        # Vis-Vis: standard loss
+        if vis_vis.any():
+            losses["vis_vis_att"] = self._ce_loss(att_pred[vis_vis], att_gt[vis_vis])
+            losses["vis_vis_spa"] = self._bce_loss(spa_pred[vis_vis], spa_gt[vis_vis])
+            losses["vis_vis_con"] = self._bce_loss(con_pred[vis_vis], con_gt[vis_vis])
+        else:
+            losses["vis_vis_att"] = zero
+            losses["vis_vis_spa"] = zero
+            losses["vis_vis_con"] = zero
+
+        # Vis-Unseen / Unseen-Unseen: VLM noise handling
+        for bucket_name, mask in [("vis_unseen", vis_unseen), ("unseen_unseen", unseen_unseen)]:
             if mask.any():
-                losses[f"{bucket_name}_att"] = self._ce_loss(att_pred[mask], att_gt[mask])
-                losses[f"{bucket_name}_spa"] = self._bce_loss(spa_pred[mask], spa_gt[mask])
-                losses[f"{bucket_name}_con"] = self._bce_loss(con_pred[mask], con_gt[mask])
+                b_att_pred = att_pred[mask]
+                b_att_gt = att_gt[mask]
+                b_spa_pred = spa_pred[mask]
+                b_spa_gt = spa_gt[mask]
+                b_con_pred = con_pred[mask]
+                b_con_gt = con_gt[mask]
+
+                # Physics veto
+                if self._physics_veto is not None and corners is not None:
+                    keep = self._physics_veto.compute_veto_mask(
+                        corners, person_idx[mask], object_idx[mask], b_con_pred
+                    )
+                    if not keep.any():
+                        losses[f"{bucket_name}_att"] = zero
+                        losses[f"{bucket_name}_spa"] = zero
+                        losses[f"{bucket_name}_con"] = zero
+                        continue
+                    b_att_pred, b_att_gt = b_att_pred[keep], b_att_gt[keep]
+                    b_spa_pred, b_spa_gt = b_spa_pred[keep], b_spa_gt[keep]
+                    b_con_pred, b_con_gt = b_con_pred[keep], b_con_gt[keep]
+
+                # Label smoothing
+                if self._label_smoother is not None:
+                    b_spa_gt = self._label_smoother.smooth_bce_target(b_spa_gt)
+                    b_con_gt = self._label_smoother.smooth_bce_target(b_con_gt)
+                    smoothed = self._label_smoother.smooth_ce_target(b_att_gt, 3)
+                    losses[f"{bucket_name}_att"] = self._kl_loss(
+                        F.log_softmax(b_att_pred, dim=-1), smoothed
+                    ) * self.lambda_vlm
+                else:
+                    losses[f"{bucket_name}_att"] = self._ce_loss(b_att_pred, b_att_gt) * self.lambda_vlm
+
+                losses[f"{bucket_name}_spa"] = self._bce_loss(b_spa_pred, b_spa_gt) * self.lambda_vlm
+                losses[f"{bucket_name}_con"] = self._bce_loss(b_con_pred, b_con_gt) * self.lambda_vlm
             else:
                 losses[f"{bucket_name}_att"] = zero
                 losses[f"{bucket_name}_spa"] = zero
                 losses[f"{bucket_name}_con"] = zero
 
-        # Total relationship loss
-        losses[const.ATTENTION_RELATION_LOSS] = self._ce_loss(att_pred, att_gt)
-        losses[const.SPATIAL_RELATION_LOSS] = self._bce_loss(spa_pred, spa_gt)
-        losses[const.CONTACTING_RELATION_LOSS] = self._bce_loss(con_pred, con_gt)
+        # Aggregates
+        losses[const.ATTENTION_RELATION_LOSS] = (
+            losses["vis_vis_att"] + losses["vis_unseen_att"] + losses["unseen_unseen_att"]
+        )
+        losses[const.SPATIAL_RELATION_LOSS] = (
+            losses["vis_vis_spa"] + losses["vis_unseen_spa"] + losses["unseen_unseen_spa"]
+        )
+        losses[const.CONTACTING_RELATION_LOSS] = (
+            losses["vis_vis_con"] + losses["vis_unseen_con"] + losses["unseen_unseen_con"]
+        )
 
         # Node classification
         if gt_node_labels is not None and self.mode in [const.SGCLS, const.SGDET]:

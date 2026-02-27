@@ -1,17 +1,14 @@
 """
-Amnesic GNN Loss with Stratified Evaluation
+Amnesic GNN Loss — VLM Noisy Label Training
 =============================================
 
-Standard CE/BCE loss for scene graph prediction, with explicit tracking
-of three edge categories to quantify Baseline 2's limitations:
+Standard CE/BCE loss with:
+  1. λ_vlm discounting for non-vis_vis buckets
+  2. Label smoothing on VLM pseudo-labels
+  3. Physics veto for geometrically impossible edges
 
-  1. Vis-Vis:       Both objects in camera FOV
-  2. Vis-Unseen:    One visible, one outside FOV
-  3. Unseen-Unseen: Both objects outside camera FOV
-
-All three contribute equally to the total loss (no λ weighting).
-The stratified metrics are the scientific output proving the need for
-temporal memory in Methods 1 & 2.
+Three-bucket stratified evaluation (Vis-Vis, Vis-Unseen, Unseen-Unseen)
+remains for ablation analysis.
 """
 
 import torch
@@ -20,24 +17,37 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional
 
 from constants import Constants as const
+from lib.supervised.worldsgg.worldsgg_base import PhysicsVeto, LabelSmoother
 
 
 class AmnesicGNNLoss(nn.Module):
     """
-    Standard loss with three-bucket stratified evaluation.
+    Stratified loss with VLM noise handling.
 
-    Args:
-        bce_loss: Use BCE for spatial/contacting (True) or MultiLabelMargin (False).
-        mode: Task mode (predcls/sgcls/sgdet).
+    Vis-Vis: full CE/BCE on clean manual labels.
+    Vis-Unseen / Unseen-Unseen: λ_vlm weighted, smoothed, physics-vetoed.
     """
 
-    def __init__(self, bce_loss: bool = True, mode: str = "predcls"):
+    def __init__(
+        self,
+        lambda_vlm: float = 0.2,
+        label_smoothing: float = 0.2,
+        use_physics_veto: bool = True,
+        physics_veto_thresh: float = 2.0,
+        bce_loss: bool = True,
+        mode: str = "predcls",
+    ):
         super().__init__()
+        self.lambda_vlm = lambda_vlm
         self.bce_loss = bce_loss
         self.mode = mode
 
         self._ce_loss = nn.CrossEntropyLoss()
         self._bce_loss = nn.BCELoss()
+        self._kl_loss = nn.KLDivLoss(reduction='batchmean')
+
+        self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
+        self._physics_veto = PhysicsVeto(dist_thresh=physics_veto_thresh) if use_physics_veto else None
 
     def forward(
         self,
@@ -49,29 +59,10 @@ class AmnesicGNNLoss(nn.Module):
         person_idx: torch.Tensor,
         object_idx: torch.Tensor,
         valid_mask: torch.Tensor,
+        corners: torch.Tensor = None,
         gt_node_labels: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Compute loss for a single frame with stratified tracking.
-
-        Args:
-            predictions: dict from AmnesicGNN.forward():
-                node_logits: (N, num_classes)
-                attention_distribution: (K, 3)
-                spatial_distribution: (K, 6)
-                contacting_distribution: (K, 17)
-            gt_attention: (K,) long — attention class per pair.
-            gt_spatial: List[List[int]] — spatial rel indices per pair.
-            gt_contacting: List[List[int]] — contacting rel indices per pair.
-            visibility_mask: (N,) bool — per-object visibility.
-            person_idx: (K,) — person indices.
-            object_idx: (K,) — object indices.
-            valid_mask: (N,) bool — valid object mask.
-            gt_node_labels: Optional (N,) long — GT object classes.
-
-        Returns:
-            dict of named losses + stratified breakdowns.
-        """
+        """Compute loss for a single frame with stratified VLM noise handling."""
         device = predictions["attention_distribution"].device
         K = predictions["attention_distribution"].shape[0]
         zero = torch.tensor(0.0, device=device, requires_grad=True)
@@ -81,39 +72,89 @@ class AmnesicGNNLoss(nn.Module):
             losses["total"] = zero
             return losses
 
-        att_pred = predictions["attention_distribution"]  # (K, 3)
-        spa_pred = predictions["spatial_distribution"]    # (K, 6)
-        con_pred = predictions["contacting_distribution"]  # (K, 17)
+        att_pred = predictions["attention_distribution"]
+        spa_pred = predictions["spatial_distribution"]
+        con_pred = predictions["contacting_distribution"]
 
         att_gt = gt_attention.to(device)
         spa_gt = self._build_multi_label_gt(gt_spatial, 6, device)
         con_gt = self._build_multi_label_gt(gt_contacting, 17, device)
 
         # --- Classify pairs into 3 buckets ---
-        p_vis = visibility_mask[person_idx]   # (K,) — is person visible?
-        o_vis = visibility_mask[object_idx]   # (K,) — is object visible?
+        p_vis = visibility_mask[person_idx]
+        o_vis = visibility_mask[object_idx]
+        vis_vis = p_vis & o_vis
+        vis_unseen = p_vis ^ o_vis
+        unseen_unseen = ~p_vis & ~o_vis
 
-        vis_vis = p_vis & o_vis               # Both visible
-        vis_unseen = p_vis ^ o_vis            # Exactly one visible
-        unseen_unseen = ~p_vis & ~o_vis       # Both unseen
+        # --- Vis-Vis: standard CE/BCE on clean manual labels ---
+        if vis_vis.any():
+            losses["vis_vis_att"] = self._ce_loss(att_pred[vis_vis], att_gt[vis_vis])
+            losses["vis_vis_spa"] = self._bce_loss(spa_pred[vis_vis], spa_gt[vis_vis])
+            losses["vis_vis_con"] = self._bce_loss(con_pred[vis_vis], con_gt[vis_vis])
+        else:
+            losses["vis_vis_att"] = zero
+            losses["vis_vis_spa"] = zero
+            losses["vis_vis_con"] = zero
 
-        # --- Compute per-bucket losses ---
-        for bucket_name, mask in [("vis_vis", vis_vis), ("vis_unseen", vis_unseen), ("unseen_unseen", unseen_unseen)]:
+        # --- Vis-Unseen & Unseen-Unseen: VLM noise handling ---
+        for bucket_name, mask in [("vis_unseen", vis_unseen), ("unseen_unseen", unseen_unseen)]:
             if mask.any():
-                losses[f"{bucket_name}_att"] = self._ce_loss(att_pred[mask], att_gt[mask])
-                losses[f"{bucket_name}_spa"] = self._bce_loss(spa_pred[mask], spa_gt[mask])
-                losses[f"{bucket_name}_con"] = self._bce_loss(con_pred[mask], con_gt[mask])
+                b_att_pred = att_pred[mask]
+                b_att_gt = att_gt[mask]
+                b_spa_pred = spa_pred[mask]
+                b_spa_gt = spa_gt[mask]
+                b_con_pred = con_pred[mask]
+                b_con_gt = con_gt[mask]
+
+                # Physics veto
+                if self._physics_veto is not None and corners is not None:
+                    b_pidx = person_idx[mask]
+                    b_oidx = object_idx[mask]
+                    keep = self._physics_veto.compute_veto_mask(corners, b_pidx, b_oidx, b_con_pred)
+                    if not keep.any():
+                        losses[f"{bucket_name}_att"] = zero
+                        losses[f"{bucket_name}_spa"] = zero
+                        losses[f"{bucket_name}_con"] = zero
+                        continue
+                    b_att_pred = b_att_pred[keep]
+                    b_att_gt = b_att_gt[keep]
+                    b_spa_pred = b_spa_pred[keep]
+                    b_spa_gt = b_spa_gt[keep]
+                    b_con_pred = b_con_pred[keep]
+                    b_con_gt = b_con_gt[keep]
+
+                # Label smoothing
+                if self._label_smoother is not None:
+                    b_spa_gt = self._label_smoother.smooth_bce_target(b_spa_gt)
+                    b_con_gt = self._label_smoother.smooth_bce_target(b_con_gt)
+                    # CE: use KL with smoothed target
+                    smoothed_att = self._label_smoother.smooth_ce_target(b_att_gt, 3)
+                    losses[f"{bucket_name}_att"] = self._kl_loss(
+                        F.log_softmax(b_att_pred, dim=-1), smoothed_att
+                    ) * self.lambda_vlm
+                else:
+                    losses[f"{bucket_name}_att"] = self._ce_loss(b_att_pred, b_att_gt) * self.lambda_vlm
+
+                losses[f"{bucket_name}_spa"] = self._bce_loss(b_spa_pred, b_spa_gt) * self.lambda_vlm
+                losses[f"{bucket_name}_con"] = self._bce_loss(b_con_pred, b_con_gt) * self.lambda_vlm
             else:
                 losses[f"{bucket_name}_att"] = zero
                 losses[f"{bucket_name}_spa"] = zero
                 losses[f"{bucket_name}_con"] = zero
 
-        # --- Total relationship loss (uniform — no λ weighting) ---
-        losses[const.ATTENTION_RELATION_LOSS] = self._ce_loss(att_pred, att_gt) if K > 0 else zero
-        losses[const.SPATIAL_RELATION_LOSS] = self._bce_loss(spa_pred, spa_gt) if K > 0 else zero
-        losses[const.CONTACTING_RELATION_LOSS] = self._bce_loss(con_pred, con_gt) if K > 0 else zero
+        # --- Aggregate relationship losses ---
+        losses[const.ATTENTION_RELATION_LOSS] = (
+            losses["vis_vis_att"] + losses["vis_unseen_att"] + losses["unseen_unseen_att"]
+        )
+        losses[const.SPATIAL_RELATION_LOSS] = (
+            losses["vis_vis_spa"] + losses["vis_unseen_spa"] + losses["unseen_unseen_spa"]
+        )
+        losses[const.CONTACTING_RELATION_LOSS] = (
+            losses["vis_vis_con"] + losses["vis_unseen_con"] + losses["unseen_unseen_con"]
+        )
 
-        # --- Node classification ---
+        # Node classification
         if gt_node_labels is not None and self.mode in [const.SGCLS, const.SGDET]:
             node_pred = predictions["node_logits"]
             node_gt = gt_node_labels.to(device)

@@ -18,15 +18,15 @@ import torch
 import torch.nn as nn
 from typing import Dict, List, Optional
 
-from .config import AMWAEConfig
 from .scaffold_tokenizer import ScaffoldTokenizer
 from .episodic_memory import EpisodicMemoryBank
 from .associative_retriever import AssociativeRetriever
 from .contextual_diffusion import ContextualDiffusion
 
 # Reuse from GL-STGN
-from lib.supervised.worldsgg.gl_stgn.global_structural_encoder import GlobalStructuralEncoder
-from lib.supervised.worldsgg.gl_stgn.prediction_heads import NodePredictor, EdgePredictor
+from lib.supervised.worldsgg.worldsgg_base import (
+    GlobalStructuralEncoder, NodePredictor, EdgePredictor,
+)
 
 
 class AMWAE(nn.Module):
@@ -47,7 +47,7 @@ class AMWAE(nn.Module):
 
     def __init__(
         self,
-        config: AMWAEConfig,
+        config,
         num_object_classes: int = 37,
         attention_class_num: int = 3,
         spatial_class_num: int = 6,
@@ -155,6 +155,9 @@ class AMWAE(nn.Module):
             "retrieved_tokens": [],
             "attn_weights": [],
             "memory_object_ids": [],
+            # Simulated-unseen clean fine-tuning outputs
+            "simulated_unseen_predictions": [],
+            "simulated_unseen_gt": [],
         }
 
         for t in range(T):
@@ -182,23 +185,18 @@ class AMWAE(nn.Module):
                 valid_mask=valid_t,
                 p_mask_visible=p_mask_visible if self.training else 0.0,
             )
-            # hybrid_tokens: (N_t, d_model)
-            # is_masked_t: (N_t,) bool
-            # original_visual_t: (N_t, d_visual) — GT features for recon loss
 
             # --- Step 3: Store visible (unmasked) tokens in memory ---
-            # Build unmasked tokens for storage (using original visual, not [MASK])
             with torch.no_grad():
                 unmasked_tokens = self.scaffold_tokenizer.fusion_proj(
                     torch.cat([struct_tokens, self.scaffold_tokenizer.visual_projector(visual_t)], dim=-1)
                 )
             object_slot_ids = torch.arange(N_t, device=device)
 
-            # Store visible tokens BEFORE retrieval (use actual visibility, not training mask)
             self.memory_bank.store(
                 tokens=unmasked_tokens,
                 object_slot_ids=object_slot_ids,
-                visibility_mask=vis_t,  # Store based on actual FOV, not training mask
+                visibility_mask=vis_t,
                 valid_mask=valid_t,
                 frame_id=t,
             )
@@ -211,15 +209,13 @@ class AMWAE(nn.Module):
                 memory_tokens=mem_tokens,
                 memory_valid=mem_valid,
             )
-            # completed_tokens: (N_t, d_model) — with memory-retrieved features
-            # attn_weights_t: (N_t, M) — attention weights
 
             # --- Step 5: Contextual diffusion (self-attention) ---
             enriched = self.diffusion(
                 tokens=completed_tokens,
                 corners=corners_t,
                 valid_mask=valid_t,
-            )  # (N_t, d_model)
+            )
 
             # --- Step 6: Scene graph prediction ---
             node_logits = self.node_predictor(enriched)
@@ -242,8 +238,66 @@ class AMWAE(nn.Module):
             outputs["attn_weights"].append(attn_weights_t)
             outputs["memory_object_ids"].append(mem_obj_ids)
 
+            # --- Step 7: Simulated-Unseen (training only) ---
+            # Artificially mask p_simulate_unseen of VISIBLE objects
+            # Force retrieval → predict SG → loss against perfect manual GT
+            if self.training and self.config.p_simulate_unseen > 0:
+                p_sim = getattr(self.config, 'p_simulate_unseen', 0.25)
+                n_visible = vis_t.sum().item()
+                n_to_mask = max(1, int(n_visible * p_sim))
+
+                if n_visible > 1:
+                    visible_indices = torch.where(vis_t & valid_t)[0]
+                    perm = torch.randperm(len(visible_indices), device=device)
+                    sim_mask_indices = visible_indices[perm[:n_to_mask]]
+
+                    # Create simulated visibility mask (hide selected visible objects)
+                    sim_vis_t = vis_t.clone()
+                    sim_vis_t[sim_mask_indices] = False
+
+                    # Re-tokenize with simulated mask
+                    sim_tokens, sim_is_masked, _ = self.scaffold_tokenizer(
+                        geometry_tokens=struct_tokens,
+                        visual_features=visual_t,
+                        visibility_mask=sim_vis_t,
+                        valid_mask=valid_t,
+                        p_mask_visible=0.0,  # No additional random masking
+                    )
+
+                    # Retrieve from memory
+                    sim_completed, _ = self.retriever(
+                        tokens=sim_tokens,
+                        memory_tokens=mem_tokens,
+                        memory_valid=mem_valid,
+                    )
+
+                    # Diffuse
+                    sim_enriched = self.diffusion(
+                        tokens=sim_completed,
+                        corners=corners_t,
+                        valid_mask=valid_t,
+                    )
+
+                    # Predict — only for the simulated-masked object pairs
+                    sim_edge_out = self.edge_predictor(
+                        enriched_states=sim_enriched,
+                        person_idx=person_idx_t,
+                        object_idx=object_idx_t,
+                        corners=corners_t,
+                    )
+
+                    outputs["simulated_unseen_predictions"].append(sim_edge_out)
+                    outputs["simulated_unseen_gt"].append(None)  # GT filled by loss module
+                else:
+                    outputs["simulated_unseen_predictions"].append(None)
+                    outputs["simulated_unseen_gt"].append(None)
+            else:
+                outputs["simulated_unseen_predictions"].append(None)
+                outputs["simulated_unseen_gt"].append(None)
+
         return outputs
 
     def reset_memory(self):
         """Reset episodic memory bank (call between videos)."""
         self.memory_bank.reset()
+
