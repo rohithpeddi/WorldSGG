@@ -523,18 +523,23 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                 # Ensure label is consistent
                 filled_obj["label"] = lbl
 
-                # Attach FINAL-coords bbox (aabb_final) from WORLD corners
-                if "aabb_floor_aligned" in filled_obj:
-                    bbox_3d = filled_obj["aabb_floor_aligned"]
+                # Attach FINAL-coords bbox (obb_final) from WORLD OBB corners
+                # Prefer obb_floor_parallel; fall back to aabb_floor_aligned
+                corners_world = None
+                obb_data = filled_obj.get("obb_floor_parallel", None)
+                if obb_data and obb_data.get("corners_world"):
                     corners_world = np.asarray(
-                        bbox_3d.get("corners_world", []), dtype=np.float32
+                        obb_data["corners_world"], dtype=np.float32
                     )
-                    if corners_world.size == 0:
-                        corners_final = corners_world
-                    else:
-                        corners_final = (R_final @ corners_world.T).T + t_final[None, :]
+                elif "aabb_floor_aligned" in filled_obj:
+                    bbox_3d = filled_obj["aabb_floor_aligned"]
+                    cw = bbox_3d.get("corners_world", [])
+                    if len(cw) > 0:
+                        corners_world = np.asarray(cw, dtype=np.float32)
 
-                    filled_obj["aabb_final"] = {
+                if corners_world is not None and corners_world.size > 0:
+                    corners_final = (R_final @ corners_world.T).T + t_final[None, :]
+                    filled_obj["obb_final"] = {
                         "corners_final": corners_final,
                     }
 
@@ -576,7 +581,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
 
         static_union_map_final: Dict[str, np.ndarray] = {}
 
-        # 1) Compute union bbox (FINAL coords) per static label
+        # 1) Compute union bbox (FINAL coords) per static label using OBB corners
         for lbl in static_labels_in_3d:
             all_corners_list_final: List[np.ndarray] = []
 
@@ -586,12 +591,12 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                     if obj.get("label") != lbl:
                         continue
 
-                    aabb_final = obj.get("aabb_final", None)
-                    if not aabb_final:
+                    obb_final = obj.get("obb_final", None)
+                    if not obb_final:
                         continue
 
                     corners_final = np.asarray(
-                        aabb_final.get("corners_final", []), dtype=np.float32
+                        obb_final.get("corners_final", []), dtype=np.float32
                     )
                     if corners_final.size == 0:
                         continue
@@ -601,7 +606,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             if not all_corners_list_final:
                 print(
                     f"[world4d][{video_id}] WARNING: static label '{lbl}' has no "
-                    "aabb_final corners available; skipping union."
+                    "obb_final corners available; skipping union."
                 )
             else:
                 all_pts_final = np.concatenate(all_corners_list_final, axis=0)  # (N*8, 3)
@@ -626,14 +631,14 @@ class FrameToWorldAnnotations(FrameToWorldBase):
 
                     union_corners_final = static_union_map_final[lbl]  # (8,3)
 
-                    # Ensure aabb_final exists, then overwrite only FINAL box
-                    if "aabb_final" not in obj:
-                        obj["aabb_final"] = {}
+                    # Ensure obb_final exists, then overwrite only FINAL box
+                    if "obb_final" not in obj:
+                        obj["obb_final"] = {}
 
-                    obj["aabb_final"]["corners_final"] = union_corners_final
+                    obj["obb_final"]["corners_final"] = union_corners_final
 
                     # NOTE: we intentionally do NOT touch
-                    # obj["aabb_floor_aligned"]["corners_world"]
+                    # obj["obb_floor_parallel"]["corners_world"]
                     # so WORLD-space boxes remain as originally constructed.
 
         # ----------------------------------------------------------------------
@@ -872,7 +877,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                 center = [0.0, 0.0, 0.0]
             obj = {
                 "label": label,
-                "aabb_final": {"corners_final": corners_list},
+                "obb_final": {"corners_final": corners_list},
                 "corners_final": corners_list,  # keep both for compatibility
                 "center": center,
                 "color": color if color is not None else [255, 180, 0],
@@ -955,12 +960,20 @@ class FrameToWorldAnnotations(FrameToWorldBase):
 
                 corners_final = None
 
-                # Prefer existing aabb_final if present
-                aabb_final = obj_raw.get("aabb_final", None)
-                if isinstance(aabb_final, dict) and aabb_final.get("corners_final") is not None:
-                    corners_final = aabb_final.get("corners_final")
+                # Prefer existing obb_final if present
+                obb_final = obj_raw.get("obb_final", None)
+                if isinstance(obb_final, dict) and obb_final.get("corners_final") is not None:
+                    corners_final = obb_final.get("corners_final")
 
-                # Otherwise compute FINAL from WORLD corners if available
+                # Otherwise compute FINAL from WORLD OBB corners if available
+                if corners_final is None:
+                    obb_world = obj_raw.get("obb_floor_parallel", None)
+                    if isinstance(obb_world, dict) and obb_world.get("corners_world") is not None:
+                        corners_world = np.asarray(obb_world["corners_world"], dtype=np.float32)
+                        if corners_world.size > 0:
+                            corners_final = (R_final @ corners_world.T).T + t_final[None, :]
+
+                # Fall back to aabb_floor_aligned if OBB not available
                 if corners_final is None:
                     aabb_world = obj_raw.get("aabb_floor_aligned", None)
                     if isinstance(aabb_world, dict) and aabb_world.get("corners_world") is not None:
@@ -990,7 +1003,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
     ) -> Dict[str, Any]:
         """
         Normalize final_alignment frames to:
-          frames_data[<frame>.png] = {"objects": [ {label, aabb_final:{corners_final}, ...}, ... ]}
+          frames_data[<frame>.png] = {"objects": [ {label, obb_final:{corners_final}, ...}, ... ]}
 
         Then apply the SAME filling + static union logic via _apply_world4d_filling.
         """
@@ -1023,10 +1036,10 @@ class FrameToWorldAnnotations(FrameToWorldBase):
         def _obj_norm(obj: Dict[str, Any]) -> Dict[str, Any]:
             lbl = obj.get("label", "Object")
 
-            # accept either "corners" or "corners_final" or nested aabb_final
+            # accept either "corners" or "corners_final" or nested obb_final
             corners = None
-            if isinstance(obj.get("aabb_final"), dict) and obj["aabb_final"].get("corners_final") is not None:
-                corners = obj["aabb_final"]["corners_final"]
+            if isinstance(obj.get("obb_final"), dict) and obj["obb_final"].get("corners_final") is not None:
+                corners = obj["obb_final"]["corners_final"]
             elif obj.get("corners_final") is not None:
                 corners = obj.get("corners_final")
             elif obj.get("corners") is not None:
@@ -1045,7 +1058,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
 
             out = dict(obj)
             out["label"] = lbl
-            out["aabb_final"] = {"corners_final": corners_list}
+            out["obb_final"] = {"corners_final": corners_list}
             out["corners_final"] = corners_list
             out["center"] = center
             out["color"] = color
@@ -1123,16 +1136,16 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             return obj.get("label", None)
 
         def _get_corners_final(obj: Dict[str, Any]) -> List[List[float]]:
-            if isinstance(obj.get("aabb_final"), dict) and obj["aabb_final"].get("corners_final") is not None:
-                return obj["aabb_final"]["corners_final"]
+            if isinstance(obj.get("obb_final"), dict) and obj["obb_final"].get("corners_final") is not None:
+                return obj["obb_final"]["corners_final"]
             if obj.get("corners_final") is not None:
                 return obj["corners_final"]
             return []
 
         def _set_corners_final(obj: Dict[str, Any], corners_list: List[List[float]]) -> None:
-            if not isinstance(obj.get("aabb_final"), dict):
-                obj["aabb_final"] = {}
-            obj["aabb_final"]["corners_final"] = corners_list
+            if not isinstance(obj.get("obb_final"), dict):
+                obj["obb_final"] = {}
+            obj["obb_final"]["corners_final"] = corners_list
             obj["corners_final"] = corners_list  # keep both for compatibility
 
             if len(corners_list) > 0:
@@ -1145,12 +1158,12 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             # Avoid shared nested references that later union-overwrites would mutate across frames
             out = dict(base_obj)
 
-            # Copy aabb_final dict + corners
-            if isinstance(base_obj.get("aabb_final"), dict):
-                out["aabb_final"] = dict(base_obj["aabb_final"])
-                if out["aabb_final"].get("corners_final") is not None:
-                    out["aabb_final"]["corners_final"] = np.asarray(
-                        out["aabb_final"]["corners_final"], dtype=np.float32
+            # Copy obb_final dict + corners
+            if isinstance(base_obj.get("obb_final"), dict):
+                out["obb_final"] = dict(base_obj["obb_final"])
+                if out["obb_final"].get("corners_final") is not None:
+                    out["obb_final"]["corners_final"] = np.asarray(
+                        out["obb_final"]["corners_final"], dtype=np.float32
                     ).tolist()
 
             # Copy top-level corners_final too
@@ -1533,7 +1546,8 @@ class FrameToWorldAnnotations(FrameToWorldBase):
 
         # ----------------------------------------------------------------------
         # Transform 3D bounding boxes
-        #   - Add `aabb_final` with `corners_final` into a separate map
+        #   - Add `obb_final` with `corners_final` into a separate map
+        #   - Prefer obb_floor_parallel; fall back to aabb_floor_aligned
         # ----------------------------------------------------------------------
         frame_3dbb_map_final: Optional[Dict[str, Dict[str, Any]]] = None
         if frame_3dbb_map_world is not None:
@@ -1542,15 +1556,26 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                 objects_world = frame_rec.get("objects", [])
                 objects_final = []
                 for obj in objects_world:
-                    bbox_3d = obj["aabb_floor_aligned"]
-                    corners_world = np.asarray(
-                        bbox_3d["corners_world"], dtype=np.float32
-                    )  # (8,3)
+                    # Prefer OBB corners, fall back to AABB
+                    corners_world = None
+                    obb_data = obj.get("obb_floor_parallel", None)
+                    if obb_data and obb_data.get("corners_world"):
+                        corners_world = np.asarray(
+                            obb_data["corners_world"], dtype=np.float32
+                        )
+                    elif "aabb_floor_aligned" in obj:
+                        bbox_3d = obj["aabb_floor_aligned"]
+                        cw = bbox_3d.get("corners_world", [])
+                        if len(cw) > 0:
+                            corners_world = np.asarray(cw, dtype=np.float32)
+
+                    if corners_world is None or corners_world.size == 0:
+                        continue
 
                     corners_final = (R_final @ corners_world.T).T + t_final[None, :]
 
                     obj_final = dict(obj)
-                    obj_final["aabb_final"] = {
+                    obj_final["obb_final"] = {
                         "corners_final": corners_final,
                     }
                     # Optional: separate color for AFTER
