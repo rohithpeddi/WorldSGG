@@ -29,6 +29,7 @@ import gc
 import math
 import os
 import pickle
+import re
 import sys
 from dataclasses import dataclass, fields as dataclass_fields
 from pathlib import Path
@@ -59,13 +60,28 @@ from lib.detector.monocular3d.models.dino_mono_3d import (
 
 MODEL_TO_DIR = {"v2": "dinov2b", "v2l": "dinov2l", "v3l": "dinov3l"}
 
-# Label normalization (must match corrected_world_bbox_generator.py)
+# Label normalization: GT compound names → short form
+# (matches the normalization used in GDino detection scripts)
 LABEL_NORMALIZE_MAP = {
     "closet/cabinet": "closet",
     "cup/glass/bottle": "cup",
     "paper/notebook": "paper",
     "sofa/couch": "sofa",
     "phone/camera": "phone",
+}
+
+# Reverse mapping: GDino detection scripts expand compound GT classes into
+# individual words for the detection prompt (e.g., "closet/cabinet" → "closet", "cabinet").
+# After detection, _normalize_label in base_ag_actor.py only handles the compound form
+# and article stripping, so PKLs can contain expanded labels like "cabinet", "glass",
+# "bottle", "notebook", "couch", "camera". This map normalizes them back to GT short forms.
+GDINO_LABEL_TO_GT_LABEL = {
+    "cabinet": "closet",
+    "glass": "cup",
+    "bottle": "cup",
+    "notebook": "paper",
+    "couch": "sofa",
+    "camera": "phone",
 }
 
 DATASET_CLASSNAMES = [
@@ -141,7 +157,20 @@ def _is_empty_array(arr) -> bool:
 
 
 def _normalize_label(label: str) -> str:
-    return LABEL_NORMALIZE_MAP.get(label, label)
+    """
+    Normalize a label to the canonical GT short form.
+    Handles both:
+      1. GT compound class names (e.g. "closet/cabinet" → "closet")
+      2. GDino expanded labels (e.g. "cabinet" → "closet", "glass" → "cup")
+    """
+    label = label.lower().strip()
+    # Strip articles (matches base_ag_actor._normalize_label)
+    label = re.sub(r"^(a|an|the)\s+", "", label)
+    # First try GT compound → short form
+    label = LABEL_NORMALIZE_MAP.get(label, label)
+    # Then try GDino expanded → GT short form
+    label = GDINO_LABEL_TO_GT_LABEL.get(label, label)
+    return label
 
 
 def _compute_target_size(
@@ -358,6 +387,7 @@ class ROIFeatureExtractor:
         gt_frame_items: List[Dict[str, Any]],
         gdino_frame: Optional[Dict[str, Any]],
         threshold: float,
+        video_gt_labels: Optional[set] = None,
     ) -> Tuple[List[List[float]], List[str], List[str], List[float]]:
         """
         Collect all bboxes for a frame: GT annotations + GDino fill for missing labels.
@@ -435,8 +465,12 @@ class ROIFeatureExtractor:
 
                 gd_label_norm = _normalize_label(gd_label)
 
-                # Skip labels already in GT
+                # Skip labels already in GT for this frame
                 if gd_label_norm in gt_labels_in_frame:
+                    continue
+
+                # Only include GDino labels that exist in the video's GT annotations
+                if video_gt_labels is not None and gd_label_norm not in video_gt_labels:
                     continue
 
                 if (gd_label_norm not in best_per_label
@@ -470,6 +504,20 @@ class ROIFeatureExtractor:
         # Load GDino detections (keyed by bare frame name like "000063.png")
         gdino_preds = _load_gdino_predictions(self.cfg.data_path, video_id)
 
+        # Pre-compute the set of unique GT labels across ALL frames of this video.
+        # GDino detections will only be included if their label belongs to this set.
+        video_gt_labels = set()
+        for frame_items in gt_annotations:
+            for item in frame_items:
+                if "person_bbox" in item:
+                    video_gt_labels.add("person")
+                elif "class" in item and item["class"] is not None:
+                    cls_idx = int(item["class"])
+                    if cls_idx > 0:
+                        label = CATID_TO_NAME.get(cls_idx, None)
+                        if label is not None:
+                            video_gt_labels.add(_normalize_label(label))
+
         frames_data = {}
 
         for frame_items in gt_annotations:
@@ -501,6 +549,7 @@ class ROIFeatureExtractor:
             gdino_frame = gdino_preds.get(frame_file, None) if gdino_preds else None
             bboxes_xyxy, labels, sources, gdino_scores = self._collect_bboxes_for_frame(
                 frame_items, gdino_frame, self.cfg.gdino_score_threshold,
+                video_gt_labels=video_gt_labels,
             )
 
             if not bboxes_xyxy:
