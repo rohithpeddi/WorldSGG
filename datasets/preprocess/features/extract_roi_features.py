@@ -711,8 +711,10 @@ class ROIFeatureExtractor:
                 union_bboxes = []
                 for p_idx in person_indices:
                     p_box = scaled_bboxes[p_idx]
+                    p_label_id = label_ids[p_idx]  # always 1 (person)
                     for o_idx in object_indices:
                         o_box = scaled_bboxes[o_idx]
+                        o_label_id = label_ids[o_idx]
                         union = [
                             min(p_box[0], o_box[0]),
                             min(p_box[1], o_box[1]),
@@ -720,7 +722,7 @@ class ROIFeatureExtractor:
                             max(p_box[3], o_box[3]),
                         ]
                         union_bboxes.append(union)
-                        pair_indices.append((p_idx, o_idx))
+                        pair_indices.append((p_label_id, o_label_id))
 
                 union_tensor = torch.tensor(union_bboxes, dtype=torch.float32, device=self.device)
                 union_pooled = self.roi_pooler(features, [union_tensor], [images.image_sizes[0]])
