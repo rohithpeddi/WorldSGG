@@ -18,7 +18,7 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(__file__) + '/..')
 
 # from AG / human pipeline codebase
-from dataloader.genome.ag_dataset import StandardAG
+from dataloader.ag_dataset import StandardAG
 
 from datasets.preprocess.human.pipeline.ag_pipeline import AgPipeline
 from datasets.preprocess.human.data_config import SMPLX_PATH
@@ -32,7 +32,6 @@ from datasets.preprocess.human.pipeline.kp_utils import (
     get_smpl_joint_names,
 )
 
-from annotation_utils import _npz_open
 from datasets.preprocess.annotations.raw.bb3D_base import BBox3DBase
 from datasets.preprocess.annotations.annotation_utils import (
     get_video_belongs_to_split,
@@ -51,7 +50,8 @@ from datasets.preprocess.annotations.annotation_utils import (
     _average_sims_robust,
     _torch_inference_ctx,
     _del_and_collect,
-    _as_np
+    _as_np,
+    _npz_open
 )
 
 
@@ -1651,5 +1651,5 @@ def main_sample():
 
 
 if __name__ == "__main__":
-    # main_sample()
-    main()
+    main_sample()
+    # main()
