@@ -4,16 +4,16 @@ Monocular3D Training Entry Point — YAML Config + CLI Override
 
 Usage:
     # Default config
-    python -m lib.detector.monocular3d.train --config configs/default.yaml
+    python -m lib.detector.monocular3d.train --config configs/default_rohith.yaml
 
     # Debug (fast iteration)
-    python -m lib.detector.monocular3d.train --config configs/debug.yaml
+    python -m lib.detector.monocular3d.train --config configs/dinov2b_saurabh_separate.yaml
 
     # Override any YAML field via CLI
-    python -m lib.detector.monocular3d.train --config configs/default.yaml --lr 5e-5 --batch_size 32
+    python -m lib.detector.monocular3d.train --config configs/default_rohith.yaml --lr 5e-5 --batch_size 32
 
     # Resume from checkpoint
-    python -m lib.detector.monocular3d.train --config configs/default.yaml --ckpt checkpoint_10
+    python -m lib.detector.monocular3d.train --config configs/default_rohith.yaml --ckpt checkpoint_10
 """
 
 import argparse
@@ -110,7 +110,7 @@ def main():
     # Resolve config path relative to script dir if not absolute
     config_path = args.config
     if not os.path.isabs(config_path):
-        config_path = os.path.join(_SCRIPT_DIR, config_path)
+        config_path = os.path.join(_PROJECT_ROOT, config_path)
 
     if not os.path.isfile(config_path):
         print(f"ERROR: Config file not found: {config_path}")

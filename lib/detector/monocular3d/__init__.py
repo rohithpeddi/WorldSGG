@@ -9,7 +9,7 @@ Sub-packages:
     utils       - LocalLogger
 
 Entry points:
-    python -m lib.detector.monocular3d.train --config configs/debug.yaml
+    python -m lib.detector.monocular3d.train --config configs/dinov2b_saurabh_separate.yaml
     python -m lib.detector.monocular3d.evaluate --checkpoint ...
 """
 

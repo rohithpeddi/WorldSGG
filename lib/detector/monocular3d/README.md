@@ -6,11 +6,6 @@ DINOv2/DINOv3-based monocular 3D object detector trained on Action Genome. Combi
 
 ```
 monocular3d/
-├── configs/                    # YAML training configs (one per experiment)
-│   ├── default_rohith.yaml     # DINOv2 ViT-B on Rohith's server
-│   ├── dinov2b_saurabh.yaml    # DINOv2 ViT-B on Saurabh's server
-│   ├── dinov2l_saurabh.yaml    # DINOv2 ViT-L on Saurabh's server
-│   └── dinov3l_saurabh.yaml    # DINOv3 ViT-L on Saurabh's server
 ├── datasets/                   # ActionGenomeDataset3D + collate_fn
 ├── evaluation/                 # 2D COCO mAP + 3D metrics (fused single-pass)
 ├── losses/                     # OVMono3D disentangled 3D loss
@@ -18,6 +13,9 @@ monocular3d/
 ├── utils/                      # JSON logger
 ├── train.py                    # Entry point (YAML config + CLI overrides)
 └── trainer.py                  # DinoAGTrainer3D (training loop, evaluation, checkpointing)
+
+# Training configs are in the project root configs/ folder:
+# configs/default_rohith.yaml, configs/dinov2b_saurabh_separate.yaml, etc.
 ```
 
 ## Prerequisites
