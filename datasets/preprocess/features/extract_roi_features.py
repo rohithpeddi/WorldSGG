@@ -100,6 +100,19 @@ DATASET_CLASSNAMES = [
 
 CATID_TO_NAME = {i: name for i, name in enumerate(DATASET_CLASSNAMES) if i > 0}
 
+# Reverse mapping: normalized label string → AG class index.
+# This mirrors `fetch_object_classes()` in BaseAG where compound names
+# like 'closet/cabinet' occupy index 9. The short forms produced by
+# _normalize_label (e.g., 'closet') map back to the same class index.
+LABEL_TO_CLASSIDX: Dict[str, int] = {}
+for _idx, _name in enumerate(DATASET_CLASSNAMES):
+    if _idx == 0:
+        continue  # skip __background__
+    LABEL_TO_CLASSIDX[_name] = _idx  # e.g., 'closet/cabinet' → 9
+    # Also register the normalized short form
+    _norm = LABEL_NORMALIZE_MAP.get(_name, _name)
+    LABEL_TO_CLASSIDX[_norm] = _idx  # e.g., 'closet' → 9
+
 # DINOv2 normalization stats (same as ag_dataset_3d.py)
 DINO_IMAGE_MEAN = (0.485, 0.456, 0.406)
 DINO_IMAGE_STD = (0.229, 0.224, 0.225)
@@ -684,14 +697,55 @@ class ROIFeatureExtractor:
             roi_features = self.roi_pooler(features, [bboxes_tensor], [images.image_sizes[0]])
             roi_features = self.box_head(roi_features)  # (N, 1024)
 
+            # ---- Label IDs (AG class indices) ----
+            label_ids = [LABEL_TO_CLASSIDX.get(l, 0) for l in labels]
+
+            # ---- Union Features for (person, object) pairs ----
+            person_indices = [i for i, l in enumerate(labels) if l == "person"]
+            object_indices = [i for i, l in enumerate(labels) if l != "person"]
+
+            union_features_np = None
+            pair_indices = []
+
+            if person_indices and object_indices:
+                union_bboxes = []
+                for p_idx in person_indices:
+                    p_box = scaled_bboxes[p_idx]
+                    for o_idx in object_indices:
+                        o_box = scaled_bboxes[o_idx]
+                        union = [
+                            min(p_box[0], o_box[0]),
+                            min(p_box[1], o_box[1]),
+                            max(p_box[2], o_box[2]),
+                            max(p_box[3], o_box[3]),
+                        ]
+                        union_bboxes.append(union)
+                        pair_indices.append((p_idx, o_idx))
+
+                union_tensor = torch.tensor(union_bboxes, dtype=torch.float32, device=self.device)
+                union_pooled = self.roi_pooler(features, [union_tensor], [images.image_sizes[0]])
+                union_feats = self.box_head(union_pooled)  # (P, 1024)
+                union_features_np = union_feats.cpu().numpy().astype(self.store_dtype)
+
+                logger.debug(
+                    f"[{video_id}][{frame_file}] Union features: {len(pair_indices)} pairs "
+                    f"(persons={person_indices}, objects={object_indices})"
+                )
+
             # Store
-            frames_data[frame_file] = {
+            frame_entry = {
                 "roi_features": roi_features.cpu().numpy().astype(self.store_dtype),
                 "bboxes_xyxy": np.array(bboxes_xyxy_orig, dtype=np.float32),
                 "labels": labels,
+                "label_ids": label_ids,
                 "sources": sources,
                 "gdino_scores": gdino_scores,
+                "pair_indices": pair_indices,
             }
+            if union_features_np is not None:
+                frame_entry["union_features"] = union_features_np
+
+            frames_data[frame_file] = frame_entry
 
         if not frames_data:
             logger.info(f"[{video_id}] No frames produced features")
