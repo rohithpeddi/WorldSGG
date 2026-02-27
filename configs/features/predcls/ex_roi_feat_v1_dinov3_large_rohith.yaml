@@ -12,10 +12,10 @@
 # =============================================================================
 
 # --- Detector (must match training config) ---
-model: "v2"                          # "v2" | "v2l" | "v3l"
-experiment_name: "dinov2_separate"   # experiment folder under working_dir
-working_dir: "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/lib/detector/monocular3d"
-ckpt: null                           # checkpoint subfolder, e.g. "checkpoint_best" or "checkpoint_50"
+model: "v3l"                          # "v2" | "v2l" | "v3l"
+experiment_name: "v1_dinov3l_separate"   # experiment folder under working_dir
+working_dir: "/home/rxp190007/CODE/Scene4Cast/lib/detector/monocular3d"
+ckpt: checkpoint_30                           # checkpoint subfolder, e.g. "checkpoint_best" or "checkpoint_50"
 
 # --- Detector architecture (must match training) ---
 head_3d_mode: "separate"

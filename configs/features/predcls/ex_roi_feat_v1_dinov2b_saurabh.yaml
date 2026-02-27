@@ -1,0 +1,35 @@
+# =============================================================================
+# ROI Feature Extraction Config
+# =============================================================================
+# Extract pre-computed ROI features from trained detectors for PredCls.
+#
+# Usage:
+#   python datasets/preprocess/features/extract_roi_features.py \
+#       --config configs/extract_roi_features.yaml
+#
+#   Override via CLI:
+#       --model v2l --ckpt checkpoint_50 --video 001YG.mp4
+# =============================================================================
+
+# --- Detector (must match training config) ---
+model: "v2"                          # "v2" | "v2l" | "v3l"
+experiment_name: "dinov2_separate"   # experiment folder under working_dir
+working_dir: "/home/cse/msr/csy227518/scratch/Projects/Active/Scene4Cast/lib/detector/monocular3d"
+ckpt: checkpoint_43                           # checkpoint subfolder, e.g. "checkpoint_best" or "checkpoint_50"
+
+# --- Detector architecture (must match training) ---
+head_3d_mode: "separate"
+num_classes: 37
+pretrained: true
+
+# --- Data ---
+data_path: "/home/cse/msr/csy227518/scratch/Datasets/action_genome"
+
+# --- Feature Extraction ---
+output_dir: null                     # null = auto: {data_path}/features/roi_features/predcls/{model_dir}
+gdino_score_threshold: 0.3
+store_dtype: "float16"               # "float16" or "float32"
+overwrite: false
+gpu: 0
+video: null                          # null = all videos, or e.g. "001YG.mp4"
+split: null                          # null = both train+test, or "train" / "test"
