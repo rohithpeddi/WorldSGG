@@ -26,11 +26,13 @@ Usage:
 
 import argparse
 import gc
+import logging
 import math
 import os
 import pickle
 import re
 import sys
+import time
 from dataclasses import dataclass, fields as dataclass_fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -53,6 +55,8 @@ if _PROJECT_ROOT not in sys.path:
 from lib.detector.monocular3d.models.dino_mono_3d import (
     DinoV3Monocular3D,
 )
+
+logger = logging.getLogger("roi_feature_extraction")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -264,7 +268,12 @@ class ROIFeatureExtractor:
         sgdet_dir = Path(cfg.data_path) / "features" / "roi_features" / "sgdet"
         os.makedirs(sgdet_dir, exist_ok=True)
 
+        # Setup logging to file (one log per config)
+        self.log_dir = self.output_dir / "logs"
+        os.makedirs(self.log_dir, exist_ok=True)
+
         # Build and load model
+        logger.info(f"Building DinoV3Monocular3D (model={cfg.model}, head_3d_mode={cfg.head_3d_mode})")
         print(f"Building DinoV3Monocular3D (model={cfg.model}, head_3d_mode={cfg.head_3d_mode})...")
         self.model = DinoV3Monocular3D(
             num_classes=cfg.num_classes,
@@ -280,15 +289,19 @@ class ROIFeatureExtractor:
             )
             if os.path.exists(ckpt_path):
                 print(f"Loading checkpoint: {ckpt_path}")
+                logger.info(f"Loading checkpoint: {ckpt_path}")
                 ckpt_state = torch.load(ckpt_path, map_location="cpu")
                 self.model.load_state_dict(ckpt_state["model_state_dict"])
                 del ckpt_state
                 gc.collect()
                 print("  ✓ Checkpoint loaded successfully")
+                logger.info("Checkpoint loaded successfully")
             else:
                 print(f"  ⚠️  Checkpoint not found at {ckpt_path}, using pretrained weights only")
+                logger.warning(f"Checkpoint not found at {ckpt_path}, using pretrained weights only")
         else:
             print("  ℹ️  No checkpoint specified, using pretrained weights only")
+            logger.info("No checkpoint specified, using pretrained weights only")
 
         self.model.to(self.device)
         self.model.eval()
@@ -329,6 +342,12 @@ class ROIFeatureExtractor:
         print(f"  Train: {len(self.train_dataset)} videos")
         print(f"  Test:  {len(self.test_dataset)} videos")
         print(f"  Output: {self.output_dir}")
+        logger.info(f"Dataset loaded: train={len(self.train_dataset)} videos, test={len(self.test_dataset)} videos")
+        logger.info(f"Output directory: {self.output_dir}")
+        logger.info(f"Device: {self.device}")
+        logger.info(f"Store dtype: {cfg.store_dtype}")
+        logger.info(f"GDino score threshold: {cfg.gdino_score_threshold}")
+        logger.info(f"Pixel limit: {cfg.pixel_limit}, Patch size: {cfg.patch_size}")
 
     # ------------------------------------------------------------------
     # Image loading & preprocessing (mirrors ag_dataset_3d.py exactly)
@@ -410,6 +429,13 @@ class ROIFeatureExtractor:
 
         gt_labels_in_frame = set()
 
+        # Track raw GDino info for logging
+        raw_gdino_detections = []
+        filtered_gdino_accepted = []
+        filtered_gdino_rejected_score = []
+        filtered_gdino_rejected_in_gt = []
+        filtered_gdino_rejected_not_in_video = []
+
         for item in gt_frame_items:
             if "person_bbox" in item:
                 # Person bbox — stored as xyxy by BaseAG
@@ -460,17 +486,22 @@ class ROIFeatureExtractor:
             best_per_label: Dict[str, Tuple[List[float], float]] = {}
             for gd_box, gd_label, gd_score in zip(gd_boxes, gd_labels, gd_scores):
                 gd_score = float(gd_score)
+                raw_gdino_detections.append((gd_label, gd_score))
+
                 if gd_score < threshold:
+                    filtered_gdino_rejected_score.append((gd_label, gd_score))
                     continue
 
                 gd_label_norm = _normalize_label(gd_label)
 
                 # Skip labels already in GT for this frame
                 if gd_label_norm in gt_labels_in_frame:
+                    filtered_gdino_rejected_in_gt.append((gd_label, gd_label_norm, gd_score))
                     continue
 
                 # Only include GDino labels that exist in the video's GT annotations
                 if video_gt_labels is not None and gd_label_norm not in video_gt_labels:
+                    filtered_gdino_rejected_not_in_video.append((gd_label, gd_label_norm, gd_score))
                     continue
 
                 if (gd_label_norm not in best_per_label
@@ -484,8 +515,12 @@ class ROIFeatureExtractor:
                 labels.append(gd_label)
                 sources.append("gdino")
                 gdino_scores_out.append(gd_score)
+                filtered_gdino_accepted.append((gd_label, gd_score))
 
-        return bboxes_xyxy, labels, sources, gdino_scores_out
+        return (bboxes_xyxy, labels, sources, gdino_scores_out,
+                raw_gdino_detections, filtered_gdino_accepted,
+                filtered_gdino_rejected_score, filtered_gdino_rejected_in_gt,
+                filtered_gdino_rejected_not_in_video)
 
     # ------------------------------------------------------------------
     # Feature extraction
@@ -518,6 +553,19 @@ class ROIFeatureExtractor:
                         if label is not None:
                             video_gt_labels.add(_normalize_label(label))
 
+        logger.info(f"[{video_id}] Video GT labels ({len(video_gt_labels)}): {sorted(video_gt_labels)}")
+        logger.info(f"[{video_id}] GDino detections available: {gdino_preds is not None}")
+        if gdino_preds is not None:
+            logger.info(f"[{video_id}] GDino frames available: {len(gdino_preds)}")
+
+        # Per-video stats
+        video_total_gt = 0
+        video_total_gdino_added = 0
+        video_total_gdino_raw = 0
+        video_total_gdino_rejected_score = 0
+        video_total_gdino_rejected_in_gt = 0
+        video_total_gdino_rejected_not_in_video = 0
+
         frames_data = {}
 
         for frame_items in gt_annotations:
@@ -547,10 +595,53 @@ class ROIFeatureExtractor:
 
             # Collect bboxes (in original image coordinates)
             gdino_frame = gdino_preds.get(frame_file, None) if gdino_preds else None
-            bboxes_xyxy, labels, sources, gdino_scores = self._collect_bboxes_for_frame(
+            (
+                bboxes_xyxy, labels, sources, gdino_scores,
+                raw_gdino_dets, accepted_gdino, rej_score, rej_in_gt, rej_not_in_video
+            ) = self._collect_bboxes_for_frame(
                 frame_items, gdino_frame, self.cfg.gdino_score_threshold,
                 video_gt_labels=video_gt_labels,
             )
+
+            # Log per-frame details
+            gt_labels_this_frame = [l for l, s in zip(labels, sources) if s == "gt"]
+            gdino_labels_this_frame = [l for l, s in zip(labels, sources) if s == "gdino"]
+            logger.debug(
+                f"[{video_id}][{frame_file}] GT objects ({len(gt_labels_this_frame)}): {gt_labels_this_frame}"
+            )
+            if raw_gdino_dets:
+                logger.debug(
+                    f"[{video_id}][{frame_file}] Raw GDino detections ({len(raw_gdino_dets)}): "
+                    f"{[(lbl, f'{sc:.3f}') for lbl, sc in raw_gdino_dets]}"
+                )
+            if rej_score:
+                logger.debug(
+                    f"[{video_id}][{frame_file}] GDino rejected (low score): "
+                    f"{[(lbl, f'{sc:.3f}') for lbl, sc in rej_score]}"
+                )
+            if rej_in_gt:
+                logger.debug(
+                    f"[{video_id}][{frame_file}] GDino rejected (already in GT): "
+                    f"{[(raw, norm, f'{sc:.3f}') for raw, norm, sc in rej_in_gt]}"
+                )
+            if rej_not_in_video:
+                logger.debug(
+                    f"[{video_id}][{frame_file}] GDino rejected (not in video GT labels): "
+                    f"{[(raw, norm, f'{sc:.3f}') for raw, norm, sc in rej_not_in_video]}"
+                )
+            if accepted_gdino:
+                logger.debug(
+                    f"[{video_id}][{frame_file}] GDino ACCEPTED ({len(accepted_gdino)}): "
+                    f"{[(lbl, f'{sc:.3f}') for lbl, sc in accepted_gdino]}"
+                )
+
+            # Accumulate video stats
+            video_total_gt += len(gt_labels_this_frame)
+            video_total_gdino_added += len(accepted_gdino)
+            video_total_gdino_raw += len(raw_gdino_dets)
+            video_total_gdino_rejected_score += len(rej_score)
+            video_total_gdino_rejected_in_gt += len(rej_in_gt)
+            video_total_gdino_rejected_not_in_video += len(rej_not_in_video)
 
             if not bboxes_xyxy:
                 continue
@@ -603,7 +694,18 @@ class ROIFeatureExtractor:
             }
 
         if not frames_data:
+            logger.info(f"[{video_id}] No frames produced features")
             return None
+
+        # Log per-video summary
+        logger.info(
+            f"[{video_id}] SUMMARY: frames={len(frames_data)}, "
+            f"gt_objects={video_total_gt}, gdino_added={video_total_gdino_added}, "
+            f"gdino_raw={video_total_gdino_raw}, "
+            f"gdino_rej_score={video_total_gdino_rejected_score}, "
+            f"gdino_rej_in_gt={video_total_gdino_rejected_in_gt}, "
+            f"gdino_rej_not_in_video={video_total_gdino_rejected_not_in_video}"
+        )
 
         return {
             "video_id": video_id,
@@ -623,6 +725,11 @@ class ROIFeatureExtractor:
     def extract_all(self) -> Dict[str, bool]:
         """Extract ROI features for all videos."""
         results = {}
+        global_stats = {
+            "total_videos": 0, "success_videos": 0, "skipped_videos": 0,
+            "total_frames": 0, "total_gt": 0, "total_gdino_added": 0,
+        }
+        start_time = time.time()
 
         datasets_to_process = []
         if self.cfg.split is None or self.cfg.split == "train":
@@ -630,10 +737,15 @@ class ROIFeatureExtractor:
         if self.cfg.split is None or self.cfg.split == "test":
             datasets_to_process.append(("test", self.test_dataset))
 
+        logger.info(f"Starting extraction: splits={[s for s, _ in datasets_to_process]}")
+
         for split_name, dataset in datasets_to_process:
             print(f"\n{'='*60}")
             print(f"Processing {split_name} split ({len(dataset)} videos)")
             print(f"{'='*60}")
+            logger.info(f"{'='*60}")
+            logger.info(f"Processing {split_name} split ({len(dataset)} videos)")
+            logger.info(f"{'='*60}")
 
             for idx in tqdm(range(len(dataset)), desc=f"[{split_name}] ROI features"):
                 item = dataset[idx]
@@ -652,7 +764,10 @@ class ROIFeatureExtractor:
                 # Skip if exists
                 if out_path.exists() and not self.cfg.overwrite:
                     results[video_id] = True
+                    global_stats["skipped_videos"] += 1
                     continue
+
+                global_stats["total_videos"] += 1
 
                 try:
                     result = self._extract_features_for_video(
@@ -662,14 +777,25 @@ class ROIFeatureExtractor:
                         with open(out_path, "wb") as f:
                             pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
                         n_frames = len(result["frames"])
-                        n_total = sum(
-                            len(fd["labels"]) for fd in result["frames"].values()
+                        n_gt = sum(
+                            sum(1 for s in fd["sources"] if s == "gt")
+                            for fd in result["frames"].values()
                         )
+                        n_gdino = sum(
+                            sum(1 for s in fd["sources"] if s == "gdino")
+                            for fd in result["frames"].values()
+                        )
+                        global_stats["success_videos"] += 1
+                        global_stats["total_frames"] += n_frames
+                        global_stats["total_gt"] += n_gt
+                        global_stats["total_gdino_added"] += n_gdino
                         results[video_id] = True
                     else:
                         results[video_id] = False
+                        logger.warning(f"[{video_id}] No features extracted")
                 except Exception as e:
                     print(f"\n  ⚠️  [{video_id}] Error: {e}")
+                    logger.error(f"[{video_id}] Error: {e}", exc_info=True)
                     results[video_id] = False
 
                 # Periodic GPU cache cleanup
@@ -678,10 +804,22 @@ class ROIFeatureExtractor:
 
         success = sum(1 for v in results.values() if v)
         total = len(results)
+        elapsed = time.time() - start_time
+        summary = (
+            f"Done: {success}/{total} videos processed successfully in {elapsed:.1f}s\n"
+            f"  Skipped (already exist): {global_stats['skipped_videos']}\n"
+            f"  Total frames: {global_stats['total_frames']}\n"
+            f"  Total GT objects: {global_stats['total_gt']}\n"
+            f"  Total GDino additions: {global_stats['total_gdino_added']}\n"
+            f"  Output: {self.output_dir}\n"
+            f"  Log: {self.log_dir}"
+        )
         print(f"\n{'='*60}")
-        print(f"Done: {success}/{total} videos processed successfully")
-        print(f"Output: {self.output_dir}")
+        print(summary)
         print(f"{'='*60}")
+        logger.info(f"{'='*60}")
+        logger.info(summary)
+        logger.info(f"{'='*60}")
 
         return results
 
@@ -737,6 +875,41 @@ def _str_to_bool(v: str) -> bool:
     raise argparse.ArgumentTypeError(f"Boolean value expected, got '{v}'")
 
 
+def _setup_logging(log_dir: Path, config_path: str) -> Path:
+    """
+    Set up logging with both file and console handlers.
+
+    File handler: DEBUG level (captures all per-frame details)
+    Console handler: INFO level (milestones only)
+
+    Returns the log file path.
+    """
+    config_stem = Path(config_path).stem
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"{config_stem}_{timestamp}.log"
+
+    # Reset any existing handlers
+    logger.handlers.clear()
+    logger.setLevel(logging.DEBUG)
+
+    # File handler — DEBUG level (all details)
+    fh = logging.FileHandler(str(log_file), mode="w", encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s | %(levelname)-7s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logger.addHandler(fh)
+
+    # Console handler — INFO level (milestones only)
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(logging.Formatter("%(levelname)-7s | %(message)s"))
+    logger.addHandler(ch)
+
+    return log_file
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -773,9 +946,28 @@ def main():
     print(f"Config: {filtered}")
 
     cfg = ExtractConfig(**filtered)
+
+    # Determine output dir early to set up logging before model init
+    model_dir = MODEL_TO_DIR.get(cfg.model, cfg.model)
+    if cfg.output_dir:
+        output_dir = Path(cfg.output_dir)
+    else:
+        output_dir = Path(cfg.data_path) / "features" / "roi_features" / "predcls" / model_dir
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_file = _setup_logging(log_dir, config_path)
+    print(f"Log file: {log_file}")
+
+    # Log full config
+    logger.info(f"Config file: {config_path}")
+    logger.info(f"Resolved config: {filtered}")
+    logger.info(f"Log file: {log_file}")
+
     extractor = ROIFeatureExtractor(cfg)
     extractor.extract_all()
 
 
 if __name__ == "__main__":
     main()
+
