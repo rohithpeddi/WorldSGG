@@ -9,21 +9,24 @@ annotated objects (GT + GDino-filled missing objects) per frame.
 The script:
   1. Loads a trained DinoV3Monocular3D detector from checkpoint.
   2. For each video, collects GT bboxes + GDino detections for missing labels.
-  3. Runs frozen backbone+FPN → ROI pooling → box_head to get 1024-d features.
-  4. Saves per-video PKL files.
+  3. Preprocesses images identically to ag_dataset_3d.py (Pi3-compatible resize,
+     DINOv2 normalization, bbox scaling).
+  4. Runs frozen backbone+FPN → ROI pooling → box_head to get 1024-d features.
+  5. Saves per-video PKL files.
 
 Usage:
     python datasets/preprocess/features/extract_roi_features.py \
-        --config configs/extract_roi_features.yaml
+        --config configs/features/predcls/ex_roi_feat_v1_dinov2b_saurabh.yaml
 
     # Override via CLI:
     python datasets/preprocess/features/extract_roi_features.py \
-        --config configs/extract_roi_features.yaml \
+        --config configs/features/predcls/ex_roi_feat_v1_dinov2b_saurabh.yaml \
         --model v2l --ckpt checkpoint_50 --video 001YG.mp4
 """
 
 import argparse
 import gc
+import math
 import os
 import pickle
 import sys
@@ -34,6 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import torch
+import torchvision.transforms.functional as TF
 import yaml
 from tqdm import tqdm
 
@@ -76,6 +80,10 @@ DATASET_CLASSNAMES = [
 
 CATID_TO_NAME = {i: name for i, name in enumerate(DATASET_CLASSNAMES) if i > 0}
 
+# DINOv2 normalization stats (same as ag_dataset_3d.py)
+DINO_IMAGE_MEAN = (0.485, 0.456, 0.406)
+DINO_IMAGE_STD = (0.229, 0.224, 0.225)
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -95,6 +103,10 @@ class ExtractConfig:
 
     # Data
     data_path: str = "/data/rohith/ag"
+
+    # Image processing (must match ag_dataset_3d.py / training config)
+    pixel_limit: int = 255000
+    patch_size: int = 14
 
     # Feature extraction
     output_dir: Optional[str] = None
@@ -130,6 +142,26 @@ def _is_empty_array(arr) -> bool:
 
 def _normalize_label(label: str) -> str:
     return LABEL_NORMALIZE_MAP.get(label, label)
+
+
+def _compute_target_size(
+    orig_w: int, orig_h: int, pixel_limit: int = 255000, patch_size: int = 14
+) -> Tuple[int, int]:
+    """
+    Compute annotation-consistent target size (identical to ag_dataset_3d.py).
+    Aspect-ratio preserving, dimensions rounded to multiples of patch_size,
+    total pixels <= pixel_limit.
+    """
+    scale = math.sqrt(pixel_limit / (orig_w * orig_h)) if orig_w * orig_h > 0 else 1
+    w_target, h_target = orig_w * scale, orig_h * scale
+    k = round(w_target / patch_size)
+    m = round(h_target / patch_size)
+    while (k * patch_size) * (m * patch_size) > pixel_limit:
+        if k / m > w_target / h_target:
+            k -= 1
+        else:
+            m -= 1
+    return max(1, k) * patch_size, max(1, m) * patch_size
 
 
 def _load_gdino_predictions(data_path: str, video_id: str) -> Optional[Dict[str, Dict[str, Any]]]:
@@ -175,6 +207,15 @@ def _load_gdino_predictions(data_path: str, video_id: str) -> Optional[Dict[str,
 class ROIFeatureExtractor:
     """
     Extracts ROI features from a trained DinoV3Monocular3D detector.
+
+    Image preprocessing mirrors ag_dataset_3d.py exactly:
+      1. Load image → uint8 RGB
+      2. Resize to Pi3-compatible target size (_compute_target_size)
+      3. Convert to float32 / 255.0
+      4. DINOv2 normalize (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
+      5. Scale bboxes by (scale_x, scale_y) to match resized dims
+
+    The model's _NoOpRCNNTransform only batches/pads — no further resize or normalization.
     """
 
     def __init__(self, cfg: ExtractConfig):
@@ -225,28 +266,25 @@ class ROIFeatureExtractor:
 
         # Extract components for manual ROI feature extraction
         self.backbone = self.model.backbone
-        self.transform = self.model.transform
-        self.roi_heads = self.model.roi_heads if cfg.head_3d_mode == "unified" else self.model.roi_heads
+        self.transform = self.model.transform  # _NoOpRCNNTransform: batching/padding only
 
         # Get ROI pooler and box_head from the roi_heads
         if cfg.head_3d_mode == "unified":
-            self.roi_pooler = self.roi_heads.base.box_roi_pool
-            self.box_head = self.roi_heads.base.box_head
+            self.roi_pooler = self.model.roi_heads.base.box_roi_pool
+            self.box_head = self.model.roi_heads.base.box_head
         else:
-            self.roi_pooler = self.roi_heads.box_roi_pool
-            self.box_head = self.roi_heads.box_head
+            self.roi_pooler = self.model.roi_heads.box_roi_pool
+            self.box_head = self.model.roi_heads.box_head
 
         # Store dtype
         self.store_dtype = np.float16 if cfg.store_dtype == "float16" else np.float32
 
         # Data paths
         self.frames_path = Path(cfg.data_path) / "frames"
-        self.frames_annotated_path = Path(cfg.data_path) / "frames_annotated"
 
         # Load AG dataset
         print("Loading Action Genome dataset...")
         from dataloader.ag_dataset import StandardAG
-        from torch.utils.data import DataLoader
 
         self.train_dataset = StandardAG(
             phase="train", mode="predcls", datasize="large",
@@ -264,34 +302,52 @@ class ROIFeatureExtractor:
         print(f"  Output: {self.output_dir}")
 
     # ------------------------------------------------------------------
-    # Image loading
+    # Image loading & preprocessing (mirrors ag_dataset_3d.py exactly)
     # ------------------------------------------------------------------
 
-    def _load_frame_image(self, video_id: str, frame_name: str) -> Optional[torch.Tensor]:
+    def _load_and_preprocess_frame(
+        self, video_id: str, frame_file: str
+    ) -> Optional[Tuple[torch.Tensor, int, int, int, int]]:
         """
-        Load a single frame image and prepare it for the detector.
+        Load a single frame and preprocess exactly as ag_dataset_3d.py does.
 
-        Returns a (3, H, W) float32 tensor normalized for DINOv2.
+        Pipeline:
+          1. Load image as RGB uint8
+          2. Compute Pi3-compatible target size via _compute_target_size
+          3. Resize to target dims
+          4. Convert to float32 / 255.0
+          5. Apply DINOv2 normalization
+
+        Returns:
+            (img_chw, orig_w, orig_h, target_w, target_h) or None if image not found.
         """
-        # Try frames_annotated first (annotated subset), then frames (all)
-        frame_file = frame_name.split("/")[-1] if "/" in frame_name else frame_name
-        img_path = self.frames_annotated_path / video_id / frame_file
-        if not img_path.exists():
-            img_path = self.frames_path / video_id / frame_file
+        img_path = self.frames_path / video_id / frame_file
         if not img_path.exists():
             return None
 
+        # Step 1: Load image (BGR → RGB)
         img_bgr = cv2.imread(str(img_path))
         if img_bgr is None:
             return None
-
-        # Convert BGR → RGB, normalize to [0, 1]
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        img_f32 = img_rgb.astype(np.float32) / 255.0
+        orig_h, orig_w = img_rgb.shape[:2]
 
-        # To tensor: (H, W, 3) → (3, H, W)
-        img_tensor = torch.from_numpy(img_f32).permute(2, 0, 1)
-        return img_tensor
+        # Step 2: Compute Pi3-compatible target size
+        target_w, target_h = _compute_target_size(
+            orig_w, orig_h, self.cfg.pixel_limit, self.cfg.patch_size
+        )
+
+        # Step 3: Resize to target dims
+        img_resized = cv2.resize(img_rgb, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+        # Step 4: Convert to float32 / 255.0, then to tensor (H, W, 3) → (3, H, W)
+        img_f32 = img_resized.astype(np.float32) / 255.0
+        img_chw = torch.from_numpy(img_f32).permute(2, 0, 1).contiguous()
+
+        # Step 5: DINOv2 normalization (same as ag_dataset_3d.py)
+        img_chw = TF.normalize(img_chw, mean=list(DINO_IMAGE_MEAN), std=list(DINO_IMAGE_STD))
+
+        return img_chw, orig_w, orig_h, target_w, target_h
 
     # ------------------------------------------------------------------
     # BBox collection
@@ -306,8 +362,13 @@ class ROIFeatureExtractor:
         """
         Collect all bboxes for a frame: GT annotations + GDino fill for missing labels.
 
+        GT bbox formats (from BaseAG.build_dataset):
+          - person_bbox: already xyxy format (x1, y1, x2, y2)
+          - object bbox:  already converted from xywh → xyxy by BaseAG.build_dataset()
+                          stored as item["bbox"] = np.array([x1, y1, x2, y2])
+
         Returns:
-            bboxes_xyxy: list of [x1, y1, x2, y2]
+            bboxes_xyxy: list of [x1, y1, x2, y2] in ORIGINAL image coordinates
             labels: list of normalized label strings
             sources: list of "gt" or "gdino"
             gdino_scores: list of float (-1.0 for GT)
@@ -321,10 +382,14 @@ class ROIFeatureExtractor:
 
         for item in gt_frame_items:
             if "person_bbox" in item:
-                # Person bbox
+                # Person bbox — stored as xyxy by BaseAG
                 pb = item["person_bbox"]
                 if isinstance(pb, np.ndarray):
-                    pb = pb.tolist()
+                    pb = pb.reshape(-1, 4).tolist()
+                elif isinstance(pb, list) and len(pb) > 0:
+                    # Handle nested list format
+                    if not isinstance(pb[0], (list, tuple, np.ndarray)):
+                        pb = [pb]  # Single person bbox as flat list
                 if isinstance(pb, list) and len(pb) > 0:
                     for b in pb:
                         b_list = b if isinstance(b, list) else list(b)
@@ -345,6 +410,7 @@ class ROIFeatureExtractor:
                         continue
                     label_norm = _normalize_label(label)
 
+                    # Object bbox — already xyxy from BaseAG.build_dataset()
                     bbox = item["bbox"]
                     if isinstance(bbox, np.ndarray):
                         bbox = bbox.tolist()
@@ -401,7 +467,7 @@ class ROIFeatureExtractor:
         """
         Extract ROI features for all annotated frames of a video.
         """
-        # Load GDino detections
+        # Load GDino detections (keyed by bare frame name like "000063.png")
         gdino_preds = _load_gdino_predictions(self.cfg.data_path, video_id)
 
         frames_data = {}
@@ -410,7 +476,7 @@ class ROIFeatureExtractor:
             if not frame_items:
                 continue
 
-            # Get frame name from the first item
+            # Get frame name from the first item (format: "video_id/frame.png")
             first_item = frame_items[0]
             frame_relpath = first_item.get("frame", "")
             if "/" in frame_relpath:
@@ -421,12 +487,17 @@ class ROIFeatureExtractor:
             if not frame_file:
                 continue
 
-            # Load image
-            img_tensor = self._load_frame_image(video_id, frame_file)
-            if img_tensor is None:
+            # Load and preprocess image (Pi3-compatible resize + DINOv2 normalization)
+            result = self._load_and_preprocess_frame(video_id, frame_file)
+            if result is None:
                 continue
+            img_chw, orig_w, orig_h, target_w, target_h = result
 
-            # Collect bboxes
+            # Compute bbox scale factors (same as ag_dataset_3d.py lines 397-398)
+            scale_x = target_w / float(orig_w)
+            scale_y = target_h / float(orig_h)
+
+            # Collect bboxes (in original image coordinates)
             gdino_frame = gdino_preds.get(frame_file, None) if gdino_preds else None
             bboxes_xyxy, labels, sources, gdino_scores = self._collect_bboxes_for_frame(
                 frame_items, gdino_frame, self.cfg.gdino_score_threshold,
@@ -435,48 +506,39 @@ class ROIFeatureExtractor:
             if not bboxes_xyxy:
                 continue
 
-            # Prepare image through the detector's transform (batching, no resize/norm)
-            img_list = [img_tensor]
-            images, _ = self.transform(img_list, None)
+            # Scale bboxes to match resized image dims + clamp to bounds
+            # (same as ag_dataset_3d.py lines 411-414, 429-432)
+            scaled_bboxes = []
+            valid_indices = []
+            for i, (x1, y1, x2, y2) in enumerate(bboxes_xyxy):
+                x1_s = max(0.0, min(x1 * scale_x, target_w - 1))
+                x2_s = max(0.0, min(x2 * scale_x, target_w - 1))
+                y1_s = max(0.0, min(y1 * scale_y, target_h - 1))
+                y2_s = max(0.0, min(y2 * scale_y, target_h - 1))
+                # Filter degenerate boxes (same threshold as ag_dataset_3d.py line 416)
+                if (x2_s - x1_s) >= 1 and (y2_s - y1_s) >= 1:
+                    scaled_bboxes.append([x1_s, y1_s, x2_s, y2_s])
+                    valid_indices.append(i)
+
+            if not scaled_bboxes:
+                continue
+
+            # Filter labels/sources/scores to match valid bboxes
+            labels = [labels[i] for i in valid_indices]
+            sources = [sources[i] for i in valid_indices]
+            gdino_scores = [gdino_scores[i] for i in valid_indices]
+            bboxes_xyxy_orig = [bboxes_xyxy[i] for i in valid_indices]
+
+            # Pass image through _NoOpRCNNTransform (batching/padding only, no resize/norm)
+            images, _ = self.transform([img_chw], None)
 
             # Run backbone + FPN
             features = self.backbone(images.tensors.to(self.device))
             if isinstance(features, torch.Tensor):
                 features = {"0": features}
 
-            # Prepare bbox tensor
-            bboxes_tensor = torch.tensor(bboxes_xyxy, dtype=torch.float32, device=self.device)
-
-            # Scale bboxes if image was resized by transform
-            orig_h, orig_w = img_tensor.shape[1], img_tensor.shape[2]
-            trans_h, trans_w = images.image_sizes[0]
-            if (trans_h != orig_h) or (trans_w != orig_w):
-                scale_x = trans_w / orig_w
-                scale_y = trans_h / orig_h
-                bboxes_tensor[:, 0] *= scale_x
-                bboxes_tensor[:, 2] *= scale_x
-                bboxes_tensor[:, 1] *= scale_y
-                bboxes_tensor[:, 3] *= scale_y
-
-            # Clamp bboxes to image bounds
-            bboxes_tensor[:, 0].clamp_(min=0, max=trans_w)
-            bboxes_tensor[:, 2].clamp_(min=0, max=trans_w)
-            bboxes_tensor[:, 1].clamp_(min=0, max=trans_h)
-            bboxes_tensor[:, 3].clamp_(min=0, max=trans_h)
-
-            # Ensure valid boxes (x2 > x1, y2 > y1)
-            valid_mask = (bboxes_tensor[:, 2] > bboxes_tensor[:, 0]) & \
-                         (bboxes_tensor[:, 3] > bboxes_tensor[:, 1])
-
-            if not valid_mask.any():
-                continue
-
-            bboxes_tensor = bboxes_tensor[valid_mask]
-            valid_indices = valid_mask.cpu().numpy()
-            labels = [l for l, v in zip(labels, valid_indices) if v]
-            sources = [s for s, v in zip(sources, valid_indices) if v]
-            gdino_scores = [g for g, v in zip(gdino_scores, valid_indices) if v]
-            bboxes_xyxy_kept = [b for b, v in zip(bboxes_xyxy, valid_indices) if v]
+            # Prepare bbox tensor (already in resized coordinates)
+            bboxes_tensor = torch.tensor(scaled_bboxes, dtype=torch.float32, device=self.device)
 
             # ROI Pool + box_head → 1024-d features
             roi_features = self.roi_pooler(features, [bboxes_tensor], [images.image_sizes[0]])
@@ -485,7 +547,7 @@ class ROIFeatureExtractor:
             # Store
             frames_data[frame_file] = {
                 "roi_features": roi_features.cpu().numpy().astype(self.store_dtype),
-                "bboxes_xyxy": np.array(bboxes_xyxy_kept, dtype=np.float32),
+                "bboxes_xyxy": np.array(bboxes_xyxy_orig, dtype=np.float32),
                 "labels": labels,
                 "sources": sources,
                 "gdino_scores": gdino_scores,
