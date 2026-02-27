@@ -13,6 +13,38 @@ from datasets.preprocess.annotations.raw.frame_to_world4D_base import FrameToWor
 
 
 # --------------------------------------------------------------------------------------
+# Label normalization (shared with corrected_world_bbox_generator.py)
+# --------------------------------------------------------------------------------------
+
+# GT compound names → short form
+LABEL_NORMALIZE_MAP = {
+    "closet/cabinet": "closet",
+    "cup/glass/bottle": "cup",
+    "paper/notebook": "paper",
+    "sofa/couch": "sofa",
+    "phone/camera": "phone",
+}
+
+# Reverse mapping: expanded GDino labels → GT short forms
+GDINO_LABEL_TO_GT_LABEL = {
+    "cabinet": "closet",
+    "glass": "cup",
+    "bottle": "cup",
+    "notebook": "paper",
+    "couch": "sofa",
+    "camera": "phone",
+}
+
+
+def _normalize_label(label: str) -> str:
+    """Normalize an object label to GT short-form space."""
+    label = label.lower().strip()
+    label = LABEL_NORMALIZE_MAP.get(label, label)
+    label = GDINO_LABEL_TO_GT_LABEL.get(label, label)
+    return label
+
+
+# --------------------------------------------------------------------------------------
 # Final world transform helper
 # --------------------------------------------------------------------------------------
 
@@ -286,26 +318,78 @@ class FrameToWorldAnnotations(FrameToWorldBase):
         # ----------------------------------------------------------------------
         # Basic stats before 4D filling
         # ----------------------------------------------------------------------
+
+        # Step 1: Estimate video-level GT label set from GT annotations.
+        # GDino-sourced objects in the 3D PKL will be filtered to this set.
+        try:
+            _, raw_gt_annotations = self.get_video_gt_annotations(video_id)
+            video_gt_labels: set = set()
+            for frame_items in raw_gt_annotations:
+                for item in frame_items:
+                    if "person_bbox" in item:
+                        video_gt_labels.add("person")
+                    else:
+                        cid = item.get("class", None)
+                        cat_name = self.catid_to_name_map.get(cid, None)
+                        if cat_name:
+                            video_gt_labels.add(_normalize_label(cat_name))
+            print(
+                f"[world4d][{video_id}] video GT labels "
+                f"({len(video_gt_labels)}): {sorted(video_gt_labels)}"
+            )
+        except FileNotFoundError:
+            # If GT annotations not available, don't filter
+            video_gt_labels = None
+            print(
+                f"[world4d][{video_id}] WARNING: GT annotations not found, "
+                "skipping video-level label filtering for GDino objects."
+            )
+
+        # Step 2: Collect labels from 3D bbox PKL and filter by video GT set
         all_labels = set()
         num_frames_with_objects = 0
         num_total_objects = 0
+        num_gdino_filtered = 0
 
         for frame_name, frame_rec in frame_3dbb_map_world.items():
             objects = frame_rec.get("objects", [])
             if not objects:
                 continue
-            num_frames_with_objects += 1
-            num_total_objects += len(objects)
+
+            # Filter objects: normalize labels, reject GDino objects not in video GT
+            filtered_objects = []
             for obj in objects:
                 lbl = obj.get("label", None)
-                if lbl:
-                    all_labels.add(lbl)
+                if not lbl:
+                    continue
+                lbl_norm = _normalize_label(lbl)
+                obj["label"] = lbl_norm  # normalize in-place
+
+                source = obj.get("source", "gt")
+                if source == "gdino" and video_gt_labels is not None:
+                    if lbl_norm not in video_gt_labels:
+                        num_gdino_filtered += 1
+                        continue  # skip this GDino object
+                filtered_objects.append(obj)
+
+            frame_rec["objects"] = filtered_objects
+
+            if filtered_objects:
+                num_frames_with_objects += 1
+                num_total_objects += len(filtered_objects)
+                for obj in filtered_objects:
+                    all_labels.add(obj["label"])
 
         print(
             f"[world4d][{video_id}] frames_with_objects={num_frames_with_objects}, "
             f"total_objects={num_total_objects}, "
             f"unique_labels={sorted(all_labels)}"
         )
+        if num_gdino_filtered > 0:
+            print(
+                f"[world4d][{video_id}] filtered {num_gdino_filtered} GDino objects "
+                f"(labels not in video GT set)"
+            )
 
         if not all_labels:
             print(f"[world4d][{video_id}] No object labels found. Skipping 4D generation.")
@@ -1533,10 +1617,9 @@ class FrameToWorldAnnotations(FrameToWorldBase):
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "World4D GT helper: "
-            "(a) inspect 3D bbox annotations, "
-            "(b) visualize original Pi3 outputs (points + floor + frames + camera + 3D boxes) "
-            "for annotated frames."
+            "Generate world-4D bbox annotations for Action Genome videos. "
+            "Loads pre-computed 3D bbox predictions, applies floor alignment, "
+            "enforces object permanence, and computes static unions."
         )
     )
     parser.add_argument("--ag_root_directory", type=str, default="/data/rohith/ag")
@@ -1545,31 +1628,137 @@ def parse_args():
         type=str,
         default="/data3/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic",
     )
-    parser.add_argument("--split", type=str, default="04")
+    parser.add_argument(
+        "--split",
+        type=str,
+        default=None,
+        help=(
+            "Process only videos belonging to this split. "
+            "Valid splits: 04, 59, AD, EH, IL, MP, QT, UZ. "
+            "If not set, all videos are processed."
+        ),
+    )
+    parser.add_argument(
+        "--video",
+        type=str,
+        default=None,
+        help="Process a single video (e.g., '00T1E.mp4').",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing 4D annotation files.",
+    )
+    parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Launch rerun visualization for each video (slow).",
+    )
     return parser.parse_args()
 
 
-def main_sample():
+def main():
+    import random
+    from tqdm import tqdm
+    from datasets.preprocess.annotations.annotation_utils import get_video_belongs_to_split
+
     args = parse_args()
 
-    frame_to_world_generator = FrameToWorldAnnotations(
+    generator = FrameToWorldAnnotations(
         ag_root_directory=args.ag_root_directory,
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
     )
-    video_id = "00T1E.mp4"
-    # frame_to_world_generator.visualize_original_results(
-    #     video_id=video_id,
-    #     vis_mode="after",  # "before", "after", or "both"
-    # )
 
-    frame_to_world_generator.fetch_stored_active_objects_in_video(video_id)
-    frame_to_world_generator.generate_video_world_bb_annotations(
-        video_id=video_id,
-        video_id_3d_bbox_predictions=frame_to_world_generator.get_video_3d_annotations(video_id),
-        visualize=True,
+    # ------------------------------------------------------------------
+    # Discover available videos from 3D bbox PKL directory
+    # ------------------------------------------------------------------
+    if args.video:
+        # Single video mode
+        video_ids = [args.video if args.video.endswith(".mp4") else f"{args.video}.mp4"]
+    else:
+        bbox_3d_dir = generator.bbox_3d_root_dir
+        if not bbox_3d_dir.exists():
+            print(f"ERROR: 3D bbox directory not found: {bbox_3d_dir}")
+            sys.exit(1)
+
+        video_ids = sorted([
+            f"{p.stem}.mp4"
+            for p in bbox_3d_dir.glob("*.pkl")
+        ])
+
+    if not video_ids:
+        print("No videos found to process.")
+        sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # Filter by split
+    # ------------------------------------------------------------------
+    if args.split:
+        video_ids = [
+            vid for vid in video_ids
+            if get_video_belongs_to_split(vid) == args.split
+        ]
+        print(f"Split '{args.split}': {len(video_ids)} videos")
+
+    if not video_ids:
+        print(f"No videos found for split '{args.split}'.")
+        sys.exit(0)
+
+    # Shuffle for multi-GPU parallelism
+    random.shuffle(video_ids)
+
+    print(f"Processing {len(video_ids)} videos (overwrite={args.overwrite}, visualize={args.visualize})")
+
+    # ------------------------------------------------------------------
+    # Process each video
+    # ------------------------------------------------------------------
+    success_count = 0
+    skip_count = 0
+    error_count = 0
+
+    for video_id in tqdm(video_ids, desc="World4D generation"):
+        # Check if output already exists
+        out_4d_path = generator.bbox_4d_root_dir / f"{video_id[:-4]}.pkl"
+        if out_4d_path.exists() and not args.overwrite:
+            skip_count += 1
+            continue
+
+        try:
+            # Load active objects classification (needed for static/dynamic split)
+            generator.fetch_stored_active_objects_in_video(video_id)
+
+            # Load 3D bbox predictions
+            video_3d = generator.get_video_3d_annotations(video_id)
+            if video_3d is None:
+                print(f"  ⚠️  [{video_id}] No 3D bbox annotations, skipping.")
+                error_count += 1
+                continue
+
+            # Generate world-4D annotations
+            generator.generate_video_world_bb_annotations(
+                video_id=video_id,
+                video_id_3d_bbox_predictions=video_3d,
+                visualize=args.visualize,
+            )
+            success_count += 1
+
+        except Exception as e:
+            print(f"  ⚠️  [{video_id}] Error: {e}")
+            error_count += 1
+
+    # ------------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------------
+    total = len(video_ids)
+    print(f"\n{'='*60}")
+    print(
+        f"Done: {success_count}/{total} succeeded, "
+        f"{skip_count} skipped (already exist), "
+        f"{error_count} errors."
     )
+    print(f"Output directory: {generator.bbox_4d_root_dir}")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":
-    # main()
-    main_sample()
+    main()

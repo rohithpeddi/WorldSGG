@@ -51,6 +51,43 @@ from datasets.preprocess.annotations.raw.bb3D_base import BBox3DBase
 
 
 # =====================================================================
+# LABEL NORMALIZATION
+# =====================================================================
+
+# GT compound names → short form
+LABEL_NORMALIZE_MAP = {
+    "closet/cabinet": "closet",
+    "cup/glass/bottle": "cup",
+    "paper/notebook": "paper",
+    "sofa/couch": "sofa",
+    "phone/camera": "phone",
+}
+
+# GDino detection scripts expand compound GT classes into individual words
+# for prompting (e.g., "closet/cabinet" → "closet", "cabinet").
+# After detection, the PKLs can contain these expanded labels.
+# This reverse mapping normalizes them back to GT short forms.
+GDINO_LABEL_TO_GT_LABEL = {
+    "cabinet": "closet",
+    "glass": "cup",
+    "bottle": "cup",
+    "notebook": "paper",
+    "couch": "sofa",
+    "camera": "phone",
+}
+
+
+def _normalize_gdino_label(label: str) -> str:
+    """Normalize a GDino label to match GT label space."""
+    label = label.lower().strip()
+    # Step 1: handle compound GT forms
+    label = LABEL_NORMALIZE_MAP.get(label, label)
+    # Step 2: handle expanded GDino forms
+    label = GDINO_LABEL_TO_GT_LABEL.get(label, label)
+    return label
+
+
+# =====================================================================
 # OBB HELPERS (reused from raw/bb3D_generator_gt_obb.py)
 # =====================================================================
 
@@ -565,6 +602,28 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
             R_inv = np.linalg.inv(R_floor)
             return (points_canonical - t_floor[None, :]) @ R_inv.T
 
+        # ----------------------------------------------------------
+        # Pre-compute video-level GT label set for GDino filtering.
+        # Only GDino detections whose normalized label belongs to this
+        # set will be lifted to 3D.
+        # ----------------------------------------------------------
+        video_gt_labels: set = set()
+        for frame_items in video_gt_annotations:
+            for item in frame_items:
+                if "person_bbox" in item:
+                    video_gt_labels.add("person")
+                else:
+                    cid = item.get("class", None)
+                    lbl = self.catid_to_name_map.get(cid, None)
+                    if lbl:
+                        lbl = LABEL_NORMALIZE_MAP.get(lbl, lbl)
+                        video_gt_labels.add(lbl)
+
+        print(
+            f"[corrected-bbox][{video_id}] video GT labels "
+            f"({len(video_gt_labels)}): {sorted(video_gt_labels)}"
+        )
+
         for frame_items in video_gt_annotations:
             frame_name = frame_items[0]["frame"].split("/")[-1]
             stem = Path(frame_name).stem
@@ -735,20 +794,15 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                     if gd_score < gdino_score_threshold:
                         continue
                     # Normalize GDino label to match GT label conventions
-                    gd_label_norm = gd_label
-                    if gd_label_norm == "closet/cabinet":
-                        gd_label_norm = "closet"
-                    elif gd_label_norm == "cup/glass/bottle":
-                        gd_label_norm = "cup"
-                    elif gd_label_norm == "paper/notebook":
-                        gd_label_norm = "paper"
-                    elif gd_label_norm == "sofa/couch":
-                        gd_label_norm = "sofa"
-                    elif gd_label_norm == "phone/camera":
-                        gd_label_norm = "phone"
+                    # (handles both compound forms and expanded forms)
+                    gd_label_norm = _normalize_gdino_label(gd_label)
 
-                    # Skip labels already covered by GT
+                    # Skip labels already covered by GT in this frame
                     if gd_label_norm in gt_labels_in_frame:
+                        continue
+
+                    # Skip labels NOT present anywhere in this video's GT
+                    if gd_label_norm not in video_gt_labels:
                         continue
 
                     # Keep highest-score detection per label
