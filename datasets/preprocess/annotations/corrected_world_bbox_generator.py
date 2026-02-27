@@ -1340,7 +1340,7 @@ def main():
 def main_sample():
     """Process a single sample video, then launch rerun visualization."""
     args = parse_args()
-    video_id = args.video or "05124.mp4"
+    video_id = args.video or "015XE.mp4"
 
     generator = CorrectedWorldBBoxGenerator(
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,

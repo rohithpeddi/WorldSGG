@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 import os
+import pickle
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import pandas as pd
 #!/usr/bin/env python3
 import argparse
 import json
 import os
-from typing import List, Set
+from typing import List, Set, Optional, Any, Dict
 
 # Adjust the import paths if your project structure differs.
-from dataloader.standard.action_genome.ag_dataset import StandardAG
+# from dataloader.standard.action_genome.ag_dataset import StandardAG
 
 # import seaborn as sns
 
@@ -20,60 +23,60 @@ BUCKETS_MB = [10, 20, 30, 40, 50]
 
 
 
+#
+# def _extract_video_ids(video_list: List[List[str]]) -> List[str]:
+#     ids: Set[str] = set()
+#     for frames in video_list:
+#         if not frames:
+#             continue
+#         # frame relpath looks like: video_id/frame_num.jpg (or similar)
+#         video_id = frames[0].split("/")[0]
+#         ids.add(video_id)
+#     return sorted(ids)
 
-def _extract_video_ids(video_list: List[List[str]]) -> List[str]:
-    ids: Set[str] = set()
-    for frames in video_list:
-        if not frames:
-            continue
-        # frame relpath looks like: video_id/frame_num.jpg (or similar)
-        video_id = frames[0].split("/")[0]
-        ids.add(video_id)
-    return sorted(ids)
 
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--out",
-        default="/data/rohith/ag/video_splits.json",
-        help="Output JSON path.",
-    )
-
-    args = parser.parse_args()
-
-    test_dataset = StandardAG(
-        phase="test",
-        mode="sgdet",
-        datasize="large",
-        data_path="/data/rohith/ag",
-        filter_nonperson_box_frame=True,
-        filter_small_box=False,
-    )
-
-    test_video_ids = _extract_video_ids(test_dataset.video_list)
-
-    train_dataset = StandardAG(
-        phase="train",
-        mode="sgdet",
-        datasize="large",
-        data_path="/data/rohith/ag",
-        filter_nonperson_box_frame=True,
-        filter_small_box=False,
-    )
-
-    train_video_ids = _extract_video_ids(train_dataset.video_list)
-
-    out_obj = {
-        "train": train_video_ids,
-        "test": test_video_ids,
-    }
-
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    with open(args.out, "w", encoding="utf-8") as f:
-        json.dump(out_obj, f, indent=2)
-
-    print(f"Wrote {args.out} (train={len(out_obj['train'])}, test={len(out_obj['test'])})")
+# def main() -> None:
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument(
+#         "--out",
+#         default="/data/rohith/ag/video_splits.json",
+#         help="Output JSON path.",
+#     )
+#
+#     args = parser.parse_args()
+#
+#     test_dataset = StandardAG(
+#         phase="test",
+#         mode="sgdet",
+#         datasize="large",
+#         data_path="/data/rohith/ag",
+#         filter_nonperson_box_frame=True,
+#         filter_small_box=False,
+#     )
+#
+#     test_video_ids = _extract_video_ids(test_dataset.video_list)
+#
+#     train_dataset = StandardAG(
+#         phase="train",
+#         mode="sgdet",
+#         datasize="large",
+#         data_path="/data/rohith/ag",
+#         filter_nonperson_box_frame=True,
+#         filter_small_box=False,
+#     )
+#
+#     train_video_ids = _extract_video_ids(train_dataset.video_list)
+#
+#     out_obj = {
+#         "train": train_video_ids,
+#         "test": test_video_ids,
+#     }
+#
+#     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+#     with open(args.out, "w", encoding="utf-8") as f:
+#         json.dump(out_obj, f, indent=2)
+#
+#     print(f"Wrote {args.out} (train={len(out_obj['train'])}, test={len(out_obj['test'])})")
 
 
 
@@ -233,5 +236,27 @@ def main():
     plt.show()
 
 
+
+def load_rag_predictions(
+    rag_results_dir: Path, mode: str, model_name: str, video_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Load the RAG prediction pkl for a single video."""
+    pkl_path = Path(rag_results_dir) / mode / model_name / f"{video_id}.pkl"
+    if not pkl_path.exists():
+        return None
+    with open(pkl_path, "rb") as f:
+        return pickle.load(f)
+
+
 if __name__ == "__main__":
-    main()
+    mllms_dir = Path("/data/rohith/ag/mllms")
+    rag_results_dir = mllms_dir / "rag_results"
+    rag_all_objects_results_dir = mllms_dir / "rag_all_objects_results"
+    subtitle_all_objects_results_dir = mllms_dir / "subtitle_all_objects_results"
+
+    mode = "predcls"
+    model_name = "internvl"
+    video_id = "3C1ZN.mp4"
+
+    predcls_rag_preds = load_rag_predictions(subtitle_all_objects_results_dir, mode, model_name, video_id)
+    print(predcls_rag_preds)
