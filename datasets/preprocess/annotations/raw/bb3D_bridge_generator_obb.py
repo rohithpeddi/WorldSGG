@@ -11,6 +11,7 @@ This replaces the need to run frame_bbox_3D_gt_obb.py as a separate step.
 Points are loaded from disk only ONCE.
 """
 import argparse
+import logging
 import os
 import pickle
 import sys
@@ -41,6 +42,29 @@ from datasets.preprocess.annotations.annotation_utils import (
 from dataloader.ag_dataset import StandardAG
 from torch.utils.data import DataLoader
 
+
+# ---------------------------------------------------------------------------
+# Logger
+# ---------------------------------------------------------------------------
+
+_CODE_ROOT = Path(__file__).resolve().parents[4]   # WorldSGG/
+_LOG_DIR = _CODE_ROOT / "logs"
+_LOG_FILE = _LOG_DIR / "bridge_obb.log"
+
+logger = logging.getLogger("bridge_obb")
+logger.setLevel(logging.DEBUG)
+
+_fh = logging.FileHandler(str(_LOG_FILE), mode="a", encoding="utf-8")
+_fh.setLevel(logging.DEBUG)
+_fh.setFormatter(logging.Formatter(
+    "%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+))
+logger.addHandler(_fh)
+
+_sh = logging.StreamHandler(sys.stdout)
+_sh.setLevel(logging.INFO)
+_sh.setFormatter(logging.Formatter("%(message)s"))
+logger.addHandler(_sh)
 
 # ---------------------------------------------------------------------------
 # Helpers (ported from bb3D_generator_gt_obb.py)
@@ -149,25 +173,26 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
         """
         out_path = self.bbox_3d_obb_bridge_root_dir / f"{video_id[:-4]}.pkl"
         if out_path.exists() and not overwrite:
-            print(f"[bridge][{video_id}] exists: {out_path} (overwrite=False). Skipping.")
+            logger.info(f"[bridge][{video_id}] exists: {out_path} (overwrite=False). Skipping.")
             return out_path
 
         # ==================================================================
         # Phase 1 — Load everything
         # ==================================================================
+        logger.info(f"[bridge][{video_id}] === Phase 1: Loading data ===")
         video_3dgt_obb = self.get_video_3d_obb_annotations(video_id)
         if video_3dgt_obb is None:
-            print(f"[bridge][{video_id}] OBB PKL not found. Skipping.")
+            logger.warning(f"[bridge][{video_id}] OBB PKL not found. Skipping.")
             return None
 
         frames_map = video_3dgt_obb.get("frames", None)
         if frames_map is None or not frames_map:
-            print(f"[bridge][{video_id}] No 'frames' in OBB PKL. Skipping.")
+            logger.warning(f"[bridge][{video_id}] No 'frames' in OBB PKL. Skipping.")
             return None
 
         gfs = video_3dgt_obb.get("global_floor_sim", None)
         if gfs is None:
-            print(f"[bridge][{video_id}] global_floor_sim missing. Skipping.")
+            logger.warning(f"[bridge][{video_id}] global_floor_sim missing. Skipping.")
             return None
 
         s_floor = float(gfs["s"])
@@ -181,13 +206,14 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
         A = Tinfo["A_world_to_final"]
 
         # Load point clouds (ONCE)
-        print(f"[bridge][{video_id}] Loading point clouds …")
+        logger.info(f"[bridge][{video_id}] Loading point clouds …")
         P = self._load_original_points_for_video(video_id)
         points_S = P["points"]      # (S, H, W, 3)
         conf_S = P["conf"]          # (S, H, W) or None
         stems_S = P["frame_stems"]  # ["000010", ...]
         cams_world = P["camera_poses"]
         S, H, W, _ = points_S.shape
+        logger.info(f"[bridge][{video_id}] Loaded {S} frames, point cloud shape=({S},{H},{W},3)")
 
         stem_to_idx = {stems_S[i]: i for i in range(S)}
 
@@ -204,7 +230,7 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
             gdino_predictions = self.get_video_gdino_annotations(video_id)
         except ValueError:
             gdino_predictions = {}
-            print(f"[bridge][{video_id}] No GDino predictions found (continuing with GT only).")
+            logger.info(f"[bridge][{video_id}] No GDino predictions found (continuing with GT only).")
 
         # Collect video GT labels for filtering
         try:
@@ -222,9 +248,14 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
         except FileNotFoundError:
             video_gt_labels = None
 
+        logger.info(f"[bridge][{video_id}] Video-level GT labels: {video_gt_labels}")
+        logger.info(f"[bridge][{video_id}] Total frames in OBB PKL: {len(frames_map)}")
+        logger.info(f"[bridge][{video_id}] GDino frames available: {len(gdino_predictions)}")
+
         # ==================================================================
         # Phase 2 — Tag GT objects + lift GDino
         # ==================================================================
+        logger.info(f"[bridge][{video_id}] === Phase 2: Tag GT + lift GDino ===")
         stats = {"gt": 0, "gdino_added": 0, "gdino_skipped_label": 0,
                  "gdino_skipped_score": 0, "gdino_skipped_exists": 0,
                  "gdino_failed_lift": 0}
@@ -248,6 +279,7 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
             # Find the point cloud index for this frame
             stem = Path(frame_name).stem
             if stem not in stem_to_idx:
+                logger.debug(f"[bridge][{video_id}][{frame_name}] stem '{stem}' not in point cloud index. Skipping frame.")
                 continue
             sidx = stem_to_idx[stem]
             pts_hw3 = points_S[sidx]       # (H, W, 3)
@@ -270,12 +302,15 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
             gdino_labels = gdino_frame.get("labels", [])
             gdino_scores = gdino_frame.get("scores", [])
 
+            logger.debug(f"[bridge][{video_id}][{frame_name}] GT labels in frame: {gt_labels_in_frame}, GDino detections: {len(gdino_boxes) if not _is_empty_array(gdino_boxes) else 0}")
+
             if _is_empty_array(gdino_boxes):
                 continue
 
             for box, lbl_raw, score in zip(gdino_boxes, gdino_labels, gdino_scores):
                 score = float(score)
                 if score < gdino_score_thr:
+                    logger.debug(f"[bridge][{video_id}][{frame_name}] GDino '{lbl_raw}' score={score:.3f} < thr={gdino_score_thr}. Skipped.")
                     stats["gdino_skipped_score"] += 1
                     continue
 
@@ -283,11 +318,13 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
 
                 # Skip if label not in video's GT label set
                 if video_gt_labels is not None and lbl not in video_gt_labels:
+                    logger.debug(f"[bridge][{video_id}][{frame_name}] GDino '{lbl}' not in video GT labels. Skipped.")
                     stats["gdino_skipped_label"] += 1
                     continue
 
                 # Skip if GT already has this label in this frame
                 if lbl in gt_labels_in_frame:
+                    logger.debug(f"[bridge][{video_id}][{frame_name}] GDino '{lbl}' already in GT for this frame. Skipped.")
                     stats["gdino_skipped_exists"] += 1
                     continue
 
@@ -353,6 +390,7 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
                         best_candidate = candidate
 
                 if best_candidate is None:
+                    logger.debug(f"[bridge][{video_id}][{frame_name}] GDino '{lbl}' failed to lift (insufficient points). Skipped.")
                     stats["gdino_failed_lift"] += 1
                     continue
 
@@ -369,9 +407,10 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
                 frame_rec["objects"].append(gdino_obj)
                 gt_labels_in_frame.add(lbl)  # prevent duplicates
                 stats["gdino_added"] += 1
+                logger.info(f"[bridge][{video_id}][{frame_name}] +GDino '{lbl}' score={score:.3f} vol={best_candidate['volume']:.4f} pts={best_candidate['num_points']}")
 
-        print(
-            f"[bridge][{video_id}] Stats: "
+        logger.info(
+            f"[bridge][{video_id}] Phase 2 Stats: "
             f"gt={stats['gt']}, gdino_added={stats['gdino_added']}, "
             f"gdino_skipped(score={stats['gdino_skipped_score']}, "
             f"label={stats['gdino_skipped_label']}, "
@@ -382,6 +421,7 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
         # ==================================================================
         # Phase 3 — WORLD → FINAL transform (same as frame_bbox_3D_gt_obb.py)
         # ==================================================================
+        logger.info(f"[bridge][{video_id}] === Phase 3: WORLD → FINAL transform ===")
 
         # Points FINAL
         pts_flat = points_S.reshape(-1, 3)
@@ -426,6 +466,7 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
 
             if out_objs:
                 obb_bbox_frames_final[frame_name] = {"objects": out_objs}
+                logger.debug(f"[bridge][{video_id}][{frame_name}] FINAL: {len(out_objs)} objects transformed")
 
         # Floor FINAL
         gv = video_3dgt_obb.get("gv", None)
@@ -443,9 +484,12 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
             if gc is not None:
                 floor_final["colors"] = np.asarray(gc, dtype=np.uint8)
 
+        logger.info(f"[bridge][{video_id}] Phase 3 done: {len(obb_bbox_frames_final)} frames with objects in FINAL space")
+
         # ==================================================================
         # Phase 4 — Save
         # ==================================================================
+        logger.info(f"[bridge][{video_id}] === Phase 4: Saving ===")
         video_3dgt_updated = dict(video_3dgt_obb)
         video_3dgt_updated["frames_final"] = {
             "frame_stems": stems_S,
@@ -459,7 +503,7 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
         }
 
         saved_path = self.save_video_3d_obb_bridge_annotations_final(video_id, video_3dgt_updated)
-        print(f"[bridge][{video_id}] Saved merged final PKL: {saved_path}")
+        logger.info(f"[bridge][{video_id}] Saved merged final PKL: {saved_path}")
         return saved_path
 
     # ======================================================================
@@ -647,7 +691,7 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
             if img is not None:
                 rr.log(f"{BASE}/image", rr.Image(img))
 
-        print(f"[bridge-vis][{video_id}] Rerun running. Scrub the 'frame' timeline.")
+        logger.info(f"[bridge-vis][{video_id}] Rerun running. Scrub the 'frame' timeline.")
 
 
 # ---------------------------------------------------------------------------
@@ -699,6 +743,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    logger.info(f"=== Bridge OBB started | args={vars(args)} | log_file={_LOG_FILE} ===")
     bridge = BBox3DBridgeOBB(
         ag_root_directory=args.ag_root_directory,
         dynamic_scene_dir_path=args.dynamic_scene_dir_path,
@@ -727,9 +772,7 @@ def main():
                             gdino_score_thr=args.gdino_score_thr,
                         )
                     except Exception as e:
-                        print(f"[bridge] Error processing {video_id}: {e}")
-                        import traceback
-                        traceback.print_exc()
+                        logger.error(f"[bridge] Error processing {video_id}: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
