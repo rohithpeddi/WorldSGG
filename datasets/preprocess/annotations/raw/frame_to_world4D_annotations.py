@@ -247,6 +247,20 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             print(f"[world4d][{video_id}] 3D bbox frames map is empty. Skipping.")
             return
 
+        # Diagnostic: show what keys the first object has
+        for _fn, _fr in frame_3dbb_map_world.items():
+            for _obj in _fr.get("objects", []):
+                _obb = _obj.get("obb_floor_parallel", "MISSING")
+                _has_cw = (isinstance(_obb, dict) and _obb.get("corners_world") is not None) if isinstance(_obb, dict) else False
+                print(
+                    f"[world4d][{video_id}] DIAG: label={_obj.get('label')}, "
+                    f"keys={sorted(_obj.keys())}, "
+                    f"obb_floor_parallel={'dict' if isinstance(_obb, dict) else repr(_obb)}, "
+                    f"has_corners_world={_has_cw}"
+                )
+                break
+            break
+
         # Precompute floor mesh in WORLD coords (BEFORE)
         if floor is not None and global_floor_sim is not None:
             floor_verts0 = np.asarray(gv, dtype=np.float32)
