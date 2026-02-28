@@ -242,24 +242,15 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             global_floor_sim = (s_g, R_g, t_g)
 
         # 3D bboxes per frame (WORLD coords)
-        frame_3dbb_map_world = video_3dgt.get("frames", None)
+        frame_3dbb_map_world = video_3dgt.get("frames_final", None)
         if frame_3dbb_map_world is None or not frame_3dbb_map_world:
             print(f"[world4d][{video_id}] 3D bbox frames map is empty. Skipping.")
             return
 
-        # Diagnostic: show what keys the first object has
-        for _fn, _fr in frame_3dbb_map_world.items():
-            for _obj in _fr.get("objects", []):
-                _obb = _obj.get("obb_floor_parallel", "MISSING")
-                _has_cw = (isinstance(_obb, dict) and _obb.get("corners_world") is not None) if isinstance(_obb, dict) else False
-                print(
-                    f"[world4d][{video_id}] DIAG: label={_obj.get('label')}, "
-                    f"keys={sorted(_obj.keys())}, "
-                    f"obb_floor_parallel={'dict' if isinstance(_obb, dict) else repr(_obb)}, "
-                    f"has_corners_world={_has_cw}"
-                )
-                break
-            break
+        obb_bbox_frames = frame_3dbb_map_world.get("obb_bbox_frames", None)
+        if obb_bbox_frames is None or not obb_bbox_frames:
+            print(f"[world4d][{video_id}] WARNING: 'obb_box_frames' missing or empty in 3D bbox data.")
+            return
 
         # Precompute floor mesh in WORLD coords (BEFORE)
         if floor is not None and global_floor_sim is not None:
@@ -368,7 +359,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
         num_total_objects = 0
         num_gdino_filtered = 0
 
-        for frame_name, frame_rec in frame_3dbb_map_world.items():
+        for frame_name, frame_rec in obb_bbox_frames.items():
             objects = frame_rec.get("objects", [])
             if not objects:
                 continue

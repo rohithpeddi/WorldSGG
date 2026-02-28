@@ -646,7 +646,7 @@ class FrameToWorldBase:
         """
         Load the floor-aligned 3D bbox annotations created by BBox3DGenerator.
         """
-        out_path = self.bbox_3d_root_dir / f"{video_id[:-4]}.pkl"
+        out_path = self.bbox_3d_gt_obb_final_root_dir / f"{video_id[:-4]}.pkl"
         if not out_path.exists():
             print(f"[world4d][{video_id}] 3D bbox annotations not found at {out_path}")
             return None
