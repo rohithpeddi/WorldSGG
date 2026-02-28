@@ -251,10 +251,10 @@ def main():
         output_dir = _Path(cfg.output_dir)
     else:
         output_dir = _Path(cfg.data_path) / "features" / "roi_features" / "predcls" / model_dir
-    log_dir = _Path("logs")
+    log_dir = _Path(_PROJECT_ROOT) / "logs"
     os.makedirs(log_dir, exist_ok=True)
 
-    log_file = setup_logging(log_dir, config_path)
+    log_file = setup_logging(log_dir, config_path, mode_name="predcls")
     print(f"Log file: {log_file}")
 
     logger.info(f"Config file: {config_path}")

@@ -618,10 +618,10 @@ def main():
         output_dir = Path(cfg.output_dir)
     else:
         output_dir = Path(cfg.data_path) / "features" / "roi_features" / "sgdet" / model_dir
-    log_dir = Path("logs")
+    log_dir = Path(_PROJECT_ROOT) / "logs"
     os.makedirs(log_dir, exist_ok=True)
 
-    log_file = setup_logging(log_dir, config_path)
+    log_file = setup_logging(log_dir, config_path, mode_name="sgdet")
     print(f"Log file: {log_file}")
 
     logger.info(f"Config file: {config_path}")

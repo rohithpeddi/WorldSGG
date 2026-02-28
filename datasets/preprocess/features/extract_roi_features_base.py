@@ -912,18 +912,24 @@ def _str_to_bool(v: str) -> bool:
     raise argparse.ArgumentTypeError(f"Boolean value expected, got '{v}'")
 
 
-def setup_logging(log_dir: Path, config_path: str) -> Path:
+def setup_logging(log_dir: Path, config_path: str, mode_name: str = "") -> Path:
     """
     Set up logging with both file and console handlers.
 
     File handler: DEBUG level (captures all per-frame details)
     Console handler: INFO level (milestones only)
 
+    Args:
+        log_dir: directory to store log files
+        config_path: path to the config file (used for naming)
+        mode_name: pipeline mode (e.g. "predcls", "sgdet") — included in filename
+
     Returns the log file path.
     """
     config_stem = Path(config_path).stem
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    log_file = log_dir / f"{config_stem}_{timestamp}.log"
+    prefix = f"{mode_name}_" if mode_name else ""
+    log_file = log_dir / f"{prefix}{config_stem}_{timestamp}.log"
 
     logger.handlers.clear()
     logger.setLevel(logging.DEBUG)
