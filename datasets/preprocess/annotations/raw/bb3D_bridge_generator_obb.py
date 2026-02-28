@@ -14,6 +14,7 @@ import argparse
 import os
 import pickle
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -523,7 +524,8 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
 
         # ---- Rerun init ----
         rr.init(app_id, spawn=True)
-        rr.log("/", rr.ViewCoordinates.RUB)
+        time.sleep(3)  # wait for viewer to start before sending data
+        rr.log("/", rr.ViewCoordinates.RUB, static=True)
         BASE = "world_final"
         rr.log(BASE, rr.ViewCoordinates.RUB, static=True)
 
