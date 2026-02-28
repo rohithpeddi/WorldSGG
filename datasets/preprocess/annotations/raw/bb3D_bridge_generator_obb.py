@@ -51,6 +51,11 @@ _CODE_ROOT = Path(__file__).resolve().parents[4]   # WorldSGG/
 _LOG_DIR = _CODE_ROOT / "logs"
 _LOG_FILE = _LOG_DIR / "bridge_obb.log"
 
+# Create log directory if it doesn't exist
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+# Create log file if it doesn't exist
+_LOG_FILE.touch(exist_ok=True)
+
 logger = logging.getLogger("bridge_obb")
 logger.setLevel(logging.DEBUG)
 
