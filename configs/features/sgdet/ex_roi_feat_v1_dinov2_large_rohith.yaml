@@ -1,21 +1,20 @@
 # =============================================================================
-# ROI Feature Extraction Config
+# ROI Feature Extraction Config — SGDet (DINOv2-Large)
 # =============================================================================
-# Extract pre-computed ROI features from trained detectors for PredCls.
+# Runs DinoV3 detector → filter → GT matching → augmentation → 3D prediction.
+# All bboxes in Pi-3 space. Train gets GT augmentation, test does not.
+# Output: {data_path}/features/roi_features/sgdet/dinov2l/{train,test}/
 #
 # Usage:
-#   python datasets/preprocess/features/extract_roi_features.py \
-#       --config configs/extract_roi_features.yaml
-#
-#   Override via CLI:
-#       --model v2l --ckpt checkpoint_50 --video 001YG.mp4
+#   python datasets/preprocess/features/extract_roi_features_sgdet.py \
+#       --config configs/features/sgdet/ex_roi_feat_v1_dinov2_large_rohith.yaml
 # =============================================================================
 
 # --- Detector (must match training config) ---
-model: "v2l"                          # "v2" | "v2l" | "v3l"
-experiment_name: "v1_dinov2l_separate"   # experiment folder under working_dir
+model: "v2l"
+experiment_name: "v1_dinov2l_separate"
 working_dir: "/home/rxp190007/CODE/Scene4Cast/lib/detector/monocular3d"
-ckpt: checkpoint_32                           # checkpoint subfolder, e.g. "checkpoint_best" or "checkpoint_50"
+ckpt: checkpoint_32
 
 # --- Detector architecture (must match training) ---
 head_3d_mode: "separate"
@@ -25,11 +24,21 @@ pretrained: true
 # --- Data ---
 data_path: "/data/rohith/ag"
 
+# --- Image processing (must match ag_dataset_3d.py / training config) ---
+pixel_limit: 255000
+patch_size: 14
+
+# --- SGDet detection parameters ---
+score_threshold: 0.1
+nms_threshold: 0.5
+assign_iou_train: 0.5
+assign_iou_test: 0.3
+use_supply: true
+
 # --- Feature Extraction ---
-output_dir: null                     # null = auto: {data_path}/features/roi_features/predcls/{model_dir}
-gdino_score_threshold: 0.3
-store_dtype: "float16"               # "float16" or "float32"
+output_dir: null
+store_dtype: "float16"
 overwrite: false
 gpu: 0
-video: null                          # null = all videos, or e.g. "001YG.mp4"
-split: null                          # null = both train+test, or "train" / "test"
+video: null
+split: null

@@ -6,12 +6,15 @@ ROI Feature Extraction for SGDet
 Extracts pre-computed ROI features using the DinoV3 detector's own detections
 (not GT bboxes). Mirrors the original Faster R-CNN Detector's sgdet pipeline:
 
-  1. Run DinoV3 detector → per-frame detections (boxes, labels, scores)
+  1. Run DinoV3 detector → per-frame detections (boxes, labels, scores) in Pi-3 space
   2. Apply score threshold + keep single highest-scoring person per frame
-  3. Match detections to GT via IoU (train: 0.5, test: 0.3)
+  3. Match detections to GT via IoU in Pi-3 space (train: 0.5, test: 0.3)
   4. [Train only] Augment with unfound GT boxes (SUPPLY_RELATIONS)
-  5. Extract ROI features + union features for finalized bounding boxes
-  6. Save per-video PKL files
+  5. Extract ROI features + union features for all finalized bounding boxes
+  6. Compute 3D predictions for ALL finalized bboxes using unified ROI features
+  7. Save per-video PKL files (train/ and test/ subdirectories)
+
+All bboxes throughout the pipeline are in Pi-3 scaled space.
 
 Usage:
     python datasets/preprocess/features/extract_roi_features_sgdet.py \
@@ -48,6 +51,7 @@ from datasets.preprocess.features.extract_roi_features_base import (
     LABEL_TO_CLASSIDX,
     MODEL_TO_DIR,
     _normalize_label,
+    scale_gt_annotations_to_pi3,
     build_parser,
     logger,
     parse_config,
@@ -65,6 +69,8 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
     """
     SGDet: runs DinoV3 detector → NMS → GT matching → GT augmentation (train).
 
+    All operations are in Pi-3 scaled space (resized image coordinates).
+
     For training: detections are matched to GT at IoU >= 0.5.
                   Unfound GT objects are injected with score=1.0 and true labels.
     For testing:  detections are matched to GT at IoU >= 0.3. No augmentation.
@@ -80,14 +86,14 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
         return Path(self.cfg.data_path) / "features" / "roi_features" / "sgdet" / model_dir / split_name
 
     # ------------------------------------------------------------------
-    # Detection + filtering
+    # Detection + filtering (all in Pi-3 space)
     # ------------------------------------------------------------------
 
     @torch.no_grad()
     def _detect_frame(
         self,
         img_chw: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Run the DinoV3 detector on a preprocessed frame.
 
@@ -96,49 +102,42 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
           - Score-based top-k (default 100 detections/image)
 
         Returns:
-            boxes: (N, 4) xyxy in resized image coordinates
+            boxes: (N, 4) xyxy in Pi-3 (resized image) coordinates
             labels: (N,) class indices (1-indexed, 0=background)
             scores: (N,) confidence scores
-            boxes_3d: (N, 8, 3) predicted 3D corners
         """
         detections = self.model([img_chw.to(self.device)])
         det = detections[0]
-        return det["boxes"], det["labels"], det["scores"], det["boxes_3d"]
+        return det["boxes"], det["labels"], det["scores"]
 
     def _filter_detections(
         self,
         boxes: torch.Tensor,
         labels: torch.Tensor,
         scores: torch.Tensor,
-        boxes_3d: torch.Tensor,
-        scale_x: float,
-        scale_y: float,
-    ) -> Tuple[List[List[float]], List[str], List[int], List[float], np.ndarray]:
+    ) -> Tuple[List[List[float]], List[str], List[int], List[float]]:
         """
-        Filter detections:
+        Filter detections (all in Pi-3 space):
           1. Score threshold (default 0.1)
           2. Person class: keep only the single highest-scoring detection
-          3. Convert boxes back to original image coordinates
 
         Returns:
-            bboxes_xyxy_orig: bboxes in original image coords
+            bboxes_pi3: bboxes in Pi-3 coords
             det_labels: normalized label strings
             det_label_ids: AG class indices
             det_scores: confidence scores
-            det_boxes_3d: (N, 8, 3) filtered 3D predictions as numpy
         """
         if len(boxes) == 0:
-            return [], [], [], [], np.empty((0, 8, 3), dtype=np.float32)
+            return [], [], [], []
 
         # Score threshold
         keep_mask = scores >= self.cfg.score_threshold
         boxes = boxes[keep_mask]
         labels = labels[keep_mask]
         scores = scores[keep_mask]
-        boxes_3d = boxes_3d[keep_mask]
 
         if len(boxes) == 0:
-            return [], [], [], [], np.empty((0, 8, 3), dtype=np.float32)
+            return [], [], [], []
 
         # Person class (index 1): keep only top-1
         person_mask = labels == 1
@@ -147,7 +146,6 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
         filtered_boxes = []
         filtered_labels = []
         filtered_scores = []
-        filtered_boxes_3d = []
 
         if person_mask.any():
             person_scores = scores[person_mask]
@@ -156,42 +154,32 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
             filtered_boxes.append(person_boxes_all[best_person_idx].unsqueeze(0))
             filtered_labels.append(labels[person_mask][best_person_idx].unsqueeze(0))
             filtered_scores.append(person_scores[best_person_idx].unsqueeze(0))
-            filtered_boxes_3d.append(boxes_3d[person_mask][best_person_idx].unsqueeze(0))
 
         if non_person_mask.any():
             filtered_boxes.append(boxes[non_person_mask])
             filtered_labels.append(labels[non_person_mask])
             filtered_scores.append(scores[non_person_mask])
-            filtered_boxes_3d.append(boxes_3d[non_person_mask])
 
         if not filtered_boxes:
-            return [], [], [], [], np.empty((0, 8, 3), dtype=np.float32)
+            return [], [], [], []
 
         boxes = torch.cat(filtered_boxes, dim=0)
         labels = torch.cat(filtered_labels, dim=0)
         scores = torch.cat(filtered_scores, dim=0)
-        boxes_3d = torch.cat(filtered_boxes_3d, dim=0)
 
-        # Convert to original image coordinates
+        # Convert to lists (already in Pi-3 coords — no scale conversion)
         boxes_np = boxes.cpu().numpy()
         labels_np = labels.cpu().numpy()
         scores_np = scores.cpu().numpy()
-        boxes_3d_np = boxes_3d.cpu().numpy()  # (N, 8, 3)
 
-        bboxes_xyxy_orig = []
+        bboxes_pi3 = []
         det_labels = []
         det_label_ids = []
         det_scores = []
 
         for i in range(len(boxes_np)):
             x1, y1, x2, y2 = boxes_np[i]
-            # Convert from resized coords to original coords
-            bboxes_xyxy_orig.append([
-                float(x1 / scale_x),
-                float(y1 / scale_y),
-                float(x2 / scale_x),
-                float(y2 / scale_y),
-            ])
+            bboxes_pi3.append([float(x1), float(y1), float(x2), float(y2)])
             cls_idx = int(labels_np[i])
             cls_name = CATID_TO_NAME.get(cls_idx, None)
             if cls_name is not None:
@@ -201,10 +189,37 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
             det_label_ids.append(cls_idx)
             det_scores.append(float(scores_np[i]))
 
-        return bboxes_xyxy_orig, det_labels, det_label_ids, det_scores, boxes_3d_np
+        return bboxes_pi3, det_labels, det_label_ids, det_scores
 
     # ------------------------------------------------------------------
-    # GT augmentation (training only)
+    # GT matching with Pi-3 scaled annotations
+    # ------------------------------------------------------------------
+
+    def _assign_relations_pi3(
+        self,
+        prediction: Dict[str, Any],
+        gt_annotations: List[List[Dict[str, Any]]],
+        scale_x: float,
+        scale_y: float,
+        target_w: int,
+        target_h: int,
+        assign_iou: float,
+    ):
+        """
+        Wrapper around assign_relations() that pre-scales GT annotations to Pi-3.
+
+        assign_relations pulls GT bboxes from raw annotation dicts (original coords).
+        We scale them first so IoU matching happens in Pi-3 space.
+
+        Supply relations returned will also contain Pi-3 scaled bboxes.
+        """
+        scaled_gt = scale_gt_annotations_to_pi3(
+            gt_annotations, scale_x, scale_y, target_w, target_h
+        )
+        return assign_relations(prediction, scaled_gt, assign_IOU_threshold=assign_iou)
+
+    # ------------------------------------------------------------------
+    # GT augmentation (training only) — bboxes already in Pi-3
     # ------------------------------------------------------------------
 
     def _augment_with_unfound_gt(
@@ -212,52 +227,47 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
         supply_relations: List[Dict[str, Any]],
         features: Dict[str, torch.Tensor],
         image_sizes: List[Tuple[int, int]],
-        scale_x: float,
-        scale_y: float,
-        target_w: int,
-        target_h: int,
-    ) -> Tuple[List[List[float]], List[str], List[int], List[float], torch.Tensor, np.ndarray]:
+    ) -> Tuple[List[List[float]], List[str], List[int], List[float], torch.Tensor]:
         """
-        Extract features and 3D predictions for unfound GT objects (SUPPLY_RELATIONS).
+        Extract features for unfound GT objects (SUPPLY_RELATIONS).
+
+        Supply relations contain bboxes **already in Pi-3 space** (from
+        _assign_relations_pi3). No scaling is needed.
 
         Args:
-            supply_relations: list of GT annotation dicts for unfound objects
+            supply_relations: list of GT annotation dicts with Pi-3 bboxes
             features: FPN feature maps from backbone (already computed)
             image_sizes: from transform
-            scale_x, scale_y: bbox scale factors
-            target_w, target_h: resized image dims
 
         Returns:
-            supply_bboxes_orig: bboxes in original coords
+            supply_bboxes_pi3: bboxes in Pi-3 coords
             supply_labels: normalized label strings
             supply_label_ids: AG class indices
             supply_scores: all 1.0
             supply_features: (M, 1024) tensor on device
-            supply_boxes_3d: (M, 8, 3) 3D predictions as numpy
         """
-        supply_bboxes_orig = []
+        supply_bboxes_pi3 = []
         supply_labels = []
         supply_label_ids = []
         supply_scores = []
-        supply_scaled_bboxes = []
 
         for gt_item in supply_relations:
             if "person_bbox" in gt_item:
-                # Person bbox
+                # Person bbox (already Pi-3 scaled)
                 pb = gt_item["person_bbox"]
                 if isinstance(pb, np.ndarray):
                     pb = pb.reshape(-1).tolist()
                 elif isinstance(pb, (list, tuple)):
                     if isinstance(pb[0], (list, tuple, np.ndarray)):
                         pb = list(pb[0])
-                bbox_orig = [float(v) for v in pb[:4]]
+                bbox_pi3 = [float(v) for v in pb[:4]]
                 label_str = "person"
                 label_id = 1
             elif "bbox" in gt_item and "class" in gt_item:
                 bbox = gt_item["bbox"]
                 if isinstance(bbox, np.ndarray):
                     bbox = bbox.tolist()
-                bbox_orig = [float(v) for v in bbox[:4]]
+                bbox_pi3 = [float(v) for v in bbox[:4]]
                 cls_idx = int(gt_item["class"])
                 cls_name = CATID_TO_NAME.get(cls_idx, None)
                 label_str = _normalize_label(cls_name) if cls_name else f"class_{cls_idx}"
@@ -265,36 +275,25 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
             else:
                 continue
 
-            # Scale to resized coords
-            x1 = max(0.0, min(bbox_orig[0] * scale_x, target_w - 1))
-            y1 = max(0.0, min(bbox_orig[1] * scale_y, target_h - 1))
-            x2 = max(0.0, min(bbox_orig[2] * scale_x, target_w - 1))
-            y2 = max(0.0, min(bbox_orig[3] * scale_y, target_h - 1))
-
+            # Validate (already Pi-3 — just check non-degenerate)
+            x1, y1, x2, y2 = bbox_pi3
             if (x2 - x1) < 1 or (y2 - y1) < 1:
                 continue
 
-            supply_bboxes_orig.append(bbox_orig)
+            supply_bboxes_pi3.append(bbox_pi3)
             supply_labels.append(label_str)
             supply_label_ids.append(label_id)
             supply_scores.append(1.0)
-            supply_scaled_bboxes.append([x1, y1, x2, y2])
 
-        if not supply_scaled_bboxes:
-            empty_3d = np.empty((0, 8, 3), dtype=np.float32)
-            return [], [], [], [], torch.tensor([]).to(self.device), empty_3d
+        if not supply_bboxes_pi3:
+            return [], [], [], [], torch.tensor([]).to(self.device)
 
         # Extract ROI features for supply bboxes using pre-computed FPN features
         supply_features = self._extract_roi_features_for_bboxes(
-            features, image_sizes, supply_scaled_bboxes
+            features, image_sizes, supply_bboxes_pi3
         )
 
-        # Compute 3D predictions for supply bboxes
-        supply_boxes_3d = self._predict_3d_for_bboxes(
-            supply_features, supply_scaled_bboxes, image_sizes
-        ).cpu().numpy()
-
-        return supply_bboxes_orig, supply_labels, supply_label_ids, supply_scores, supply_features, supply_boxes_3d
+        return supply_bboxes_pi3, supply_labels, supply_label_ids, supply_scores, supply_features
 
     # ------------------------------------------------------------------
     # Build prediction dict for assign_relations
@@ -312,8 +311,10 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
             prediction["FINAL_BBOXES"]: (N, 5) tensor with [frame_idx, x1, y1, x2, y2]
             prediction["FINAL_LABELS"]: (N,) tensor with class indices
 
+        All bboxes are in Pi-3 space.
+
         Args:
-            all_frame_bboxes: list of per-frame bbox lists (original coords)
+            all_frame_bboxes: list of per-frame bbox lists (Pi-3 coords)
             all_frame_labels: list of per-frame label_id lists
 
         Returns:
@@ -351,23 +352,30 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
         split_name: str,
     ) -> Optional[Dict[str, Any]]:
         """
-        SGDet extraction pipeline:
+        SGDet extraction pipeline (all in Pi-3 space):
           1. Detect objects in each frame
           2. Filter (score threshold + person top-1)
-          3. Match to GT via assign_relations
+          3. Match to GT via assign_relations (GT scaled to Pi-3)
           4. [Train] Augment with unfound GT boxes
           5. Extract ROI + union features for finalized bboxes
+          6. Compute 3D predictions for ALL finalized bboxes
         """
         is_train = (split_name == "train")
         assign_iou = self.cfg.assign_iou_train if is_train else self.cfg.assign_iou_test
 
         # ====================================================================
-        # Phase 1: Run detector on all frames, collect detections
+        # Phase 1: Run detector on all frames, collect detections (Pi-3 space)
         # ====================================================================
-        per_frame_data = []  # [(frame_file, img_chw, orig_w, orig_h, target_w, target_h, bboxes_orig, labels, label_ids, scores, scaled_bboxes)]
+        per_frame_data = []
 
         all_frame_bboxes_for_assign = []
         all_frame_label_ids_for_assign = []
+
+        # We need consistent scale factors — compute from first valid frame
+        video_scale_x = None
+        video_scale_y = None
+        video_target_w = None
+        video_target_h = None
 
         for frame_items in gt_annotations:
             if not frame_items:
@@ -399,30 +407,22 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
             scale_x = target_w / float(orig_w)
             scale_y = target_h / float(orig_h)
 
-            # Run detector
-            det_boxes, det_labels, det_scores, det_boxes_3d = self._detect_frame(img_chw)
+            # Store scale for assign_relations (same across all frames in a video)
+            if video_scale_x is None:
+                video_scale_x = scale_x
+                video_scale_y = scale_y
+                video_target_w = target_w
+                video_target_h = target_h
 
-            # Filter detections
-            bboxes_orig, labels, label_ids, scores, boxes_3d_np = self._filter_detections(
-                det_boxes, det_labels, det_scores, det_boxes_3d, scale_x, scale_y
+            # Run detector (output is already Pi-3)
+            det_boxes, det_labels, det_scores = self._detect_frame(img_chw)
+
+            # Filter detections (stays in Pi-3)
+            bboxes_pi3, labels, label_ids, scores = self._filter_detections(
+                det_boxes, det_labels, det_scores
             )
 
-            # Scale filtered bboxes to resized coords for feature extraction
-            if bboxes_orig:
-                scaled_bboxes, valid_indices = self._scale_and_validate_bboxes(
-                    bboxes_orig, scale_x, scale_y, target_w, target_h
-                )
-                # Filter to only valid bboxes
-                bboxes_orig = [bboxes_orig[i] for i in valid_indices]
-                labels = [labels[i] for i in valid_indices]
-                label_ids = [label_ids[i] for i in valid_indices]
-                scores = [scores[i] for i in valid_indices]
-                boxes_3d_np = boxes_3d_np[valid_indices]
-            else:
-                scaled_bboxes = []
-                boxes_3d_np = np.empty((0, 8, 3), dtype=np.float32)
-
-            all_frame_bboxes_for_assign.append(bboxes_orig)
+            all_frame_bboxes_for_assign.append(bboxes_pi3)
             all_frame_label_ids_for_assign.append(label_ids)
 
             per_frame_data.append({
@@ -434,16 +434,14 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
                 "target_h": target_h,
                 "scale_x": scale_x,
                 "scale_y": scale_y,
-                "bboxes_orig": bboxes_orig,
+                "bboxes_pi3": bboxes_pi3,
                 "labels": labels,
                 "label_ids": label_ids,
                 "scores": scores,
-                "scaled_bboxes": scaled_bboxes,
-                "boxes_3d": boxes_3d_np,
             })
 
         # ====================================================================
-        # Phase 2: Match detections to GT via assign_relations
+        # Phase 2: Match detections to GT via assign_relations (Pi-3 space)
         # ====================================================================
         prediction = self._build_prediction_for_assign(
             all_frame_bboxes_for_assign, all_frame_label_ids_for_assign
@@ -453,18 +451,25 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
             logger.info(f"[{video_id}] No detections produced")
             return None
 
-        DETECTOR_FOUND_IDX, GT_RELATIONS, SUPPLY_RELATIONS, assigned_labels = assign_relations(
-            prediction, gt_annotations, assign_IOU_threshold=assign_iou
+        # Use scale from first valid frame (all frames in a video have same resolution)
+        if video_scale_x is None:
+            logger.info(f"[{video_id}] No valid frames found")
+            return None
+
+        DETECTOR_FOUND_IDX, GT_RELATIONS, SUPPLY_RELATIONS, assigned_labels = self._assign_relations_pi3(
+            prediction, gt_annotations,
+            video_scale_x, video_scale_y, video_target_w, video_target_h,
+            assign_iou,
         )
 
         logger.info(
-            f"[{video_id}] assign_relations (IoU={assign_iou}): "
+            f"[{video_id}] assign_relations (IoU={assign_iou}, Pi-3 space): "
             f"found={sum(len(d) for d in DETECTOR_FOUND_IDX)}, "
             f"supply={sum(len(s) for s in SUPPLY_RELATIONS)}"
         )
 
         # ====================================================================
-        # Phase 3: Augment with unfound GT (train only) + extract features
+        # Phase 3: Augment + extract features + 3D predictions (all Pi-3)
         # ====================================================================
         frames_data = {}
 
@@ -474,84 +479,63 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
 
             frame_file = frame_data["frame_file"]
             img_chw = frame_data["img_chw"]
-            bboxes_orig = list(frame_data["bboxes_orig"])
+            bboxes_pi3 = list(frame_data["bboxes_pi3"])
             labels = list(frame_data["labels"])
             label_ids = list(frame_data["label_ids"])
             scores = list(frame_data["scores"])
-            scaled_bboxes = list(frame_data["scaled_bboxes"])
-            frame_boxes_3d = frame_data["boxes_3d"]  # (N_det, 8, 3)
-            sources = ["detector"] * len(bboxes_orig)
-
-            supply_features_tensor = None
+            sources = ["detector"] * len(bboxes_pi3)
 
             # GT augmentation for training
             if is_train and self.cfg.use_supply and frame_idx < len(SUPPLY_RELATIONS):
                 supply_rels = SUPPLY_RELATIONS[frame_idx]
                 if len(supply_rels) > 0:
-                    # We need FPN features for this frame to extract supply box features
+                    # We need FPN features for supply box feature extraction
                     images, _ = self.transform([img_chw], None)
                     features = self.backbone(images.tensors.to(self.device))
                     if isinstance(features, torch.Tensor):
                         features = {"0": features}
 
                     (
-                        supply_bboxes_orig, supply_labels, supply_label_ids,
-                        supply_scores, supply_features_tensor, supply_boxes_3d
+                        supply_bboxes_pi3, supply_labels, supply_label_ids,
+                        supply_scores, supply_features_tensor
                     ) = self._augment_with_unfound_gt(
                         supply_rels, features, [images.image_sizes[0]],
-                        frame_data["scale_x"], frame_data["scale_y"],
-                        frame_data["target_w"], frame_data["target_h"],
                     )
 
-                    if supply_bboxes_orig:
-                        # Scale supply bboxes to resized coords
-                        supply_scaled, supply_valid = self._scale_and_validate_bboxes(
-                            supply_bboxes_orig,
-                            frame_data["scale_x"], frame_data["scale_y"],
-                            frame_data["target_w"], frame_data["target_h"],
-                        )
-
-                        bboxes_orig.extend(supply_bboxes_orig)
+                    if supply_bboxes_pi3:
+                        bboxes_pi3.extend(supply_bboxes_pi3)
                         labels.extend(supply_labels)
                         label_ids.extend(supply_label_ids)
                         scores.extend(supply_scores)
-                        sources.extend(["gt_supply"] * len(supply_bboxes_orig))
-                        scaled_bboxes.extend(supply_scaled)
-                        # Concatenate 3D predictions: detector + supply
-                        frame_boxes_3d = np.concatenate(
-                            [frame_boxes_3d, supply_boxes_3d], axis=0
-                        )
+                        sources.extend(["gt_supply"] * len(supply_bboxes_pi3))
 
                         logger.debug(
-                            f"[{video_id}][{frame_file}] Supply: added {len(supply_bboxes_orig)} GT boxes"
+                            f"[{video_id}][{frame_file}] Supply: added {len(supply_bboxes_pi3)} GT boxes"
                         )
 
-            if not bboxes_orig:
+            if not bboxes_pi3:
                 continue
 
-            # Extract ROI + union features for all finalized bboxes
+            # Extract ROI + union features for ALL finalized bboxes (Pi-3)
             roi_features, union_features_np, pair_indices = self._extract_roi_and_union_features(
-                img_chw, scaled_bboxes, labels, label_ids,
+                img_chw, bboxes_pi3, labels, label_ids,
             )
 
-            # If we have supply features, we need to replace their entries in roi_features
-            # since we already extracted them from the supply augmentation step.
-            # However, _extract_roi_and_union_features re-extracts features for ALL bboxes
-            # (including the supply ones), which is correct — it uses the same backbone
-            # and produces consistent features.
-            # The supply_features_tensor was used to ensure we CAN extract features for
-            # these boxes; the final features come from the unified extraction call.
+            # Compute 3D predictions for ALL finalized bboxes using unified ROI features
+            images_for_3d, _ = self.transform([img_chw], None)
+            boxes_3d = self._predict_3d_for_bboxes(
+                roi_features, bboxes_pi3, [images_for_3d.image_sizes[0]]
+            )
 
             # Get assigned labels for this frame's detections
             frame_assigned_labels = []
             if assigned_labels is not None:
-                # assigned_labels is flat across all frames; find this frame's entries
                 final_bboxes = prediction["FINAL_BBOXES"]
                 frame_mask = final_bboxes[:, 0] == frame_idx
                 frame_assigned = assigned_labels[frame_mask.numpy() if isinstance(frame_mask, torch.Tensor) else frame_mask]
                 frame_assigned_labels = frame_assigned.tolist()
                 # Pad with 0s for supply boxes
-                frame_assigned_labels.extend([0] * (len(bboxes_orig) - len(frame_assigned_labels)))
+                frame_assigned_labels.extend([0] * (len(bboxes_pi3) - len(frame_assigned_labels)))
 
             # Detector-found indices for this frame
             frame_detector_found = []
@@ -559,16 +543,17 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
                 frame_detector_found = DETECTOR_FOUND_IDX[frame_idx]
 
             logger.debug(
-                f"[{video_id}][{frame_file}] Final: {len(bboxes_orig)} boxes "
+                f"[{video_id}][{frame_file}] Final: {len(bboxes_pi3)} boxes "
                 f"(detector={sources.count('detector')}, supply={sources.count('gt_supply')}), "
                 f"{len(pair_indices)} pairs"
             )
 
-            # Store frame entry
+            # Store frame entry (all in Pi-3 space)
             frame_entry = {
                 "roi_features": roi_features.cpu().numpy().astype(self.store_dtype),
-                "bboxes_xyxy": np.array(bboxes_orig, dtype=np.float32),
-                "boxes_3d": frame_boxes_3d.astype(self.store_dtype),
+                "bboxes_xyxy": np.array(bboxes_pi3, dtype=np.float32),
+                "boxes_3d": boxes_3d.cpu().numpy().astype(self.store_dtype),
+                "target_size": (frame_data["target_w"], frame_data["target_h"]),
                 "labels": labels,
                 "label_ids": label_ids,
                 "sources": sources,
@@ -603,6 +588,7 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
             "video_id": video_id,
             "model": self.cfg.model,
             "mode": "sgdet",
+            "coord_space": "pi3",
             "split": split_name,
             "feature_dim": 1024,
             "assign_iou_threshold": assign_iou,

@@ -39,6 +39,7 @@ from datasets.preprocess.features.extract_roi_features_base import (
     ExtractConfig,
     CATID_TO_NAME,
     LABEL_TO_CLASSIDX,
+    MODEL_TO_DIR,
     _load_gdino_predictions,
     _normalize_label,
     build_parser,
@@ -55,6 +56,14 @@ class PredClsROIFeatureExtractor(BaseROIFeatureExtractor):
     """
 
     MODE_NAME = "predcls"
+
+    def _get_output_dir(self, split_name: str) -> Path:
+        """PredCls uses separate train/test output directories."""
+        from pathlib import Path as _Path
+        model_dir = MODEL_TO_DIR.get(self.cfg.model, self.cfg.model)
+        if self.cfg.output_dir:
+            return _Path(self.cfg.output_dir) / split_name
+        return _Path(self.cfg.data_path) / "features" / "roi_features" / "predcls" / model_dir / split_name
 
     @torch.no_grad()
     def _extract_features_for_video(
@@ -112,13 +121,14 @@ class PredClsROIFeatureExtractor(BaseROIFeatureExtractor):
             scale_x = target_w / float(orig_w)
             scale_y = target_h / float(orig_h)
 
-            # Collect bboxes (in original image coordinates)
+            # Collect bboxes (scaled to Pi-3 space)
             gdino_frame = gdino_preds.get(frame_file, None) if gdino_preds else None
             (
                 bboxes_xyxy, labels, sources, gdino_scores,
                 raw_gdino_dets, accepted_gdino, rej_score, rej_in_gt, rej_not_in_video
             ) = self._collect_bboxes_for_frame(
                 frame_items, gdino_frame, self.cfg.gdino_score_threshold,
+                scale_x, scale_y, target_w, target_h,
                 video_gt_labels=video_gt_labels,
             )
 
@@ -165,26 +175,13 @@ class PredClsROIFeatureExtractor(BaseROIFeatureExtractor):
             if not bboxes_xyxy:
                 continue
 
-            # Scale and validate bboxes
-            scaled_bboxes, valid_indices = self._scale_and_validate_bboxes(
-                bboxes_xyxy, scale_x, scale_y, target_w, target_h
-            )
-
-            if not scaled_bboxes:
-                continue
-
-            # Filter labels/sources/scores to match valid bboxes
-            labels = [labels[i] for i in valid_indices]
-            sources = [sources[i] for i in valid_indices]
-            gdino_scores = [gdino_scores[i] for i in valid_indices]
-            bboxes_xyxy_orig = [bboxes_xyxy[i] for i in valid_indices]
-
+            # Bboxes are already in Pi-3 space — no filtering needed for PredCls
             # Label IDs (AG class indices)
             label_ids = [LABEL_TO_CLASSIDX.get(l, 0) for l in labels]
 
-            # Extract ROI + union features
+            # Extract ROI + union features (bboxes already Pi-3)
             roi_features, union_features_np, pair_indices = self._extract_roi_and_union_features(
-                img_chw, scaled_bboxes, labels, label_ids,
+                img_chw, bboxes_xyxy, labels, label_ids,
             )
 
             if pair_indices:
@@ -192,10 +189,11 @@ class PredClsROIFeatureExtractor(BaseROIFeatureExtractor):
                     f"[{video_id}][{frame_file}] Union features: {len(pair_indices)} pairs"
                 )
 
-            # Store frame entry
+            # Store frame entry (all bboxes in Pi-3 space)
             frame_entry = {
                 "roi_features": roi_features.cpu().numpy().astype(self.store_dtype),
-                "bboxes_xyxy": np.array(bboxes_xyxy_orig, dtype=np.float32),
+                "bboxes_xyxy": np.array(bboxes_xyxy, dtype=np.float32),
+                "target_size": (target_w, target_h),
                 "labels": labels,
                 "label_ids": label_ids,
                 "sources": sources,
@@ -224,6 +222,8 @@ class PredClsROIFeatureExtractor(BaseROIFeatureExtractor):
         return {
             "video_id": video_id,
             "model": self.cfg.model,
+            "mode": "predcls",
+            "coord_space": "pi3",
             "feature_dim": 1024,
             "checkpoint": os.path.join(
                 self.cfg.working_dir or "", self.cfg.experiment_name,

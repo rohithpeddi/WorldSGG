@@ -13,6 +13,7 @@ Subclasses (PredCls / SGDet) override `_extract_features_for_video()`.
 """
 
 import argparse
+import copy
 import gc
 import logging
 import math
@@ -173,6 +174,65 @@ def _normalize_label(label: str) -> str:
     label = LABEL_NORMALIZE_MAP.get(label, label)
     label = GDINO_LABEL_TO_GT_LABEL.get(label, label)
     return label
+
+
+def _scale_bbox_to_pi3(
+    bbox: List[float], scale_x: float, scale_y: float,
+    target_w: int, target_h: int,
+) -> List[float]:
+    """Scale a single [x1, y1, x2, y2] bbox from original to Pi-3 coords."""
+    x1 = max(0.0, min(float(bbox[0]) * scale_x, target_w - 1))
+    y1 = max(0.0, min(float(bbox[1]) * scale_y, target_h - 1))
+    x2 = max(0.0, min(float(bbox[2]) * scale_x, target_w - 1))
+    y2 = max(0.0, min(float(bbox[3]) * scale_y, target_h - 1))
+    return [x1, y1, x2, y2]
+
+
+def scale_gt_annotations_to_pi3(
+    gt_annotations: List[List[Dict[str, Any]]],
+    scale_x: float,
+    scale_y: float,
+    target_w: int,
+    target_h: int,
+) -> List[List[Dict[str, Any]]]:
+    """
+    Deep-copy GT annotations with all bboxes scaled to Pi-3 space.
+
+    Scales `person_bbox` and `bbox` fields. All other fields are copied as-is.
+    The returned annotations have the exact same structure expected by
+    `assign_relations()` and `_collect_bboxes_for_frame()`.
+    """
+    scaled_annotations = []
+    for frame_items in gt_annotations:
+        scaled_frame = []
+        for item in frame_items:
+            new_item = copy.copy(item)  # shallow copy — only bbox fields change
+
+            if "person_bbox" in item and item["person_bbox"] is not None:
+                pb = item["person_bbox"]
+                if isinstance(pb, np.ndarray):
+                    pb = pb.reshape(-1).tolist()
+                elif isinstance(pb, (list, tuple)):
+                    if isinstance(pb[0], (list, tuple, np.ndarray)):
+                        pb = list(pb[0])
+                    else:
+                        pb = list(pb)
+                new_item["person_bbox"] = _scale_bbox_to_pi3(
+                    pb, scale_x, scale_y, target_w, target_h
+                )
+
+            if "bbox" in item and item["bbox"] is not None:
+                bbox = item["bbox"]
+                if isinstance(bbox, np.ndarray):
+                    bbox = bbox.tolist()
+                new_item["bbox"] = np.array(
+                    _scale_bbox_to_pi3(bbox, scale_x, scale_y, target_w, target_h),
+                    dtype=np.float32,
+                )
+
+            scaled_frame.append(new_item)
+        scaled_annotations.append(scaled_frame)
+    return scaled_annotations
 
 
 def _compute_target_size(
@@ -388,11 +448,18 @@ class BaseROIFeatureExtractor(ABC):
         gt_frame_items: List[Dict[str, Any]],
         gdino_frame: Optional[Dict[str, Any]],
         threshold: float,
+        scale_x: float,
+        scale_y: float,
+        target_w: int,
+        target_h: int,
         video_gt_labels: Optional[set] = None,
     ) -> Tuple[List[List[float]], List[str], List[str], List[float],
                List, List, List, List, List]:
         """
         Collect all bboxes for a frame: GT annotations + GDino fill for missing labels.
+
+        All returned bboxes are in **Pi-3 scaled space** (resized image coordinates).
+        GT bboxes and GDino bboxes are scaled from original coords to Pi-3 inline.
 
         Returns:
             bboxes_xyxy, labels, sources, gdino_scores,
@@ -422,7 +489,11 @@ class BaseROIFeatureExtractor(ABC):
                 if isinstance(pb, list) and len(pb) > 0:
                     for b in pb:
                         b_list = b if isinstance(b, list) else list(b)
-                        bboxes_xyxy.append([float(v) for v in b_list[:4]])
+                        bbox_orig = [float(v) for v in b_list[:4]]
+                        bbox_pi3 = _scale_bbox_to_pi3(
+                            bbox_orig, scale_x, scale_y, target_w, target_h
+                        )
+                        bboxes_xyxy.append(bbox_pi3)
                         labels.append("person")
                         sources.append("gt")
                         gdino_scores_out.append(-1.0)
@@ -442,7 +513,11 @@ class BaseROIFeatureExtractor(ABC):
                     bbox = item["bbox"]
                     if isinstance(bbox, np.ndarray):
                         bbox = bbox.tolist()
-                    bboxes_xyxy.append([float(v) for v in bbox[:4]])
+                    bbox_orig = [float(v) for v in bbox[:4]]
+                    bbox_pi3 = _scale_bbox_to_pi3(
+                        bbox_orig, scale_x, scale_y, target_w, target_h
+                    )
+                    bboxes_xyxy.append(bbox_pi3)
                     labels.append(label_norm)
                     sources.append("gt")
                     gdino_scores_out.append(-1.0)
@@ -477,7 +552,11 @@ class BaseROIFeatureExtractor(ABC):
                         or gd_score > best_per_label[gd_label_norm][1]):
                     if hasattr(gd_box, 'tolist'):
                         gd_box = gd_box.tolist()
-                    best_per_label[gd_label_norm] = ([float(v) for v in gd_box], gd_score)
+                    # Scale GDino bbox to Pi-3 space
+                    gd_box_pi3 = _scale_bbox_to_pi3(
+                        [float(v) for v in gd_box], scale_x, scale_y, target_w, target_h
+                    )
+                    best_per_label[gd_label_norm] = (gd_box_pi3, gd_score)
 
             for gd_label, (gd_box, gd_score) in best_per_label.items():
                 bboxes_xyxy.append(gd_box)
@@ -634,36 +713,7 @@ class BaseROIFeatureExtractor(ABC):
                             video_gt_labels.add(_normalize_label(label))
         return video_gt_labels
 
-    # ------------------------------------------------------------------
-    # Bbox scaling and validation
-    # ------------------------------------------------------------------
 
-    def _scale_and_validate_bboxes(
-        self,
-        bboxes_xyxy: List[List[float]],
-        scale_x: float,
-        scale_y: float,
-        target_w: int,
-        target_h: int,
-    ) -> Tuple[List[List[float]], List[int]]:
-        """
-        Scale bboxes from original to resized coords and filter degenerate boxes.
-
-        Returns:
-            scaled_bboxes: list of valid [x1, y1, x2, y2] in resized coords
-            valid_indices: indices of valid bboxes in the original list
-        """
-        scaled_bboxes = []
-        valid_indices = []
-        for i, (x1, y1, x2, y2) in enumerate(bboxes_xyxy):
-            x1_s = max(0.0, min(x1 * scale_x, target_w - 1))
-            x2_s = max(0.0, min(x2 * scale_x, target_w - 1))
-            y1_s = max(0.0, min(y1 * scale_y, target_h - 1))
-            y2_s = max(0.0, min(y2 * scale_y, target_h - 1))
-            if (x2_s - x1_s) >= 1 and (y2_s - y1_s) >= 1:
-                scaled_bboxes.append([x1_s, y1_s, x2_s, y2_s])
-                valid_indices.append(i)
-        return scaled_bboxes, valid_indices
 
     # ------------------------------------------------------------------
     # Abstract method for subclasses

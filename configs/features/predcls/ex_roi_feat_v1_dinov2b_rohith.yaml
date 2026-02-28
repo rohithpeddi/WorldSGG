@@ -1,32 +1,37 @@
 # =============================================================================
-# ROI Feature Extraction Config
+# ROI Feature Extraction Config — PredCls (DINOv2-Base)
 # =============================================================================
-# Extract pre-computed ROI features from trained detectors for PredCls.
+# Uses GT bboxes + GDino fill. No detection. All bboxes in Pi-3 space.
+# Output: {data_path}/features/roi_features/predcls/dinov2b/{train,test}/
 #
 # Usage:
-#   python datasets/preprocess/features/extract_roi_features.py \
-#       --config configs/extract_roi_features.yaml
+#   python datasets/preprocess/features/extract_roi_features_predcls.py \
+#       --config configs/features/predcls/ex_roi_feat_v1_dinov2b_rohith.yaml
 #
 #   Override via CLI:
-#       --model v2l --ckpt checkpoint_50 --video 001YG.mp4
+#       --ckpt checkpoint_50 --video 001YG.mp4 --split train
 # =============================================================================
 
 # --- Detector (must match training config) ---
-model: "v2"                          # "v2" | "v2l" | "v3l"
-experiment_name: "v1_dinov2b_separate"   # experiment folder under working_dir
+model: "v2"                          # "v2" (DINOv2-Base) | "v2l" (DINOv2-Large) | "v3l" (DINOv3-Large)
+experiment_name: "v1_dinov2b_separate"
 working_dir: "/home/rxp190007/CODE/Scene4Cast/lib/detector/monocular3d"
-ckpt: checkpoint_43                           # checkpoint subfolder, e.g. "checkpoint_best" or "checkpoint_50"
+ckpt: checkpoint_43
 
 # --- Detector architecture (must match training) ---
-head_3d_mode: "separate"
+head_3d_mode: "separate"             # "unified" or "separate"
 num_classes: 37
 pretrained: true
 
 # --- Data ---
 data_path: "/data/rohith/ag"
 
+# --- Image processing (must match ag_dataset_3d.py / training config) ---
+pixel_limit: 255000
+patch_size: 14
+
 # --- Feature Extraction ---
-output_dir: null                     # null = auto: {data_path}/features/roi_features/predcls/{model_dir}
+output_dir: null                     # null = auto: {data_path}/features/roi_features/predcls/{model_dir}/{split}
 gdino_score_threshold: 0.3
 store_dtype: "float16"               # "float16" or "float32"
 overwrite: false
