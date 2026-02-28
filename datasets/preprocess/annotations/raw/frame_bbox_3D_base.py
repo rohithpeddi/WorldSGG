@@ -263,12 +263,14 @@ class FrameToWorldAnnotationsBase:
         self.bbox_4d_root_dir = self.world_annotations_root_dir / "bbox_annotations_4d"
         self.bbox_3d_final_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_final"
         self.bbox_3d_obb_final_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_obb_final"
+        self.bbox_3d_obb_bridge_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_obb_bridge"
         self.bbox_3d_camera_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_camera"
 
         os.makedirs(self.bbox_4d_root_dir, exist_ok=True)
         os.makedirs(self.bbox_3d_final_root_dir, exist_ok=True)
         os.makedirs(self.bbox_3d_camera_root_dir, exist_ok=True)
         os.makedirs(self.bbox_3d_obb_final_root_dir, exist_ok=True)
+        os.makedirs(self.bbox_3d_obb_bridge_root_dir, exist_ok=True)
 
         # GT annotations
         self.gt_annotations_root_dir = self.ag_root_directory / "gt_annotations"
@@ -710,6 +712,12 @@ class FrameToWorldAnnotationsBase:
 
     def save_video_3d_obb_annotations_final(self, video_id: str, video_3dgt_updated: Dict[str, Any]) -> Path:
         out_path = self.bbox_3d_obb_final_root_dir / f"{video_id[:-4]}.pkl"
+        with open(out_path, "wb") as f:
+            pickle.dump(video_3dgt_updated, f, protocol=pickle.HIGHEST_PROTOCOL)
+        return out_path
+
+    def save_video_3d_obb_bridge_annotations_final(self, video_id: str, video_3dgt_updated: Dict[str, Any]) -> Path:
+        out_path = self.bbox_3d_obb_bridge_root_dir / f"{video_id[:-4]}.pkl"
         with open(out_path, "wb") as f:
             pickle.dump(video_3dgt_updated, f, protocol=pickle.HIGHEST_PROTOCOL)
         return out_path

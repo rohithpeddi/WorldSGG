@@ -146,7 +146,7 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
           4. Apply WORLD→FINAL transform
           5. Save to bbox_annotations_3d_obb_final/
         """
-        out_path = self.bbox_3d_obb_final_root_dir / f"{video_id[:-4]}.pkl"
+        out_path = self.bbox_3d_obb_bridge_root_dir / f"{video_id[:-4]}.pkl"
         if out_path.exists() and not overwrite:
             print(f"[bridge][{video_id}] exists: {out_path} (overwrite=False). Skipping.")
             return out_path
@@ -457,7 +457,7 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
             "A_world_to_final": A,
         }
 
-        saved_path = self.save_video_3d_obb_annotations_final(video_id, video_3dgt_updated)
+        saved_path = self.save_video_3d_obb_bridge_annotations_final(video_id, video_3dgt_updated)
         print(f"[bridge][{video_id}] Saved merged final PKL: {saved_path}")
         return saved_path
 
@@ -477,7 +477,7 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
         Load saved final PKL and visualize with rerun.
         Color-codes bboxes by source: green=GT, orange=GDino.
         """
-        final_pkl = self.bbox_3d_obb_final_root_dir / f"{video_id[:-4]}.pkl"
+        final_pkl = self.bbox_3d_obb_bridge_root_dir / f"{video_id[:-4]}.pkl"
         if not final_pkl.exists():
             raise FileNotFoundError(f"Final PKL not found: {final_pkl}")
 
