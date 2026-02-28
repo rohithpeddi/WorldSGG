@@ -437,7 +437,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
         # ----------------------------------------------------------------------
         # Sort frames chronologically by frame index (000123.png -> 123)
         frame_names_sorted = sorted(
-            frame_3dbb_map_world.keys(),
+            obb_bbox_frames.keys(),
             key=lambda fn: int(Path(fn).stem)
             if Path(fn).stem.isdigit()
             else Path(fn).stem,
@@ -454,7 +454,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
 
         for fi, fname in enumerate(frame_names_sorted):
             frame_idx_map[fname] = fi
-            frame_rec = frame_3dbb_map_world.get(fname, {})
+            frame_rec = obb_bbox_frames.get(fname, {})
             objects = frame_rec.get("objects", [])
 
             for obj in objects:
