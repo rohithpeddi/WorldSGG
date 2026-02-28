@@ -573,6 +573,7 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
         for vis_t in range(S):
             stem = stems_S[vis_t]
             rr.set_time_sequence("frame", vis_t)
+            rr.log(f"{BASE}/bboxes", rr.Clear(recursive=True))
 
             # Points
             pts = points_final[vis_t].reshape(-1, 3)
