@@ -51,14 +51,13 @@ from datasets.preprocess.features.extract_roi_features_base import (
     LABEL_TO_CLASSIDX,
     MODEL_TO_DIR,
     _normalize_label,
+    assign_relations,
     scale_gt_annotations_to_pi3,
     build_parser,
     logger,
     parse_config,
     setup_logging,
 )
-
-from lib.supervised.funcs import assign_relations
 
 
 # ---------------------------------------------------------------------------

@@ -235,6 +235,116 @@ def scale_gt_annotations_to_pi3(
     return scaled_annotations
 
 
+# ---------------------------------------------------------------------------
+# Bbox IoU + assign_relations (local, no lib_b dependency)
+# ---------------------------------------------------------------------------
+
+def bbox_overlaps(boxes_a: np.ndarray, boxes_b: np.ndarray) -> np.ndarray:
+    """
+    Compute IoU between two sets of bboxes (pure numpy, no compiled deps).
+
+    Args:
+        boxes_a: (N, 4) xyxy
+        boxes_b: (M, 4) xyxy
+
+    Returns:
+        iou: (N, M) IoU matrix
+    """
+    x1 = np.maximum(boxes_a[:, 0:1], boxes_b[:, 0:1].T)
+    y1 = np.maximum(boxes_a[:, 1:2], boxes_b[:, 1:2].T)
+    x2 = np.minimum(boxes_a[:, 2:3], boxes_b[:, 2:3].T)
+    y2 = np.minimum(boxes_a[:, 3:4], boxes_b[:, 3:4].T)
+
+    inter = np.maximum(0, x2 - x1) * np.maximum(0, y2 - y1)
+
+    area_a = (boxes_a[:, 2] - boxes_a[:, 0]) * (boxes_a[:, 3] - boxes_a[:, 1])
+    area_b = (boxes_b[:, 2] - boxes_b[:, 0]) * (boxes_b[:, 3] - boxes_b[:, 1])
+
+    union = area_a[:, None] + area_b[None, :] - inter
+    return inter / np.maximum(union, 1e-6)
+
+
+def assign_relations(prediction, gt_annotations, assign_IOU_threshold):
+    """
+    Match detector predictions to GT annotations via IoU.
+
+    Local copy of lib.supervised.funcs.assign_relations that uses pure-numpy
+    bbox_overlaps instead of the compiled lib_b C extension.
+
+    Args:
+        prediction: dict with FINAL_BBOXES (N, 5) [frame_idx, x1, y1, x2, y2]
+                    and FINAL_LABELS (N,)
+        gt_annotations: list of per-frame annotation lists
+        assign_IOU_threshold: IoU threshold for matching (0.5 train, 0.3 test)
+
+    Returns:
+        DETECTOR_FOUND_IDX, GT_RELATIONS, SUPPLY_RELATIONS, assigned_labels
+    """
+    FINAL_BBOXES = prediction['FINAL_BBOXES']
+    FINAL_LABELS = prediction['FINAL_LABELS']
+    DETECTOR_FOUND_IDX = []
+    GT_RELATIONS = []
+    SUPPLY_RELATIONS = []
+
+    assigned_labels = np.zeros(FINAL_LABELS.shape[0])
+
+    for i, j in enumerate(gt_annotations):
+        gt_boxes = np.zeros([len(j), 4])
+        gt_labels = np.zeros(len(j))
+
+        if type(j[0]['person_bbox']) == list:
+            gt_boxes[0] = np.array(j[0]['person_bbox'])
+        elif type(j[0]['person_bbox']) == np.ndarray:
+            gt_boxes[0] = j[0]['person_bbox']
+        elif type(j[0]['person_bbox']) == torch.Tensor:
+            gt_boxes[0] = j[0]['person_bbox'].cpu().numpy()
+        gt_labels[0] = 1
+        for m, n in enumerate(j[1:]):
+            gt_boxes[m + 1, :] = n['bbox']
+            gt_labels[m + 1] = n['class']
+
+        pred_boxes = FINAL_BBOXES[FINAL_BBOXES[:, 0] == i, 1:].detach().cpu().numpy()
+
+        IOUs = bbox_overlaps(pred_boxes, gt_boxes)
+
+        assigned_labels[(FINAL_BBOXES[:, 0].cpu().numpy() == i).nonzero()[0][np.max(IOUs, axis=1) > 0.5]] = \
+            gt_labels[np.argmax(IOUs, axis=1)][np.max(IOUs, axis=1) > 0.5]
+
+        detector_found_idx = []
+        gt_relations = []
+        supply_relations = []
+        candidates = []
+        for m, n in enumerate(gt_annotations[i]):
+            if m == 0:
+                if sum(IOUs[:, m] > assign_IOU_threshold) > 0:
+                    candidate = IOUs[:, m].argmax()
+                    detector_found_idx.append(candidate)
+                    gt_relations.append(n)
+                    candidates.append(candidate)
+                else:
+                    supply_relations.append(n)
+            else:
+                if sum(IOUs[:, m] > assign_IOU_threshold) > 0:
+                    candidate = IOUs[:, m].argmax()
+                    if candidate in candidates:
+                        for c in np.argsort(-IOUs[:, m]):
+                            if c not in candidates:
+                                candidate = c
+                                break
+                    detector_found_idx.append(candidate)
+                    gt_relations.append(n)
+                    candidates.append(candidate)
+                    assigned_labels[(FINAL_BBOXES[:, 0].cpu().numpy() == i).nonzero()[0][candidate]] = n['class']
+                else:
+                    supply_relations.append(n)
+
+        DETECTOR_FOUND_IDX.append(detector_found_idx)
+        GT_RELATIONS.append(gt_relations)
+        SUPPLY_RELATIONS.append(supply_relations)
+
+    return DETECTOR_FOUND_IDX, GT_RELATIONS, SUPPLY_RELATIONS, assigned_labels
+
+
 def _compute_target_size(
     orig_w: int, orig_h: int, pixel_limit: int = 255000, patch_size: int = 14
 ) -> Tuple[int, int]:
