@@ -525,7 +525,7 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
         rr.init(app_id, spawn=True)
         rr.log("/", rr.ViewCoordinates.RUB)
         BASE = "world_final"
-        rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
+        rr.log(BASE, rr.ViewCoordinates.RUB, static=True)
 
         # Axes
         axis_len = 0.5
@@ -537,7 +537,7 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
                 colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],
                 labels=["+X", "+Y", "+Z"],
             ),
-            timeless=True,
+            static=True,
         )
 
         # Floor
@@ -552,7 +552,7 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
             rr.log(
                 f"{BASE}/floor",
                 rr.Mesh3D(vertex_positions=v, triangle_indices=f, **kwargs),
-                timeless=True,
+                static=True,
             )
 
         def _get_image_for_stem(stem: str) -> Optional[np.ndarray]:
@@ -571,7 +571,6 @@ class BBox3DBridgeOBB(FrameToWorldAnnotationsBase):
         for vis_t in range(S):
             stem = stems_S[vis_t]
             rr.set_time_sequence("frame", vis_t)
-            rr.log("/", rr.Clear(recursive=True))
 
             # Points
             pts = points_final[vis_t].reshape(-1, 3)
