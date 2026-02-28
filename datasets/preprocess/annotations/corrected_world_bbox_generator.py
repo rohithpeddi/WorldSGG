@@ -3,7 +3,7 @@
 Corrected World BBox Generator
 ===============================
 
-Generates world-frame 3D bounding boxes (both AABB and OBB) using manually
+Generates world-frame 3D bounding boxes (OBB) using manually
 corrected floor transforms downloaded from Firebase, instead of the
 auto-computed floor alignment from SMPL-scene correspondences.
 
@@ -180,18 +180,7 @@ def _compute_obb_floor_parallel(
     }
 
 
-def _corners_from_mins_maxs(mins: np.ndarray, maxs: np.ndarray) -> np.ndarray:
-    """Build 8 AABB corners from min/max vectors."""
-    return np.array([
-        [mins[0], mins[1], mins[2]],
-        [mins[0], mins[1], maxs[2]],
-        [mins[0], maxs[1], mins[2]],
-        [mins[0], maxs[1], maxs[2]],
-        [maxs[0], mins[1], mins[2]],
-        [maxs[0], mins[1], maxs[2]],
-        [maxs[0], maxs[1], mins[2]],
-        [maxs[0], maxs[1], maxs[2]],
-    ], dtype=np.float32)
+
 
 
 # =====================================================================
@@ -467,7 +456,7 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
 
         This is the shared core for both GT and GDino 2D→3D lifting.
         Uses the 2D bbox as a pixel mask to select 3D points, then computes
-        AABB and OBB variants.
+        OBB variants.
 
         Returns an object dict or None if insufficient points.
         """
@@ -493,35 +482,24 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
             obj_pts_world = pts_hw3[sel].reshape(-1, 3).astype(np.float32)
             pts_floor = floor_align_fn(obj_pts_world)
 
-            # 1. AABB (floor-aligned)
+            # OBB (floor-parallel)
+            obb_floor_res = _compute_obb_floor_parallel(
+                pts_floor, floor_to_world_fn=floor_to_world_fn,
+            )
+
+            # OBB (arbitrary, PCA)
+            obb_res = _compute_obb_pca(obj_pts_world)
+
+            # Volume from floor-aligned min/max (for candidate ranking)
             mins = pts_floor.min(axis=0)
             maxs = pts_floor.max(axis=0)
             size = (maxs - mins).clip(1e-6)
             volume = float(size[0] * size[1] * size[2])
 
-            corners_floor_aabb = _corners_from_mins_maxs(mins, maxs)
-            corners_world_aabb = floor_to_world_fn(corners_floor_aabb)
-
-            # 2. OBB (floor-parallel)
-            obb_floor_res = _compute_obb_floor_parallel(
-                pts_floor, floor_to_world_fn=floor_to_world_fn,
-            )
-
-            # 3. OBB (arbitrary, PCA)
-            obb_res = _compute_obb_pca(obj_pts_world)
-
             multi_scale_candidates.append({
                 "kernel_size": int(ksz),
                 "num_points": num_sel,
                 "volume": volume,
-                "mins_floor": mins.tolist(),
-                "maxs_floor": maxs.tolist(),
-                "corners_world": corners_world_aabb.tolist(),
-                "aabb_floor_aligned": {
-                    "volume": volume,
-                    "corners_world": corners_world_aabb.tolist(),
-                    "corners_floor": corners_floor_aabb.tolist(),
-                },
                 "obb_floor_parallel": obb_floor_res,
                 "obb_arbitrary": obb_res,
             })
@@ -530,7 +508,6 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
             return {
                 "label": label,
                 "bbox_xyxy": bbox_xyxy,
-                "aabb_floor_aligned": None,
                 "obb_floor_parallel": None,
                 "obb_arbitrary": None,
                 "candidates": [],
@@ -544,15 +521,6 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
         return {
             "label": label,
             "bbox_xyxy": bbox_xyxy,
-            "aabb_floor_aligned": {
-                "mins_floor": best["mins_floor"],
-                "maxs_floor": best["maxs_floor"],
-                "corners_world": best["corners_world"],
-                "corners_floor": best["aabb_floor_aligned"]["corners_floor"],
-                "source": f"pc-aabb-multiscale-corrected-{source_tag}",
-                "kernel_size": best["kernel_size"],
-                "volume": float(best["volume"]),
-            },
             "obb_floor_parallel": best.get("obb_floor_parallel"),
             "obb_arbitrary": best.get("obb_arbitrary"),
             "candidates": multi_scale_candidates,
@@ -575,7 +543,7 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
         gdino_score_threshold: float = 0.3,
     ) -> Dict[str, Dict[str, Any]]:
         """
-        Build per-frame AABB and OBB bounding boxes using the corrected
+        Build per-frame OBB bounding boxes using the corrected
         floor transform.
 
         For each annotated frame:
@@ -712,35 +680,24 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                     # Transform to corrected canonical frame
                     pts_floor = _corrected_floor_align_points(obj_pts_world)
 
-                    # 1. AABB (floor-aligned)
+                    # OBB (floor-parallel)
+                    obb_floor_res = _compute_obb_floor_parallel(
+                        pts_floor, floor_to_world_fn=_corrected_floor_to_world,
+                    )
+
+                    # OBB (arbitrary, PCA)
+                    obb_res = _compute_obb_pca(obj_pts_world)
+
+                    # Volume from floor-aligned min/max (for candidate ranking)
                     mins = pts_floor.min(axis=0)
                     maxs = pts_floor.max(axis=0)
                     size = (maxs - mins).clip(1e-6)
                     volume = float(size[0] * size[1] * size[2])
 
-                    corners_floor_aabb = _corners_from_mins_maxs(mins, maxs)
-                    corners_world_aabb = _corrected_floor_to_world(corners_floor_aabb)
-
-                    # 2. OBB (floor-parallel)
-                    obb_floor_res = _compute_obb_floor_parallel(
-                        pts_floor, floor_to_world_fn=_corrected_floor_to_world,
-                    )
-
-                    # 3. OBB (arbitrary, PCA)
-                    obb_res = _compute_obb_pca(obj_pts_world)
-
                     multi_scale_candidates.append({
                         "kernel_size": int(ksz),
                         "num_points": num_sel,
                         "volume": volume,
-                        "mins_floor": mins.tolist(),
-                        "maxs_floor": maxs.tolist(),
-                        "corners_world": corners_world_aabb.tolist(),
-                        "aabb_floor_aligned": {
-                            "volume": volume,
-                            "corners_world": corners_world_aabb.tolist(),
-                            "corners_floor": corners_floor_aabb.tolist(),
-                        },
                         "obb_floor_parallel": obb_floor_res,
                         "obb_arbitrary": obb_res,
                     })
@@ -749,7 +706,6 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                     frame_rec["objects"].append({
                         "label": label,
                         "gt_bbox_xyxy": gt_xyxy,
-                        "aabb_floor_aligned": None,
                         "obb_floor_parallel": None,
                         "obb_arbitrary": None,
                         "candidates": [],
@@ -763,15 +719,6 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
                     frame_rec["objects"].append({
                         "label": label,
                         "gt_bbox_xyxy": gt_xyxy,
-                        "aabb_floor_aligned": {
-                            "mins_floor": best["mins_floor"],
-                            "maxs_floor": best["maxs_floor"],
-                            "corners_world": best["corners_world"],
-                            "corners_floor": best["aabb_floor_aligned"]["corners_floor"],
-                            "source": "pc-aabb-multiscale-corrected",
-                            "kernel_size": best["kernel_size"],
-                            "volume": float(best["volume"]),
-                        },
                         "obb_floor_parallel": best.get("obb_floor_parallel"),
                         "obb_arbitrary": best.get("obb_arbitrary"),
                         "candidates": multi_scale_candidates,
@@ -1018,8 +965,8 @@ class CorrectedWorldBBoxGenerator(BBox3DBase):
 
     @staticmethod
     def _extract_corners(obj: Dict[str, Any]) -> Optional[np.ndarray]:
-        """Extract 8×3 corners from an object dict (OBB preferred, AABB fallback)."""
-        for key in ("obb_floor_parallel", "aabb_floor_aligned"):
+        """Extract 8×3 corners from an object dict (OBB only)."""
+        for key in ("obb_floor_parallel",):
             sub = obj.get(key)
             if isinstance(sub, dict):
                 for ck in ("corners_world", "corners_final"):

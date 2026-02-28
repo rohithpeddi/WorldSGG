@@ -438,21 +438,13 @@ def rerun_frame_vis_results(
             if frame_name in frame_3dbb_before:
                 frame_objects = frame_3dbb_before[frame_name]["objects"]
                 for bi, obj in enumerate(frame_objects):
-                    # Prefer OBB corners, fall back to AABB
-                    corners_world = None
                     obb_data = obj.get("obb_floor_parallel", None)
-                    if isinstance(obb_data, dict) and obb_data.get("corners_world") is not None:
-                        corners_world = np.asarray(
-                            obb_data["corners_world"], dtype=np.float32
-                        )
-                    elif "aabb_floor_aligned" in obj:
-                        bbox_3d = obj["aabb_floor_aligned"]
-                        if bbox_3d and bbox_3d.get("corners_world") is not None:
-                            corners_world = np.asarray(
-                                bbox_3d["corners_world"], dtype=np.float32
-                            )
-
-                    if corners_world is None or corners_world.size == 0:
+                    if not isinstance(obb_data, dict) or obb_data.get("corners_world") is None:
+                        continue
+                    corners_world = np.asarray(
+                        obb_data["corners_world"], dtype=np.float32
+                    )
+                    if corners_world.size == 0:
                         continue
 
                     col = obj.get("color", [255, 180, 0])
@@ -472,21 +464,13 @@ def rerun_frame_vis_results(
             if frame_name in frame_3dbb_after:
                 frame_objects = frame_3dbb_after[frame_name]["objects"]
                 for bi, obj in enumerate(frame_objects):
-                    # Prefer obb_final, fall back to aabb_final for compatibility
-                    corners_final = None
                     obb_final = obj.get("obb_final", None)
-                    if isinstance(obb_final, dict) and obb_final.get("corners_final") is not None:
-                        corners_final = np.asarray(
-                            obb_final["corners_final"], dtype=np.float32
-                        )
-                    else:
-                        aabb_final = obj.get("aabb_final", None)
-                        if isinstance(aabb_final, dict) and aabb_final.get("corners_final") is not None:
-                            corners_final = np.asarray(
-                                aabb_final["corners_final"], dtype=np.float32
-                            )
-
-                    if corners_final is None or corners_final.size == 0:
+                    if not isinstance(obb_final, dict) or obb_final.get("corners_final") is None:
+                        continue
+                    corners_final = np.asarray(
+                        obb_final["corners_final"], dtype=np.float32
+                    )
+                    if corners_final.size == 0:
                         continue
 
                     col = obj.get("color_after", [255, 230, 80])

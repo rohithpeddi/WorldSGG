@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import argparse
+import os
 import pickle
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 
 from datasets.preprocess.annotations.annotation_utils import (
@@ -193,10 +195,10 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                  (c) if neither exists, raise an error.
           4) Compute WORLD -> FINAL transform (floor-aligned + optional mirror).
           5) For each filled object, attach:
-                 - original `aabb_floor_aligned` (corners_world)
-                 - `aabb_final` (corners in FINAL coords)
+                 - `obb_floor_parallel` (corners_world)
+                 - `obb_final` (corners in FINAL coords)
           6) For static labels, union bboxes **in FINAL coords** and overwrite
-             their `aabb_final` in all frames (world boxes unchanged).
+             their `obb_final` in all frames (world boxes unchanged).
           7) Save the resulting 4D annotations to bbox_4d_root_dir.
           8) Optionally visualize final 4D bboxes (wireframe only, no points).
         """
@@ -436,115 +438,355 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             else Path(fn).stem,
         )
 
-        # First known bbox per label: label -> (source_frame_name, obj_dict)
-        label_first_source: Dict[str, Tuple[str, Dict[str, Any]]] = {}
-        for fname in frame_names_sorted:
-            objects = frame_3dbb_map_world[fname].get("objects", [])
+        # ==================================================================
+        # PASS 1: Collect all detected objects per label per frame
+        # ==================================================================
+        # label -> list of (frame_idx, frame_name, obj_dict) for detected objects
+        label_detections: Dict[str, List[Tuple[int, str, Dict[str, Any]]]] = {
+            lbl: [] for lbl in all_labels
+        }
+        frame_idx_map: Dict[str, int] = {}  # frame_name -> idx
+
+        for fi, fname in enumerate(frame_names_sorted):
+            frame_idx_map[fname] = fi
+            frame_rec = frame_3dbb_map_world.get(fname, {})
+            objects = frame_rec.get("objects", [])
+
             for obj in objects:
                 lbl = obj.get("label", None)
-                if not lbl:
+                if not lbl or lbl not in all_labels:
                     continue
-                if lbl not in label_first_source:
-                    label_first_source[lbl] = (fname, obj)
+                # Keep first instance per label per frame
+                if not any(d[1] == fname for d in label_detections[lbl]):
+                    label_detections[lbl].append((fi, fname, obj))
 
-        # Safety check: every label must appear at least once
+        # ------------------------------------------------------------------
+        # Logging setup
+        # ------------------------------------------------------------------
+        log_dir = self.bbox_4d_root_dir / "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = log_dir / f"{video_id}.log"
+
+        log_lines: List[str] = []
+        log_lines.append(f"=== World4D Pipeline Log: {video_id} ===")
+        log_lines.append(f"Total unique labels in video: {len(all_labels)}")
+        log_lines.append(f"Labels: {sorted(all_labels)}")
+        log_lines.append(f"Static labels: {sorted(static_labels_in_3d)}")
+        dynamic_labels_in_3d = sorted(set(all_labels) - set(static_labels_in_3d))
+        log_lines.append(f"Dynamic labels: {dynamic_labels_in_3d}")
+        log_lines.append(f"Total frames: {len(frame_names_sorted)}")
+        log_lines.append("")
+
+        # Per-label detection summary
+        for lbl in sorted(all_labels):
+            det_frames = [d[1] for d in label_detections[lbl]]
+            sources = []
+            for d in label_detections[lbl]:
+                src = d[2].get("source", "gt")
+                sources.append(src)
+            gt_count = sum(1 for s in sources if s == "gt")
+            gdino_count = sum(1 for s in sources if s == "gdino")
+            log_lines.append(
+                f"  {lbl}: detected in {len(det_frames)} frames "
+                f"(GT={gt_count}, GDino={gdino_count})"
+            )
+        log_lines.append("")
+
+        # Safety check
         for lbl in all_labels:
-            if lbl not in label_first_source:
+            if not label_detections[lbl]:
                 raise ValueError(
                     f"[world4d][{video_id}] Label '{lbl}' in all_labels "
                     "has no actual bbox in any frame."
                 )
+
+        # ==================================================================
+        # OBB decomposition + interpolation helpers
+        # ==================================================================
+        from scipy.spatial.transform import Rotation, Slerp
+
+        def _obb_corners_to_params(corners: np.ndarray):
+            """
+            Decompose 8 OBB corners into (center, R, extent).
+
+            corners: (8, 3) — first 4 are bottom face, next 4 are top face.
+            Returns: center (3,), rotation Rotation obj, extent (3,)
+            """
+            center = corners.mean(axis=0)
+
+            # Bottom face center and top face center for Y extent
+            bottom_center = corners[:4].mean(axis=0)
+            top_center = corners[4:].mean(axis=0)
+            half_height = np.linalg.norm(top_center - bottom_center) / 2.0
+
+            # XZ extent: use bottom face edges
+            # Bottom corners: 0,1,2,3 in order from minAreaRect
+            edge1 = corners[1] - corners[0]
+            edge2 = corners[3] - corners[0]
+
+            len1 = np.linalg.norm(edge1)
+            len2 = np.linalg.norm(edge2)
+
+            if len1 < 1e-8 or len2 < 1e-8:
+                return center, Rotation.identity(), np.array([0.01, half_height, 0.01])
+
+            half_w = len1 / 2.0
+            half_d = len2 / 2.0
+
+            # Build rotation from edges (X = edge1 dir, Y = up, Z = edge2 dir)
+            x_axis = edge1 / len1
+            z_axis = edge2 / len2
+            y_axis = np.cross(z_axis, x_axis)
+            y_norm = np.linalg.norm(y_axis)
+            if y_norm < 1e-8:
+                y_axis = (top_center - bottom_center)
+                y_norm = np.linalg.norm(y_axis)
+                if y_norm < 1e-8:
+                    y_axis = np.array([0.0, 1.0, 0.0])
+                else:
+                    y_axis = y_axis / y_norm
+            else:
+                y_axis = y_axis / y_norm
+
+            rot_mat = np.stack([x_axis, y_axis, z_axis], axis=1)  # (3, 3)
+            # Ensure valid rotation (fix determinant)
+            if np.linalg.det(rot_mat) < 0:
+                rot_mat[:, 2] *= -1
+
+            try:
+                rot = Rotation.from_matrix(rot_mat)
+            except Exception:
+                rot = Rotation.identity()
+
+            extent = np.array([half_w, half_height, half_d])
+            return center, rot, extent
+
+        def _params_to_obb_corners(center, rot, extent):
+            """
+            Reconstruct 8 OBB corners from (center, rotation, extent).
+
+            Returns: (8, 3) corners — bottom 4 then top 4.
+            """
+            half_w, half_h, half_d = extent
+
+            # Local corners (centered at origin)
+            local = np.array([
+                [-half_w, -half_h, -half_d],
+                [+half_w, -half_h, -half_d],
+                [+half_w, -half_h, +half_d],
+                [-half_w, -half_h, +half_d],
+                [-half_w, +half_h, -half_d],
+                [+half_w, +half_h, -half_d],
+                [+half_w, +half_h, +half_d],
+                [-half_w, +half_h, +half_d],
+            ], dtype=np.float32)
+
+            R_mat = rot.as_matrix()
+            world = (R_mat @ local.T).T + center[None, :]
+            return world.astype(np.float32)
+
+        def _interpolate_obb(
+                corners_prev: np.ndarray,
+                corners_next: np.ndarray,
+                t: float,
+        ) -> np.ndarray:
+            """
+            Interpolate between two OBB corner sets using center+R+extent decomposition.
+            t in [0, 1]: 0 = prev, 1 = next.
+            """
+            c_prev, r_prev, e_prev = _obb_corners_to_params(corners_prev)
+            c_next, r_next, e_next = _obb_corners_to_params(corners_next)
+
+            # Lerp center and extent
+            center_interp = (1.0 - t) * c_prev + t * c_next
+            extent_interp = (1.0 - t) * e_prev + t * e_next
+
+            # Slerp rotation
+            try:
+                key_rots = Rotation.concatenate([r_prev, r_next])
+                slerp_fn = Slerp([0.0, 1.0], key_rots)
+                rot_interp = slerp_fn(t)
+            except Exception:
+                # Fallback: just use prev rotation
+                rot_interp = r_prev
+
+            return _params_to_obb_corners(center_interp, rot_interp, extent_interp)
+
+        # Helper to extract OBB world corners from an object
+        def _get_obb_corners_world(obj: Dict[str, Any]) -> Optional[np.ndarray]:
+            obb_data = obj.get("obb_floor_parallel", None)
+            if obb_data and obb_data.get("corners_world"):
+                c = np.asarray(obb_data["corners_world"], dtype=np.float32)
+                if c.shape == (8, 3):
+                    return c
+            return None
 
         # Helper to clone an object and attach 4D metadata
         def _clone_with_meta(
                 base_obj: Dict[str, Any],
                 *,
                 filled: bool,
+                fill_method: str,
                 source_frame: str,
                 target_frame: str,
         ) -> Dict[str, Any]:
-            new_obj = dict(base_obj)  # shallow copy is enough; we don't mutate nested dicts
+            new_obj = dict(base_obj)
             new_obj["world4d_filled"] = bool(filled)
+            new_obj["world4d_fill_method"] = fill_method
             new_obj["world4d_source_frame"] = source_frame
             new_obj["world4d_frame"] = target_frame
             return new_obj
 
-        # last known bbox per label on/before current frame
-        last_seen: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+        # ==================================================================
+        # PASS 2: Fill all labels in all frames
+        # ==================================================================
         frames_filled_world: Dict[str, Dict[str, Any]] = {}
+        n_detected = 0
+        n_static_copy = 0
+        n_interpolated = 0
+        n_hold = 0
 
-        for fname in frame_names_sorted:
+        for fi, fname in enumerate(frame_names_sorted):
             frame_rec = frame_3dbb_map_world.get(fname, {})
             objects = frame_rec.get("objects", [])
 
-            # Map label -> object for this frame (if present)
+            # Map label -> object for this frame
             label_to_obj_current: Dict[str, Dict[str, Any]] = {}
             for obj in objects:
                 lbl = obj.get("label", None)
                 if not lbl:
                     continue
-                # If multiple instances of the same label exist, we keep the first.
                 if lbl not in label_to_obj_current:
                     label_to_obj_current[lbl] = obj
 
             filled_objects: List[Dict[str, Any]] = []
 
-            # Only fill/extrapolate for static labels; dynamic objects only appear where detected
             for lbl in sorted(all_labels):
                 is_static = lbl in static_labels_in_3d
 
                 if lbl in label_to_obj_current:
-                    # Object exists in this frame - always include it
+                    # ---- DETECTED (GT or GDino) ----
                     base_obj = label_to_obj_current[lbl]
-                    last_seen[lbl] = (fname, base_obj)
                     filled_obj = _clone_with_meta(
                         base_obj,
                         filled=False,
+                        fill_method="detected",
                         source_frame=fname,
                         target_frame=fname,
                     )
-                elif is_static:
-                    # Static object missing in this frame - fill from last/first known
-                    if lbl in last_seen:
-                        src_frame, base_obj = last_seen[lbl]
-                    else:
-                        src_frame, base_obj = label_first_source[lbl]
+                    n_detected += 1
 
+                elif is_static:
+                    # ---- STATIC COPY (last/first known) ----
+                    detections = label_detections[lbl]
+                    # Find nearest previous detection
+                    prev_det = None
+                    for d_fi, d_fn, d_obj in reversed(detections):
+                        if d_fi <= fi:
+                            prev_det = (d_fi, d_fn, d_obj)
+                            break
+                    if prev_det is None:
+                        # Use first known
+                        prev_det = detections[0]
+
+                    _, src_frame, base_obj = prev_det
                     filled_obj = _clone_with_meta(
                         base_obj,
                         filled=True,
+                        fill_method="static_copy",
                         source_frame=src_frame,
                         target_frame=fname,
                     )
+                    n_static_copy += 1
+
                 else:
-                    # Dynamic object missing - do NOT fill/extrapolate
-                    # Skip this label for this frame
-                    continue
+                    # ---- DYNAMIC: INTERPOLATE between nearest detections ----
+                    detections = label_detections[lbl]
+
+                    # Find prev and next detections
+                    prev_det = None
+                    next_det = None
+                    for d_fi, d_fn, d_obj in detections:
+                        if d_fi <= fi:
+                            prev_det = (d_fi, d_fn, d_obj)
+                        elif next_det is None and d_fi > fi:
+                            next_det = (d_fi, d_fn, d_obj)
+                            break
+
+                    if prev_det is not None and next_det is not None:
+                        # Interpolate between prev and next
+                        prev_corners = _get_obb_corners_world(prev_det[2])
+                        next_corners = _get_obb_corners_world(next_det[2])
+
+                        if prev_corners is not None and next_corners is not None:
+                            span = next_det[0] - prev_det[0]
+                            t = (fi - prev_det[0]) / span if span > 0 else 0.5
+                            interp_corners = _interpolate_obb(prev_corners, next_corners, t)
+
+                            filled_obj = _clone_with_meta(
+                                prev_det[2],
+                                filled=True,
+                                fill_method="interpolation",
+                                source_frame=f"{prev_det[1]}..{next_det[1]}",
+                                target_frame=fname,
+                            )
+                            # Replace corners with interpolated
+                            filled_obj["obb_floor_parallel"] = {
+                                "corners_world": interp_corners.tolist(),
+                            }
+                            n_interpolated += 1
+                        else:
+                            # One side has no corners; hold the one that does
+                            hold_det = prev_det if prev_corners is not None else next_det
+                            if hold_det is None:
+                                continue
+                            filled_obj = _clone_with_meta(
+                                hold_det[2],
+                                filled=True,
+                                fill_method="hold_prev" if hold_det == prev_det else "hold_next",
+                                source_frame=hold_det[1],
+                                target_frame=fname,
+                            )
+                            n_hold += 1
+
+                    elif prev_det is not None:
+                        # Only prev exists — hold
+                        filled_obj = _clone_with_meta(
+                            prev_det[2],
+                            filled=True,
+                            fill_method="hold_prev",
+                            source_frame=prev_det[1],
+                            target_frame=fname,
+                        )
+                        n_hold += 1
+
+                    elif next_det is not None:
+                        # Only next exists — hold
+                        filled_obj = _clone_with_meta(
+                            next_det[2],
+                            filled=True,
+                            fill_method="hold_next",
+                            source_frame=next_det[1],
+                            target_frame=fname,
+                        )
+                        n_hold += 1
+
+                    else:
+                        # No detections at all for this label (shouldn't happen)
+                        continue
 
                 # Ensure label is consistent
                 filled_obj["label"] = lbl
 
                 # Attach FINAL-coords bbox (obb_final) from WORLD OBB corners
-                # Prefer obb_floor_parallel; fall back to aabb_floor_aligned
-                corners_world = None
-                obb_data = filled_obj.get("obb_floor_parallel", None)
-                if obb_data and obb_data.get("corners_world"):
-                    corners_world = np.asarray(
-                        obb_data["corners_world"], dtype=np.float32
-                    )
-                elif "aabb_floor_aligned" in filled_obj:
-                    bbox_3d = filled_obj["aabb_floor_aligned"]
-                    cw = bbox_3d.get("corners_world", [])
-                    if len(cw) > 0:
-                        corners_world = np.asarray(cw, dtype=np.float32)
-
-                if corners_world is not None and corners_world.size > 0:
+                corners_world = _get_obb_corners_world(filled_obj)
+                if corners_world is not None:
                     corners_final = (R_final @ corners_world.T).T + t_final[None, :]
                     filled_obj["obb_final"] = {
                         "corners_final": corners_final,
                     }
 
-                # Choose a default color for AFTER visualization if not present
+                # Default color for AFTER visualization
                 if "color_after" not in filled_obj:
                     filled_obj["color_after"] = filled_obj.get("color", [255, 230, 80])
 
@@ -552,37 +794,55 @@ class FrameToWorldAnnotations(FrameToWorldBase):
 
             frames_filled_world[fname] = {"objects": filled_objects}
 
+        # Logging: filling summary
+        log_lines.append("--- Filling Summary ---")
+        log_lines.append(f"  Detected (GT+GDino): {n_detected}")
+        log_lines.append(f"  Static copy:         {n_static_copy}")
+        log_lines.append(f"  Interpolated:        {n_interpolated}")
+        log_lines.append(f"  Hold (prev/next):    {n_hold}")
+        log_lines.append(
+            f"  Total objects across all frames: "
+            f"{n_detected + n_static_copy + n_interpolated + n_hold}"
+        )
+        log_lines.append("")
+
+        print(
+            f"[world4d][{video_id}] Filling: detected={n_detected}, "
+            f"static_copy={n_static_copy}, interpolated={n_interpolated}, "
+            f"hold={n_hold}"
+        )
+
         # ----------------------------------------------------------------------
-        # Static-object union logic (UNION IN FINAL COORDS, WORLD UNCHANGED)
+        # Static-object OBB union (UNION IN FINAL COORDS, WORLD UNCHANGED)
+        # Uses cv2.minAreaRect on XZ projection of pooled corners
         # ----------------------------------------------------------------------
 
-        def _make_aabb_corners_from_minmax(min_xyz: np.ndarray,
-                                           max_xyz: np.ndarray) -> np.ndarray:
+        def _compute_obb_union_final(all_corners: np.ndarray) -> np.ndarray:
             """
-            Build 8 axis-aligned cuboid corners from min/max in FINAL coords.
+            Compute tightest OBB union from pooled corners in FINAL coords.
 
-            Corner indexing is consistent with a standard cuboid and works
-            with the existing `cuboid_edges` list in rerun_frame_vis_results.
+            all_corners: (N, 3) points in FINAL (floor-aligned) coords.
+            Returns: (8, 3) OBB corners — bottom 4 then top 4.
             """
-            x0, y0, z0 = min_xyz
-            x1, y1, z1 = max_xyz
-            return np.array(
-                [
-                    [x0, y0, z0],
-                    [x1, y0, z0],
-                    [x0, y0, z1],
-                    [x1, y0, z1],
-                    [x0, y1, z0],
-                    [x1, y1, z0],
-                    [x0, y1, z1],
-                    [x1, y1, z1],
-                ],
-                dtype=np.float32,
-            )
+            # Project onto XZ plane (Y is floor normal in FINAL coords)
+            pts_xz = all_corners[:, [0, 2]].astype(np.float32)
+            rect = cv2.minAreaRect(pts_xz[:, None, :])
+            box_2d = cv2.boxPoints(rect)  # (4, 2) in XZ
+
+            y_min = float(all_corners[:, 1].min())
+            y_max = float(all_corners[:, 1].max())
+
+            # Build 8 corners: bottom face (y_min) then top face (y_max)
+            corners = np.zeros((8, 3), dtype=np.float32)
+            for i in range(4):
+                corners[i] = [box_2d[i][0], y_min, box_2d[i][1]]
+                corners[i + 4] = [box_2d[i][0], y_max, box_2d[i][1]]
+
+            return corners
 
         static_union_map_final: Dict[str, np.ndarray] = {}
 
-        # 1) Compute union bbox (FINAL coords) per static label using OBB corners
+        # 1) Compute OBB union (FINAL coords) per static label
         for lbl in static_labels_in_3d:
             all_corners_list_final: List[np.ndarray] = []
 
@@ -605,21 +865,26 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                     all_corners_list_final.append(corners_final)
 
             if not all_corners_list_final:
+                log_lines.append(
+                    f"  WARNING: static label '{lbl}' has no obb_final corners; "
+                    "skipping union."
+                )
                 print(
                     f"[world4d][{video_id}] WARNING: static label '{lbl}' has no "
                     "obb_final corners available; skipping union."
                 )
             else:
-                all_pts_final = np.concatenate(all_corners_list_final, axis=0)  # (N*8, 3)
-                min_xyz_f = all_pts_final.min(axis=0)
-                max_xyz_f = all_pts_final.max(axis=0)
-                union_corners_final = _make_aabb_corners_from_minmax(min_xyz_f, max_xyz_f)
+                all_pts_final = np.concatenate(all_corners_list_final, axis=0)
+                union_corners_final = _compute_obb_union_final(all_pts_final)
                 static_union_map_final[lbl] = union_corners_final
 
-        # 2) Apply union bbox (FINAL coords) to all frames for those static labels
+        # 2) Apply union OBB (FINAL coords) to all frames for static labels
         if static_union_map_final:
+            log_lines.append(
+                f"--- Static OBB Union applied for {len(static_union_map_final)} labels ---"
+            )
             print(
-                f"[world4d][{video_id}] Applying static union bboxes in FINAL coords "
+                f"[world4d][{video_id}] Applying static OBB union in FINAL coords "
                 f"for {len(static_union_map_final)} labels."
             )
 
@@ -630,17 +895,18 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                     if lbl not in static_union_map_final:
                         continue
 
-                    union_corners_final = static_union_map_final[lbl]  # (8,3)
+                    union_corners_final = static_union_map_final[lbl]
 
-                    # Ensure obb_final exists, then overwrite only FINAL box
                     if "obb_final" not in obj:
                         obj["obb_final"] = {}
-
                     obj["obb_final"]["corners_final"] = union_corners_final
 
-                    # NOTE: we intentionally do NOT touch
-                    # obj["obb_floor_parallel"]["corners_world"]
-                    # so WORLD-space boxes remain as originally constructed.
+                    # NOTE: WORLD-space boxes remain as originally constructed.
+
+        # Write log file
+        with open(log_path, "w", encoding="utf-8") as lf:
+            lf.write("\n".join(log_lines))
+        print(f"[world4d][{video_id}] Log written to {log_path}")
 
         # ----------------------------------------------------------------------
         # Optional: visualize world-4D bboxes + POINTS (BEFORE/AFTER) over time
@@ -966,19 +1232,11 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                 if isinstance(obb_final, dict) and obb_final.get("corners_final") is not None:
                     corners_final = obb_final.get("corners_final")
 
-                # Otherwise compute FINAL from WORLD OBB corners if available
+                # Compute FINAL from WORLD OBB corners
                 if corners_final is None:
                     obb_world = obj_raw.get("obb_floor_parallel", None)
                     if isinstance(obb_world, dict) and obb_world.get("corners_world") is not None:
                         corners_world = np.asarray(obb_world["corners_world"], dtype=np.float32)
-                        if corners_world.size > 0:
-                            corners_final = (R_final @ corners_world.T).T + t_final[None, :]
-
-                # Fall back to aabb_floor_aligned if OBB not available
-                if corners_final is None:
-                    aabb_world = obj_raw.get("aabb_floor_aligned", None)
-                    if isinstance(aabb_world, dict) and aabb_world.get("corners_world") is not None:
-                        corners_world = np.asarray(aabb_world["corners_world"], dtype=np.float32)
                         if corners_world.size > 0:
                             corners_final = (R_final @ corners_world.T).T + t_final[None, :]
 
@@ -1309,21 +1567,21 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             frames_filled[fname] = {"objects": filled_objects, "relationships": frame_relationships}
 
         # ----------------------------------------------------------------------
-        # Static union logic: UNION IN FINAL COORDS, WORLD UNCHANGED
+        # Static OBB union: UNION IN FINAL COORDS, WORLD UNCHANGED
+        # Uses cv2.minAreaRect on XZ projection of pooled corners
         # ----------------------------------------------------------------------
-        def _make_aabb_corners_from_minmax(min_xyz: np.ndarray, max_xyz: np.ndarray) -> List[List[float]]:
-            x0, y0, z0 = min_xyz.tolist()
-            x1, y1, z1 = max_xyz.tolist()
-            return [
-                [x0, y0, z0],
-                [x1, y0, z0],
-                [x0, y0, z1],
-                [x1, y0, z1],
-                [x0, y1, z0],
-                [x1, y1, z0],
-                [x0, y1, z1],
-                [x1, y1, z1],
-            ]
+        def _compute_obb_union_final_filling(all_corners: np.ndarray) -> List[List[float]]:
+            pts_xz = all_corners[:, [0, 2]].astype(np.float32)
+            rect = cv2.minAreaRect(pts_xz[:, None, :])
+            box_2d = cv2.boxPoints(rect)  # (4, 2) in XZ
+            y_min = float(all_corners[:, 1].min())
+            y_max = float(all_corners[:, 1].max())
+            corners = []
+            for i in range(4):
+                corners.append([float(box_2d[i][0]), y_min, float(box_2d[i][1])])
+            for i in range(4):
+                corners.append([float(box_2d[i][0]), y_max, float(box_2d[i][1])])
+            return corners
 
         static_union_map_final: Dict[str, List[List[float]]] = {}
 
@@ -1347,13 +1605,11 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                 continue
 
             all_pts = np.concatenate(all_corners_list, axis=0)  # (N*8,3)
-            min_xyz = all_pts.min(axis=0)
-            max_xyz = all_pts.max(axis=0)
-            static_union_map_final[lbl] = _make_aabb_corners_from_minmax(min_xyz, max_xyz)
+            static_union_map_final[lbl] = _compute_obb_union_final_filling(all_pts)
 
         if static_union_map_final:
             print(
-                f"[world4d][{video_id}] Applying static union bboxes in FINAL coords for {len(static_union_map_final)} labels.")
+                f"[world4d][{video_id}] Applying static OBB union in FINAL coords for {len(static_union_map_final)} labels.")
             for fname in frame_names_sorted:
                 for obj in frames_filled.get(fname, {}).get("objects", []):
                     lbl = obj.get("label")
@@ -1363,7 +1619,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                     # Overwrite ONLY FINAL coords
                     _set_corners_final(obj, static_union_map_final[lbl])
 
-                    # NOTE: if obj carries any world-space fields, we intentionally do not touch them.
+                    # NOTE: world-space fields are intentionally untouched.
 
         result = {
             "video_id": video_id,
@@ -1548,7 +1804,6 @@ class FrameToWorldAnnotations(FrameToWorldBase):
         # ----------------------------------------------------------------------
         # Transform 3D bounding boxes
         #   - Add `obb_final` with `corners_final` into a separate map
-        #   - Prefer obb_floor_parallel; fall back to aabb_floor_aligned
         # ----------------------------------------------------------------------
         frame_3dbb_map_final: Optional[Dict[str, Dict[str, Any]]] = None
         if frame_3dbb_map_world is not None:
@@ -1557,21 +1812,12 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                 objects_world = frame_rec.get("objects", [])
                 objects_final = []
                 for obj in objects_world:
-                    # Prefer OBB corners, fall back to AABB
-                    corners_world = None
                     obb_data = obj.get("obb_floor_parallel", None)
-                    if obb_data and obb_data.get("corners_world"):
-                        corners_world = np.asarray(
-                            obb_data["corners_world"], dtype=np.float32
-                        )
-                    elif "aabb_floor_aligned" in obj:
-                        bbox_3d = obj["aabb_floor_aligned"]
-                        cw = bbox_3d.get("corners_world", [])
-                        if len(cw) > 0:
-                            corners_world = np.asarray(cw, dtype=np.float32)
-
-                    if corners_world is None or corners_world.size == 0:
+                    if not obb_data or not obb_data.get("corners_world"):
                         continue
+                    corners_world = np.asarray(
+                        obb_data["corners_world"], dtype=np.float32
+                    )
 
                     corners_final = (R_final @ corners_world.T).T + t_final[None, :]
 
