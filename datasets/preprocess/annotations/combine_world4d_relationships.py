@@ -235,6 +235,9 @@ def process_video(
     with open(w4d_pkl_path, "rb") as f:
         w4d_data = pickle.load(f)
 
+    logger.info(f"[{video_id}] Loaded augmented_rel PKL: {rel_pkl_path.name}")
+    logger.info(f"[{video_id}] Loaded world4D PKL: {w4d_pkl_path.name}")
+
     # ------------------------------------------------------------------
     # 2) Build stem→camera index from world4D
     # ------------------------------------------------------------------
@@ -246,11 +249,22 @@ def process_video(
 
     w4d_frames = w4d_data.get("frames", {})
 
+    logger.debug(
+        f"[{video_id}] World4D: {len(w4d_frames)} frames, "
+        f"{len(w4d_frame_stems)} camera stems, "
+        f"camera_poses={'None' if w4d_camera_poses is None else w4d_camera_poses.shape}"
+    )
+
     # ------------------------------------------------------------------
     # 3) Per-frame merge
     # ------------------------------------------------------------------
     rel_object_bbox = rel_data.get("object_bbox", {})
     rel_person_bbox = rel_data.get("person_bbox", {})
+
+    logger.debug(
+        f"[{video_id}] Augmented rel: {len(rel_object_bbox)} object_bbox frames, "
+        f"{len(rel_person_bbox)} person_bbox frames"
+    )
 
     combined_frames: Dict[str, Dict[str, Any]] = {}
     all_labels: Set[str] = set()
@@ -259,13 +273,28 @@ def process_video(
     valid_cam_indices: List[int] = []
     camera_frame_keys: List[str] = []
 
+    n_person_matched = 0
+    n_person_missing = 0
+    n_obj_matched = 0
+    n_obj_missing_3d = 0
+    n_cam_matched = 0
+    n_cam_missing = 0
+
     for frame_key in sorted(rel_object_bbox.keys()):
         frame_name = frame_key.split("/")[-1]  # "000042.png"
         frame_stem = frame_name.replace(".png", "")
 
         # ---- World4D lookup ----
-        w4d_frame_rec = w4d_frames.get(frame_name, {})
-        w4d_objects = w4d_frame_rec.get("objects", [])
+        w4d_frame_rec = w4d_frames.get(frame_name, None)
+
+        if w4d_frame_rec is None:
+            logger.warning(
+                f"[{video_id}] Frame {frame_name}: NOT FOUND in world4D frames — "
+                f"skipping 3D data for this frame"
+            )
+            w4d_objects = []
+        else:
+            w4d_objects = w4d_frame_rec.get("objects", [])
 
         # Build label→obj map from world4D (short-form keys)
         w4d_label_map: Dict[str, Dict[str, Any]] = {}
@@ -280,10 +309,21 @@ def process_video(
                 if lbl not in w4d_label_map:
                     w4d_label_map[lbl] = obj
 
+        logger.debug(
+            f"[{video_id}] Frame {frame_name}: "
+            f"w4d_objects={len(w4d_objects)} (person={'YES' if w4d_person_obj else 'NO'}, "
+            f"objects={sorted(w4d_label_map.keys())})"
+        )
+
         # ---- Verify object label sets ----
         rel_objs = rel_object_bbox.get(frame_key, [])
         rel_labels = {_to_short(o["class"]) for o in rel_objs}
         w4d_labels = set(w4d_label_map.keys())
+
+        logger.debug(
+            f"[{video_id}] Frame {frame_name}: "
+            f"rel_labels={sorted(rel_labels)}, w4d_labels={sorted(w4d_labels)}"
+        )
 
         if rel_labels != w4d_labels:
             rel_only = rel_labels - w4d_labels
@@ -294,7 +334,7 @@ def process_video(
                 f"  w4d_only:  {sorted(w4d_only) if w4d_only else '{}'}"
             )
             mismatch_lines.append(line)
-            logger.debug(line)
+            logger.warning(line)
 
         # ---- Person info ----
         person_rel = rel_person_bbox.get(frame_key, {})
@@ -306,6 +346,12 @@ def process_video(
         if w4d_person_obj is not None:
             person_3d = _extract_3d_fields(w4d_person_obj)
             person_info.update(person_3d)
+            n_person_matched += 1
+            logger.debug(
+                f"[{video_id}] Frame {frame_name}: person 3D MATCHED "
+                f"(filled={person_3d['world4d_filled']}, "
+                f"method={person_3d['world4d_fill_method']})"
+            )
         else:
             # No person in world4D — fill with None
             person_info.update({
@@ -316,6 +362,11 @@ def process_video(
                 "world4d_fill_method": None,
                 "world4d_source": None,
             })
+            n_person_missing += 1
+            logger.warning(
+                f"[{video_id}] Frame {frame_name}: person NOT FOUND in world4D — "
+                f"3D fields set to None"
+            )
 
         # ---- Object info list ----
         object_info_list: List[Dict[str, Any]] = []
@@ -323,6 +374,7 @@ def process_video(
         for rel_obj in rel_objs:
             cls_full = rel_obj["class"]          # full AG name
             cls_short = _to_short(cls_full)      # short-form for matching
+            rel_source = rel_obj.get("source", "gt")
             all_labels.add(cls_short)
 
             # Base from augmented_rel
@@ -334,7 +386,7 @@ def process_video(
                 "attention_relationship": rel_obj.get("attention_relationship", []),
                 "contacting_relationship": rel_obj.get("contacting_relationship", []),
                 "spatial_relationship": rel_obj.get("spatial_relationship", []),
-                "source": rel_obj.get("source", "gt"),
+                "source": rel_source,
                 "attention_scores": rel_obj.get("attention_scores", None),
                 "contacting_scores": rel_obj.get("contacting_scores", None),
                 "spatial_scores": rel_obj.get("spatial_scores", None),
@@ -344,8 +396,16 @@ def process_video(
             w4d_match = w4d_label_map.get(cls_short)
             if w4d_match is not None:
                 merged.update(_extract_3d_fields(w4d_match))
+                n_obj_matched += 1
+                logger.debug(
+                    f"[{video_id}] Frame {frame_name}: obj '{cls_short}' "
+                    f"(src={rel_source}) 3D MATCHED "
+                    f"(filled={merged['world4d_filled']}, "
+                    f"method={merged['world4d_fill_method']}, "
+                    f"w4d_src={merged['world4d_source']})"
+                )
             else:
-                # No world4D match (shouldn't happen normally, logged in verify)
+                # No world4D match — logged in verify
                 merged.update({
                     "corners_world": None,
                     "corners_final": None,
@@ -354,6 +414,11 @@ def process_video(
                     "world4d_fill_method": None,
                     "world4d_source": None,
                 })
+                n_obj_missing_3d += 1
+                logger.warning(
+                    f"[{video_id}] Frame {frame_name}: obj '{cls_short}' "
+                    f"(src={rel_source}) NO world4D match — 3D fields set to None"
+                )
 
             object_info_list.append(merged)
 
@@ -366,6 +431,13 @@ def process_video(
         if frame_stem in stem_to_cam_idx:
             valid_cam_indices.append(stem_to_cam_idx[frame_stem])
             camera_frame_keys.append(frame_key)
+            n_cam_matched += 1
+        else:
+            n_cam_missing += 1
+            logger.warning(
+                f"[{video_id}] Frame {frame_name}: stem '{frame_stem}' "
+                f"NOT FOUND in world4D frame_stems — no camera pose for this frame"
+            )
 
     # ------------------------------------------------------------------
     # 4) Filter camera poses
@@ -375,6 +447,18 @@ def process_video(
         camera_poses_filtered = np.asarray(w4d_camera_poses, dtype=np.float32)[
             valid_cam_indices
         ]
+        logger.debug(
+            f"[{video_id}] Camera poses filtered: "
+            f"{w4d_camera_poses.shape} → {camera_poses_filtered.shape} "
+            f"({n_cam_matched} matched, {n_cam_missing} missing)"
+        )
+    elif w4d_camera_poses is None:
+        logger.warning(f"[{video_id}] No camera_poses in world4D PKL")
+    else:
+        logger.warning(
+            f"[{video_id}] No valid camera pose indices found "
+            f"(0/{len(rel_object_bbox)} frames matched)"
+        )
 
     # ------------------------------------------------------------------
     # 5) Build and save output
@@ -415,7 +499,15 @@ def process_video(
     )
     logger.info(
         f"[{video_id}] Saved {len(combined_frames)} frames, "
-        f"{n_objs} objects, camera={cam_shape} → {output_path.name}"
+        f"{n_objs} total objects, camera={cam_shape} → {output_path.name}"
+    )
+    logger.info(
+        f"[{video_id}] Match stats: "
+        f"person={n_person_matched}/{n_person_matched + n_person_missing}, "
+        f"objects={n_obj_matched}/{n_obj_matched + n_obj_missing_3d}, "
+        f"camera={n_cam_matched}/{n_cam_matched + n_cam_missing}, "
+        f"labels={sorted(all_labels)}, "
+        f"mismatches={len(mismatch_lines)}"
     )
 
     return True, mismatch_lines, output_record
