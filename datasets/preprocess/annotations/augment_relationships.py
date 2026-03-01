@@ -20,6 +20,25 @@ The per-video pkl stores **two dicts** that mirror the global
     "rag_model":     str,
     "rag_mode":      str,
 
+    # Pre-filtering stats (matches base_ag_dataset.py logic)
+    "filter_stats": {
+        "total_frames":             int,   # frames before filtering
+        "dropped_no_visible_obj":   int,   # dropped: no visible GT object
+        "dropped_no_person_bbox":   int,   # dropped: no person bbox
+        "valid_frames":             int,   # frames after filtering
+    },
+
+    # RAG augmentation stats
+    "augmentation_stats": {
+        "total_observed":           int,   # total GT observed objects across all frames
+        "total_missing":            int,   # total RAG missing objects across all frames
+        "missing_non_empty":        int,   # missing objs with ≥1 valid relationship label
+        "missing_empty":            int,   # missing objs with all relationship lists empty
+        "missing_with_attention":   int,   # missing objs with ≥1 attention label
+        "missing_with_spatial":     int,   # missing objs with ≥1 spatial label
+        "missing_with_contacting":  int,   # missing objs with ≥1 contacting label
+    },
+
     # Same schema as person_bbox.pkl  (keyed by "video_id/frame.png")
     "person_bbox": {
         "video_id/000042.png": {
@@ -565,6 +584,11 @@ def process_video(
     object_bbox_dict: Dict[str, List[Dict[str, Any]]] = {}
     n_observed = 0
     n_missing = 0
+    n_missing_non_empty = 0   # missing objs with ≥1 valid rel label
+    n_missing_empty = 0       # missing objs with all rel lists empty
+    n_missing_att = 0         # missing objs with ≥1 attention label
+    n_missing_spa = 0         # missing objs with ≥1 spatial label
+    n_missing_cont = 0        # missing objs with ≥1 contacting label
 
     for frame_key in valid_frame_keys:
         person_entry, observed = gt_loader.get_frame_data(frame_key, phase=phase)
@@ -580,14 +604,37 @@ def process_video(
             missing = extract_missing_for_frame(rag_data, stem, phase=phase)
             for obj in missing:
                 all_object_labels.add(obj["class"])
+                has_att = len(obj["attention_relationship"]) > 0
+                has_cont = len(obj["contacting_relationship"]) > 0
+                has_spa = len(obj["spatial_relationship"]) > 0
+                if has_att:
+                    n_missing_att += 1
+                if has_spa:
+                    n_missing_spa += 1
+                if has_cont:
+                    n_missing_cont += 1
+                if has_att or has_cont or has_spa:
+                    n_missing_non_empty += 1
+                else:
+                    n_missing_empty += 1
 
         # Flat list: GT observed first, then RAG missing
         object_bbox_dict[frame_key] = observed + missing
         n_observed += len(observed)
         n_missing += len(missing)
 
+    augmentation_stats = {
+        "total_observed": n_observed,
+        "total_missing": n_missing,
+        "missing_non_empty": n_missing_non_empty,
+        "missing_empty": n_missing_empty,
+        "missing_with_attention": n_missing_att,
+        "missing_with_spatial": n_missing_spa,
+        "missing_with_contacting": n_missing_cont,
+    }
+
     # ==================================================================
-    # STEP 3: SAVE with filter stats
+    # STEP 3: SAVE with filter + augmentation stats
     # ==================================================================
     output_record = {
         "video_id": video_id,
@@ -596,6 +643,7 @@ def process_video(
         "rag_model": model_name,
         "rag_mode": mode,
         "filter_stats": filter_stats,
+        "augmentation_stats": augmentation_stats,
         "person_bbox": person_bbox_dict,
         "object_bbox": object_bbox_dict,
     }
@@ -603,11 +651,17 @@ def process_video(
         pickle.dump(output_record, f)
 
     logger.info(
-        f"[{video_id}] {filter_stats['total_frames']}→{len(valid_frame_keys)} frames "
+        f"[{video_id}] Filter: {filter_stats['total_frames']}→{filter_stats['valid_frames']} frames "
         f"(dropped: {filter_stats['dropped_no_visible_obj']} no-vis, "
-        f"{filter_stats['dropped_no_person_bbox']} no-person) "
-        f"| {n_observed} observed, {n_missing} missing → {save_path.name}"
+        f"{filter_stats['dropped_no_person_bbox']} no-person)"
     )
+    logger.info(
+        f"[{video_id}] Augmentation: "
+        f"{n_observed} observed, {n_missing} missing "
+        f"(non-empty={n_missing_non_empty}, empty={n_missing_empty}) "
+        f"| att={n_missing_att}, spa={n_missing_spa}, cont={n_missing_cont}"
+    )
+    logger.info(f"[{video_id}] Saved → {save_path.name}")
     return True, output_record
 
 
