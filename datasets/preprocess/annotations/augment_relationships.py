@@ -391,18 +391,18 @@ def _extract_rel_label_and_score(
 
 
 def extract_missing_for_frame(
-    rag_data: Dict[str, Any], frame_stem: str, phase: str = "train",
+    rag_data: Dict[str, Any], frame_name: str, phase: str = "train",
 ) -> List[Dict[str, Any]]:
     """
     Extract RAG-predicted missing-object relationships for a frame.
 
-    ``frame_stem`` is the numeric part (e.g. ``"000042"``).
+    ``frame_name`` is the filename part (e.g. ``"000042.png"``).
 
     Returns a list of dicts in the same schema as GT objects but with
     ``bbox=None``, ``visible=False``, ``source="rag"``, ``class=str``.
     """
     frames = rag_data.get("frames", {})
-    frame_data = frames.get(frame_stem)
+    frame_data = frames.get(frame_name)
     if frame_data is None:
         return []
 
@@ -492,10 +492,9 @@ def extract_missing_for_frame(
 # Frame-stem extraction helper
 # ---------------------------------------------------------------------------
 
-def frame_key_to_stem(frame_key: str) -> str:
-    """``'00T1E/000042.png'`` → ``'000042'``"""
-    fname = frame_key.split("/")[-1]
-    return os.path.splitext(fname)[0]
+def frame_key_to_filename(frame_key: str) -> str:
+    """``'001YG.mp4/000042.png'`` → ``'000042.png'``"""
+    return frame_key.split("/")[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -608,7 +607,7 @@ def process_video(
             all_object_labels.add(obj["class"])
 
         # Augment with RAG missing-object predictions
-        stem = frame_key_to_stem(frame_key)
+        stem = frame_key_to_filename(frame_key)
         missing: List[Dict[str, Any]] = []
         if rag_data is not None:
             missing = extract_missing_for_frame(rag_data, stem, phase=phase)
