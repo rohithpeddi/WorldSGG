@@ -173,16 +173,47 @@ logger.addHandler(_fh)
 
 
 def _normalize_rel_label(label: str) -> str:
-    """Normalize a relationship label: strip, lowercase, space→underscore."""
+    """Normalize a relationship label to canonical underscore format.
+
+    Strips whitespace, lowercases, and converts space-separated labels
+    (e.g. ``"looking at"``) to underscore format (``"looking_at"``).
+    Uses ``_LABEL_SPACE_TO_UNDERSCORE`` for known mappings, falls back
+    to generic space→underscore replacement.
+
+    Parameters
+    ----------
+    label : str
+        Raw relationship label string from GT or RAG output.
+
+    Returns
+    -------
+    str
+        Normalized label in underscore format.
+    """
     label = label.strip().lower()
     return _LABEL_SPACE_TO_UNDERSCORE.get(label, label.replace(" ", "_"))
 
 
 def _resolve_object_label(raw_name: str) -> str:
-    """Resolve a raw object name to the canonical full AG class name (string).
+    """Resolve a raw object name to the canonical full AG class name string.
 
-    For example: "closet" → "closet/cabinet", "bed" → "bed".
-    Raises ValueError if the name is not in the AG vocabulary.
+    Handles both full AG names (``"closet/cabinet"``) and short forms
+    (``"closet"``), returning the canonical full name.
+
+    Parameters
+    ----------
+    raw_name : str
+        Object label from GT or RAG output.
+
+    Returns
+    -------
+    str
+        Canonical full AG class name (e.g. ``"closet/cabinet"``).
+
+    Raises
+    ------
+    ValueError
+        If the name cannot be mapped to any AG object class.
     """
     name = raw_name.strip().lower()
     # Direct match in full names
@@ -207,8 +238,21 @@ def _resolve_object_label(raw_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 class GTAnnotationLoader:
-    """Load GT annotations from ``object_bbox_and_relationship.pkl``
-    and ``person_bbox.pkl``."""
+    """Load and serve GT annotations from Action Genome pkl files.
+
+    Reads ``person_bbox.pkl`` and ``object_bbox_and_relationship.pkl``
+    from ``<ag_root>/annotations/``. Provides methods to enumerate
+    videos/frames by phase and extract per-frame person bboxes + object
+    annotations in the format expected by ``base_ag_dataset.py``.
+
+    Attributes
+    ----------
+    person_bbox : dict
+        Raw person_bbox.pkl contents, keyed by ``"video_id/frame.png"``.
+    object_bbox : dict
+        Raw object_bbox_and_relationship.pkl contents, keyed by
+        ``"video_id/frame.png"``.
+    """
 
     def __init__(self, ag_root_directory: str):
         self.ag_root = Path(ag_root_directory)
@@ -233,7 +277,18 @@ class GTAnnotationLoader:
     # ---- Video / frame enumeration ------------------------------------
 
     def get_all_video_ids(self, phase: str = "train") -> List[str]:
-        """Return sorted list of unique video IDs for the given phase."""
+        """Return sorted list of unique video IDs for the given phase.
+
+        Parameters
+        ----------
+        phase : str
+            Dataset split (``"train"`` or ``"test"``).
+
+        Returns
+        -------
+        list[str]
+            Sorted unique video IDs (e.g. ``["001YG.mp4", "003Q2.mp4", ...]``).
+        """
         videos: Set[str] = set()
         for key in self.object_bbox:
             metadata = self.object_bbox[key][0].get("metadata", {})
@@ -245,8 +300,20 @@ class GTAnnotationLoader:
     def get_video_frame_keys(
         self, video_id: str, phase: str = "train"
     ) -> List[str]:
-        """Return sorted list of frame keys (``video_id/frame_name``) for
-        a video in the given phase."""
+        """Return sorted frame keys for a video in the given phase.
+
+        Parameters
+        ----------
+        video_id : str
+            Video folder name (e.g. ``"001YG.mp4"``).
+        phase : str
+            Dataset split (``"train"`` or ``"test"``).
+
+        Returns
+        -------
+        list[str]
+            Sorted frame keys (e.g. ``["001YG.mp4/000089.png", ...]``).
+        """
         frame_keys = []
         prefix = video_id + "/"
         for key in self.object_bbox:
@@ -270,7 +337,7 @@ class GTAnnotationLoader:
         person_entry : dict
             ``{"bbox": np.ndarray, "bbox_size": (w, h)}``
         observed_objects : list[dict]
-            Each dict has: class (str), bbox (np.ndarray xywh), visible (True),
+            Each dict has: class (str), bbox (np.ndarray xyxy), visible (True),
             attention_relationship, contacting_relationship,
             spatial_relationship (lists of underscore-formatted strings),
             metadata ({"set": phase}), source ("gt").
@@ -352,7 +419,26 @@ class GTAnnotationLoader:
 def load_rag_predictions(
     rag_results_dir: str, mode: str, model_name: str, video_id: str,
 ) -> Optional[Dict[str, Any]]:
-    """Load the RAG prediction pkl for a single video."""
+    """Load the RAG prediction pkl for a single video.
+
+    Looks for ``<rag_results_dir>/<mode>/<model_name>/<video_id>.pkl``.
+
+    Parameters
+    ----------
+    rag_results_dir : str
+        Root directory of RAG results.
+    mode : str
+        Evaluation mode (``"predcls"`` or ``"sgdet"``).
+    model_name : str
+        VLM model name (e.g. ``"qwen3vl"``).
+    video_id : str
+        Video identifier (e.g. ``"001YG.mp4"``).
+
+    Returns
+    -------
+    dict or None
+        Loaded RAG data dict, or ``None`` if the pkl file does not exist.
+    """
     pkl_path = Path(rag_results_dir) / mode / model_name / f"{video_id}.pkl"
     if not pkl_path.exists():
         return None
@@ -363,14 +449,33 @@ def load_rag_predictions(
 def _extract_rel_label_and_score(
     entry: Any, valid_set: List[str], default: str,
 ) -> Tuple[Optional[str], float]:
-    """Extract (label, score) from a RAG prediction entry.
+    """Extract (label, score) from a single RAG relationship prediction entry.
 
-    RAG output format can be:
-      - dict: {"label": "...", "yes_prob": 0.8}   (from verification)
-      - dict: {"label": "...", "score": 0.8}       (from skip-verification)
-      - str:  "label_name"
+    Handles multiple RAG output formats:
+      - ``dict``: ``{"label": "...", "yes_prob": 0.8}`` (from verification)
+      - ``dict``: ``{"label": "...", "score": 0.8}`` (from skip-verification)
+      - ``str``:  ``"label_name"`` (plain string, score defaults to 0.5)
 
-    Returns (None, 0.0) if the label is 'unknown' or not in the valid set.
+    Parameters
+    ----------
+    entry : dict | str
+        A single relationship prediction entry from RAG output.
+    valid_set : list[str]
+        Allowed relationship labels for this category.
+    default : str
+        Fallback label if entry has no ``"label"`` key.
+
+    Returns
+    -------
+    tuple[str | None, float]
+        ``(normalized_label, confidence_score)``.
+        Returns ``(None, 0.0)`` if the label is ``"unknown"`` or not in
+        ``valid_set``.
+
+    Raises
+    ------
+    ValueError
+        If ``entry`` is neither a dict nor a str.
     """
     if isinstance(entry, dict):
         label = _normalize_rel_label(entry.get("label", default))
@@ -393,13 +498,37 @@ def _extract_rel_label_and_score(
 def extract_missing_for_frame(
     rag_data: Dict[str, Any], frame_name: str, phase: str = "train",
 ) -> List[Dict[str, Any]]:
-    """
-    Extract RAG-predicted missing-object relationships for a frame.
+    """Extract RAG-predicted missing-object relationships for a single frame.
 
-    ``frame_name`` is the filename part (e.g. ``"000042.png"``).
+    Looks up ``rag_data["frames"][frame_name]["predictions"]`` and converts
+    each prediction into a dict compatible with the GT object format used
+    by ``base_ag_dataset.py``.
 
-    Returns a list of dicts in the same schema as GT objects but with
-    ``bbox=None``, ``visible=False``, ``source="rag"``, ``class=str``.
+    Parameters
+    ----------
+    rag_data : dict
+        Loaded RAG prediction data for a video.
+    frame_name : str
+        Frame filename (e.g. ``"000042.png"``), used as key into
+        ``rag_data["frames"]``.
+    phase : str
+        Dataset split, stored in ``metadata.set`` of each output dict.
+
+    Returns
+    -------
+    list[dict]
+        One dict per missing object with keys: ``class`` (str),
+        ``bbox`` (None), ``visible`` (False), ``source`` ("rag"),
+        ``attention_relationship``, ``contacting_relationship``,
+        ``spatial_relationship`` (lists of str, empty if unknown),
+        ``attention_scores``, ``contacting_scores``, ``spatial_scores``
+        (dicts mapping label→confidence), ``metadata``.
+
+    Raises
+    ------
+    ValueError
+        If a prediction has an empty ``missing_object`` field or an
+        unrecognized object label.
     """
     frames = rag_data.get("frames", {})
     frame_data = frames.get(frame_name)
@@ -411,7 +540,7 @@ def extract_missing_for_frame(
         raw_obj_name = pred.get("missing_object", "").strip().lower()
         if not raw_obj_name:
             raise ValueError(
-                f"Empty missing_object in RAG prediction for frame '{frame_stem}': {pred}"
+                f"Empty missing_object in RAG prediction for frame '{frame_name}': {pred}"
             )
 
         # Resolve to canonical full AG class NAME (string)
@@ -493,7 +622,18 @@ def extract_missing_for_frame(
 # ---------------------------------------------------------------------------
 
 def frame_key_to_filename(frame_key: str) -> str:
-    """``'001YG.mp4/000042.png'`` → ``'000042.png'``"""
+    """Extract the frame filename from a full frame key.
+
+    Parameters
+    ----------
+    frame_key : str
+        Full frame key (e.g. ``"001YG.mp4/000042.png"``).
+
+    Returns
+    -------
+    str
+        Filename portion (e.g. ``"000042.png"``).
+    """
     return frame_key.split("/")[-1]
 
 
@@ -513,15 +653,45 @@ def process_video(
 ) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """Process a single video: filter → augment → save.
 
-    **Step 1 – Filter** (same logic as ``base_ag_dataset.py``):
-      - Drop frames with no visible GT object
-      - Drop frames with empty person bbox
-      - Drop entire video if ≤ 2 valid frames remain
+    Applies the same frame filtering as ``base_ag_dataset.py`` to produce
+    a pre-filtered and augmented per-video PKL file.
+
+    **Step 1 – Filter** (matches ``base_ag_dataset.py`` logic):
+      - Drop frames with no visible GT object.
+      - Drop frames with empty person bounding box.
+      - Drop entire video if ≤ 2 valid frames remain.
 
     **Step 2 – Augment** (only valid frames):
-      - Append RAG missing-object predictions to each frame's object list
+      - Load RAG predictions for the video.
+      - Append RAG missing-object entries to each frame's object list.
 
-    **Step 3 – Save** per-video PKL with filter stats.
+    **Step 3 – Save** per-video PKL with filter and augmentation stats.
+
+    Parameters
+    ----------
+    video_id : str
+        Video identifier (e.g. ``"001YG.mp4"``).
+    gt_loader : GTAnnotationLoader
+        Pre-loaded GT annotation loader.
+    rag_results_dir : str
+        Root directory of RAG prediction pkl files.
+    mode : str
+        Evaluation mode (``"predcls"`` or ``"sgdet"``).
+    model_name : str
+        VLM model name (e.g. ``"qwen3vl"``).
+    phase : str
+        Dataset split (``"train"`` or ``"test"``).
+    output_dir : Path
+        Directory to save the combined per-video pkl.
+    overwrite : bool
+        If ``True``, overwrite existing output files.
+
+    Returns
+    -------
+    tuple[bool, dict | None]
+        ``(success, output_record)``.
+        ``output_record`` is the saved dict if processing succeeded,
+        ``None`` if skipped (already exists) or failed (filtered out).
     """
     save_path = output_dir / f"{video_id}.pkl"
     if save_path.exists() and not overwrite:
