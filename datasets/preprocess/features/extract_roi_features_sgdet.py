@@ -16,6 +16,42 @@ Extracts pre-computed ROI features using the DinoV3 detector's own detections
 
 All bboxes throughout the pipeline are in Pi-3 scaled space.
 
+Output PKL format
+-----------------
+One ``.pkl`` file per video, saved under ``<output_dir>/<split>/``:
+
+::
+
+    {
+        "video_id":              str,            # e.g. "001YG.mp4"
+        "model":                 str,            # backbone id, e.g. "v2b"
+        "mode":                  "sgdet",
+        "coord_space":           "pi3",          # all bboxes in Pi-3 scaled space
+        "split":                 str,            # "train" or "test"
+        "feature_dim":           int,            # 1024
+        "assign_iou_threshold":  float,          # IoU used for GT matching
+        "use_supply":            bool,           # whether GT augmentation was enabled
+        "score_threshold":       float,          # detector score cutoff
+        "checkpoint":            str,            # model checkpoint path
+        "frames": {
+            "<frame_filename>": {                # e.g. "000001.png"
+                "roi_features":      np.ndarray, # (N, 1024) float16/32 ROI-pooled features
+                "bboxes_xyxy":       np.ndarray, # (N, 4)    float32 [x1, y1, x2, y2] in Pi-3
+                "boxes_3d":          np.ndarray, # (N, D)    float16/32 predicted 3D params
+                "target_size":       (int, int), # (width, height) of the Pi-3 image
+                "labels":            list[str],  # N normalized label strings
+                "label_ids":         list[int],  # N AG class indices (1-indexed)
+                "sources":           list[str],  # N, each "detector" or "gt_supply"
+                "scores":            list[float],# N detection scores (supply=1.0)
+                "assigned_labels":   list[int],  # N GT class ids from assign_relations
+                "detector_found_idx":list[int],  # indices of GT objects matched by detector
+                "pair_indices":      list[tuple],# person-object pairs [(person_idx, obj_idx)]
+                "union_features":    np.ndarray, # (P, 1024) float16/32 union features (optional)
+            },
+            ...
+        }
+    }
+
 Usage:
     python datasets/preprocess/features/extract_roi_features_sgdet.py \
         --config configs/features/sgdet/ex_roi_feat_v1_dinov2b_saurabh.yaml
@@ -78,7 +114,17 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
     MODE_NAME = "sgdet"
 
     def _get_output_dir(self, split_name: str) -> Path:
-        """SGDet uses separate train/test output directories."""
+        """Return the output directory for the given split.
+
+        Resolves to ``<output_dir>/<split>`` when ``output_dir`` is set,
+        otherwise ``<data_path>/features/roi_features/sgdet/<model>/<split>``.
+
+        Args:
+            split_name: ``"train"`` or ``"test"``.
+
+        Returns:
+            Path to the split-specific output directory.
+        """
         model_dir = MODEL_TO_DIR.get(self.cfg.model, self.cfg.model)
         if self.cfg.output_dir:
             return Path(self.cfg.output_dir) / split_name
@@ -93,17 +139,19 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
         self,
         img_chw: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Run the DinoV3 detector on a preprocessed frame.
+        """Run the DinoV3 detector on a single preprocessed frame.
 
-        The model's built-in postprocess_detections applies:
-          - Per-class NMS (default IoU 0.5)
-          - Score-based top-k (default 100 detections/image)
+        The model's built-in ``postprocess_detections`` applies per-class NMS
+        (default IoU 0.5) and score-based top-k filtering (default 100
+        detections per image).
+
+        Args:
+            img_chw: (3, H, W) preprocessed image tensor.
 
         Returns:
-            boxes: (N, 4) xyxy in Pi-3 (resized image) coordinates
-            labels: (N,) class indices (1-indexed, 0=background)
-            scores: (N,) confidence scores
+            boxes:  (N, 4) xyxy bounding boxes in Pi-3 coordinates.
+            labels: (N,) class indices (1-indexed; 0 = background).
+            scores: (N,) confidence scores.
         """
         detections = self.model([img_chw.to(self.device)])
         det = detections[0]
@@ -115,16 +163,23 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
         labels: torch.Tensor,
         scores: torch.Tensor,
     ) -> Tuple[List[List[float]], List[str], List[int], List[float]]:
-        """
-        Filter detections (all in Pi-3 space):
-          1. Score threshold (default 0.1)
-          2. Person class: keep only the single highest-scoring detection
+        """Filter raw detector outputs in Pi-3 space.
+
+        Two-stage filtering:
+          1. Drop detections below ``cfg.score_threshold`` (default 0.1).
+          2. For the *person* class (index 1), keep only the single
+             highest-scoring detection.
+
+        Args:
+            boxes:  (N, 4) xyxy tensor from the detector.
+            labels: (N,) class-index tensor (1-indexed).
+            scores: (N,) confidence-score tensor.
 
         Returns:
-            bboxes_pi3: bboxes in Pi-3 coords
-            det_labels: normalized label strings
-            det_label_ids: AG class indices
-            det_scores: confidence scores
+            bboxes_pi3:    list of [x1, y1, x2, y2] float lists (Pi-3 coords).
+            det_labels:    list of normalized label strings.
+            det_label_ids: list of AG class indices.
+            det_scores:    list of confidence scores.
         """
         if len(boxes) == 0:
             return [], [], [], []
@@ -204,13 +259,29 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
         target_h: int,
         assign_iou: float,
     ):
-        """
-        Wrapper around assign_relations() that pre-scales GT annotations to Pi-3.
+        """Match detections to GT annotations with bboxes in Pi-3 space.
 
-        assign_relations pulls GT bboxes from raw annotation dicts (original coords).
-        We scale them first so IoU matching happens in Pi-3 space.
+        Wrapper around :func:`assign_relations` that first scales raw GT
+        annotation bboxes (in original image coordinates) to Pi-3 space so
+        that IoU matching is performed in a consistent coordinate frame.
 
-        Supply relations returned will also contain Pi-3 scaled bboxes.
+        Args:
+            prediction:     dict with ``FINAL_BBOXES`` (N, 5) and
+                            ``FINAL_LABELS`` (N,) tensors (see
+                            :meth:`_build_prediction_for_assign`).
+            gt_annotations: per-frame list of GT annotation dicts in
+                            original image coordinates.
+            scale_x:        horizontal scale factor (Pi-3 / original).
+            scale_y:        vertical scale factor (Pi-3 / original).
+            target_w:       Pi-3 image width.
+            target_h:       Pi-3 image height.
+            assign_iou:     IoU threshold for matching (train: 0.5,
+                            test: 0.3).
+
+        Returns:
+            Tuple of ``(DETECTOR_FOUND_IDX, GT_RELATIONS,
+            SUPPLY_RELATIONS, assigned_labels)`` — all with bboxes in
+            Pi-3 space.
         """
         scaled_gt = scale_gt_annotations_to_pi3(
             gt_annotations, scale_x, scale_y, target_w, target_h
@@ -227,23 +298,33 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
         features: Dict[str, torch.Tensor],
         image_sizes: List[Tuple[int, int]],
     ) -> Tuple[List[List[float]], List[str], List[int], List[float], torch.Tensor]:
-        """
-        Extract features for unfound GT objects (SUPPLY_RELATIONS).
+        """Extract ROI features for GT objects not found by the detector.
 
-        Supply relations contain bboxes **already in Pi-3 space** (from
-        _assign_relations_pi3). No scaling is needed.
+        During training, ``assign_relations`` returns ``SUPPLY_RELATIONS``
+        containing GT objects that the detector missed (IoU below threshold).
+        This method extracts ROI features for those objects so they can be
+        injected into the final feature set with a confidence score of 1.0.
+
+        Supply bboxes are **already in Pi-3 space** (produced by
+        :meth:`_assign_relations_pi3`), so no coordinate conversion occurs.
+
+        Degenerate boxes (width or height < 1 px) are silently skipped.
 
         Args:
-            supply_relations: list of GT annotation dicts with Pi-3 bboxes
-            features: FPN feature maps from backbone (already computed)
-            image_sizes: from transform
+            supply_relations: list of GT annotation dicts with Pi-3 bboxes.
+                Each dict contains either ``person_bbox`` or ``bbox`` +
+                ``class`` keys.
+            features:    FPN feature-map dict from the backbone (already
+                         computed for the current frame).
+            image_sizes: list of ``(H, W)`` tuples from the model transform.
 
         Returns:
-            supply_bboxes_pi3: bboxes in Pi-3 coords
-            supply_labels: normalized label strings
-            supply_label_ids: AG class indices
-            supply_scores: all 1.0
-            supply_features: (M, 1024) tensor on device
+            supply_bboxes_pi3:  list of [x1, y1, x2, y2] float lists.
+            supply_labels:      list of normalized label strings.
+            supply_label_ids:   list of AG class indices (1-indexed).
+            supply_scores:      list of floats, all 1.0.
+            supply_features:    (M, 1024) tensor on ``self.device``; empty
+                                tensor when no valid supply boxes exist.
         """
         supply_bboxes_pi3 = []
         supply_labels = []
@@ -303,21 +384,26 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
         all_frame_bboxes: List[List[List[float]]],
         all_frame_labels: List[List[int]],
     ) -> Dict[str, Any]:
-        """
-        Build the prediction dict expected by assign_relations().
+        """Assemble per-frame detections into the dict expected by ``assign_relations``.
 
-        assign_relations expects:
-            prediction["FINAL_BBOXES"]: (N, 5) tensor with [frame_idx, x1, y1, x2, y2]
-            prediction["FINAL_LABELS"]: (N,) tensor with class indices
+        ``assign_relations`` expects:
 
-        All bboxes are in Pi-3 space.
+        * ``prediction["FINAL_BBOXES"]``: ``(N, 5)`` float tensor with
+          ``[frame_idx, x1, y1, x2, y2]`` rows.
+        * ``prediction["FINAL_LABELS"]``: ``(N,)`` int64 tensor of AG
+          class indices.
+
+        All bboxes must be in Pi-3 space.
 
         Args:
-            all_frame_bboxes: list of per-frame bbox lists (Pi-3 coords)
-            all_frame_labels: list of per-frame label_id lists
+            all_frame_bboxes: per-frame list of bbox coordinate lists,
+                each ``[x1, y1, x2, y2]`` in Pi-3 space.
+            all_frame_labels: per-frame list of AG class-index ints,
+                aligned with *all_frame_bboxes*.
 
         Returns:
-            prediction dict with FINAL_BBOXES and FINAL_LABELS tensors
+            dict with ``FINAL_BBOXES`` and ``FINAL_LABELS`` tensors.
+            Returns zero-length tensors when there are no detections.
         """
         all_bboxes = []
         all_labels = []
@@ -350,14 +436,30 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
         frame_names: List[str],
         split_name: str,
     ) -> Optional[Dict[str, Any]]:
-        """
-        SGDet extraction pipeline (all in Pi-3 space):
-          1. Detect objects in each frame
-          2. Filter (score threshold + person top-1)
-          3. Match to GT via assign_relations (GT scaled to Pi-3)
-          4. [Train] Augment with unfound GT boxes
-          5. Extract ROI + union features for finalized bboxes
-          6. Compute 3D predictions for ALL finalized bboxes
+        """Run the full SGDet feature-extraction pipeline for one video.
+
+        All coordinates are in Pi-3 (resized-image) space throughout.
+
+        Pipeline stages:
+          1. Run the DinoV3 detector on every frame.
+          2. Filter detections (score threshold + person top-1).
+          3. Match detections to GT via ``assign_relations`` (GT scaled
+             to Pi-3; IoU threshold differs for train vs. test).
+          4. **[Train only]** Augment with unfound GT boxes
+             (``SUPPLY_RELATIONS``).
+          5. Extract ROI-pooled features and person–object union features
+             for all finalized bounding boxes.
+          6. Compute 3D predictions from unified ROI features.
+
+        Args:
+            video_id:       identifier of the video (e.g. ``"001YG.mp4"``).
+            gt_annotations: per-frame list of GT annotation dicts.
+            frame_names:    ordered frame filenames for the video.
+            split_name:     ``"train"`` or ``"test"``.
+
+        Returns:
+            A dict matching the output PKL schema documented in the module
+            docstring, or ``None`` when no frames yield valid features.
         """
         is_train = (split_name == "train")
         assign_iou = self.cfg.assign_iou_train if is_train else self.cfg.assign_iou_test
@@ -606,6 +708,7 @@ class SGDetROIFeatureExtractor(BaseROIFeatureExtractor):
 # ---------------------------------------------------------------------------
 
 def main():
+    """CLI entry-point: parse args, configure logging, and run SGDet extraction."""
     parser = build_parser(description="Extract ROI features (SGDet mode — detector + GT augmentation)")
     args = parser.parse_args()
 

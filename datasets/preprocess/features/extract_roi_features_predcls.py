@@ -8,6 +8,35 @@ annotated objects (GT + GDino-filled missing objects) per frame.
 
 Uses GT bounding boxes directly — no detection, no NMS.
 
+Output PKL format
+-----------------
+One ``.pkl`` file per video, saved under ``<output_dir>/<split>/``:
+
+::
+
+    {
+        "video_id":     str,            # e.g. "001YG.mp4"
+        "model":        str,            # backbone id, e.g. "v2b"
+        "mode":         "predcls",
+        "coord_space":  "pi3",          # all bboxes in Pi-3 scaled space
+        "feature_dim":  int,            # 1024
+        "checkpoint":   str,            # model checkpoint path
+        "frames": {
+            "<frame_filename>": {        # e.g. "000001.png"
+                "roi_features":  np.ndarray, # (N, 1024) float16/32 ROI-pooled features
+                "bboxes_xyxy":   np.ndarray, # (N, 4)    float32 [x1,y1,x2,y2] in Pi-3
+                "target_size":   (int, int), # (width, height) of the Pi-3 image
+                "labels":        list[str],  # N normalized label strings
+                "label_ids":     list[int],  # N AG class indices (1-indexed)
+                "sources":       list[str],  # N, each "gt" or "gdino"
+                "gdino_scores":  list[float],# N, 0.0 for GT objects
+                "pair_indices":  list[tuple],# person-object pairs [(person_idx, obj_idx)]
+                "union_features":np.ndarray, # (P, 1024) float16/32 union features (optional)
+            },
+            ...
+        }
+    }
+
 Usage:
     python datasets/preprocess/features/extract_roi_features_predcls.py \
         --config configs/features/predcls/ex_roi_feat_v1_dinov2b_saurabh.yaml
@@ -59,7 +88,17 @@ class PredClsROIFeatureExtractor(BaseROIFeatureExtractor):
     MODE_NAME = "predcls"
 
     def _get_output_dir(self, split_name: str) -> Path:
-        """PredCls uses separate train/test output directories."""
+        """Return the output directory for the given split.
+
+        Resolves to ``<output_dir>/<split>`` when ``output_dir`` is set,
+        otherwise ``<data_path>/features/roi_features/predcls/<model>/<split>``.
+
+        Args:
+            split_name: ``"train"`` or ``"test"``.
+
+        Returns:
+            Path to the split-specific output directory.
+        """
         from pathlib import Path as _Path
         model_dir = MODEL_TO_DIR.get(self.cfg.model, self.cfg.model)
         if self.cfg.output_dir:
@@ -74,7 +113,30 @@ class PredClsROIFeatureExtractor(BaseROIFeatureExtractor):
         frame_names: List[str],
         split_name: str,
     ) -> Optional[Dict[str, Any]]:
-        """Extract ROI features for all annotated frames using GT bboxes."""
+        """Run the PredCls feature-extraction pipeline for one video.
+
+        For each annotated frame the method:
+          1. Loads and preprocesses the image.
+          2. Collects GT bounding boxes (scaled to Pi-3 space) and
+             optionally fills in missing object labels with GDino
+             detections that pass score / label filtering.
+          3. Extracts ROI-pooled features and person–object union
+             features for every collected bounding box.
+
+        No detector is run — bounding boxes come directly from
+        annotations and (optionally) GDino predictions.
+
+        Args:
+            video_id:       identifier of the video (e.g. ``"001YG.mp4"``).
+            gt_annotations: per-frame list of GT annotation dicts.
+            frame_names:    ordered frame filenames for the video.
+            split_name:     ``"train"`` or ``"test"``.
+
+        Returns:
+            A dict matching the output PKL schema documented in the
+            module docstring, or ``None`` when no frames yield valid
+            features.
+        """
 
         # Load GDino detections
         gdino_preds = _load_gdino_predictions(self.cfg.data_path, video_id)
@@ -239,6 +301,7 @@ class PredClsROIFeatureExtractor(BaseROIFeatureExtractor):
 # ---------------------------------------------------------------------------
 
 def main():
+    """CLI entry-point: parse args, configure logging, and run PredCls extraction."""
     parser = build_parser(description="Extract ROI features (PredCls mode — GT bboxes)")
     args = parser.parse_args()
 
