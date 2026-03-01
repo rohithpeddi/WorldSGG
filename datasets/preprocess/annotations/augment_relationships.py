@@ -312,26 +312,31 @@ def load_rag_predictions(
 
 def _extract_rel_label_and_score(
     entry: Any, valid_set: List[str], default: str,
-) -> Tuple[str, float]:
+) -> Tuple[Optional[str], float]:
     """Extract (label, score) from a RAG prediction entry.
 
     RAG output format can be:
-      - dict: {"label": "...", "score": 0.8}
+      - dict: {"label": "...", "yes_prob": 0.8}   (from verification)
+      - dict: {"label": "...", "score": 0.8}       (from skip-verification)
       - str:  "label_name"
+
+    Returns (None, 0.0) if the label is 'unknown' or not in the valid set.
     """
     if isinstance(entry, dict):
         label = _normalize_rel_label(entry.get("label", default))
-        score = float(entry.get("score", 0.5))
+        # RAG verification uses 'yes_prob'; skip-verification uses 'score'
+        score = float(entry.get("yes_prob", entry.get("score", 0.5)))
     elif isinstance(entry, str):
         label = _normalize_rel_label(entry)
         score = 0.5  # no score available
     else:
-        label = default
-        score = 0.0
+        raise ValueError(
+            f"Unexpected relationship entry type {type(entry)}: {entry}"
+        )
 
-    if label not in valid_set:
-        label = default
-        score = 0.0
+    # 'unknown' or invalid → return None so caller can drop it
+    if label == "unknown" or label not in valid_set:
+        return None, 0.0
     return label, score
 
 
@@ -353,21 +358,35 @@ def extract_missing_for_frame(
 
     missing: List[Dict[str, Any]] = []
     for pred in frame_data.get("predictions", []):
-        obj_name = pred.get("missing_object", "")
+        obj_name = pred.get("missing_object", "").strip().lower()
         if not obj_name:
-            continue
+            raise ValueError(
+                f"Empty missing_object in RAG prediction for frame '{frame_stem}': {pred}"
+            )
 
+        # Try lookup: raw name first, then denormalized (short→full)
         class_idx = NAME_TO_IDX.get(obj_name, -1)
         if class_idx <= 0:
-            continue
+            # Try denormalizing short form → full AG name
+            full_try = LABEL_DENORMALIZE_MAP.get(obj_name)
+            if full_try:
+                class_idx = NAME_TO_IDX.get(full_try, -1)
+        if class_idx <= 0:
+            raise ValueError(
+                f"Unknown object label in RAG output: '{obj_name}' "
+                f"(frame='{frame_stem}'). Not found in AG vocabulary. "
+                f"Available: {sorted(NAME_TO_IDX.keys())}"
+            )
 
-        # Resolve back to full AG label for consistency
+        # Resolve to full AG label for consistency with GT
         full_label = LABEL_DENORMALIZE_MAP.get(obj_name, obj_name)
-        if full_label not in NAME_TO_IDX and obj_name in NAME_TO_IDX:
-            full_label = obj_name
+        # Verify it's valid; if denormalized form isn't in vocab, keep original
+        if full_label not in NAME_TO_IDX:
+            full_label = OBJECT_CLASSES[class_idx] if class_idx < len(OBJECT_CLASSES) else obj_name
 
         # --- Attention (single label) ---
-        att_raw = pred.get("attention", "unsure")
+        att_raw = pred.get("attention", "unknown")
+        att_label, att_score = None, 0.0
         if isinstance(att_raw, dict):
             att_label, att_score = _extract_rel_label_and_score(
                 att_raw, ATTENTION_RELATIONSHIPS, "unsure"
@@ -379,15 +398,14 @@ def extract_missing_for_frame(
         elif isinstance(att_raw, str):
             att_label = _normalize_rel_label(att_raw)
             att_score = 0.5
-            if att_label not in ATTENTION_RELATIONSHIPS:
-                att_label, att_score = "unsure", 0.0
-        else:
-            att_label, att_score = "unsure", 0.0
-        att_list = [att_label]
-        att_scores = {att_label: att_score}
+            if att_label == "unknown" or att_label not in ATTENTION_RELATIONSHIPS:
+                att_label = None
+
+        att_list = [att_label] if att_label is not None else []
+        att_scores = {att_label: att_score} if att_label is not None else {}
 
         # --- Contacting (multi-label) ---
-        cont_raw = pred.get("contacting", ["not_contacting"])
+        cont_raw = pred.get("contacting", ["unknown"])
         if isinstance(cont_raw, str):
             cont_raw = [cont_raw]
         elif isinstance(cont_raw, dict):
@@ -399,15 +417,12 @@ def extract_missing_for_frame(
             lbl, sc = _extract_rel_label_and_score(
                 c, CONTACTING_RELATIONSHIPS, "not_contacting"
             )
-            if lbl not in cont_scores:  # deduplicate
+            if lbl is not None and lbl not in cont_scores:  # skip unknown, deduplicate
                 cont_list.append(lbl)
                 cont_scores[lbl] = sc
-        if not cont_list:
-            cont_list = ["not_contacting"]
-            cont_scores = {"not_contacting": 0.0}
 
         # --- Spatial (multi-label) ---
-        spa_raw = pred.get("spatial", ["in_front_of"])
+        spa_raw = pred.get("spatial", ["unknown"])
         if isinstance(spa_raw, str):
             spa_raw = [spa_raw]
         elif isinstance(spa_raw, dict):
@@ -419,12 +434,9 @@ def extract_missing_for_frame(
             lbl, sc = _extract_rel_label_and_score(
                 s, SPATIAL_RELATIONSHIPS, "in_front_of"
             )
-            if lbl not in spa_scores:
+            if lbl is not None and lbl not in spa_scores:
                 spa_list.append(lbl)
                 spa_scores[lbl] = sc
-        if not spa_list:
-            spa_list = ["in_front_of"]
-            spa_scores = {"in_front_of": 0.0}
 
         missing.append({
             "class": class_idx,
@@ -482,7 +494,7 @@ def process_video(
     # 2. Load RAG predictions (may be None)
     rag_data = load_rag_predictions(rag_results_dir, mode, model_name, video_id)
     if rag_data is None:
-        logger.debug(f"[{video_id}] No RAG predictions found — saving observed-only")
+        logger.warning(f"[{video_id}] No RAG file found — saving with missing=[] for all frames")
 
     # 3. Process each frame
     all_object_labels: Set[str] = set()
