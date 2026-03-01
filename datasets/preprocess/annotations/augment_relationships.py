@@ -8,57 +8,63 @@ with **RAG-predicted** missing-object relationships (per-video pkl files from
 
 Output directory: ``<ag_root>/world_rel_annotations/<phase>/``
 
-For each video and each annotated frame:
-  - ``observed``: objects visible in the frame with GT relationship labels
-  - ``missing``:  objects NOT visible in the frame but predicted by the RAG pipeline
+OUTPUT PKL FORMAT (compatible with ``base_ag_dataset.py``)
+----------------------------------------------------------
+The per-video pkl stores **two dicts** that mirror the global
+``person_bbox.pkl`` and ``object_bbox_and_relationship.pkl`` structure:
 
-OUTPUT PKL STRUCTURE
---------------------
 {
-    "video_id":       str,
-    "video_objects":  sorted list of all unique object label strings,
-    "num_frames":     int,
-    "frames": {
-        "<video_id>/<frame>.png": {
-            "person_bbox":  np.ndarray | None,
-            "observed": [
-                {
-                    "class": int,             # AG class index (1-36)
-                    "label": str,             # e.g. "closet/cabinet"
-                    "bbox":  list[float]|None, # [x, y, w, h] or None
-                    "visible": True,
-                    "attention_relationship":  list[str],
-                    "contacting_relationship": list[str],
-                    "spatial_relationship":    list[str],
-                    "source": "gt",
-                },
-                ...
-            ],
-            "missing": [
-                {
-                    "class": int,
-                    "label": str,
-                    "bbox":  None,
-                    "visible": False,
-                    "attention_relationship":  list[str],
-                    "contacting_relationship": list[str],
-                    "spatial_relationship":    list[str],
-                    "attention_scores":        dict[str, float],
-                    "contacting_scores":       dict[str, float],
-                    "spatial_scores":          dict[str, float],
-                    "source": "rag",
-                },
-                ...
-            ],
+    "video_id":      str,
+    "video_objects":  sorted list of unique object label strings,
+    "num_frames":    int,
+    "rag_model":     str,
+    "rag_mode":      str,
+
+    # Same schema as person_bbox.pkl  (keyed by "video_id/frame.png")
+    "person_bbox": {
+        "video_id/000042.png": {
+            "bbox":      np.ndarray,       # person bounding box
+            "bbox_size": (w, h),           # frame dimensions (from GT)
         },
+        ...
+    },
+
+    # Same schema as object_bbox_and_relationship.pkl
+    # Each value is a LIST of object dicts (GT observed + RAG missing)
+    "object_bbox": {
+        "video_id/000042.png": [
+            {   # ----- GT observed object -----
+                "class":                    str,   # e.g. "bed" (full AG name)
+                "bbox":                     np.ndarray([x1,y1,x2,y2]) | None,  # xyxy
+                "visible":                  True,
+                "attention_relationship":   list[str],   # underscore format
+                "contacting_relationship":  list[str],
+                "spatial_relationship":     list[str],
+                "metadata":                 {"set": "train"},
+                "source":                   "gt",
+            },
+            {   # ----- RAG missing object -----
+                "class":                    str,   # e.g. "laptop"
+                "bbox":                     None,
+                "visible":                  False,
+                "attention_relationship":   list[str],   # [] if unknown
+                "contacting_relationship":  list[str],
+                "spatial_relationship":     list[str],
+                "metadata":                 {"set": "train"},
+                "source":                   "rag",
+                "attention_scores":         dict[str, float],
+                "contacting_scores":        dict[str, float],
+                "spatial_scores":           dict[str, float],
+            },
+            ...
+        ],
         ...
     },
 }
 
 Usage:
-    python datasets/preprocess/annotations/augment_relationships.py \
-        --ag_root_directory /data/rohith/ag \
-        --rag_results_dir /data/rohith/ag/rag_results \
+    python datasets/preprocess/annotations/augment_relationships.py \\
+        --ag_root_directory /data/rohith/ag \\
         --mode predcls --model_name qwen3vl --phase train
 """
 
@@ -88,7 +94,7 @@ OBJECT_CLASSES = [
     "vacuum", "window",
 ]
 
-# Normalized short-form → AG class index
+# Short-form ↔ full AG name mappings
 LABEL_NORMALIZE_MAP = {
     "closet/cabinet": "closet", "cup/glass/bottle": "cup",
     "paper/notebook": "paper", "sofa/couch": "sofa",
@@ -97,7 +103,7 @@ LABEL_NORMALIZE_MAP = {
 LABEL_DENORMALIZE_MAP = {v: k for k, v in LABEL_NORMALIZE_MAP.items()}
 
 NAME_TO_IDX = {name: idx for idx, name in enumerate(OBJECT_CLASSES) if idx > 0}
-# Also map short forms → idx
+# Also register short forms for lookup
 for _short, _full in LABEL_DENORMALIZE_MAP.items():
     NAME_TO_IDX[_short] = NAME_TO_IDX[_full]
 
@@ -112,7 +118,7 @@ SPATIAL_RELATIONSHIPS = [
     "above", "beneath", "in_front_of", "behind", "on_the_side_of", "in",
 ]
 
-# Map space-separated labels (from LLM) → underscore format
+# Space-separated → underscore (from LLM output)
 _LABEL_SPACE_TO_UNDERSCORE = {
     "looking at": "looking_at", "not looking at": "not_looking_at",
     "covered by": "covered_by", "drinking from": "drinking_from",
@@ -153,6 +159,30 @@ def _normalize_rel_label(label: str) -> str:
     return _LABEL_SPACE_TO_UNDERSCORE.get(label, label.replace(" ", "_"))
 
 
+def _resolve_object_label(raw_name: str) -> str:
+    """Resolve a raw object name to the canonical full AG class name (string).
+
+    For example: "closet" → "closet/cabinet", "bed" → "bed".
+    Raises ValueError if the name is not in the AG vocabulary.
+    """
+    name = raw_name.strip().lower()
+    # Direct match in full names
+    if name in OBJECT_CLASSES and name not in ("__background__", "person"):
+        return name
+    # Short form → full name
+    full = LABEL_DENORMALIZE_MAP.get(name)
+    if full and full in OBJECT_CLASSES:
+        return full
+    # Check NAME_TO_IDX (includes short forms)
+    idx = NAME_TO_IDX.get(name, -1)
+    if idx > 0:
+        return OBJECT_CLASSES[idx]
+    raise ValueError(
+        f"Unknown object label: '{raw_name}'. "
+        f"Not found in AG vocabulary."
+    )
+
+
 # ---------------------------------------------------------------------------
 # GT annotation loader
 # ---------------------------------------------------------------------------
@@ -184,10 +214,7 @@ class GTAnnotationLoader:
     # ---- Video / frame enumeration ------------------------------------
 
     def get_all_video_ids(self, phase: str = "train") -> List[str]:
-        """Return sorted list of unique video IDs for the given phase.
-
-        AG uses ``"train"`` for training and ``"testing"`` for test.
-        """
+        """Return sorted list of unique video IDs for the given phase."""
         videos: Set[str] = set()
         for key in self.object_bbox:
             metadata = self.object_bbox[key][0].get("metadata", {})
@@ -212,28 +239,31 @@ class GTAnnotationLoader:
 
     # ---- Per-frame GT extraction --------------------------------------
 
-    def get_observed_for_frame(
-        self, frame_key: str,
-    ) -> Tuple[Optional[np.ndarray], List[Dict[str, Any]]]:
+    def get_frame_data(
+        self, frame_key: str, phase: str = "train",
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
-        Extract person bbox and observed object annotations for a single frame.
+        Extract person bbox entry and object annotations for a frame,
+        formatted to match the raw pkl schema expected by ``base_ag_dataset.py``.
 
         Returns
         -------
-        person_bbox : np.ndarray | None
-        observed : list[dict]
-            Each dict: class (int), label (str), bbox, visible (True),
+        person_entry : dict
+            ``{"bbox": np.ndarray, "bbox_size": (w, h)}``
+        observed_objects : list[dict]
+            Each dict has: class (str), bbox (np.ndarray xywh), visible (True),
             attention_relationship, contacting_relationship,
             spatial_relationship (lists of underscore-formatted strings),
-            source="gt".
+            metadata ({"set": phase}), source ("gt").
         """
-        # Person bbox
-        person_entry = self.person_bbox.get(frame_key)
-        person_bb = None
-        if person_entry is not None:
-            person_bb = person_entry.get("bbox", None)
+        # ---- Person bbox ----
+        raw_person = self.person_bbox.get(frame_key, {})
+        person_entry = {
+            "bbox": raw_person.get("bbox", np.zeros((0, 4))),
+            "bbox_size": raw_person.get("bbox_size", (0, 0)),
+        }
 
-        # Object annotations
+        # ---- Object annotations ----
         obj_entries = self.object_bbox.get(frame_key, [])
         observed: List[Dict[str, Any]] = []
 
@@ -245,16 +275,14 @@ class GTAnnotationLoader:
             if cls_raw is None:
                 continue
 
-            # Resolve class name → int index
+            # Resolve to string label (the dataloader expects string)
             if isinstance(cls_raw, int):
                 if cls_raw <= 0 or cls_raw >= len(OBJECT_CLASSES):
                     continue
-                class_idx = cls_raw
                 label = OBJECT_CLASSES[cls_raw]
             elif isinstance(cls_raw, str):
                 label = cls_raw
-                class_idx = NAME_TO_IDX.get(label, -1)
-                if class_idx <= 0:
+                if NAME_TO_IDX.get(label, -1) <= 0:
                     continue
             else:
                 continue
@@ -262,37 +290,40 @@ class GTAnnotationLoader:
             if label in ("person", "__background__"):
                 continue
 
-            # Relationship labels (already strings in the raw pkl)
+            # Relationship labels (normalize to underscore format)
             att_rel = obj_ann.get("attention_relationship", [])
             cont_rel = obj_ann.get("contacting_relationship", [])
             spa_rel = obj_ann.get("spatial_relationship", [])
 
-            # Normalize relationship labels to underscore format
             att_rel = [_normalize_rel_label(r) for r in att_rel] if att_rel else ["unsure"]
             cont_rel = [_normalize_rel_label(r) for r in cont_rel] if cont_rel else ["not_contacting"]
             spa_rel = [_normalize_rel_label(r) for r in spa_rel] if spa_rel else ["in_front_of"]
 
-            # Bbox (raw format varies in the pkl)
+            # Bbox — convert from raw xywh to xyxy
             raw_bbox = obj_ann.get("bbox", None)
-            bbox = None
             if raw_bbox is not None:
                 if isinstance(raw_bbox, np.ndarray):
                     raw_bbox = raw_bbox.tolist()
-                if len(raw_bbox) == 4:
-                    bbox = raw_bbox
+                if isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4:
+                    x, y, w, h = float(raw_bbox[0]), float(raw_bbox[1]), float(raw_bbox[2]), float(raw_bbox[3])
+                    bbox = np.array([x, y, x + w, y + h], dtype=np.float32)
+                else:
+                    bbox = None
+            else:
+                bbox = None
 
             observed.append({
-                "class": class_idx,
-                "label": label,
-                "bbox": bbox,
+                "class": label,                          # STRING (dataloader converts)
+                "bbox": bbox,                            # np.ndarray xyxy
                 "visible": True,
                 "attention_relationship": att_rel,
                 "contacting_relationship": cont_rel,
                 "spatial_relationship": spa_rel,
+                "metadata": {"set": phase},
                 "source": "gt",
             })
 
-        return person_bb, observed
+        return person_entry, observed
 
 
 # ---------------------------------------------------------------------------
@@ -341,15 +372,15 @@ def _extract_rel_label_and_score(
 
 
 def extract_missing_for_frame(
-    rag_data: Dict[str, Any], frame_stem: str,
+    rag_data: Dict[str, Any], frame_stem: str, phase: str = "train",
 ) -> List[Dict[str, Any]]:
     """
     Extract RAG-predicted missing-object relationships for a frame.
 
     ``frame_stem`` is the numeric part (e.g. ``"000042"``).
 
-    Returns a list of dicts with ``bbox=None``, ``visible=False``,
-    ``source="rag"``, plus ``*_scores`` dicts for downstream weighting.
+    Returns a list of dicts in the same schema as GT objects but with
+    ``bbox=None``, ``visible=False``, ``source="rag"``, ``class=str``.
     """
     frames = rag_data.get("frames", {})
     frame_data = frames.get(frame_stem)
@@ -358,31 +389,14 @@ def extract_missing_for_frame(
 
     missing: List[Dict[str, Any]] = []
     for pred in frame_data.get("predictions", []):
-        obj_name = pred.get("missing_object", "").strip().lower()
-        if not obj_name:
+        raw_obj_name = pred.get("missing_object", "").strip().lower()
+        if not raw_obj_name:
             raise ValueError(
                 f"Empty missing_object in RAG prediction for frame '{frame_stem}': {pred}"
             )
 
-        # Try lookup: raw name first, then denormalized (short→full)
-        class_idx = NAME_TO_IDX.get(obj_name, -1)
-        if class_idx <= 0:
-            # Try denormalizing short form → full AG name
-            full_try = LABEL_DENORMALIZE_MAP.get(obj_name)
-            if full_try:
-                class_idx = NAME_TO_IDX.get(full_try, -1)
-        if class_idx <= 0:
-            raise ValueError(
-                f"Unknown object label in RAG output: '{obj_name}' "
-                f"(frame='{frame_stem}'). Not found in AG vocabulary. "
-                f"Available: {sorted(NAME_TO_IDX.keys())}"
-            )
-
-        # Resolve to full AG label for consistency with GT
-        full_label = LABEL_DENORMALIZE_MAP.get(obj_name, obj_name)
-        # Verify it's valid; if denormalized form isn't in vocab, keep original
-        if full_label not in NAME_TO_IDX:
-            full_label = OBJECT_CLASSES[class_idx] if class_idx < len(OBJECT_CLASSES) else obj_name
+        # Resolve to canonical full AG class NAME (string)
+        label = _resolve_object_label(raw_obj_name)
 
         # --- Attention (single label) ---
         att_raw = pred.get("attention", "unknown")
@@ -417,7 +431,7 @@ def extract_missing_for_frame(
             lbl, sc = _extract_rel_label_and_score(
                 c, CONTACTING_RELATIONSHIPS, "not_contacting"
             )
-            if lbl is not None and lbl not in cont_scores:  # skip unknown, deduplicate
+            if lbl is not None and lbl not in cont_scores:
                 cont_list.append(lbl)
                 cont_scores[lbl] = sc
 
@@ -439,17 +453,17 @@ def extract_missing_for_frame(
                 spa_scores[lbl] = sc
 
         missing.append({
-            "class": class_idx,
-            "label": full_label,
-            "bbox": None,
+            "class": label,                          # STRING (matches GT format)
+            "bbox": None,                            # no bbox for missing objects
             "visible": False,
-            "attention_relationship": att_list,
+            "attention_relationship": att_list,       # [] if unknown
             "contacting_relationship": cont_list,
             "spatial_relationship": spa_list,
+            "metadata": {"set": phase},
+            "source": "rag",
             "attention_scores": att_scores,
             "contacting_scores": cont_scores,
             "spatial_scores": spa_scores,
-            "source": "rag",
         })
 
     return missing
@@ -479,7 +493,11 @@ def process_video(
     output_dir: Path,
     overwrite: bool = False,
 ) -> bool:
-    """Process a single video: merge GT + RAG and save combined pkl."""
+    """Process a single video: merge GT + RAG and save combined pkl.
+
+    Output format mirrors person_bbox.pkl + object_bbox_and_relationship.pkl
+    so the existing ``base_ag_dataset.py`` dataloader can consume it.
+    """
     save_path = output_dir / f"{video_id}.pkl"
     if save_path.exists() and not overwrite:
         logger.debug(f"Skipping {video_id}: output already exists at {save_path}")
@@ -496,50 +514,49 @@ def process_video(
     if rag_data is None:
         logger.warning(f"[{video_id}] No RAG file found — saving with missing=[] for all frames")
 
-    # 3. Process each frame
+    # 3. Process each frame → build person_bbox and object_bbox dicts
     all_object_labels: Set[str] = set()
-    frames_combined: Dict[str, Any] = {}
-    n_rag_total = 0
+    person_bbox_dict: Dict[str, Any] = {}
+    object_bbox_dict: Dict[str, List[Dict[str, Any]]] = {}
+    n_observed = 0
+    n_missing = 0
 
     for frame_key in frame_keys:
-        person_bb, observed = gt_loader.get_observed_for_frame(frame_key)
+        person_entry, observed = gt_loader.get_frame_data(frame_key, phase=phase)
+        person_bbox_dict[frame_key] = person_entry
 
-        # Collect observed object labels
         for obj in observed:
-            all_object_labels.add(obj["label"])
+            all_object_labels.add(obj["class"])
 
         # Extract missing-object predictions
         stem = frame_key_to_stem(frame_key)
         missing: List[Dict[str, Any]] = []
         if rag_data is not None:
-            missing = extract_missing_for_frame(rag_data, stem)
+            missing = extract_missing_for_frame(rag_data, stem, phase=phase)
             for obj in missing:
-                all_object_labels.add(obj["label"])
-            n_rag_total += len(missing)
+                all_object_labels.add(obj["class"])
 
-        frames_combined[frame_key] = {
-            "person_bbox": person_bb,
-            "observed": observed,
-            "missing": missing,
-        }
+        # Combine into flat list (GT observed first, then RAG missing)
+        object_bbox_dict[frame_key] = observed + missing
+        n_observed += len(observed)
+        n_missing += len(missing)
 
     # 4. Save combined result
     output_record = {
         "video_id": video_id,
         "video_objects": sorted(all_object_labels),
-        "num_frames": len(frames_combined),
+        "num_frames": len(frame_keys),
         "rag_model": model_name,
         "rag_mode": mode,
-        "frames": frames_combined,
+        "person_bbox": person_bbox_dict,
+        "object_bbox": object_bbox_dict,
     }
     with open(save_path, "wb") as f:
         pickle.dump(output_record, f)
 
-    n_obs = sum(len(fd["observed"]) for fd in frames_combined.values())
-    n_mis = sum(len(fd["missing"]) for fd in frames_combined.values())
     logger.info(
-        f"[{video_id}] {len(frames_combined)} frames "
-        f"({n_obs} observed, {n_mis} missing) → {save_path.name}"
+        f"[{video_id}] {len(frame_keys)} frames "
+        f"({n_observed} observed, {n_missing} missing) → {save_path.name}"
     )
     return True
 
@@ -631,7 +648,6 @@ def main():
 
     # Process each video
     success_count = 0
-    skip_count = 0
     error_count = 0
 
     for video_id in tqdm(video_ids, desc=f"Augmenting ({args.phase})"):
