@@ -88,11 +88,13 @@ def rerun_frame_vis_results(
 
     rr.log(BASE, rr.ViewCoordinates.RUB, timeless=True)
 
-    # Cuboid edge list
+    # Cuboid edge list — matches corner ordering from _params_to_obb_corners:
+    #   0:(-w,-h,-d) 1:(+w,-h,-d) 2:(+w,-h,+d) 3:(-w,-h,+d)  (bottom, CCW)
+    #   4:(-w,+h,-d) 5:(+w,+h,-d) 6:(+w,+h,+d) 7:(-w,+h,+d)  (top, CCW)
     cuboid_edges = [
-        (0, 1), (1, 3), (3, 2), (2, 0),
-        (4, 5), (5, 7), (7, 6), (6, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
+        (0, 1), (1, 2), (2, 3), (3, 0),  # bottom face
+        (4, 5), (5, 6), (6, 7), (7, 4),  # top face
+        (0, 4), (1, 5), (2, 6), (3, 7),  # vertical pillars
     ]
 
     # Try to get grid size for pinhole aspect ratio
