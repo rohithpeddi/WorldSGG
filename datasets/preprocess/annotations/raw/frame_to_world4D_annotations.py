@@ -53,7 +53,7 @@ OUTPUT PKL STRUCTURE
                     "world4d_fill_method":  str,            # "detected" | "interpolation"
                                                            # | "static_copy" | "hold_prev"
                                                            # | "hold_next"
-                    "world4d_source_frame": str,            # frame(s) data came from
+                    "world4d_source_frame": str,            # frame the data was copied from
                     "world4d_frame":        str,            # this frame name
                 },
                 ...
@@ -294,8 +294,9 @@ def compute_final_world_transform(
 
 # --------------------------------------------------------------------------------------
 # FrameToWorldAnnotations
-#   - loads 3D bbox annotations (.pkl produced by BBox3DGenerator)
-#   - can visualize ORIGINAL Pi3 points + floor mesh + 3D boxes for annotated frames
+#   - loads bridge PKL (GT + GDino merged 3D OBB annotations)
+#   - generates 4D annotations with object permanence filling
+#   - can visualize Pi3 points + floor mesh + 3D boxes via Rerun
 # --------------------------------------------------------------------------------------
 
 
@@ -1135,7 +1136,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
           - dynamic objects appear only in frames they exist
           - static union computed in FINAL coords; WORLD data left untouched
         """
-        print(f"[world4d][{video_id}] Generating from Firebase annotations")
+        logger.info(f"[world4d][{video_id}] Generating from Firebase annotations")
 
         video_id_clean = video_id.replace(".mp4", "").replace(".", "_")
 
@@ -1712,24 +1713,23 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             },
         }
 
-        print(f"[world4d][{video_id}] Generated 4D annotations for {len(frame_names_sorted)} frames")
+        logger.info(f"[world4d][{video_id}] Generated 4D annotations for {len(frame_names_sorted)} frames")
         return result
 
     # ----------------------------------------------------------------------------------
-    # NEW: centralized transform + visualization entry point
+    # Visualization: original Pi3 points + bridge 3D bboxes
     # ----------------------------------------------------------------------------------
 
     def visualize_original_results(self, video_id: str, vis_mode: str = "after") -> None:
         """
-        1) Loads original Pi3 points using the same slicing logic as bbox_3D construction.
-        2) Loads floor mesh + global_floor_sim from the 3D bbox .pkl (if present).
-        3) Uses `compute_final_world_transform` to compute WORLD -> FINAL transform.
-        4) Applies that transform to:
-             - points
-             - cameras
-             - floor mesh
-             - 3D bbox corners
-        5) Calls `rerun_frame_vis_results` with both BEFORE (world) and AFTER (final) data.
+        Visualize original Pi3 points + 3D bounding boxes for a video.
+
+        1) Loads raw Pi3 points (WORLD coords) from predictions.npz.
+        2) Loads bridge PKL for floor mesh, global_floor_sim, and
+           pre-computed corners_final.
+        3) Computes WORLD -> FINAL transform for points/cameras/floor.
+        4) Uses pre-computed corners_final from bridge PKL for bbox display.
+        5) Calls `rerun_frame_vis_results` with BEFORE (world) and AFTER (final).
         """
         P = self._load_original_points_for_video(video_id)
 
