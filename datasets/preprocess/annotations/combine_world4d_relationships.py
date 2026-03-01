@@ -205,7 +205,7 @@ def process_video(
     w4d_pkl_path: Path,
     output_path: Path,
     overwrite: bool = False,
-) -> Tuple[bool, List[str]]:
+) -> Tuple[bool, List[str], Optional[Dict[str, Any]]]:
     """Merge augmented_rel + world4D for a single video.
 
     Returns
@@ -216,18 +216,18 @@ def process_video(
     """
     if output_path.exists() and not overwrite:
         logger.debug(f"[{video_id}] Skipping: output exists at {output_path}")
-        return True, []
+        return True, [], None
 
     # ------------------------------------------------------------------
     # 1) Load PKLs
     # ------------------------------------------------------------------
     if not rel_pkl_path.exists():
         logger.warning(f"[{video_id}] Augmented rel PKL not found: {rel_pkl_path}")
-        return False, []
+        return False, [], None
 
     if not w4d_pkl_path.exists():
         logger.warning(f"[{video_id}] World4D PKL not found: {w4d_pkl_path}")
-        return False, []
+        return False, [], None
 
     with open(rel_pkl_path, "rb") as f:
         rel_data = pickle.load(f)
@@ -418,7 +418,7 @@ def process_video(
         f"{n_objs} objects, camera={cam_shape} → {output_path.name}"
     )
 
-    return True, mismatch_lines
+    return True, mismatch_lines, output_record
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +518,7 @@ def main():
         out_pkl = output_dir / f"{video_id}.pkl"
 
         try:
-            ok, mismatches = process_video(
+            ok, mismatches, output_record = process_video(
                 video_id=video_id,
                 rel_pkl_path=rel_pkl,
                 w4d_pkl_path=w4d_pkl,
