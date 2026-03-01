@@ -493,10 +493,17 @@ def process_video(
     output_dir: Path,
     overwrite: bool = False,
 ) -> bool:
-    """Process a single video: merge GT + RAG and save combined pkl.
+    """Process a single video: filter → augment → save.
 
-    Output format mirrors person_bbox.pkl + object_bbox_and_relationship.pkl
-    so the existing ``base_ag_dataset.py`` dataloader can consume it.
+    **Step 1 – Filter** (same logic as ``base_ag_dataset.py``):
+      - Drop frames with no visible GT object
+      - Drop frames with empty person bbox
+      - Drop entire video if ≤ 2 valid frames remain
+
+    **Step 2 – Augment** (only valid frames):
+      - Append RAG missing-object predictions to each frame's object list
+
+    **Step 3 – Save** per-video PKL with filter stats.
     """
     save_path = output_dir / f"{video_id}.pkl"
     if save_path.exists() and not overwrite:
@@ -509,26 +516,64 @@ def process_video(
         logger.warning(f"Skipping {video_id}: no frames found for phase={phase}")
         return False
 
-    # 2. Load RAG predictions (may be None)
+    # ==================================================================
+    # STEP 1: FILTER (matches base_ag_dataset.py logic)
+    # ==================================================================
+    filter_stats = {
+        "total_frames": len(frame_keys),
+        "dropped_no_visible_obj": 0,
+        "dropped_no_person_bbox": 0,
+    }
+    valid_frame_keys: List[str] = []
+
+    for fk in frame_keys:
+        # Filter 1: frame must have at least one visible GT object
+        obj_entries = gt_loader.object_bbox.get(fk, [])
+        has_visible = any(obj.get("visible", False) for obj in obj_entries)
+        if not has_visible:
+            filter_stats["dropped_no_visible_obj"] += 1
+            continue
+
+        # Filter 2: frame must have a non-empty person bbox
+        person_raw = gt_loader.person_bbox.get(fk, {})
+        person_bb = person_raw.get("bbox", np.zeros((0, 4)))
+        if isinstance(person_bb, np.ndarray) and person_bb.shape[0] == 0:
+            filter_stats["dropped_no_person_bbox"] += 1
+            continue
+
+        valid_frame_keys.append(fk)
+
+    filter_stats["valid_frames"] = len(valid_frame_keys)
+
+    # Filter 3: video must have > 2 valid frames
+    if len(valid_frame_keys) <= 2:
+        logger.warning(
+            f"Skipping {video_id}: only {len(valid_frame_keys)} valid frames "
+            f"(need > 2). {filter_stats}"
+        )
+        return False
+
+    # ==================================================================
+    # STEP 2: AUGMENT (only valid frames get RAG predictions)
+    # ==================================================================
     rag_data = load_rag_predictions(rag_results_dir, mode, model_name, video_id)
     if rag_data is None:
         logger.warning(f"[{video_id}] No RAG file found — saving with missing=[] for all frames")
 
-    # 3. Process each frame → build person_bbox and object_bbox dicts
     all_object_labels: Set[str] = set()
     person_bbox_dict: Dict[str, Any] = {}
     object_bbox_dict: Dict[str, List[Dict[str, Any]]] = {}
     n_observed = 0
     n_missing = 0
 
-    for frame_key in frame_keys:
+    for frame_key in valid_frame_keys:
         person_entry, observed = gt_loader.get_frame_data(frame_key, phase=phase)
         person_bbox_dict[frame_key] = person_entry
 
         for obj in observed:
             all_object_labels.add(obj["class"])
 
-        # Extract missing-object predictions
+        # Augment with RAG missing-object predictions
         stem = frame_key_to_stem(frame_key)
         missing: List[Dict[str, Any]] = []
         if rag_data is not None:
@@ -536,18 +581,21 @@ def process_video(
             for obj in missing:
                 all_object_labels.add(obj["class"])
 
-        # Combine into flat list (GT observed first, then RAG missing)
+        # Flat list: GT observed first, then RAG missing
         object_bbox_dict[frame_key] = observed + missing
         n_observed += len(observed)
         n_missing += len(missing)
 
-    # 4. Save combined result
+    # ==================================================================
+    # STEP 3: SAVE with filter stats
+    # ==================================================================
     output_record = {
         "video_id": video_id,
         "video_objects": sorted(all_object_labels),
-        "num_frames": len(frame_keys),
+        "num_frames": len(valid_frame_keys),
         "rag_model": model_name,
         "rag_mode": mode,
+        "filter_stats": filter_stats,
         "person_bbox": person_bbox_dict,
         "object_bbox": object_bbox_dict,
     }
@@ -555,8 +603,10 @@ def process_video(
         pickle.dump(output_record, f)
 
     logger.info(
-        f"[{video_id}] {len(frame_keys)} frames "
-        f"({n_observed} observed, {n_missing} missing) → {save_path.name}"
+        f"[{video_id}] {filter_stats['total_frames']}→{len(valid_frame_keys)} frames "
+        f"(dropped: {filter_stats['dropped_no_visible_obj']} no-vis, "
+        f"{filter_stats['dropped_no_person_bbox']} no-person) "
+        f"| {n_observed} observed, {n_missing} missing → {save_path.name}"
     )
     return True
 
