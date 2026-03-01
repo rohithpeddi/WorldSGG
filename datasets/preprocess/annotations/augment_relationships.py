@@ -6,13 +6,60 @@ Merge **observed** relationship annotations (from ``object_bbox_and_relationship
 with **RAG-predicted** missing-object relationships (per-video pkl files from
 ``process_ag_rag.py``) into combined per-video pkl files.
 
-Output directory: ``<ag_root>/world_annotations/augmented_relationships/``
+Output directory: ``<ag_root>/world_rel_annotations/<phase>/``
 
 For each video and each annotated frame:
   - ``observed``: objects visible in the frame with GT relationship labels
   - ``missing``:  objects NOT visible in the frame but predicted by the RAG pipeline
 
-This is an intermediate format; the next step augments these with 3D bbox annotations.
+OUTPUT PKL STRUCTURE
+--------------------
+{
+    "video_id":       str,
+    "video_objects":  sorted list of all unique object label strings,
+    "num_frames":     int,
+    "frames": {
+        "<video_id>/<frame>.png": {
+            "person_bbox":  np.ndarray | None,
+            "observed": [
+                {
+                    "class": int,             # AG class index (1-36)
+                    "label": str,             # e.g. "closet/cabinet"
+                    "bbox":  list[float]|None, # [x, y, w, h] or None
+                    "visible": True,
+                    "attention_relationship":  list[str],
+                    "contacting_relationship": list[str],
+                    "spatial_relationship":    list[str],
+                    "source": "gt",
+                },
+                ...
+            ],
+            "missing": [
+                {
+                    "class": int,
+                    "label": str,
+                    "bbox":  None,
+                    "visible": False,
+                    "attention_relationship":  list[str],
+                    "contacting_relationship": list[str],
+                    "spatial_relationship":    list[str],
+                    "attention_scores":        dict[str, float],
+                    "contacting_scores":       dict[str, float],
+                    "spatial_scores":          dict[str, float],
+                    "source": "rag",
+                },
+                ...
+            ],
+        },
+        ...
+    },
+}
+
+Usage:
+    python datasets/preprocess/annotations/augment_relationships.py \
+        --ag_root_directory /data/rohith/ag \
+        --rag_results_dir /data/rohith/ag/rag_results \
+        --mode predcls --model_name qwen3vl --phase train
 """
 
 import argparse
@@ -25,6 +72,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
+from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
 # Relationship label vocabulary (Action Genome)
@@ -40,7 +88,18 @@ OBJECT_CLASSES = [
     "vacuum", "window",
 ]
 
+# Normalized short-form → AG class index
+LABEL_NORMALIZE_MAP = {
+    "closet/cabinet": "closet", "cup/glass/bottle": "cup",
+    "paper/notebook": "paper", "sofa/couch": "sofa",
+    "phone/camera": "phone",
+}
+LABEL_DENORMALIZE_MAP = {v: k for k, v in LABEL_NORMALIZE_MAP.items()}
+
 NAME_TO_IDX = {name: idx for idx, name in enumerate(OBJECT_CLASSES) if idx > 0}
+# Also map short forms → idx
+for _short, _full in LABEL_DENORMALIZE_MAP.items():
+    NAME_TO_IDX[_short] = NAME_TO_IDX[_full]
 
 ATTENTION_RELATIONSHIPS = ["looking_at", "not_looking_at", "unsure"]
 CONTACTING_RELATIONSHIPS = [
@@ -53,7 +112,45 @@ SPATIAL_RELATIONSHIPS = [
     "above", "beneath", "in_front_of", "behind", "on_the_side_of", "in",
 ]
 
-logger = logging.getLogger(__name__)
+# Map space-separated labels (from LLM) → underscore format
+_LABEL_SPACE_TO_UNDERSCORE = {
+    "looking at": "looking_at", "not looking at": "not_looking_at",
+    "covered by": "covered_by", "drinking from": "drinking_from",
+    "have it on the back": "have_it_on_the_back",
+    "leaning on": "leaning_on", "lying on": "lying_on",
+    "not contacting": "not_contacting", "other relationship": "other_relationship",
+    "sitting on": "sitting_on", "standing on": "standing_on",
+    "writing on": "writing_on",
+    "in front of": "in_front_of", "on the side of": "on_the_side_of",
+}
+
+# ---------------------------------------------------------------------------
+# Logger setup
+# ---------------------------------------------------------------------------
+_CODE_ROOT = Path(__file__).resolve().parents[3]  # WorldSGG/
+_LOG_DIR = _CODE_ROOT / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+logger = logging.getLogger("augment_rel")
+logger.setLevel(logging.DEBUG)
+
+_ch = logging.StreamHandler()
+_ch.setLevel(logging.INFO)
+_ch.setFormatter(logging.Formatter("%(levelname)-7s | %(message)s"))
+logger.addHandler(_ch)
+
+_fh = logging.FileHandler(_LOG_DIR / "augment_relationships.log", mode="a")
+_fh.setLevel(logging.DEBUG)
+_fh.setFormatter(logging.Formatter(
+    "%(asctime)s | %(levelname)-5s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
+))
+logger.addHandler(_fh)
+
+
+def _normalize_rel_label(label: str) -> str:
+    """Normalize a relationship label: strip, lowercase, space→underscore."""
+    label = label.strip().lower()
+    return _LABEL_SPACE_TO_UNDERSCORE.get(label, label.replace(" ", "_"))
 
 
 # ---------------------------------------------------------------------------
@@ -86,8 +183,11 @@ class GTAnnotationLoader:
 
     # ---- Video / frame enumeration ------------------------------------
 
-    def get_all_video_ids(self, phase: str = "testing") -> List[str]:
-        """Return sorted list of unique video IDs for the given phase."""
+    def get_all_video_ids(self, phase: str = "train") -> List[str]:
+        """Return sorted list of unique video IDs for the given phase.
+
+        AG uses ``"train"`` for training and ``"testing"`` for test.
+        """
         videos: Set[str] = set()
         for key in self.object_bbox:
             metadata = self.object_bbox[key][0].get("metadata", {})
@@ -97,7 +197,7 @@ class GTAnnotationLoader:
         return sorted(videos)
 
     def get_video_frame_keys(
-        self, video_id: str, phase: str = "testing"
+        self, video_id: str, phase: str = "train"
     ) -> List[str]:
         """Return sorted list of frame keys (``video_id/frame_name``) for
         a video in the given phase."""
@@ -116,17 +216,16 @@ class GTAnnotationLoader:
         self, frame_key: str,
     ) -> Tuple[Optional[np.ndarray], List[Dict[str, Any]]]:
         """
-        Extract person bbox and observed object annotations for a single
-        frame.
+        Extract person bbox and observed object annotations for a single frame.
 
         Returns
         -------
         person_bbox : np.ndarray | None
-            Person bounding box for the frame.
         observed : list[dict]
-            Each dict has: class (int), label (str), bbox (list[float] xyxy | None),
-            visible (bool), attention_relationship, contacting_relationship,
-            spatial_relationship (each list[str]), source="gt".
+            Each dict: class (int), label (str), bbox, visible (True),
+            attention_relationship, contacting_relationship,
+            spatial_relationship (lists of underscore-formatted strings),
+            source="gt".
         """
         # Person bbox
         person_entry = self.person_bbox.get(frame_key)
@@ -168,23 +267,28 @@ class GTAnnotationLoader:
             cont_rel = obj_ann.get("contacting_relationship", [])
             spa_rel = obj_ann.get("spatial_relationship", [])
 
-            # Bbox (raw format is [x, y, w, h] in the pkl)
+            # Normalize relationship labels to underscore format
+            att_rel = [_normalize_rel_label(r) for r in att_rel] if att_rel else ["unsure"]
+            cont_rel = [_normalize_rel_label(r) for r in cont_rel] if cont_rel else ["not_contacting"]
+            spa_rel = [_normalize_rel_label(r) for r in spa_rel] if spa_rel else ["in_front_of"]
+
+            # Bbox (raw format varies in the pkl)
             raw_bbox = obj_ann.get("bbox", None)
             bbox = None
             if raw_bbox is not None:
                 if isinstance(raw_bbox, np.ndarray):
                     raw_bbox = raw_bbox.tolist()
                 if len(raw_bbox) == 4:
-                    bbox = raw_bbox  # keep raw format; consumer can convert
+                    bbox = raw_bbox
 
             observed.append({
                 "class": class_idx,
                 "label": label,
                 "bbox": bbox,
                 "visible": True,
-                "attention_relationship": list(att_rel) if att_rel else ["unsure"],
-                "contacting_relationship": list(cont_rel) if cont_rel else ["not_contacting"],
-                "spatial_relationship": list(spa_rel) if spa_rel else ["in_front_of"],
+                "attention_relationship": att_rel,
+                "contacting_relationship": cont_rel,
+                "spatial_relationship": spa_rel,
                 "source": "gt",
             })
 
@@ -206,17 +310,41 @@ def load_rag_predictions(
         return pickle.load(f)
 
 
+def _extract_rel_label_and_score(
+    entry: Any, valid_set: List[str], default: str,
+) -> Tuple[str, float]:
+    """Extract (label, score) from a RAG prediction entry.
+
+    RAG output format can be:
+      - dict: {"label": "...", "score": 0.8}
+      - str:  "label_name"
+    """
+    if isinstance(entry, dict):
+        label = _normalize_rel_label(entry.get("label", default))
+        score = float(entry.get("score", 0.5))
+    elif isinstance(entry, str):
+        label = _normalize_rel_label(entry)
+        score = 0.5  # no score available
+    else:
+        label = default
+        score = 0.0
+
+    if label not in valid_set:
+        label = default
+        score = 0.0
+    return label, score
+
+
 def extract_missing_for_frame(
     rag_data: Dict[str, Any], frame_stem: str,
 ) -> List[Dict[str, Any]]:
     """
     Extract RAG-predicted missing-object relationships for a frame.
 
-    ``frame_stem`` is just the numeric part (e.g. ``"000042"``), which is
-    the key used in the RAG output's ``frames`` dict.
+    ``frame_stem`` is the numeric part (e.g. ``"000042"``).
 
-    Returns a list of dicts in the same schema as observed objects but with
-    ``bbox=None``, ``visible=False``, ``source="rag"``.
+    Returns a list of dicts with ``bbox=None``, ``visible=False``,
+    ``source="rag"``, plus ``*_scores`` dicts for downstream weighting.
     """
     frames = rag_data.get("frames", {})
     frame_data = frames.get(frame_stem)
@@ -233,34 +361,82 @@ def extract_missing_for_frame(
         if class_idx <= 0:
             continue
 
-        # Extract relationship labels, filter out "unknown"
-        att = pred.get("attention", "unknown")
-        if isinstance(att, list):
-            att = att[0] if att else "unknown"
-        att_list = [att] if att != "unknown" and att in ATTENTION_RELATIONSHIPS else ["unsure"]
+        # Resolve back to full AG label for consistency
+        full_label = LABEL_DENORMALIZE_MAP.get(obj_name, obj_name)
+        if full_label not in NAME_TO_IDX and obj_name in NAME_TO_IDX:
+            full_label = obj_name
 
-        cont = pred.get("contacting", ["unknown"])
-        if isinstance(cont, str):
-            cont = [cont]
-        cont_list = [c for c in cont if c != "unknown" and c in CONTACTING_RELATIONSHIPS]
+        # --- Attention (single label) ---
+        att_raw = pred.get("attention", "unsure")
+        if isinstance(att_raw, dict):
+            att_label, att_score = _extract_rel_label_and_score(
+                att_raw, ATTENTION_RELATIONSHIPS, "unsure"
+            )
+        elif isinstance(att_raw, list) and att_raw:
+            att_label, att_score = _extract_rel_label_and_score(
+                att_raw[0], ATTENTION_RELATIONSHIPS, "unsure"
+            )
+        elif isinstance(att_raw, str):
+            att_label = _normalize_rel_label(att_raw)
+            att_score = 0.5
+            if att_label not in ATTENTION_RELATIONSHIPS:
+                att_label, att_score = "unsure", 0.0
+        else:
+            att_label, att_score = "unsure", 0.0
+        att_list = [att_label]
+        att_scores = {att_label: att_score}
+
+        # --- Contacting (multi-label) ---
+        cont_raw = pred.get("contacting", ["not_contacting"])
+        if isinstance(cont_raw, str):
+            cont_raw = [cont_raw]
+        elif isinstance(cont_raw, dict):
+            cont_raw = [cont_raw]
+
+        cont_list = []
+        cont_scores = {}
+        for c in cont_raw:
+            lbl, sc = _extract_rel_label_and_score(
+                c, CONTACTING_RELATIONSHIPS, "not_contacting"
+            )
+            if lbl not in cont_scores:  # deduplicate
+                cont_list.append(lbl)
+                cont_scores[lbl] = sc
         if not cont_list:
             cont_list = ["not_contacting"]
+            cont_scores = {"not_contacting": 0.0}
 
-        spa = pred.get("spatial", ["unknown"])
-        if isinstance(spa, str):
-            spa = [spa]
-        spa_list = [s for s in spa if s != "unknown" and s in SPATIAL_RELATIONSHIPS]
+        # --- Spatial (multi-label) ---
+        spa_raw = pred.get("spatial", ["in_front_of"])
+        if isinstance(spa_raw, str):
+            spa_raw = [spa_raw]
+        elif isinstance(spa_raw, dict):
+            spa_raw = [spa_raw]
+
+        spa_list = []
+        spa_scores = {}
+        for s in spa_raw:
+            lbl, sc = _extract_rel_label_and_score(
+                s, SPATIAL_RELATIONSHIPS, "in_front_of"
+            )
+            if lbl not in spa_scores:
+                spa_list.append(lbl)
+                spa_scores[lbl] = sc
         if not spa_list:
             spa_list = ["in_front_of"]
+            spa_scores = {"in_front_of": 0.0}
 
         missing.append({
             "class": class_idx,
-            "label": obj_name,
+            "label": full_label,
             "bbox": None,
             "visible": False,
             "attention_relationship": att_list,
             "contacting_relationship": cont_list,
             "spatial_relationship": spa_list,
+            "attention_scores": att_scores,
+            "contacting_scores": cont_scores,
+            "spatial_scores": spa_scores,
             "source": "rag",
         })
 
@@ -289,11 +465,12 @@ def process_video(
     model_name: str,
     phase: str,
     output_dir: Path,
+    overwrite: bool = False,
 ) -> bool:
     """Process a single video: merge GT + RAG and save combined pkl."""
     save_path = output_dir / f"{video_id}.pkl"
-    if save_path.exists():
-        logger.info(f"Skipping {video_id}: output already exists at {save_path}")
+    if save_path.exists() and not overwrite:
+        logger.debug(f"Skipping {video_id}: output already exists at {save_path}")
         return True
 
     # 1. Get all frame keys for this video
@@ -305,11 +482,12 @@ def process_video(
     # 2. Load RAG predictions (may be None)
     rag_data = load_rag_predictions(rag_results_dir, mode, model_name, video_id)
     if rag_data is None:
-        logger.info(f"[{video_id}] No RAG predictions found — saving observed-only")
+        logger.debug(f"[{video_id}] No RAG predictions found — saving observed-only")
 
     # 3. Process each frame
     all_object_labels: Set[str] = set()
     frames_combined: Dict[str, Any] = {}
+    n_rag_total = 0
 
     for frame_key in frame_keys:
         person_bb, observed = gt_loader.get_observed_for_frame(frame_key)
@@ -325,6 +503,7 @@ def process_video(
             missing = extract_missing_for_frame(rag_data, stem)
             for obj in missing:
                 all_object_labels.add(obj["label"])
+            n_rag_total += len(missing)
 
         frames_combined[frame_key] = {
             "person_bbox": person_bb,
@@ -337,6 +516,8 @@ def process_video(
         "video_id": video_id,
         "video_objects": sorted(all_object_labels),
         "num_frames": len(frames_combined),
+        "rag_model": model_name,
+        "rag_mode": mode,
         "frames": frames_combined,
     }
     with open(save_path, "wb") as f:
@@ -345,8 +526,8 @@ def process_video(
     n_obs = sum(len(fd["observed"]) for fd in frames_combined.values())
     n_mis = sum(len(fd["missing"]) for fd in frames_combined.values())
     logger.info(
-        f"[{video_id}] Saved {len(frames_combined)} frames "
-        f"({n_obs} observed, {n_mis} missing) → {save_path}"
+        f"[{video_id}] {len(frames_combined)} frames "
+        f"({n_obs} observed, {n_mis} missing) → {save_path.name}"
     )
     return True
 
@@ -365,14 +546,17 @@ def main():
     )
     parser.add_argument(
         "--rag_results_dir", type=str,
-        default="/data/rohith/ag/rag_results",
-        help="Directory with RAG output pkl files (<dir>/<mode>/<model_name>/<video>.pkl)",
+        default=None,
+        help=(
+            "Directory with RAG output pkl files (<dir>/<mode>/<model_name>/<video>.pkl). "
+            "Defaults to <ag_root>/rag_results/"
+        ),
     )
     parser.add_argument(
         "--output_dir", type=str, default=None,
         help=(
             "Output directory for combined pkl files. "
-            "Defaults to <ag_root>/world_annotations/augmented_relationships/"
+            "Defaults to <ag_root>/world_rel_annotations/<phase>/"
         ),
     )
     parser.add_argument(
@@ -381,44 +565,52 @@ def main():
         help="Evaluation mode (selects RAG subdirectory)",
     )
     parser.add_argument(
-        "--model_name", type=str, default="kimikvl",
+        "--model_name", type=str, default="qwen3vl",
         help="VLM model name (selects RAG subdirectory)",
     )
     parser.add_argument(
-        "--phase", type=str, default="testing",
+        "--phase", type=str, default="train",
         choices=["train", "testing"],
-        help="Dataset phase to process",
+        help="Dataset phase to process (default: train)",
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true", default=False,
+        help="Overwrite existing output files",
     )
     parser.add_argument(
         "--limit", type=int, default=None,
         help="Process at most this many videos (for dev/debug)",
     )
+    parser.add_argument(
+        "--video", type=str, default=None,
+        help="Process only this video ID (e.g. '001YG')",
+    )
 
     args = parser.parse_args()
 
-    # Setup logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    # Resolve RAG results dir
+    if args.rag_results_dir is None:
+        args.rag_results_dir = str(Path(args.ag_root_directory) / "rag_results")
 
     # Resolve output dir
     if args.output_dir is None:
-        output_dir = (
-            Path(args.ag_root_directory)
-            / "world_annotations"
-            / "augmented_relationships"
-        )
+        output_dir = Path(args.ag_root_directory) / "world_rel_annotations" / args.phase
     else:
         output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"RAG results: {args.rag_results_dir}/{args.mode}/{args.model_name}/")
     logger.info(f"Output directory: {output_dir}")
+    logger.info(f"Phase: {args.phase}, Mode: {args.mode}, Model: {args.model_name}")
 
     # Load GT annotations
     gt_loader = GTAnnotationLoader(args.ag_root_directory)
 
-    # Get all video IDs for the phase
-    video_ids = gt_loader.get_all_video_ids(phase=args.phase)
+    # Get video IDs
+    if args.video:
+        video_ids = [args.video]
+    else:
+        video_ids = gt_loader.get_all_video_ids(phase=args.phase)
     logger.info(f"Found {len(video_ids)} videos for phase={args.phase}")
 
     if args.limit is not None:
@@ -427,24 +619,32 @@ def main():
 
     # Process each video
     success_count = 0
-    for i, video_id in enumerate(video_ids):
-        logger.info(f"Processing [{i + 1}/{len(video_ids)}] {video_id}")
-        ok = process_video(
-            video_id=video_id,
-            gt_loader=gt_loader,
-            rag_results_dir=args.rag_results_dir,
-            mode=args.mode,
-            model_name=args.model_name,
-            phase=args.phase,
-            output_dir=output_dir,
-        )
-        if ok:
-            success_count += 1
+    skip_count = 0
+    error_count = 0
+
+    for video_id in tqdm(video_ids, desc=f"Augmenting ({args.phase})"):
+        try:
+            ok = process_video(
+                video_id=video_id,
+                gt_loader=gt_loader,
+                rag_results_dir=args.rag_results_dir,
+                mode=args.mode,
+                model_name=args.model_name,
+                phase=args.phase,
+                output_dir=output_dir,
+                overwrite=args.overwrite,
+            )
+            if ok:
+                success_count += 1
+        except Exception as e:
+            logger.error(f"[{video_id}] Error: {e}", exc_info=True)
+            error_count += 1
 
     logger.info(
-        f"Done. {success_count}/{len(video_ids)} videos processed. "
-        f"Output: {output_dir}"
+        f"Done. {success_count}/{len(video_ids)} videos processed, "
+        f"{error_count} errors. Output: {output_dir}"
     )
+    logger.info(f"Log: {_LOG_DIR / 'augment_relationships.log'}")
 
 
 if __name__ == "__main__":
