@@ -109,6 +109,7 @@ To visualize:
     - floor_mesh.gv needs WORLD→FINAL if rendering raw WORLD floor.
 """
 import argparse
+import logging
 import os
 import pickle
 import sys
@@ -122,6 +123,28 @@ from datasets.preprocess.annotations.annotation_utils import (
     _faces_u32,
 )
 from datasets.preprocess.annotations.raw.frame_to_world4D_base import FrameToWorldBase, rerun_frame_vis_results
+
+# --------------------------------------------------------------------------------------
+# Logger setup — writes to both console and code root log file
+# --------------------------------------------------------------------------------------
+_CODE_ROOT = Path(__file__).resolve().parents[4]  # WorldSGG/
+_LOG_DIR = _CODE_ROOT / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+logger = logging.getLogger("world4d")
+logger.setLevel(logging.DEBUG)
+
+# Console handler (INFO level)
+_ch = logging.StreamHandler()
+_ch.setLevel(logging.INFO)
+_ch.setFormatter(logging.Formatter("%(message)s"))
+logger.addHandler(_ch)
+
+# File handler (DEBUG level — captures everything)
+_fh = logging.FileHandler(_LOG_DIR / "frame_to_world4D_annotations.log", mode="a")
+_fh.setLevel(logging.DEBUG)
+_fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-5s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+logger.addHandler(_fh)
 
 
 # --------------------------------------------------------------------------------------
@@ -303,7 +326,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
           5) Save the resulting 4D annotations.
           6) Optionally visualize final 4D bboxes + points via Rerun.
         """
-        print(f"[world4d][{video_id}] Generating world SGG annotations (4D bboxes)")
+        logger.info(f"[world4d][{video_id}] Generating world SGG annotations (4D bboxes)")
 
         # ----------------------------------------------------------------------
         # Load / validate 3D bbox annotations
@@ -314,7 +337,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             video_3dgt = video_id_3d_bbox_predictions
 
         if video_3dgt is None:
-            print(f"[world4d][{video_id}] No 3D bbox annotations found. Skipping.")
+            logger.warning(f"[world4d][{video_id}] No 3D bbox annotations found. Skipping.")
             return
 
         # Optional floor mesh & global floor similarity
@@ -345,12 +368,12 @@ class FrameToWorldAnnotations(FrameToWorldBase):
         # 3D bboxes per frame (WORLD coords)
         frame_3dbb_map_world = video_3dgt.get("frames_final", None)
         if frame_3dbb_map_world is None or not frame_3dbb_map_world:
-            print(f"[world4d][{video_id}] 3D bbox frames map is empty. Skipping.")
+            logger.warning(f"[world4d][{video_id}] 3D bbox frames map is empty. Skipping.")
             return
 
         obb_bbox_frames = frame_3dbb_map_world.get("obb_bbox_frames", None)
         if obb_bbox_frames is None or not obb_bbox_frames:
-            print(f"[world4d][{video_id}] WARNING: 'obb_box_frames' missing or empty in 3D bbox data.")
+            logger.warning(f"[world4d][{video_id}] 'obb_bbox_frames' missing or empty in 3D bbox data.")
             return
 
         # Precompute floor mesh in WORLD coords (BEFORE)
@@ -448,14 +471,14 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                 for obj in valid:
                     all_labels.add(obj["label"])
 
-        print(
+        logger.info(
             f"[world4d][{video_id}] frames_with_objects={num_frames_with_objects}, "
             f"total_objects={num_total_objects}, "
             f"unique_labels={sorted(all_labels)}"
         )
 
         if not all_labels:
-            print(f"[world4d][{video_id}] No object labels found. Skipping 4D generation.")
+            logger.warning(f"[world4d][{video_id}] No object labels found. Skipping 4D generation.")
             return
 
         # Loads object labels corresponding to active objects in the dataset
@@ -482,7 +505,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             if lbl in all_labels
         ]
 
-        print(
+        logger.info(
             f"[world4d][{video_id}] static_labels_in_3d={sorted(static_labels_in_3d)} "
             f"(from active={sorted(video_active_object_labels)})"
         )
@@ -521,21 +544,15 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                     label_detections[lbl].append((fi, fname, obj))
 
         # ------------------------------------------------------------------
-        # Logging setup
+        # Per-video detailed debug log
         # ------------------------------------------------------------------
-        log_dir = self.bbox_4d_root_dir / "logs"
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = log_dir / f"{video_id}.log"
-
-        log_lines: List[str] = []
-        log_lines.append(f"=== World4D Pipeline Log: {video_id} ===")
-        log_lines.append(f"Total unique labels in video: {len(all_labels)}")
-        log_lines.append(f"Labels: {sorted(all_labels)}")
-        log_lines.append(f"Static labels: {sorted(static_labels_in_3d)}")
+        logger.debug(f"=== World4D Pipeline Log: {video_id} ===")
+        logger.debug(f"Total unique labels in video: {len(all_labels)}")
+        logger.debug(f"Labels: {sorted(all_labels)}")
+        logger.debug(f"Static labels: {sorted(static_labels_in_3d)}")
         dynamic_labels_in_3d = sorted(set(all_labels) - set(static_labels_in_3d))
-        log_lines.append(f"Dynamic labels: {dynamic_labels_in_3d}")
-        log_lines.append(f"Total frames: {len(frame_names_sorted)}")
-        log_lines.append("")
+        logger.debug(f"Dynamic labels: {dynamic_labels_in_3d}")
+        logger.debug(f"Total frames: {len(frame_names_sorted)}")
 
         # Per-label detection summary
         for lbl in sorted(all_labels):
@@ -546,11 +563,10 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                 sources.append(src)
             gt_count = sum(1 for s in sources if s == "gt")
             gdino_count = sum(1 for s in sources if s == "gdino")
-            log_lines.append(
+            logger.debug(
                 f"  {lbl}: detected in {len(det_frames)} frames "
                 f"(GT={gt_count}, GDino={gdino_count})"
             )
-        log_lines.append("")
 
         # Safety check
         for lbl in all_labels:
@@ -861,22 +877,17 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             frames_filled_world[fname] = {"objects": filled_objects}
 
         # Logging: filling summary
-        log_lines.append("--- Filling Summary ---")
-        log_lines.append(f"  Detected (GT+GDino): {n_detected}")
-        log_lines.append(f"  Static copy:         {n_static_copy}")
-        log_lines.append(f"  Interpolated:        {n_interpolated}")
-        log_lines.append(f"  Hold (prev/next):    {n_hold}")
-        log_lines.append(
-            f"  Total objects across all frames: "
-            f"{n_detected + n_static_copy + n_interpolated + n_hold}"
-        )
-        log_lines.append("")
-
-        print(
+        logger.info(
             f"[world4d][{video_id}] Filling: detected={n_detected}, "
             f"static_copy={n_static_copy}, interpolated={n_interpolated}, "
-            f"hold={n_hold}"
+            f"hold={n_hold}, "
+            f"total={n_detected + n_static_copy + n_interpolated + n_hold}"
         )
+        logger.debug(f"--- Filling Summary [{video_id}] ---")
+        logger.debug(f"  Detected (GT+GDino): {n_detected}")
+        logger.debug(f"  Static copy:         {n_static_copy}")
+        logger.debug(f"  Interpolated:        {n_interpolated}")
+        logger.debug(f"  Hold (prev/next):    {n_hold}")
 
         # ----------------------------------------------------------------------
         # Static-object OBB union (UNION IN FINAL COORDS, WORLD UNCHANGED)
@@ -1111,7 +1122,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
         with open(out_4d_path, "wb") as f:
             pickle.dump(world4d_annotations, f)
 
-        print(f"[world4d][{video_id}] Saved world-4D bbox annotations to {out_4d_path}")
+        logger.info(f"[world4d][{video_id}] Saved world-4D bbox annotations to {out_4d_path}")
 
     # ----------------------------------------------------------------------------------
     # Generate World4D from Firebase annotations
@@ -2016,7 +2027,7 @@ def main():
     else:
         bbox_3d_dir = generator.bbox_3d_obb_bridge_root_dir
         if not bbox_3d_dir.exists():
-            print(f"ERROR: Bridge PKL directory not found: {bbox_3d_dir}")
+            logger.error(f"ERROR: Bridge PKL directory not found: {bbox_3d_dir}")
             sys.exit(1)
 
         video_ids = sorted([
@@ -2045,7 +2056,7 @@ def main():
     # Shuffle for multi-GPU parallelism
     random.shuffle(video_ids)
 
-    print(f"Processing {len(video_ids)} videos (overwrite={args.overwrite}, visualize={args.visualize})")
+    logger.info(f"Processing {len(video_ids)} videos (overwrite={args.overwrite}, visualize={args.visualize})")
 
     # ------------------------------------------------------------------
     # Process each video
@@ -2068,7 +2079,7 @@ def main():
             # Load bridge 3D bbox predictions
             video_3d = generator.get_video_3d_bridge_annotations(video_id)
             if video_3d is None:
-                print(f"  ⚠️  [{video_id}] No bridge 3D bbox annotations, skipping.")
+                logger.warning(f"  [{video_id}] No bridge 3D bbox annotations, skipping.")
                 error_count += 1
                 continue
 
@@ -2081,21 +2092,22 @@ def main():
             success_count += 1
 
         except Exception as e:
-            print(f"  ⚠️  [{video_id}] Error: {e}")
+            logger.error(f"  [{video_id}] Error: {e}", exc_info=True)
             error_count += 1
 
     # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------
     total = len(video_ids)
-    print(f"\n{'='*60}")
-    print(
+    logger.info(f"\n{'='*60}")
+    logger.info(
         f"Done: {success_count}/{total} succeeded, "
         f"{skip_count} skipped (already exist), "
         f"{error_count} errors."
     )
-    print(f"Output directory: {generator.bbox_4d_root_dir}")
-    print(f"{'='*60}")
+    logger.info(f"Output directory: {generator.bbox_4d_root_dir}")
+    logger.info(f"Log file: {_LOG_DIR / 'frame_to_world4D_annotations.log'}")
+    logger.info(f"{'='*60}")
 
 
 if __name__ == "__main__":
