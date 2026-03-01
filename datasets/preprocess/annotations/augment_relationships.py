@@ -583,8 +583,8 @@ def process_video(
         logger.debug(f"[{video_id}] RAG pkl top-level keys: {rag_keys}")
         frames_key = rag_data.get("frames", {})
         if isinstance(frames_key, dict):
-            sample_frame_keys = list(frames_key.keys())[:5]
-            logger.debug(f"[{video_id}] RAG frame keys (first 5): {sample_frame_keys}")
+            sample_frame_keys = list(frames_key.keys())
+            logger.debug(f"[{video_id}] RAG frame keys: {sample_frame_keys}")
         else:
             logger.warning(f"[{video_id}] RAG 'frames' is not a dict: {type(frames_key)}")
 
@@ -613,6 +613,10 @@ def process_video(
             missing = extract_missing_for_frame(rag_data, stem, phase=phase)
             if not missing:
                 logger.debug(f"[{video_id}] No missing objects for frame stem '{stem}' (frame_key='{frame_key}')")
+            else:
+                logger.debug(f"[{video_id}] Found {len(missing)} missing objects for frame stem '{stem}' (frame_key='{frame_key}')")
+                logger.debug(f"[{video_id}] Missing objects: {missing}")
+
             for obj in missing:
                 all_object_labels.add(obj["class"])
                 has_att = len(obj["attention_relationship"]) > 0
