@@ -942,25 +942,17 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                     all_corners_list_final.append(corners_final)
 
             if not all_corners_list_final:
-                log_lines.append(
-                    f"  WARNING: static label '{lbl}' has no obb_final corners; "
-                    "skipping union."
-                )
-                print(
-                    f"[world4d][{video_id}] WARNING: static label '{lbl}' has no "
-                    "obb_final corners available; skipping union."
+                logger.warning(
+                    f"[world4d][{video_id}] static label '{lbl}' has no "
+                    "obb_final corners; skipping union."
                 )
             else:
                 all_pts_final = np.concatenate(all_corners_list_final, axis=0)
                 union_corners_final = _compute_obb_union_final(all_pts_final)
                 static_union_map_final[lbl] = union_corners_final
 
-        # 2) Apply union OBB (FINAL coords) to all frames for static labels
         if static_union_map_final:
-            log_lines.append(
-                f"--- Static OBB Union applied for {len(static_union_map_final)} labels ---"
-            )
-            print(
+            logger.info(
                 f"[world4d][{video_id}] Applying static OBB union in FINAL coords "
                 f"for {len(static_union_map_final)} labels."
             )
@@ -980,10 +972,6 @@ class FrameToWorldAnnotations(FrameToWorldBase):
 
                     # NOTE: WORLD-space boxes remain as originally constructed.
 
-        # Write log file
-        with open(log_path, "w", encoding="utf-8") as lf:
-            lf.write("\n".join(log_lines))
-        print(f"[world4d][{video_id}] Log written to {log_path}")
 
         # ----------------------------------------------------------------------
         # Optional: visualize world-4D bboxes + POINTS (BEFORE/AFTER) over time
