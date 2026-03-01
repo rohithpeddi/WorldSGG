@@ -578,6 +578,16 @@ def process_video(
     rag_data = load_rag_predictions(rag_results_dir, mode, model_name, video_id)
     if rag_data is None:
         logger.warning(f"[{video_id}] No RAG file found — saving with missing=[] for all frames")
+    else:
+        # Debug: show RAG pkl structure to diagnose mismatches
+        rag_keys = list(rag_data.keys())
+        logger.debug(f"[{video_id}] RAG pkl top-level keys: {rag_keys}")
+        frames_key = rag_data.get("frames", {})
+        if isinstance(frames_key, dict):
+            sample_frame_keys = list(frames_key.keys())[:5]
+            logger.debug(f"[{video_id}] RAG frame keys (first 5): {sample_frame_keys}")
+        else:
+            logger.warning(f"[{video_id}] RAG 'frames' is not a dict: {type(frames_key)}")
 
     all_object_labels: Set[str] = set()
     person_bbox_dict: Dict[str, Any] = {}
@@ -602,6 +612,8 @@ def process_video(
         missing: List[Dict[str, Any]] = []
         if rag_data is not None:
             missing = extract_missing_for_frame(rag_data, stem, phase=phase)
+            if not missing:
+                logger.debug(f"[{video_id}] No missing objects for frame stem '{stem}' (frame_key='{frame_key}')")
             for obj in missing:
                 all_object_labels.add(obj["class"])
                 has_att = len(obj["attention_relationship"]) > 0
