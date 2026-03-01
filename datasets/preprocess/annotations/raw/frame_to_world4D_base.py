@@ -596,6 +596,7 @@ class FrameToWorldBase:
         self.bbox_3d_gt_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_gt"
         self.bbox_3d_gt_obb_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_obb"
         self.bbox_3d_gt_obb_final_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_obb_final"
+        self.bbox_3d_obb_bridge_root_dir = self.world_annotations_root_dir / "bbox_annotations_3d_obb_bridge"
 
         os.makedirs(self.bbox_4d_root_dir, exist_ok=True)
         os.makedirs(self.bbox_3d_final_root_dir, exist_ok=True)
@@ -654,6 +655,18 @@ class FrameToWorldBase:
         with open(out_path, "rb") as f:
             video_3d_annotations = pickle.load(f)
         return video_3d_annotations
+
+    def get_video_3d_bridge_annotations(self, video_id: str):
+        """
+        Load bridge PKL (GT + GDino merged, with FINAL-coords transforms).
+        """
+        out_path = self.bbox_3d_obb_bridge_root_dir / f"{video_id[:-4]}.pkl"
+        if not out_path.exists():
+            print(f"[world4d][{video_id}] Bridge PKL not found at {out_path}")
+            return None
+
+        with open(out_path, "rb") as f:
+            return pickle.load(f)
 
     def get_video_gt_annotations(self, video_id: str):
         video_gt_annotations_json_path = self.gt_annotations_root_dir / video_id / "gt_annotations.json"

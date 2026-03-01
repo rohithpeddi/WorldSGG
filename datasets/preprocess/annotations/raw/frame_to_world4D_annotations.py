@@ -1,4 +1,113 @@
 #!/usr/bin/env python3
+"""
+frame_to_world4D_annotations.py
+================================
+Generates world 4D bounding box annotations from bridge PKL files.
+
+Input:  bbox_annotations_3d_obb_bridge/{video}.pkl   (from bb3D_bridge_generator_obb.py)
+Output: bbox_annotations_4d/{video}.pkl
+
+Pipeline:
+    1) Load bridge PKL (GT + GDino merged, corners_final pre-computed).
+    2) Normalize all object labels to GT short-form space.
+    3) Enforce object permanence across all annotated frames:
+       - Detected objects (GT or GDino) are used as-is.
+       - Static objects (sofa, bed, table, ...) are copied from nearest detection.
+       - Dynamic objects are interpolated (center lerp + rotation slerp + extent lerp).
+       - If only one side detection exists, it is held.
+    4) Compute static OBB union per label in FINAL coords (cv2.minAreaRect on XZ).
+    5) Save 4D annotations with all bridge metadata.
+
+OUTPUT PKL STRUCTURE
+--------------------
+{
+    "video_id":        str,                   # e.g. "00T1E.mp4"
+    "frame_names":     List[str],             # sorted: ["000010.png", "000015.png", ...]
+    "all_labels":      List[str],             # sorted unique labels: ["bed", "person", ...]
+    "meta": {
+        "num_frames":  int,
+        "labels":      List[str],
+    },
+
+    # --- Per-frame 4D-filled objects ---
+    "frames": {
+        "<frame>.png": {
+            "objects": [
+                {
+                    "label":                str,           # normalized GT short-form
+                    "source":               "gt"|"gdino",  # original detection source
+                    "obb_floor_parallel": {                 # WORLD-space OBB (pass-through)
+                        "corners_world":    ndarray (8,3),
+                        "center_world":     ndarray (3,),
+                        ...
+                    },
+                    "corners_final":        ndarray (8,3),  # FINAL-space corners (from bridge)
+                    "obb_final": {                          # FINAL-space OBB (pipeline output)
+                        "corners_final":    ndarray (8,3),  # may be union for static labels
+                    },
+                    "color":                [R, G, B],
+                    "color_after":          [R, G, B],      # visualization color
+
+                    # --- 4D filling metadata ---
+                    "world4d_filled":       bool,           # True if not directly detected
+                    "world4d_fill_method":  str,            # "detected" | "interpolation"
+                                                           # | "static_copy" | "hold_prev"
+                                                           # | "hold_next"
+                    "world4d_source_frame": str,            # frame(s) data came from
+                    "world4d_frame":        str,            # this frame name
+                },
+                ...
+            ]
+        },
+        ...
+    },
+
+    # --- Bridge pass-through data ---
+    "camera_poses":    ndarray (S, 4, 4),     # camera-to-FINAL transforms
+    "frame_stems":     List[str],             # ["000010", "000015", ...]
+    "floor_mesh": {                           # raw floor mesh (WORLD space)
+        "gv":          ndarray (V, 3),        # vertices
+        "gf":          ndarray (F, 3),        # faces
+        "gc":          ndarray (V, 3)|None,   # vertex colors
+    } | None,
+    "global_floor_sim": {                     # similarity transform params
+        "s":           float,                 # scale
+        "R":           ndarray (3, 3),        # rotation
+        "t":           ndarray (3,),          # translation
+    } | None,
+    "world_to_final": {                       # pre-computed WORLD→FINAL transform
+        "origin_world":       ndarray (3,),   # floor origin in WORLD
+        "A_world_to_final":   ndarray (3, 3), # rotation+mirror matrix
+    } | None,
+    "floor_final":     dict | None,           # floor mesh already in FINAL coords
+}
+
+COORDINATE SYSTEMS
+------------------
+- WORLD:  Raw Pi3 reconstruction space (arbitrary orientation).
+- FINAL:  Floor-aligned space (Y=up, XZ=floor plane, origin at floor center).
+
+TRANSFORMATIONS
+---------------
+To transform a point from WORLD to FINAL:
+
+    Using world_to_final (row-vector, from bridge):
+        pts_final = (pts_world - origin_world) @ A_world_to_final.T
+
+    Using compute_final_world_transform (column-vector, re-derived):
+        pts_final = R_final @ pts_world + t_final
+
+    Both are equivalent:
+        R_final = A_world_to_final
+        t_final = -A_world_to_final @ origin_world
+
+To visualize:
+    - obb_final.corners_final are ALREADY in FINAL coords (ready to render).
+    - camera_poses are ALREADY in FINAL coords.
+    - To transform raw point clouds: load predictions.npz, apply WORLD→FINAL above.
+    - floor_final contains floor mesh in FINAL coords (ready to render).
+    - floor_mesh.gv needs WORLD→FINAL if rendering raw WORLD floor.
+"""
 import argparse
 import os
 import pickle
@@ -186,21 +295,13 @@ class FrameToWorldAnnotations(FrameToWorldBase):
         Generate world 4D bbox annotations for a single video.
 
         Steps:
-          1) Load 3D bbox predictions (.pkl) if not already provided.
-          2) Inspect per-frame 3D objects and collect stats.
+          1) Load bridge PKL (GT + GDino merged, FINAL-coords transforms already applied).
+          2) Collect per-frame object labels (already filtered by bridge script).
           3) Enforce object permanence: every label in `all_labels` is present
-             in every annotated frame. Missing instances are filled using:
-                 (a) last known bbox for that object if it exists;
-                 (b) otherwise the first known bbox for that object;
-                 (c) if neither exists, raise an error.
-          4) Compute WORLD -> FINAL transform (floor-aligned + optional mirror).
-          5) For each filled object, attach:
-                 - `obb_floor_parallel` (corners_world)
-                 - `obb_final` (corners in FINAL coords)
-          6) For static labels, union bboxes **in FINAL coords** and overwrite
-             their `obb_final` in all frames (world boxes unchanged).
-          7) Save the resulting 4D annotations to bbox_4d_root_dir.
-          8) Optionally visualize final 4D bboxes (wireframe only, no points).
+             in every annotated frame (via interpolation, hold, or static copy).
+          4) For static labels, union bboxes in FINAL coords across all frames.
+          5) Save the resulting 4D annotations.
+          6) Optionally visualize final 4D bboxes + points via Rerun.
         """
         print(f"[world4d][{video_id}] Generating world SGG annotations (4D bboxes)")
 
@@ -208,7 +309,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
         # Load / validate 3D bbox annotations
         # ----------------------------------------------------------------------
         if video_id_3d_bbox_predictions is None:
-            video_3dgt = self.get_video_3d_annotations(video_id)
+            video_3dgt = self.get_video_3d_bridge_annotations(video_id)
         else:
             video_3dgt = video_id_3d_bbox_predictions
 
@@ -324,68 +425,27 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             )
 
         # ----------------------------------------------------------------------
-        # Basic stats before 4D filling
+        # Collect labels from bridge PKL (already filtered by bridge script)
         # ----------------------------------------------------------------------
-
-        # Step 1: Estimate video-level GT label set from GT annotations.
-        # GDino-sourced objects in the 3D PKL will be filtered to this set.
-        try:
-            _, raw_gt_annotations = self.get_video_gt_annotations(video_id)
-            video_gt_labels: set = set()
-            for frame_items in raw_gt_annotations:
-                for item in frame_items:
-                    if "person_bbox" in item:
-                        video_gt_labels.add("person")
-                    else:
-                        cid = item.get("class", None)
-                        cat_name = self.catid_to_name_map.get(cid, None)
-                        if cat_name:
-                            video_gt_labels.add(_normalize_label(cat_name))
-            print(
-                f"[world4d][{video_id}] video GT labels "
-                f"({len(video_gt_labels)}): {sorted(video_gt_labels)}"
-            )
-        except FileNotFoundError:
-            # If GT annotations not available, don't filter
-            video_gt_labels = None
-            print(
-                f"[world4d][{video_id}] WARNING: GT annotations not found, "
-                "skipping video-level label filtering for GDino objects."
-            )
-
-        # Step 2: Collect labels from 3D bbox PKL and filter by video GT set
         all_labels = set()
         num_frames_with_objects = 0
         num_total_objects = 0
-        num_gdino_filtered = 0
 
         for frame_name, frame_rec in obb_bbox_frames.items():
             objects = frame_rec.get("objects", [])
             if not objects:
                 continue
-
-            # Filter objects: normalize labels, reject GDino objects not in video GT
-            filtered_objects = []
+            # Normalize labels in-place
             for obj in objects:
                 lbl = obj.get("label", None)
-                if not lbl:
-                    continue
-                lbl_norm = _normalize_label(lbl)
-                obj["label"] = lbl_norm  # normalize in-place
-
-                source = obj.get("source", "gt")
-                if source == "gdino" and video_gt_labels is not None:
-                    if lbl_norm not in video_gt_labels:
-                        num_gdino_filtered += 1
-                        continue  # skip this GDino object
-                filtered_objects.append(obj)
-
-            frame_rec["objects"] = filtered_objects
-
-            if filtered_objects:
+                if lbl:
+                    obj["label"] = _normalize_label(lbl)
+            valid = [o for o in objects if o.get("label")]
+            frame_rec["objects"] = valid
+            if valid:
                 num_frames_with_objects += 1
-                num_total_objects += len(filtered_objects)
-                for obj in filtered_objects:
+                num_total_objects += len(valid)
+                for obj in valid:
                     all_labels.add(obj["label"])
 
         print(
@@ -393,11 +453,6 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             f"total_objects={num_total_objects}, "
             f"unique_labels={sorted(all_labels)}"
         )
-        if num_gdino_filtered > 0:
-            print(
-                f"[world4d][{video_id}] filtered {num_gdino_filtered} GDino objects "
-                f"(labels not in video GT set)"
-            )
 
         if not all_labels:
             print(f"[world4d][{video_id}] No object labels found. Skipping 4D generation.")
@@ -617,11 +672,18 @@ class FrameToWorldAnnotations(FrameToWorldBase):
 
             return _params_to_obb_corners(center_interp, rot_interp, extent_interp)
 
-        # Helper to extract OBB world corners from an object
-        def _get_obb_corners_world(obj: Dict[str, Any]) -> Optional[np.ndarray]:
-            obb_data = obj.get("obb_floor_parallel", None)
-            if obb_data and obb_data.get("corners_world"):
-                c = np.asarray(obb_data["corners_world"], dtype=np.float32)
+        # Helper to extract FINAL-coord corners from an object
+        def _get_corners_final(obj: Dict[str, Any]) -> Optional[np.ndarray]:
+            # Bridge PKL objects have corners_final at top level
+            cf = obj.get("corners_final", None)
+            if cf is not None:
+                c = np.asarray(cf, dtype=np.float32)
+                if c.shape == (8, 3):
+                    return c
+            # Also check nested obb_final (from prior fill passes)
+            obb_final = obj.get("obb_final", None)
+            if obb_final and obb_final.get("corners_final") is not None:
+                c = np.asarray(obb_final["corners_final"], dtype=np.float32)
                 if c.shape == (8, 3):
                     return c
             return None
@@ -719,9 +781,9 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                             break
 
                     if prev_det is not None and next_det is not None:
-                        # Interpolate between prev and next
-                        prev_corners = _get_obb_corners_world(prev_det[2])
-                        next_corners = _get_obb_corners_world(next_det[2])
+                        # Interpolate between prev and next in FINAL coords
+                        prev_corners = _get_corners_final(prev_det[2])
+                        next_corners = _get_corners_final(next_det[2])
 
                         if prev_corners is not None and next_corners is not None:
                             span = next_det[0] - prev_det[0]
@@ -735,9 +797,9 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                                 source_frame=f"{prev_det[1]}..{next_det[1]}",
                                 target_frame=fname,
                             )
-                            # Replace corners with interpolated
-                            filled_obj["obb_floor_parallel"] = {
-                                "corners_world": interp_corners.tolist(),
+                            # Store interpolated corners in FINAL coords
+                            filled_obj["obb_final"] = {
+                                "corners_final": interp_corners,
                             }
                             n_interpolated += 1
                         else:
@@ -783,13 +845,12 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                 # Ensure label is consistent
                 filled_obj["label"] = lbl
 
-                # Attach FINAL-coords bbox (obb_final) from WORLD OBB corners
-                corners_world = _get_obb_corners_world(filled_obj)
-                if corners_world is not None:
-                    corners_final = (R_final @ corners_world.T).T + t_final[None, :]
-                    filled_obj["obb_final"] = {
-                        "corners_final": corners_final,
-                    }
+                # Ensure obb_final exists with corners_final
+                # For detected/held/copied objects, corners_final comes from bridge PKL
+                if "obb_final" not in filled_obj:
+                    cf = _get_corners_final(filled_obj)
+                    if cf is not None:
+                        filled_obj["obb_final"] = {"corners_final": cf}
 
                 # Default color for AFTER visualization
                 if "color_after" not in filled_obj:
@@ -1034,6 +1095,17 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                 "num_frames": len(frame_names_sorted),
                 "labels": sorted(all_labels),
             },
+            # --- Pass-through from bridge PKL ---
+            "camera_poses": frame_3dbb_map_world.get("camera_poses", None),  # (S,4,4) FINAL coords
+            "frame_stems": frame_3dbb_map_world.get("frame_stems", None),    # list of stem strings
+            "floor_mesh": {
+                "gv": gv,
+                "gf": gf,
+                "gc": gc,
+            } if floor is not None else None,
+            "global_floor_sim": gfs,   # {"s", "R", "t"}
+            "world_to_final": video_3dgt.get("world_to_final", None),  # {"origin_world", "A_world_to_final"}
+            "floor_final": frame_3dbb_map_world.get("floor", None),    # floor mesh already in FINAL coords
         }
 
         with open(out_4d_path, "wb") as f:
@@ -1672,6 +1744,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
         floor = None
         global_floor_sim = None
         frame_3dbb_map_world = None
+        obb_bbox_frames = None
         floor_vertices_before = None
         floor_vertices_after = None
         floor_axes_before = None
@@ -1680,7 +1753,7 @@ class FrameToWorldAnnotations(FrameToWorldBase):
         floor_faces = None
         floor_kwargs = None
 
-        video_3dgt = self.get_video_3d_annotations(video_id)
+        video_3dgt = self.get_video_3d_bridge_annotations(video_id)
         if video_3dgt is not None:
             gv = video_3dgt.get("gv", None)
             gf = video_3dgt.get("gf", None)
@@ -1695,8 +1768,14 @@ class FrameToWorldAnnotations(FrameToWorldBase):
                 t_g = np.asarray(gfs["t"], dtype=np.float32)
                 global_floor_sim = (s_g, R_g, t_g)
 
-            # 3D bboxes per frame
-            frame_3dbb_map_world = video_3dgt.get("frames", None)
+            # 3D bboxes per frame (from bridge PKL: already have corners_final)
+            frames_final_data = video_3dgt.get("frames_final", None)
+            frame_3dbb_map_world = None
+            obb_bbox_frames = None
+            if frames_final_data:
+                obb_bbox_frames = frames_final_data.get("obb_bbox_frames", None)
+                # Also try original world-space frames for BEFORE visualization
+                frame_3dbb_map_world = video_3dgt.get("frames", None)
 
             # Precompute floor mesh in WORLD coords
             if floor is not None and global_floor_sim is not None:
@@ -1807,37 +1886,24 @@ class FrameToWorldAnnotations(FrameToWorldBase):
             )
 
         # ----------------------------------------------------------------------
-        # Transform 3D bounding boxes
-        #   - Add `obb_final` with `corners_final` into a separate map
+        # 3D bounding boxes in FINAL coords (from bridge PKL)
         # ----------------------------------------------------------------------
         frame_3dbb_map_final: Optional[Dict[str, Dict[str, Any]]] = None
-        if frame_3dbb_map_world is not None:
+        if obb_bbox_frames is not None:
             frame_3dbb_map_final = {}
-            for frame_name, frame_rec in frame_3dbb_map_world.items():
-                objects_world = frame_rec.get("objects", [])
+            for frame_name, frame_rec in obb_bbox_frames.items():
                 objects_final = []
-                for obj in objects_world:
-                    obb_data = obj.get("obb_floor_parallel", None)
-                    if not obb_data or not obb_data.get("corners_world"):
+                for obj in frame_rec.get("objects", []):
+                    corners_final = obj.get("corners_final", None)
+                    if corners_final is None:
                         continue
-                    corners_world = np.asarray(
-                        obb_data["corners_world"], dtype=np.float32
-                    )
-
-                    corners_final = (R_final @ corners_world.T).T + t_final[None, :]
-
                     obj_final = dict(obj)
                     obj_final["obb_final"] = {
-                        "corners_final": corners_final,
+                        "corners_final": np.asarray(corners_final, dtype=np.float32),
                     }
-                    # Optional: separate color for AFTER
                     obj_final["color_after"] = obj.get("color", [255, 230, 80])
-
                     objects_final.append(obj_final)
-
-                frame_3dbb_map_final[frame_name] = {
-                    "objects": objects_final
-                }
+                frame_3dbb_map_final[frame_name] = {"objects": objects_final}
 
         # ----------------------------------------------------------------------
         # Call visualization (no transforms inside)
@@ -1872,14 +1938,9 @@ class FrameToWorldAnnotations(FrameToWorldBase):
         """
         Example/debug entry point for a single video.
 
-        Right now:
-          - loads GT / GDINO / 3D bboxes;
-          - calls generate_video_bb_annotations (skeleton stats);
-          - visualizes original Pi3 point clouds + floor mesh + frames + camera + 3D boxes.
+        Loads bridge PKL (GT + GDino merged) and generates 4D annotations.
         """
-        video_id_gt_bboxes, video_id_gt_annotations = self.get_video_gt_annotations(video_id)
-        video_id_gdino_annotations = self.get_video_gdino_annotations(video_id)
-        video_id_3d_bbox_predictions = self.get_video_3d_annotations(video_id)
+        video_id_3d_bbox_predictions = self.get_video_3d_bridge_annotations(video_id)
 
         self.generate_video_world_bb_annotations(
             video_id,
@@ -1953,9 +2014,9 @@ def main():
         # Single video mode
         video_ids = [args.video if args.video.endswith(".mp4") else f"{args.video}.mp4"]
     else:
-        bbox_3d_dir = generator.bbox_3d_root_dir
+        bbox_3d_dir = generator.bbox_3d_obb_bridge_root_dir
         if not bbox_3d_dir.exists():
-            print(f"ERROR: 3D bbox directory not found: {bbox_3d_dir}")
+            print(f"ERROR: Bridge PKL directory not found: {bbox_3d_dir}")
             sys.exit(1)
 
         video_ids = sorted([
@@ -2004,10 +2065,10 @@ def main():
             # Load active objects classification (needed for static/dynamic split)
             generator.fetch_stored_active_objects_in_video(video_id)
 
-            # Load 3D bbox predictions
-            video_3d = generator.get_video_3d_annotations(video_id)
+            # Load bridge 3D bbox predictions
+            video_3d = generator.get_video_3d_bridge_annotations(video_id)
             if video_3d is None:
-                print(f"  ⚠️  [{video_id}] No 3D bbox annotations, skipping.")
+                print(f"  ⚠️  [{video_id}] No bridge 3D bbox annotations, skipping.")
                 error_count += 1
                 continue
 
