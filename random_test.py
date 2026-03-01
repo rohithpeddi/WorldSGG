@@ -255,8 +255,8 @@ if __name__ == "__main__":
     subtitle_all_objects_results_dir = mllms_dir / "subtitle_all_objects_results"
 
     mode = "predcls"
-    model_name = "internvl"
-    video_id = "3C1ZN.mp4"
+    model_name = "kimikvl"
+    video_id = "0PVKV.mp4"
 
     predcls_rag_preds = load_rag_predictions(subtitle_all_objects_results_dir, mode, model_name, video_id)
     print(predcls_rag_preds)

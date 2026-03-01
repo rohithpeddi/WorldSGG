@@ -492,7 +492,7 @@ def process_video(
     phase: str,
     output_dir: Path,
     overwrite: bool = False,
-) -> bool:
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """Process a single video: filter → augment → save.
 
     **Step 1 – Filter** (same logic as ``base_ag_dataset.py``):
@@ -508,13 +508,13 @@ def process_video(
     save_path = output_dir / f"{video_id}.pkl"
     if save_path.exists() and not overwrite:
         logger.debug(f"Skipping {video_id}: output already exists at {save_path}")
-        return True
+        return True, None
 
     # 1. Get all frame keys for this video
     frame_keys = gt_loader.get_video_frame_keys(video_id, phase=phase)
     if not frame_keys:
         logger.warning(f"Skipping {video_id}: no frames found for phase={phase}")
-        return False
+        return False, None
 
     # ==================================================================
     # STEP 1: FILTER (matches base_ag_dataset.py logic)
@@ -551,7 +551,7 @@ def process_video(
             f"Skipping {video_id}: only {len(valid_frame_keys)} valid frames "
             f"(need > 2). {filter_stats}"
         )
-        return False
+        return False, None
 
     # ==================================================================
     # STEP 2: AUGMENT (only valid frames get RAG predictions)
@@ -608,7 +608,7 @@ def process_video(
         f"{filter_stats['dropped_no_person_bbox']} no-person) "
         f"| {n_observed} observed, {n_missing} missing → {save_path.name}"
     )
-    return True
+    return True, output_record
 
 
 def main():
@@ -649,7 +649,7 @@ def main():
     )
     parser.add_argument(
         "--phase", type=str, default="train",
-        choices=["train", "testing"],
+        choices=["train", "test"],
         help="Dataset phase to process (default: train)",
     )
     parser.add_argument(
@@ -669,7 +669,7 @@ def main():
 
     # Resolve RAG results dir
     if args.rag_results_dir is None:
-        args.rag_results_dir = str(Path(args.ag_root_directory) / "rag_results")
+        args.rag_results_dir = str(Path(args.ag_root_directory) / "mllms" / "rag_results")
 
     # Resolve output dir
     if args.output_dir is None:
@@ -702,7 +702,7 @@ def main():
 
     for video_id in tqdm(video_ids, desc=f"Augmenting ({args.phase})"):
         try:
-            ok = process_video(
+            ok, output_record = process_video(
                 video_id=video_id,
                 gt_loader=gt_loader,
                 rag_results_dir=args.rag_results_dir,
