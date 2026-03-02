@@ -212,8 +212,8 @@ class WSGGBase:
     def _init_optimizer(self):
         """Initialize optimizer from config."""
         opt_name = self._conf.optimizer.lower()
-        lr = self._conf.lr
-        wd = self._conf.weight_decay
+        lr = float(self._conf.lr)
+        wd = float(self._conf.weight_decay)
 
         if opt_name == "adamw":
             self._optimizer = optim.AdamW(self._model.parameters(), lr=lr, weight_decay=wd)
