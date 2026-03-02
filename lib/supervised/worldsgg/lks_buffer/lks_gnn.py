@@ -220,6 +220,7 @@ class LKSGNN(nn.Module):
 
         outputs = {
             "node_logits": node_logits_all,                              # (T, N, C)
+            "attention_logits": edge_out["attention_logits"],              # (T, K_max, 3)
             "attention_distribution": edge_out["attention_distribution"],  # (T, K_max, 3)
             "spatial_distribution": edge_out["spatial_distribution"],      # (T, K_max, 6)
             "contacting_distribution": edge_out["contacting_distribution"],  # (T, K_max, 17)

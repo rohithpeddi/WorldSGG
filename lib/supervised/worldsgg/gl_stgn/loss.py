@@ -78,7 +78,7 @@ class GLSTGNLoss(nn.Module):
             corners: (T, N_max, 8, 3) optional — 3D corners for smoothness
             gt_node_labels: (T, N_max) optional — node class labels
         """
-        device = predictions["attention_distribution"].device
+        device = predictions["attention_logits"].device
         zero = torch.tensor(0.0, device=device, requires_grad=True)
         losses = {}
 
@@ -88,7 +88,7 @@ class GLSTGNLoss(nn.Module):
             return losses
 
         # Flatten all valid pairs across T
-        att_pred = predictions["attention_distribution"][valid]  # (K_total, 3)
+        att_pred = predictions["attention_logits"][valid]  # (K_total, 3)
         spa_pred = predictions["spatial_logits"][valid]           # (K_total, 6) raw logits
         con_pred = predictions["contacting_logits"][valid]        # (K_total, 17) raw logits
 
@@ -174,8 +174,8 @@ class GLSTGNLoss(nn.Module):
         Operates on padded (T, K_max, C) tensors. Computes KL between t and t-1
         only for positions valid in BOTH frames.
         """
-        device = predictions["attention_distribution"].device
-        T = predictions["attention_distribution"].shape[0]
+        device = predictions["attention_logits"].device
+        T = predictions["attention_logits"].shape[0]
 
         if T < 2:
             return torch.tensor(0.0, device=device, requires_grad=True)

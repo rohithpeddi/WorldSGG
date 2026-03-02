@@ -71,7 +71,7 @@ class LKSLoss(nn.Module):
             person_idx: (T, K_max) long
             object_idx: (T, K_max) long
         """
-        device = predictions["attention_distribution"].device
+        device = predictions["attention_logits"].device
         zero = torch.tensor(0.0, device=device, requires_grad=True)
         losses = {}
 
@@ -81,7 +81,7 @@ class LKSLoss(nn.Module):
             losses["total"] = zero
             return losses
 
-        att_pred = predictions["attention_distribution"][valid]  # (K_total, 3)
+        att_pred = predictions["attention_logits"][valid]  # (K_total, 3)
         spa_pred = predictions["spatial_logits"][valid]           # (K_total, 6) raw logits
         con_pred = predictions["contacting_logits"][valid]        # (K_total, 17) raw logits
 

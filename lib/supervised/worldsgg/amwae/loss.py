@@ -88,7 +88,7 @@ class AMWAELoss(nn.Module):
             person_idx: (T, K_max) long
             object_idx: (T, K_max) long
         """
-        device = predictions["attention_distribution"].device
+        device = predictions["attention_logits"].device
         losses = {}
 
         # 1. Scene graph loss (split visible/masked)
@@ -140,7 +140,7 @@ class AMWAELoss(nn.Module):
             }
 
         # Flatten all valid pairs across T
-        att_pred = predictions["attention_distribution"][valid]
+        att_pred = predictions["attention_logits"][valid]
         spa_pred = predictions["spatial_logits"][valid]     # raw logits
         con_pred = predictions["contacting_logits"][valid]  # raw logits
 

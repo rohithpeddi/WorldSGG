@@ -10,6 +10,7 @@ class Constants:
     WORLD_ANNOTATIONS = "world_annotations"
     ASSIGNED_LABELS = "ASSIGNED_LABELS"
     ATTENTION_DISTRIBUTION = "attention_distribution"
+    ATTENTION_LOGITS = "attention_logits"
     ATTENTION_GT = "attention_gt"
     ATTENTION_GT_MASK = "attention_gt_mask"
     ATTENTION_REL = "a_rel"

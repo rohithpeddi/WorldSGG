@@ -354,7 +354,7 @@ class TrainAMWAEPP(TrainWSGGBase):
 
         # Stack per-frame predictions into (T, ...) for batched loss
         stacked_pred = {}
-        for key in ["attention_distribution", "spatial_distribution", "contacting_distribution"]:
+        for key in ["attention_logits", "attention_distribution", "spatial_distribution", "contacting_distribution"]:
             if key in all_preds[0]:
                 stacked_pred[key] = torch.stack([p[key] for p in all_preds])
         # Pass through non-stackable items

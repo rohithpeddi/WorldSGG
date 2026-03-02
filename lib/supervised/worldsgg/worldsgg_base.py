@@ -524,16 +524,18 @@ class RelationshipPredictor(nn.Module):
             Padded positions are zeroed out.
         """
         # Batched heads: (T, K_max, C)
-        att_all = self.att_head(rel_tokens)
+        att_logits_all = self.att_head(rel_tokens)
         spa_logits_all = self.spa_head(rel_tokens)
         con_logits_all = self.con_head(rel_tokens)
 
-        # Sigmoid for eval-compatible distributions
+        # Activation for eval-compatible distributions
+        att_all = torch.softmax(att_logits_all, dim=-1)
         spa_all = torch.sigmoid(spa_logits_all)
         con_all = torch.sigmoid(con_logits_all)
 
         # Zero out padded positions
         mask = pair_valid.unsqueeze(-1).float()  # (T, K_max, 1)
+        att_logits_all = att_logits_all * mask
         att_all = att_all * mask
         spa_all = spa_all * mask
         con_all = con_all * mask
@@ -541,11 +543,12 @@ class RelationshipPredictor(nn.Module):
         con_logits_all = con_logits_all * mask
 
         return {
-            "attention_distribution": att_all,   # (T, K_max, 3) — logits
-            "spatial_distribution": spa_all,      # (T, K_max, 6) — probabilities
-            "contacting_distribution": con_all,   # (T, K_max, 17) — probabilities
-            "spatial_logits": spa_logits_all,      # (T, K_max, 6) — raw logits
-            "contacting_logits": con_logits_all,   # (T, K_max, 17) — raw logits
+            "attention_logits": att_logits_all,    # (T, K_max, 3) — raw logits
+            "attention_distribution": att_all,      # (T, K_max, 3) — probabilities
+            "spatial_distribution": spa_all,        # (T, K_max, 6) — probabilities
+            "contacting_distribution": con_all,     # (T, K_max, 17) — probabilities
+            "spatial_logits": spa_logits_all,        # (T, K_max, 6) — raw logits
+            "contacting_logits": con_logits_all,     # (T, K_max, 17) — raw logits
         }
 
     def form_rel_tokens(
@@ -617,10 +620,12 @@ class RelationshipPredictor(nn.Module):
         Returns:
             dict with attention/spatial/contacting distributions.
         """
+        att_logits = self.att_head(rel_tokens)
         spa_logits = self.spa_head(rel_tokens)
         con_logits = self.con_head(rel_tokens)
         return {
-            "attention_distribution": self.att_head(rel_tokens),
+            "attention_logits": att_logits,
+            "attention_distribution": torch.softmax(att_logits, dim=-1),
             "spatial_distribution": torch.sigmoid(spa_logits),
             "contacting_distribution": torch.sigmoid(con_logits),
             "spatial_logits": spa_logits,
@@ -641,6 +646,7 @@ class RelationshipPredictor(nn.Module):
 
         Returns:
             dict with:
+                attention_logits: (K, att_classes)
                 attention_distribution: (K, att_classes)
                 spatial_distribution: (K, spa_classes)
                 contacting_distribution: (K, con_classes)
@@ -650,6 +656,7 @@ class RelationshipPredictor(nn.Module):
         if K == 0:
             device = enriched_states.device
             return {
+                "attention_logits": torch.zeros(0, self.attention_class_num, device=device),
                 "attention_distribution": torch.zeros(0, self.attention_class_num, device=device),
                 "spatial_distribution": torch.zeros(0, self.spatial_class_num, device=device),
                 "contacting_distribution": torch.zeros(0, self.contact_class_num, device=device),

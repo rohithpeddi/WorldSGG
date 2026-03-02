@@ -181,7 +181,7 @@ class BasicSceneGraphEvaluator:
     
     def fetch_pred_tuples(self, gt, pred):
         idx_pred_triplets_map = {}
-        pred['attention_distribution'] = nn.functional.softmax(pred['attention_distribution'], dim=1)
+        # attention_distribution is already softmax'd from the model
         for idx, frame_gt in enumerate(gt):
             frame_idx = frame_gt[0]['frame'].split('/')[-1].split('.')[0]
             # first part for attention and contact, second for spatial
@@ -258,7 +258,7 @@ class BasicSceneGraphEvaluator:
     
     def evaluate_scene_graph(self, gt, pred):
         """collect the ground truth and prediction"""
-        pred['attention_distribution'] = nn.functional.softmax(pred['attention_distribution'], dim=1)
+        # attention_distribution is already softmax'd from the model
         for idx, frame_gt in enumerate(gt):
             # generate the ground truth
             gt_boxes = np.zeros([len(frame_gt), 4])  # now there is no person box! we assume that person box index == 0
