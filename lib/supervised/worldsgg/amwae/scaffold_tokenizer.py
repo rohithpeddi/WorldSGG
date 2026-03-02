@@ -4,7 +4,7 @@ Geometric Scaffold Tokenizer
 
 Top-down tokenization: initializes the complete global graph from the wireframe,
 then binds DINO visual evidence to visible nodes and a learnable [MASK] embedding
-to unseen nodes.
+to unseen nodes. Also fuses camera-relative features for viewpoint awareness.
 
 This is the paradigm shift from GL-STGN: instead of building outward from camera
 detections, we start with the full structural scaffold and fill in the evidence.
@@ -13,15 +13,17 @@ detections, we start with the full structural scaffold and fill in the evidence.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional
 
 
 class ScaffoldTokenizer(nn.Module):
     """
-    Converts wireframe geometry tokens + visual features into hybrid tokens.
+    Converts wireframe geometry tokens + visual features + camera features
+    into hybrid tokens.
 
     For each object at time t:
-      - If VISIBLE:  token = Proj([geometry_token ⊕ projected_DINO])
-      - If MASKED:   token = Proj([geometry_token ⊕ E_mask])
+      - If VISIBLE:  token = Proj([geometry_token ⊕ projected_DINO ⊕ cam_feats])
+      - If MASKED:   token = Proj([geometry_token ⊕ E_mask ⊕ cam_feats])
 
     During training, a fraction p_mask_visible of visible objects are
     *artificially* masked (their DINO features replaced with E_mask)
@@ -32,6 +34,7 @@ class ScaffoldTokenizer(nn.Module):
         d_visual: Projected visual feature dim.
         d_model: Output token dim.
         d_detector_roi: Raw DINO ROI feature dim (1024).
+        d_camera: Camera-relative feature dim (from CameraPoseEncoder).
     """
 
     def __init__(
@@ -40,10 +43,12 @@ class ScaffoldTokenizer(nn.Module):
         d_visual: int = 256,
         d_model: int = 256,
         d_detector_roi: int = 1024,
+        d_camera: int = 128,
     ):
         super().__init__()
         self.d_visual = d_visual
         self.d_model = d_model
+        self.d_camera = d_camera
 
         # Project raw DINO ROI features → d_visual
         self.visual_projector = nn.Sequential(
@@ -55,9 +60,10 @@ class ScaffoldTokenizer(nn.Module):
         # Learnable [MASK] embedding — replaces DINO features for unseen objects
         self.mask_embedding = nn.Parameter(torch.randn(d_visual) * 0.02)
 
-        # Fuse geometry + visual/mask → d_model
+        # Fuse geometry + visual/mask + camera features → d_model
+        fusion_input_dim = d_struct + d_visual + d_camera
         self.fusion_proj = nn.Sequential(
-            nn.Linear(d_struct + d_visual, d_model),
+            nn.Linear(fusion_input_dim, d_model),
             nn.ReLU(inplace=True),
             nn.LayerNorm(d_model),
         )
@@ -69,6 +75,7 @@ class ScaffoldTokenizer(nn.Module):
         visibility_mask: torch.Tensor,
         valid_mask: torch.Tensor,
         p_mask_visible: float = 0.0,
+        cam_feats: Optional[torch.Tensor] = None,
     ) -> tuple:
         """
         Args:
@@ -78,6 +85,7 @@ class ScaffoldTokenizer(nn.Module):
             visibility_mask: (N,) bool — True if in camera FOV.
             valid_mask: (N,) bool — True for real objects (not padding).
             p_mask_visible: Training masking prob for visible objects.
+            cam_feats: (N, d_camera) or None — per-object camera-relative features.
 
         Returns:
             tokens: (N, d_model) — hybrid tokens.
@@ -114,11 +122,16 @@ class ScaffoldTokenizer(nn.Module):
             visual_proj,
         )  # (N, d_visual)
 
-        # Fuse geometry + visual component
-        fused = torch.cat([geometry_tokens, visual_component], dim=-1)  # (N, d_struct + d_visual)
+        # Camera-relative features (zeros if not provided)
+        if cam_feats is None:
+            cam_feats = torch.zeros(N, self.d_camera, device=device)
+
+        # Fuse geometry + visual component + camera features
+        fused = torch.cat([geometry_tokens, visual_component, cam_feats], dim=-1)
         tokens = self.fusion_proj(fused)  # (N, d_model)
 
         # Zero out padding
         tokens = tokens * valid_mask.unsqueeze(-1).float()
 
         return tokens, is_masked, original_visual
+

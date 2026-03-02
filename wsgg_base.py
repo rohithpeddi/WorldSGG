@@ -64,6 +64,8 @@ def load_wsgg_config(yaml_path: str = None) -> SimpleNamespace:
     parser.add_argument("--d_struct", default=None, type=int)
     parser.add_argument("--d_visual", default=None, type=int)
     parser.add_argument("--d_memory", default=None, type=int)
+    parser.add_argument("--d_camera", default=None, type=int)
+    parser.add_argument("--d_motion", default=None, type=int)
     parser.add_argument("--n_heads", default=None, type=int)
     parser.add_argument("--dropout", default=None, type=float)
     parser.add_argument("--batch_size", default=None, type=int)

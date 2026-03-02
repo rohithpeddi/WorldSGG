@@ -82,6 +82,10 @@ class AssociativeRetriever(nn.Module):
         are refined with temporal context)
     K, V = episodic memory bank tokens
 
+    View-aware retrieval (4B): When pose features are provided, they
+    are fused into Q (current viewpoint) and K (capture viewpoint),
+    naturally biasing attention toward memory entries from similar viewpoints.
+
     Returns completed tokens AND attention weights for contrastive loss.
 
     Args:
@@ -90,6 +94,7 @@ class AssociativeRetriever(nn.Module):
         n_heads: Attention heads.
         d_feedforward: FFN hidden dim.
         dropout: Dropout probability.
+        d_camera: Camera feature dim (for pose-aware Q/K projection).
     """
 
     def __init__(
@@ -99,24 +104,37 @@ class AssociativeRetriever(nn.Module):
         n_heads: int = 4,
         d_feedforward: int = 512,
         dropout: float = 0.1,
+        d_camera: int = 128,
     ):
         super().__init__()
+        self.d_model = d_model
+        self.d_camera = d_camera
+
         self.layers = nn.ModuleList([
             CrossAttentionLayer(d_model, n_heads, d_feedforward, dropout)
             for _ in range(n_layers)
         ])
+
+        # View-aware pose projections (4B)
+        # Project camera features → token space for Q/K bias
+        self.query_pose_proj = nn.Linear(d_camera, d_model)
+        self.key_pose_proj = nn.Linear(d_camera, d_model)
 
     def forward(
         self,
         tokens: torch.Tensor,
         memory_tokens: torch.Tensor,
         memory_valid: torch.Tensor = None,
+        query_pose_feats: torch.Tensor = None,
+        memory_pose_feats: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             tokens: (N, d_model) — current hybrid tokens.
             memory_tokens: (M, d_model) — episodic memory bank.
             memory_valid: (M,) bool — valid mask for memory entries.
+            query_pose_feats: (N, d_camera) or None — current camera features per query.
+            memory_pose_feats: (M, d_camera) or None — capture camera features per memory entry.
 
         Returns:
             completed_tokens: (N, d_model) — auto-completed tokens.
@@ -130,6 +148,12 @@ class AssociativeRetriever(nn.Module):
         # Handle empty memory: return tokens unchanged with zero attention
         if M == 0:
             return tokens, torch.zeros(N, 0, device=device)
+
+        # View-aware Q/K bias (4B)
+        if query_pose_feats is not None:
+            tokens = tokens + self.query_pose_proj(query_pose_feats)  # (N, d_model)
+        if memory_pose_feats is not None:
+            memory_tokens = memory_tokens + self.key_pose_proj(memory_pose_feats)  # (M, d_model)
 
         # Add batch dimension: (1, N, d_model), (1, M, d_model)
         query = tokens.unsqueeze(0)
@@ -150,3 +174,4 @@ class AssociativeRetriever(nn.Module):
         completed = query.squeeze(0)  # (N, d_model)
 
         return completed, last_attn
+
