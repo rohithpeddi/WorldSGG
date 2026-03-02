@@ -179,12 +179,12 @@ class AmnesicGNN(nn.Module):
             staleness=staleness,
         )  # (N, d_model)
 
-        # Step 5: Spatial context propagation via GNN
+        # Step 5: Spatial context propagation via GNN (batched interface)
         enriched = self.spatial_gnn(
-            tokens=tokens,
-            corners=corners,
-            valid_mask=valid_mask,
-        )  # (N, d_model)
+            tokens=tokens.unsqueeze(0),
+            corners=corners.unsqueeze(0),
+            valid_mask=valid_mask.unsqueeze(0),
+        ).squeeze(0)  # (N, d_model)
 
         # Step 6: Predict scene graph
         node_logits = self.node_predictor(enriched)

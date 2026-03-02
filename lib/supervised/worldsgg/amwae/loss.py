@@ -8,9 +8,8 @@ L_total = L_vis + λ_vlm * L_masked + λ_recon * λ_recon_dominance * L_recon
 Changes from baseline:
   1. λ_vlm discounting (0.2 vs old 2.0)
   2. Label smoothing on masked/unseen GT
-  3. Physics veto for geometrically impossible VLM edges
-  4. Feature reconstruction dominance (λ_recon_dominance = 5x)
-  5. Simulated-unseen clean fine-tuning (the "silver bullet")
+  3. Feature reconstruction dominance (λ_recon_dominance = 5x)
+  4. Simulated-unseen clean fine-tuning (the "silver bullet")
 """
 
 import torch
@@ -19,7 +18,7 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional
 
 from constants import Constants as const
-from lib.supervised.worldsgg.worldsgg_base import PhysicsVeto, LabelSmoother
+from lib.supervised.worldsgg.worldsgg_base import LabelSmoother
 
 
 class AMWAELoss(nn.Module):
@@ -33,8 +32,7 @@ class AMWAELoss(nn.Module):
         lambda_contrastive: InfoNCE contrastive loss weight.
         p_simulate_unseen: Fraction of visible objects to artificially mask.
         label_smoothing: Epsilon for VLM label smoothing.
-        use_physics_veto: Enable geometric masking.
-        physics_veto_thresh: Distance threshold for veto.
+
         temperature: InfoNCE temperature.
         bce_loss: Use BCE for spatial/contacting.
         mode: Task mode.
@@ -48,7 +46,7 @@ class AMWAELoss(nn.Module):
         lambda_contrastive: float = 0.5,
         p_simulate_unseen: float = 0.25,
         label_smoothing: float = 0.2,
-        use_physics_veto: bool = True,
+        use_physics_veto: bool = True,  # DEPRECATED — kept for backward compat, ignored
         physics_veto_thresh: float = 2.0,
         temperature: float = 0.07,
         bce_loss: bool = True,
@@ -69,7 +67,7 @@ class AMWAELoss(nn.Module):
         self._kl_loss = nn.KLDivLoss(reduction='batchmean')
 
         self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
-        self._physics_veto = PhysicsVeto(dist_thresh=physics_veto_thresh) if use_physics_veto else None
+
 
     def forward(
         self,
@@ -170,17 +168,7 @@ class AMWAELoss(nn.Module):
                     m_con_pred = con_pred[pair_masked]
                     m_con_gt = con_gt[pair_masked]
 
-                    # Physics veto
-                    if self._physics_veto is not None and corners_seq is not None:
-                        keep = self._physics_veto.compute_veto_mask(
-                            corners_seq[t], p_idx[pair_masked], o_idx[pair_masked], m_con_pred
-                        )
-                        if keep.any():
-                            m_att_pred, m_att_gt = m_att_pred[keep], m_att_gt[keep]
-                            m_spa_pred, m_spa_gt = m_spa_pred[keep], m_spa_gt[keep]
-                            m_con_pred, m_con_gt = m_con_pred[keep], m_con_gt[keep]
-                        else:
-                            continue
+
 
                     # Label smoothing
                     if self._label_smoother is not None:

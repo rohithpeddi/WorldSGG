@@ -7,18 +7,17 @@ Method-specific modules (memory banks, tokenizers, retrievers) stay
 in their respective directories.
 
 Components:
-  1. GlobalStructuralEncoder — PointNet 3D bbox → tokens
+  1. GlobalStructuralEncoder — Flattened local-centered 3D bbox → tokens
   2. SpatialPositionalEncoding — 3D geometry-aware PE
   3. SpatialGNN — Transformer encoder with spatial PE
   4. NodePredictor — Object class MLP
   5. EdgePredictor — Relationship MLP with spatial + union features
   6. CameraPoseEncoder — Camera extrinsic → viewpoint tokens
   7. CameraTemporalEncoder — Ego-motion between consecutive frames
-  8. PhysicsVeto — Deterministic 3D geometric filter
-  9. LabelSmoother — Soft targets for VLM pseudo-labels
-  10. ObservabilityClassifier — Per-object observability state from pose
-  12. MotionFeatureEncoder — 3D velocity/acceleration → d_motion tokens
-  13. FeatureAging — Staleness + pose-delta aware feature blending
+  8. LabelSmoother — Soft targets for VLM pseudo-labels
+  9. ObservabilityClassifier — Per-object observability state from pose
+  10. MotionFeatureEncoder — 3D velocity/acceleration → d_motion tokens
+  11. FeatureAging — Staleness + pose-delta aware feature blending
 """
 
 import math
@@ -36,7 +35,15 @@ import torch.nn.functional as F
 class GlobalStructuralEncoder(nn.Module):
     """
     Encodes world-frame 3D bounding boxes into per-object structural tokens
-    and a global summary token using a PointNet-style architecture.
+    and a global summary token using flattened local-centered coordinates.
+
+    Each bounding box's 8 corners are centered (translation-invariant local
+    geometry) and flattened into a 24-dim vector, then concatenated with the
+    3D absolute center to form a 27-dim input. This preserves the full rigid
+    geometry (dimensions + orientation) that per-corner max-pooling discards.
+
+    The global max-pool over N objects remains appropriate because objects
+    in a scene ARE an unordered, variable-size set.
 
     Input:  corners (B, N, 8, 3), valid_mask (B, N)
     Output: object_tokens (B, N, d_struct), global_token (B, d_struct)
@@ -45,18 +52,17 @@ class GlobalStructuralEncoder(nn.Module):
     def __init__(self, d_struct: int = 256, d_hidden: int = 128):
         super().__init__()
         self.d_struct = d_struct
-        self.corner_mlp = nn.Sequential(
-            nn.Linear(3, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, d_hidden),
-            nn.ReLU(inplace=True),
-        )
+
+        # Input: 24 local corner coords (8*3) + 3 absolute center = 27
         self.object_mlp = nn.Sequential(
+            nn.Linear(27, d_hidden),
+            nn.ReLU(inplace=True),
             nn.Linear(d_hidden, d_hidden * 2),
             nn.ReLU(inplace=True),
             nn.LayerNorm(d_hidden * 2),
             nn.Linear(d_hidden * 2, d_struct),
         )
+
         self.global_mlp = nn.Sequential(
             nn.Linear(d_struct, d_struct),
             nn.ReLU(inplace=True),
@@ -68,18 +74,19 @@ class GlobalStructuralEncoder(nn.Module):
         B, N, C, D = corners.shape
         assert C == 8 and D == 3
 
-        x = corners.reshape(B * N * C, D)
-        x = self.corner_mlp(x)
-        x = x.view(B, N, C, -1)
+        # 1. Extract local geometry (translation-invariant box shape)
+        centers = corners.mean(dim=2, keepdim=True)               # (B, N, 1, 3)
+        local_corners = corners - centers                         # (B, N, 8, 3)
 
-        mask_expanded = valid_mask.unsqueeze(-1).unsqueeze(-1)
-        x = x.masked_fill(~mask_expanded, float("-inf"))
-        x, _ = x.max(dim=2)
-        x = x.masked_fill(~valid_mask.unsqueeze(-1), 0.0)
+        # 2. Flatten 8 local corners and concatenate absolute center
+        local_flat = local_corners.view(B, N, 24)                 # (B, N, 24)
+        x = torch.cat([local_flat, centers.squeeze(2)], dim=-1)   # (B, N, 27)
 
-        object_tokens = self.object_mlp(x)
+        # 3. Encode full bounding box geometry at once
+        object_tokens = self.object_mlp(x)                        # (B, N, d_struct)
         object_tokens = object_tokens.masked_fill(~valid_mask.unsqueeze(-1), 0.0)
 
+        # 4. Global pool over N objects (permutation-invariant set aggregation)
         global_pool = object_tokens.masked_fill(~valid_mask.unsqueeze(-1), float("-inf"))
         global_pool, _ = global_pool.max(dim=1)
         all_invalid = ~valid_mask.any(dim=1, keepdim=True)
@@ -99,8 +106,8 @@ class SpatialPositionalEncoding(nn.Module):
     Computes pairwise spatial features (distance, direction, volume ratio)
     and aggregates into per-object encodings.
 
-    Input:  corners (N, 8, 3), valid_mask (N,)
-    Output: spatial_pe (N, d_model)
+    Input:  corners (B, N, 8, 3), valid_mask (B, N)
+    Output: spatial_pe (B, N, d_model)
     """
 
     def __init__(self, d_model: int = 256, d_hidden: int = 64):
@@ -114,30 +121,58 @@ class SpatialPositionalEncoding(nn.Module):
         self.out_proj = nn.Linear(d_hidden, d_model)
 
     def forward(self, corners: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
-        N = corners.shape[0]
+        # 1. Handle Batch Dimension Properly
+        B, N, C, D = corners.shape
+        assert C == 8 and D == 3, "Expected corners shape (B, N, 8, 3)"
 
-        centers = corners.mean(dim=1)
-        mins, _ = corners.min(dim=1)
-        maxs, _ = corners.max(dim=1)
-        extents = (maxs - mins).clamp(min=1e-6)
-        volumes = extents.prod(dim=-1)
-        log_volumes = torch.log(volumes + 1e-6)
+        # dim=2 corresponds to the 8 corners
+        centers = corners.mean(dim=2)  # (B, N, 3)
 
-        diff = centers.unsqueeze(1) - centers.unsqueeze(0)
-        dist = diff.norm(dim=-1, keepdim=True)
-        direction = diff / (dist + 1e-6)
-        log_vol_ratio = (log_volumes.unsqueeze(1) - log_volumes.unsqueeze(0)).unsqueeze(-1)
+        # Exact OBB volume from edge vectors (not AABB min/max which overestimates
+        # for rotated boxes). Corner ordering: 0-3 bottom face perimeter, 4-7 top
+        # face directly above (i.e., corner 4 is above corner 0).
+        edge_a = corners[:, :, 1] - corners[:, :, 0]   # (B, N, 3) perimeter edge
+        edge_b = corners[:, :, 3] - corners[:, :, 0]   # (B, N, 3) perimeter edge
+        edge_c = corners[:, :, 4] - corners[:, :, 0]   # (B, N, 3) vertical edge
+        len_a = torch.sqrt((edge_a ** 2).sum(dim=-1) + 1e-6)  # (B, N)
+        len_b = torch.sqrt((edge_b ** 2).sum(dim=-1) + 1e-6)  # (B, N)
+        len_c = torch.sqrt((edge_c ** 2).sum(dim=-1) + 1e-6)  # (B, N)
+        volumes = len_a * len_b * len_c                        # (B, N)
+        log_volumes = torch.log(volumes + 1e-6)                # (B, N)
 
-        pair_feats = torch.cat([dist, direction, log_vol_ratio], dim=-1)
-        pair_encoded = self.pair_mlp(pair_feats)
+        # 2. Pairwise Relationships (Broadcasting over B and N)
+        # diff shape: (B, N, 1, 3) - (B, 1, N, 3) -> (B, N, N, 3)
+        # points FROM neighbor 'j' TO target 'i'
+        diff = centers.unsqueeze(2) - centers.unsqueeze(1)
+        
+        # CRITICAL FIX: Safe distance calculation (prevents NaN gradients)
+        dist = torch.sqrt((diff ** 2).sum(dim=-1, keepdim=True) + 1e-6) # (B, N, N, 1)
+        direction = diff / dist                                         # (B, N, N, 3)
+        
+        # Log volume ratio: log(Vi) - log(Vj)
+        log_vol_ratio = (log_volumes.unsqueeze(2) - log_volumes.unsqueeze(1)).unsqueeze(-1) # (B, N, N, 1)
 
-        pair_valid = valid_mask.unsqueeze(0) & valid_mask.unsqueeze(1)
+        # 3. Feed through MLP
+        pair_feats = torch.cat([dist, direction, log_vol_ratio], dim=-1) # (B, N, N, 5)
+        pair_encoded = self.pair_mlp(pair_feats)                         # (B, N, N, d_hidden)
+
+        # 4. Masking Out Invalid Object Pairs
+        # pair_valid shape: (B, N, 1) & (B, 1, N) -> (B, N, N)
+        pair_valid = valid_mask.unsqueeze(2) & valid_mask.unsqueeze(1)
         pair_encoded = pair_encoded * pair_valid.unsqueeze(-1).float()
 
-        n_valid = pair_valid.float().sum(dim=1, keepdim=True).clamp(min=1)
-        agg = pair_encoded.sum(dim=1) / n_valid
+        # 5. Aggregation
+        # Sum over the neighbor dimension (dim=2, or 'j')
+        n_valid = pair_valid.float().sum(dim=2, keepdim=True).clamp(min=1) # (B, N, 1)
+        agg = pair_encoded.sum(dim=2) / n_valid                            # (B, N, d_hidden)
 
-        return self.out_proj(agg)
+        # 6. Final Projection & Post-Masking
+        spatial_pe = self.out_proj(agg)                                    # (B, N, d_model)
+        
+        # STRICT MASKING: Ensure invalid objects don't output the linear layer bias
+        spatial_pe = spatial_pe.masked_fill(~valid_mask.unsqueeze(-1), 0.0)
+
+        return spatial_pe
 
 
 # ============================================================================
@@ -147,10 +182,21 @@ class SpatialPositionalEncoding(nn.Module):
 class SpatialGNN(nn.Module):
     """
     Transformer encoder with 3D spatial positional encoding.
-    Stateless context propagation based on geometric proximity.
+    Context propagation based on geometric proximity.
 
-    Input:  tokens (N, d_model), corners (N, 8, 3), valid_mask (N,)
-    Output: enriched (N, d_model)
+    Accepts batched (B, N, ...) inputs natively.
+    Invalid (padding) objects are excluded via src_key_padding_mask and
+    strictly zeroed out in the output.
+
+    Args:
+        d_model: Token / output dimension.
+        n_layers: Number of transformer encoder layers.
+        n_heads: Number of attention heads.
+        d_feedforward: FFN hidden dimension.
+        dropout: Dropout probability.
+
+    Input:  tokens (B, N, d_model), corners (B, N, 8, 3), valid_mask (B, N)
+    Output: enriched (B, N, d_model)
     """
 
     def __init__(
@@ -162,8 +208,9 @@ class SpatialGNN(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
+
         self.spatial_pe = SpatialPositionalEncoding(d_model=d_model)
-        self.pre_norm = nn.LayerNorm(d_model)
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=n_heads,
@@ -172,8 +219,12 @@ class SpatialGNN(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-        self.post_norm = nn.LayerNorm(d_model)
+        # Final LayerNorm required for pre-norm architecture
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=n_layers,
+            norm=nn.LayerNorm(d_model),
+        )
 
     def forward(
         self,
@@ -181,15 +232,26 @@ class SpatialGNN(nn.Module):
         corners: torch.Tensor,
         valid_mask: torch.Tensor,
     ) -> torch.Tensor:
-        spatial_enc = self.spatial_pe(corners, valid_mask)
+        # 1. Spatial Positional Encoding (natively batched)
+        spatial_enc = self.spatial_pe(corners, valid_mask)  # (B, N, d_model)
         x = tokens + spatial_enc
-        x = self.pre_norm(x)
-        x = x.unsqueeze(0)
-        padding_mask = ~valid_mask.unsqueeze(0)
+
+        # 2. Padding mask: True = ignore for PyTorch transformer
+        padding_mask = ~valid_mask  # (B, N)
+
+        # 3. Failsafe: if an entire batch item is fully padded, MHA returns NaN.
+        #    Temporarily unmask the first token of that sequence.
+        all_invalid = padding_mask.all(dim=1)  # (B,)
+        if all_invalid.any():
+            padding_mask = padding_mask.clone()
+            padding_mask[all_invalid, 0] = False
+
+        # 4. Global attention / context propagation
         x = self.transformer(x, src_key_padding_mask=padding_mask)
-        x = x.squeeze(0)
-        x = self.post_norm(x)
-        x = x * valid_mask.unsqueeze(-1).float()
+
+        # 5. Strict zero-masking (FFN biases + residual leak into padded tokens)
+        x = x.masked_fill(~valid_mask.unsqueeze(-1), 0.0)
+
         return x
 
 
@@ -641,101 +703,6 @@ class CameraTemporalEncoder(nn.Module):
 
         return self.ego_mlp(ego_input)  # (d_camera,)
 
-
-# ============================================================================
-# 9. Physics Veto — Deterministic 3D Geometric Filter
-# ============================================================================
-
-class PhysicsVeto(nn.Module):
-    """
-    Non-differentiable geometric filter that vetoes VLM pseudo-labels
-    violating basic spatial physics.
-
-    Rules:
-      1. If VLM predicts a contact predicate (touching/holding/sitting_on/etc.)
-         but the 3D centroids of subject and object are > dist_thresh apart → veto
-      2. If VLM predicts [inside] but no bounding box containment → veto
-
-    Args:
-        dist_thresh: Meters — max distance for contact predicates.
-        contact_predicate_indices: Set of predicate indices that require proximity
-            (touching, holding, sitting_on, lying_on, carrying, etc.).
-        inside_predicate_idx: Index of the "inside" predicate, or None.
-    """
-
-    def __init__(
-        self,
-        dist_thresh: float = 2.0,
-        contact_predicate_indices: set = None,
-        inside_predicate_idx: int = None,
-    ):
-        super().__init__()
-        self.dist_thresh = dist_thresh
-        # Default contact predicates (common Action Genome indices)
-        # These should be overridden with actual dataset indices
-        self.contact_predicate_indices = contact_predicate_indices or set()
-        self.inside_predicate_idx = inside_predicate_idx
-
-    @torch.no_grad()
-    def compute_veto_mask(
-        self,
-        corners: torch.Tensor,
-        person_idx: torch.Tensor,
-        object_idx: torch.Tensor,
-        pred_labels: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Compute per-edge veto mask.
-
-        Args:
-            corners: (N, 8, 3) — world-frame 3D bbox corners.
-            person_idx: (K,) long — person indices.
-            object_idx: (K,) long — object indices.
-            pred_labels: (K,) long or (K, C) float — predicted labels/logits.
-
-        Returns:
-            keep_mask: (K,) bool — True = keep, False = veto.
-        """
-        K = person_idx.shape[0]
-        if K == 0:
-            return torch.ones(0, dtype=torch.bool, device=corners.device)
-
-        # Compute centroids from corners: mean of 8 corner points
-        centroids = corners.mean(dim=1)  # (N, 3)
-        p_centroids = centroids[person_idx]  # (K, 3)
-        o_centroids = centroids[object_idx]  # (K, 3)
-        dists = torch.norm(p_centroids - o_centroids, dim=-1)  # (K,)
-
-        keep_mask = torch.ones(K, dtype=torch.bool, device=corners.device)
-
-        # Get predicted class indices
-        if pred_labels.dim() == 2:
-            # pred_labels is logits → get argmax
-            pred_cls = pred_labels.argmax(dim=-1)  # (K,)
-        else:
-            pred_cls = pred_labels  # (K,) already indices
-
-        # Rule 1: veto contact predicates if distance > threshold
-        if self.contact_predicate_indices:
-            for idx in self.contact_predicate_indices:
-                is_contact = (pred_cls == idx)
-                too_far = (dists > self.dist_thresh)
-                keep_mask = keep_mask & ~(is_contact & too_far)
-
-        # Rule 2: veto "inside" if no containment
-        if self.inside_predicate_idx is not None:
-            is_inside = (pred_cls == self.inside_predicate_idx)
-            # Simple containment check: object centroid within person bbox bounds
-            p_mins = corners[person_idx].min(dim=1).values  # (K, 3)
-            p_maxs = corners[person_idx].max(dim=1).values  # (K, 3)
-            o_cent = o_centroids  # (K, 3)
-            inside_bounds = (
-                (o_cent >= p_mins).all(dim=-1) &
-                (o_cent <= p_maxs).all(dim=-1)
-            )
-            keep_mask = keep_mask & ~(is_inside & ~inside_bounds)
-
-        return keep_mask
 
 
 # ============================================================================

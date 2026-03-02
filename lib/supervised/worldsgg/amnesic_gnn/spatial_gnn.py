@@ -6,6 +6,8 @@ Graph Transformer for spatial context propagation in the Amnesic GNN.
 Allows visual features from visible nodes to "bleed" to unseen nodes
 based on 3D proximity — the only mechanism for unseen object reasoning
 when there is zero temporal memory.
+
+Accepts batched (B, N, ...) inputs natively.
 """
 
 import torch
@@ -28,6 +30,9 @@ class SpatialGNN(nn.Module):
         n_heads: Attention heads.
         d_feedforward: FFN hidden dim.
         dropout: Dropout probability.
+
+    Input:  tokens (B, N, d_model), corners (B, N, 8, 3), valid_mask (B, N)
+    Output: enriched (B, N, d_model)
     """
 
     def __init__(
@@ -40,13 +45,8 @@ class SpatialGNN(nn.Module):
     ):
         super().__init__()
 
-        # 3D spatial positional encoding (reused from GL-STGN)
         self.spatial_pe = SpatialPositionalEncoding(d_model=d_model)
 
-        # Pre-norm
-        self.pre_norm = nn.LayerNorm(d_model)
-
-        # Transformer encoder stack
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=n_heads,
@@ -58,10 +58,8 @@ class SpatialGNN(nn.Module):
         self.transformer = nn.TransformerEncoder(
             encoder_layer,
             num_layers=n_layers,
+            norm=nn.LayerNorm(d_model),
         )
-
-        # Post-norm
-        self.post_norm = nn.LayerNorm(d_model)
 
     def forward(
         self,
@@ -71,29 +69,30 @@ class SpatialGNN(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            tokens: (N, d_model) — hybrid tokens from AmnesicTokenizer.
-            corners: (N, 8, 3) — 3D bbox corners.
-            valid_mask: (N,) bool — True for real objects.
+            tokens: (B, N, d_model) — hybrid tokens from AmnesicTokenizer.
+            corners: (B, N, 8, 3) — 3D bbox corners.
+            valid_mask: (B, N) bool — True for real objects.
 
         Returns:
-            enriched: (N, d_model) — context-enriched representations.
+            enriched: (B, N, d_model) — context-enriched representations.
         """
-        # Add spatial positional encoding
-        spatial_enc = self.spatial_pe(corners, valid_mask)  # (N, d_model)
+        # 1. Spatial PE (natively batched)
+        spatial_enc = self.spatial_pe(corners, valid_mask)  # (B, N, d_model)
         x = tokens + spatial_enc
 
-        x = self.pre_norm(x)
+        # 2. Padding mask
+        padding_mask = ~valid_mask  # (B, N)
 
-        # Add batch dim: (1, N, d_model)
-        x = x.unsqueeze(0)
-        padding_mask = ~valid_mask.unsqueeze(0)  # (1, N) — True = ignore
+        # 3. Failsafe for fully-padded batch items
+        all_invalid = padding_mask.all(dim=1)
+        if all_invalid.any():
+            padding_mask = padding_mask.clone()
+            padding_mask[all_invalid, 0] = False
 
+        # 4. Transformer
         x = self.transformer(x, src_key_padding_mask=padding_mask)
 
-        x = x.squeeze(0)  # (N, d_model)
-        x = self.post_norm(x)
-
-        # Zero out padding
-        x = x * valid_mask.unsqueeze(-1).float()
+        # 5. Strict zero-masking
+        x = x.masked_fill(~valid_mask.unsqueeze(-1), 0.0)
 
         return x

@@ -7,9 +7,8 @@ L_total = L_manual(Visible) + λ_vlm * L_pseudo(Unseen) + λ_smooth * L_smooth
 Changes from baseline loss:
   1. λ_vlm discounting (0.2 vs old 2.0) — VLM labels are gentle regularizers
   2. Label smoothing on unseen GT — tells model "VLM might be wrong"
-  3. Physics veto — zero out loss for geometrically impossible VLM labels
-  4. Memory shielding — .detach() handled in model forward, not here
-  5. Temporal inertia — penalizes jittery unseen predictions
+  3. Memory shielding — .detach() handled in model forward, not here
+  4. Temporal inertia — penalizes jittery unseen predictions
 """
 
 import torch
@@ -18,7 +17,7 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional
 
 from constants import Constants as const
-from lib.supervised.worldsgg.worldsgg_base import PhysicsVeto, LabelSmoother
+from lib.supervised.worldsgg.worldsgg_base import LabelSmoother
 
 
 class GLSTGNLoss(nn.Module):
@@ -28,8 +27,7 @@ class GLSTGNLoss(nn.Module):
     Args:
         lambda_vlm: Weight for unseen (VLM) edge loss (should be << 1.0).
         label_smoothing: Epsilon for VLM label smoothing.
-        use_physics_veto: Enable geometric masking.
-        physics_veto_thresh: Distance threshold for physics veto.
+
         lambda_smooth: Weight for temporal inertia regularization.
         movement_thresh: Skip smoothing if object moved > this (meters).
         bce_loss: Use BCE (True) or MultiLabelMarginLoss (False).
@@ -40,7 +38,7 @@ class GLSTGNLoss(nn.Module):
         self,
         lambda_vlm: float = 0.2,
         label_smoothing: float = 0.2,
-        use_physics_veto: bool = True,
+        use_physics_veto: bool = True,  # DEPRECATED — kept for backward compat, ignored
         physics_veto_thresh: float = 2.0,
         lambda_smooth: float = 0.1,
         movement_thresh: float = 0.3,
@@ -61,7 +59,7 @@ class GLSTGNLoss(nn.Module):
 
         # VLM noisy label utilities
         self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
-        self._physics_veto = PhysicsVeto(dist_thresh=physics_veto_thresh) if use_physics_veto else None
+
 
     def forward(
         self,
@@ -133,24 +131,7 @@ class GLSTGNLoss(nn.Module):
                     unseen_con_pred = con_pred_t[pair_unseen]
                     unseen_con_gt = con_gt_t[pair_unseen]
 
-                    # Physics veto: zero out geometrically impossible edges
-                    if self._physics_veto is not None and corners_seq is not None:
-                        # Get unseen pair indices relative to full node set
-                        unseen_pidx = p_idx[pair_unseen]
-                        unseen_oidx = o_idx[pair_unseen]
-                        keep = self._physics_veto.compute_veto_mask(
-                            corners_seq[t], unseen_pidx, unseen_oidx, unseen_con_pred
-                        )
-                        if keep.any():
-                            unseen_att_pred = unseen_att_pred[keep]
-                            unseen_att_gt = unseen_att_gt[keep]
-                            unseen_spa_pred = unseen_spa_pred[keep]
-                            unseen_spa_gt = unseen_spa_gt[keep]
-                            unseen_con_pred = unseen_con_pred[keep]
-                            unseen_con_gt = unseen_con_gt[keep]
-                        else:
-                            # All vetoed → skip this frame's unseen
-                            continue
+
 
                     # Label smoothing for VLM targets
                     if self._label_smoother is not None:

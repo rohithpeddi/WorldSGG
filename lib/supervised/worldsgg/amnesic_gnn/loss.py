@@ -5,7 +5,6 @@ Amnesic GNN Loss — VLM Noisy Label Training
 Standard CE/BCE loss with:
   1. λ_vlm discounting for non-vis_vis buckets
   2. Label smoothing on VLM pseudo-labels
-  3. Physics veto for geometrically impossible edges
 
 Three-bucket stratified evaluation (Vis-Vis, Vis-Unseen, Unseen-Unseen)
 remains for ablation analysis.
@@ -17,7 +16,7 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional
 
 from constants import Constants as const
-from lib.supervised.worldsgg.worldsgg_base import PhysicsVeto, LabelSmoother
+from lib.supervised.worldsgg.worldsgg_base import LabelSmoother
 
 
 class AmnesicGNNLoss(nn.Module):
@@ -25,14 +24,14 @@ class AmnesicGNNLoss(nn.Module):
     Stratified loss with VLM noise handling.
 
     Vis-Vis: full CE/BCE on clean manual labels.
-    Vis-Unseen / Unseen-Unseen: λ_vlm weighted, smoothed, physics-vetoed.
+    Vis-Unseen / Unseen-Unseen: λ_vlm weighted, smoothed.
     """
 
     def __init__(
         self,
         lambda_vlm: float = 0.2,
         label_smoothing: float = 0.2,
-        use_physics_veto: bool = True,
+        use_physics_veto: bool = True,  # DEPRECATED — kept for backward compat, ignored
         physics_veto_thresh: float = 2.0,
         bce_loss: bool = True,
         mode: str = "predcls",
@@ -47,7 +46,7 @@ class AmnesicGNNLoss(nn.Module):
         self._kl_loss = nn.KLDivLoss(reduction='batchmean')
 
         self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
-        self._physics_veto = PhysicsVeto(dist_thresh=physics_veto_thresh) if use_physics_veto else None
+
 
     def forward(
         self,
@@ -107,22 +106,7 @@ class AmnesicGNNLoss(nn.Module):
                 b_con_pred = con_pred[mask]
                 b_con_gt = con_gt[mask]
 
-                # Physics veto
-                if self._physics_veto is not None and corners is not None:
-                    b_pidx = person_idx[mask]
-                    b_oidx = object_idx[mask]
-                    keep = self._physics_veto.compute_veto_mask(corners, b_pidx, b_oidx, b_con_pred)
-                    if not keep.any():
-                        losses[f"{bucket_name}_att"] = zero
-                        losses[f"{bucket_name}_spa"] = zero
-                        losses[f"{bucket_name}_con"] = zero
-                        continue
-                    b_att_pred = b_att_pred[keep]
-                    b_att_gt = b_att_gt[keep]
-                    b_spa_pred = b_spa_pred[keep]
-                    b_spa_gt = b_spa_gt[keep]
-                    b_con_pred = b_con_pred[keep]
-                    b_con_gt = b_con_gt[keep]
+
 
                 # Label smoothing
                 if self._label_smoother is not None:

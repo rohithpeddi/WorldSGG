@@ -79,8 +79,7 @@ batch_size: 16
 # ---- Universal: Asymmetric Loss ----
 lambda_vlm: 0.2              # VLM pseudo-label weight (vs 1.0 for manual)
 label_smoothing_vlm: 0.2     # Label smoothing epsilon for VLM targets
-use_physics_veto: true       # Enable geometric masking of VLM hallucinations
-physics_veto_dist_thresh: 2.0 # Meters — veto [touching] if objects > this apart
+
 
 # ---- M1 (GL-STGN): Memory Shielding ----
 detach_unseen_memory: true   # Stop gradients from VLM loss to GRU

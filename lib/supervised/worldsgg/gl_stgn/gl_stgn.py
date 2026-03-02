@@ -263,12 +263,12 @@ class GLSTGN(nn.Module):
                     motion_feats=motion_feats,
                 )
 
-            # --- Step 5: Relational reasoning via Graph Transformer ---
+            # --- Step 5: Relational reasoning via Graph Transformer (batched interface) ---
             enriched = self.graph_transformer(
-                memory_states=memory,
-                corners=corners_t,
-                valid_mask=valid_t,
-            )  # (N_t, d_memory)
+                memory_states=memory.unsqueeze(0),
+                corners=corners_t.unsqueeze(0),
+                valid_mask=valid_t.unsqueeze(0),
+            ).squeeze(0)  # (N_t, d_memory)
 
             # --- Step 6: Observability-Graded Memory Shielding ---
             # Classify each object's observability state

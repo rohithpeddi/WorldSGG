@@ -282,12 +282,12 @@ class AMWAE(nn.Module):
                 memory_pose_feats=memory_pose_feats_t,
             )
 
-            # --- Step 6: Contextual diffusion (self-attention) ---
+            # --- Step 6: Contextual diffusion (batched interface) ---
             enriched = self.diffusion(
-                tokens=completed_tokens,
-                corners=corners_t,
-                valid_mask=valid_t,
-            )
+                tokens=completed_tokens.unsqueeze(0),
+                corners=corners_t.unsqueeze(0),
+                valid_mask=valid_t.unsqueeze(0),
+            ).squeeze(0)
 
             # --- Step 7: Scene graph prediction ---
             node_logits = self.node_predictor(enriched)
@@ -377,10 +377,10 @@ class AMWAE(nn.Module):
                     )
 
                     sim_enriched = self.diffusion(
-                        tokens=sim_completed,
-                        corners=corners_t,
-                        valid_mask=valid_t,
-                    )
+                        tokens=sim_completed.unsqueeze(0),
+                        corners=corners_t.unsqueeze(0),
+                        valid_mask=valid_t.unsqueeze(0),
+                    ).squeeze(0)
 
                     sim_edge_out = self.edge_predictor(
                         enriched_states=sim_enriched,

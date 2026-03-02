@@ -5,7 +5,7 @@ LKS Buffer Loss — VLM Noisy Label Training
 Same stratified structure as AmnesicGNNLoss (they test the same hypothesis).
 
   Vis-Vis: full loss on clean manual labels
-  Vis-Unseen / Unseen-Unseen: λ_vlm weighted, smoothed, physics-vetoed
+  Vis-Unseen / Unseen-Unseen: λ_vlm weighted, smoothed
 """
 
 import torch
@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional
 
 from constants import Constants as const
-from lib.supervised.worldsgg.worldsgg_base import PhysicsVeto, LabelSmoother
+from lib.supervised.worldsgg.worldsgg_base import LabelSmoother
 
 
 class LKSLoss(nn.Module):
@@ -23,7 +23,7 @@ class LKSLoss(nn.Module):
         self,
         lambda_vlm: float = 0.2,
         label_smoothing: float = 0.2,
-        use_physics_veto: bool = True,
+        use_physics_veto: bool = True,  # DEPRECATED — kept for backward compat, ignored
         physics_veto_thresh: float = 2.0,
         bce_loss: bool = True,
         mode: str = "predcls",
@@ -38,7 +38,7 @@ class LKSLoss(nn.Module):
         self._kl_loss = nn.KLDivLoss(reduction='batchmean')
 
         self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
-        self._physics_veto = PhysicsVeto(dist_thresh=physics_veto_thresh) if use_physics_veto else None
+
 
     def forward(
         self,
@@ -97,19 +97,7 @@ class LKSLoss(nn.Module):
                 b_con_pred = con_pred[mask]
                 b_con_gt = con_gt[mask]
 
-                # Physics veto
-                if self._physics_veto is not None and corners is not None:
-                    keep = self._physics_veto.compute_veto_mask(
-                        corners, person_idx[mask], object_idx[mask], b_con_pred
-                    )
-                    if not keep.any():
-                        losses[f"{bucket_name}_att"] = zero
-                        losses[f"{bucket_name}_spa"] = zero
-                        losses[f"{bucket_name}_con"] = zero
-                        continue
-                    b_att_pred, b_att_gt = b_att_pred[keep], b_att_gt[keep]
-                    b_spa_pred, b_spa_gt = b_spa_pred[keep], b_spa_gt[keep]
-                    b_con_pred, b_con_gt = b_con_pred[keep], b_con_gt[keep]
+
 
                 # Label smoothing
                 if self._label_smoother is not None:
