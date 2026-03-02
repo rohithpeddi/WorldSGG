@@ -26,7 +26,7 @@ import wandb
 from torch import optim
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
-from lib.supervised import BasicSceneGraphEvaluator
+from lib.supervised.evaluation_recall import BasicSceneGraphEvaluator
 
 
 # ============================================================================

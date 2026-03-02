@@ -35,7 +35,7 @@ OBJECT_CLASSES = [
 
 def main():
     parser = argparse.ArgumentParser(description="Precompute CLIP text embeddings for AG classes")
-    parser.add_argument("--data_path", type=str, required=True, help="AG dataset root")
+    parser.add_argument("--data_path", type=str, default="/data/rohith/ag", help="AG dataset root")
     parser.add_argument("--clip_model", type=str, default="ViT-B/32", help="CLIP model variant")
     args = parser.parse_args()
 

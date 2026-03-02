@@ -4,9 +4,69 @@ from functools import reduce
 
 import numpy as np
 import torch.nn as nn
-from lib_b.fpn.box_intersections_cpu.bbox import bbox_overlaps
 
-from lib_b.pytorch_misc import intersect_2d, argsort_desc
+
+# ============================================================================
+# Self-contained replacements for lib_b utilities
+# ============================================================================
+
+def bbox_overlaps(boxes1, boxes2):
+    """
+    Compute IoU between two sets of bounding boxes.
+
+    Args:
+        boxes1: (M, 4) numpy array of [x1, y1, x2, y2] boxes.
+        boxes2: (N, 4) numpy array of [x1, y1, x2, y2] boxes.
+
+    Returns:
+        overlaps: (M, N) numpy array of IoU values.
+    """
+    x11, y11, x12, y12 = np.split(boxes1, 4, axis=1)  # each (M, 1)
+    x21, y21, x22, y22 = np.split(boxes2, 4, axis=1)  # each (N, 1)
+
+    # Intersection
+    xi1 = np.maximum(x11, x21.T)  # (M, N)
+    yi1 = np.maximum(y11, y21.T)
+    xi2 = np.minimum(x12, x22.T)
+    yi2 = np.minimum(y12, y22.T)
+    inter = np.maximum(xi2 - xi1, 0) * np.maximum(yi2 - yi1, 0)
+
+    # Union
+    area1 = (x12 - x11) * (y12 - y11)  # (M, 1)
+    area2 = (x22 - x21) * (y22 - y21)  # (N, 1)
+    union = area1 + area2.T - inter
+
+    return inter / np.maximum(union, 1e-8)
+
+
+def intersect_2d(x1, x2):
+    """
+    Check row-wise equality between two 2D arrays.
+
+    Args:
+        x1: (M, D) numpy array.
+        x2: (N, D) numpy array.
+
+    Returns:
+        (M, N) bool array where [i, j] = True iff x1[i] == x2[j] (all columns).
+    """
+    return (x1[:, None] == x2[None, :]).all(axis=2)
+
+
+def argsort_desc(scores):
+    """
+    Return (row, col) indices that sort a 2D array in descending order.
+
+    Args:
+        scores: (M, N) numpy array.
+
+    Returns:
+        (K, 2) array of [row, col] indices sorted by descending score.
+    """
+    flat_order = np.argsort(-scores.ravel())
+    rows = flat_order // scores.shape[1]
+    cols = flat_order % scores.shape[1]
+    return np.column_stack((rows, cols))
 
 
 class BasicSceneGraphEvaluator:
