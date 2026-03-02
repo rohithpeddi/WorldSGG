@@ -112,10 +112,9 @@ class AMWAELoss(nn.Module):
 
         # 5. Attractor stability loss (AMWAE++ Energy Transformer only)
         if self.lambda_stability > 0 and "h_prev_seq" in predictions and predictions["h_prev_seq"]:
-            stability_losses = []
-            for h_final, h_prev in zip(predictions["enriched_seq"], predictions["h_prev_seq"]):
-                stability_losses.append(F.mse_loss(h_final, h_prev.detach()))
-            L_stability = torch.stack(stability_losses).mean()
+            h_final_all = torch.stack(predictions["enriched_seq"])   # (T, N, d)
+            h_prev_all = torch.stack(predictions["h_prev_seq"])     # (T, N, d)
+            L_stability = F.mse_loss(h_final_all, h_prev_all.detach())
             losses["stability_loss"] = self.lambda_stability * L_stability
 
         # Total
@@ -244,37 +243,36 @@ class AMWAELoss(nn.Module):
         MSE between retrieved tokens and original DINO features for masked tokens.
 
         This is the dominant loss for M2 — drives visual fidelity over VLM text.
+        Vectorized: stacks all T frames and computes masked MSE in one shot.
         """
         zero = torch.tensor(0.0, device=device, requires_grad=True)
         T = len(predictions.get("is_masked", []))
         if T == 0:
             return zero
 
-        recon_losses = []
-        for t in range(T):
-            is_masked = predictions["is_masked"][t]  # (N_t,) bool
-            if not is_masked.any():
-                continue
-
-            retrieved = predictions["retrieved_tokens"][t]  # (N_t, d_model)
-            original = predictions["original_visual"][t]    # (N_t, d_visual)
-
-            # Compare masked token retrievals with originals
-            masked_retrieved = retrieved[is_masked]
-            masked_original = original[is_masked]
-
-            if masked_retrieved.shape[-1] != masked_original.shape[-1]:
-                # Project if dims differ
-                masked_original = F.adaptive_avg_pool1d(
-                    masked_original.unsqueeze(0), masked_retrieved.shape[-1]
-                ).squeeze(0)
-
-            recon_losses.append(F.mse_loss(masked_retrieved, masked_original))
-
-        if not recon_losses:
+        # Stack all frames: (T, N, ...)
+        is_masked_all = torch.stack(predictions["is_masked"])          # (T, N)
+        if not is_masked_all.any():
             return zero
 
-        return torch.stack(recon_losses).mean()
+        retrieved_all = torch.stack(predictions["retrieved_tokens"])   # (T, N, d_model)
+        original_all = torch.stack(predictions["original_visual"])    # (T, N, d_visual)
+
+        # Handle dimension mismatch if needed
+        if retrieved_all.shape[-1] != original_all.shape[-1]:
+            original_all = F.adaptive_avg_pool1d(
+                original_all.reshape(-1, original_all.shape[-1]).unsqueeze(1),
+                retrieved_all.shape[-1],
+            ).squeeze(1).reshape(original_all.shape[0], original_all.shape[1], -1)
+
+        # Select only masked tokens and compute MSE
+        masked_retrieved = retrieved_all[is_masked_all]  # (M, d)
+        masked_original = original_all[is_masked_all]    # (M, d)
+
+        if masked_retrieved.numel() == 0:
+            return zero
+
+        return F.mse_loss(masked_retrieved, masked_original)
 
     # ------------------------------------------------------------------
     # Contrastive Loss (InfoNCE)

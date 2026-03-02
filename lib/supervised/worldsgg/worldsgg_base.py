@@ -794,24 +794,18 @@ class TemporalEdgeAttention(nn.Module):
         unique_keys, inverse_ids = torch.unique(valid_keys, return_inverse=True)  # (num_pairs,), (total_valid,)
         num_pairs = unique_keys.shape[0]
 
-        # Compute temporal position within each pair using cumsum trick
-        # Sort by pair_id to group, then compute within-group position
+        # Compute within-group temporal position (vectorized, no Python loop)
         sort_order = torch.argsort(inverse_ids)
         sorted_pair_ids = inverse_ids[sort_order]
 
-        # Mark boundaries between pairs
-        boundaries = torch.ones(sorted_pair_ids.shape[0], dtype=torch.long, device=device)
-        boundaries[1:] = (sorted_pair_ids[1:] != sorted_pair_ids[:-1]).long()
-        temporal_pos_sorted = torch.cumsum(boundaries, dim=0) - torch.cumsum(boundaries, dim=0).gather(
-            0, torch.zeros_like(sorted_pair_ids)  # placeholder
-        )
-        # Simpler: just count within each group
-        pair_counts = torch.zeros(sorted_pair_ids.shape[0], dtype=torch.long, device=device)
-        pair_starts = torch.cat([torch.tensor([0], device=device),
-                                  (sorted_pair_ids[1:] != sorted_pair_ids[:-1]).nonzero(as_tuple=True)[0] + 1])
-        for i, start in enumerate(pair_starts):
-            end = pair_starts[i + 1] if i + 1 < len(pair_starts) else sorted_pair_ids.shape[0]
-            pair_counts[start:end] = torch.arange(end - start, device=device)
+        # Detect group boundaries and compute within-group position via cumsum
+        is_new_group = torch.ones(sorted_pair_ids.shape[0], dtype=torch.long, device=device)
+        is_new_group[1:] = (sorted_pair_ids[1:] != sorted_pair_ids[:-1]).long()
+        # cumsum gives 1-based group index; within each group, subtracting
+        # the group's starting cumsum yields 0-based within-group position
+        cumsum = torch.cumsum(torch.ones_like(sorted_pair_ids), dim=0)  # 1,2,3,...
+        group_start_cumsum = torch.cummax(cumsum * is_new_group, dim=0)[0]  # start val per group
+        pair_counts = cumsum - group_start_cumsum  # 0-based within-group position
 
         # Unsort temporal positions
         temporal_pos = torch.zeros_like(pair_counts)
@@ -1048,20 +1042,21 @@ class CameraTemporalEncoder(nn.Module):
         T = pose_seq.shape[0]
         device = pose_seq.device
 
-        # 1. Compute per-step relative poses → MLP → raw ego tokens
-        ego_tokens = []
-        for t in range(T):
-            if t == 0:
-                ego_tokens.append(self.no_prev_embedding.unsqueeze(0))
-            else:
-                T_rel = pose_seq[t] @ torch.inverse(pose_seq[t - 1])  # (4, 4)
-                R_rel = T_rel[:3, :3]
-                t_rel = T_rel[:3, 3]
-                rot_6d = _rotation_matrix_to_6d(R_rel)  # (6,)
-                ego_input = torch.cat([rot_6d, t_rel], dim=-1)  # (9,)
-                ego_tokens.append(self.ego_mlp(ego_input).unsqueeze(0))
-
-        ego_seq = torch.cat(ego_tokens, dim=0)  # (T, d_camera)
+        # 1. Compute per-step relative poses → MLP → raw ego tokens (batched)
+        if T == 1:
+            ego_seq = self.no_prev_embedding.unsqueeze(0)  # (1, d_camera)
+        else:
+            # Batched relative pose: T_rel[i] = pose_seq[i+1] @ inv(pose_seq[i])
+            T_rel = pose_seq[1:] @ torch.linalg.inv(pose_seq[:-1])  # (T-1, 4, 4)
+            R_rel = T_rel[:, :3, :3]   # (T-1, 3, 3)
+            t_rel = T_rel[:, :3, 3]    # (T-1, 3)
+            rot_6d = _rotation_matrix_to_6d(R_rel)  # (T-1, 6)
+            ego_input = torch.cat([rot_6d, t_rel], dim=-1)  # (T-1, 9)
+            ego_from_mlp = self.ego_mlp(ego_input)  # (T-1, d_camera)
+            ego_seq = torch.cat([
+                self.no_prev_embedding.unsqueeze(0),  # (1, d_camera)
+                ego_from_mlp,
+            ], dim=0)  # (T, d_camera)
 
         # 2. Add temporal positional encoding
         positions = torch.arange(T, device=device).clamp(max=self.max_time - 1)
