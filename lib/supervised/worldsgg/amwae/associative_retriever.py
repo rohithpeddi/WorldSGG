@@ -1,92 +1,37 @@
 """
-Associative Retriever
-======================
+Associative Retriever (Batched, Bidirectional)
+================================================
 
-Cross-attention module that retrieves visual features from the episodic
-memory bank for masked tokens. Mathematically equivalent to dense
-associative memory retrieval (continuous Hopfield network).
+Per-object cross-attention that auto-completes masked tokens by
+retrieving visual features from ALL visible appearances of that
+object across ALL T frames.
 
-Masked tokens use their wireframe geometry as a query key to "unlock"
-the visual memory of that specific 3D location from past frames.
+For each object n:
+  Q = masked tokens across T (frames where unseen)
+  K/V = visible tokens across T (frames where visible)
+
+This replaces the sequential episodic memory store/retrieve pattern.
+All T frames are available simultaneously — no causal constraint.
+
+The retriever also supports view-aware biasing: camera pose features
+are added to Q (current viewpoint) and K (capture viewpoint) so the
+attention naturally favours memory entries from similar viewpoints.
 """
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Tuple
-
-
-class CrossAttentionLayer(nn.Module):
-    """Single cross-attention layer with residual + FFN."""
-
-    def __init__(self, d_model: int, n_heads: int, d_feedforward: int, dropout: float = 0.1):
-        super().__init__()
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=d_model,
-            num_heads=n_heads,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_feedforward),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_feedforward, d_model),
-            nn.Dropout(dropout),
-        )
-
-    def forward(
-        self,
-        query: torch.Tensor,
-        memory: torch.Tensor,
-        memory_key_padding_mask: torch.Tensor = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            query: (1, N, d_model) — current tokens as queries.
-            memory: (1, M, d_model) — memory bank tokens as K/V.
-            memory_key_padding_mask: (1, M) bool — True = ignore.
-
-        Returns:
-            output: (1, N, d_model)
-            attn_weights: (N, M) — attention weights (for contrastive loss).
-        """
-        # Cross-attention
-        attn_out, attn_weights = self.cross_attn(
-            query=query,
-            key=memory,
-            value=memory,
-            key_padding_mask=memory_key_padding_mask,
-            average_attn_weights=True,  # Average across heads for contrastive loss
-        )
-        query = self.norm1(query + attn_out)
-
-        # Feed-forward
-        ffn_out = self.ffn(query)
-        query = self.norm2(query + ffn_out)
-
-        # Remove batch dim from attn_weights
-        attn_weights = attn_weights.squeeze(0)  # (N, M)
-
-        return query, attn_weights
+from typing import Optional, Tuple
 
 
 class AssociativeRetriever(nn.Module):
     """
-    Multi-layer cross-attention that auto-completes masked tokens by
-    retrieving features from the episodic memory bank.
+    Bidirectional per-object cross-attention over all T frames.
 
-    Q = all current tokens (masked tokens need retrieval, visible tokens
-        are refined with temporal context)
-    K, V = episodic memory bank tokens
+    For each object, masked tokens query visible tokens from ANY frame.
+    Visible tokens are also refined (self-contextualized) via the same
+    cross-attention mechanism.
 
-    View-aware retrieval (4B): When pose features are provided, they
-    are fused into Q (current viewpoint) and K (capture viewpoint),
-    naturally biasing attention toward memory entries from similar viewpoints.
-
-    Returns completed tokens AND attention weights for contrastive loss.
+    Supports view-aware retrieval via camera pose feature bias on Q/K.
 
     Args:
         d_model: Token dimension.
@@ -94,7 +39,7 @@ class AssociativeRetriever(nn.Module):
         n_heads: Attention heads.
         d_feedforward: FFN hidden dim.
         dropout: Dropout probability.
-        d_camera: Camera feature dim (for pose-aware Q/K projection).
+        d_camera: Camera feature dim for view-aware Q/K bias.
     """
 
     def __init__(
@@ -110,68 +55,103 @@ class AssociativeRetriever(nn.Module):
         self.d_model = d_model
         self.d_camera = d_camera
 
-        self.layers = nn.ModuleList([
-            CrossAttentionLayer(d_model, n_heads, d_feedforward, dropout)
-            for _ in range(n_layers)
-        ])
+        # Cross-attention: Q = all tokens, K/V = visible tokens only
+        self.cross_attn_layers = nn.ModuleList()
+        self.cross_norms1 = nn.ModuleList()
+        self.cross_norms2 = nn.ModuleList()
+        self.cross_ffns = nn.ModuleList()
 
-        # View-aware pose projections (4B)
-        # Project camera features → token space for Q/K bias
+        for _ in range(n_layers):
+            self.cross_attn_layers.append(
+                nn.MultiheadAttention(
+                    embed_dim=d_model, num_heads=n_heads,
+                    dropout=dropout, batch_first=True,
+                )
+            )
+            self.cross_norms1.append(nn.LayerNorm(d_model))
+            self.cross_norms2.append(nn.LayerNorm(d_model))
+            self.cross_ffns.append(nn.Sequential(
+                nn.Linear(d_model, d_feedforward),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_feedforward, d_model),
+                nn.Dropout(dropout),
+            ))
+
+        # View-aware pose projections
         self.query_pose_proj = nn.Linear(d_camera, d_model)
         self.key_pose_proj = nn.Linear(d_camera, d_model)
 
     def forward(
         self,
         tokens: torch.Tensor,
-        memory_tokens: torch.Tensor,
-        memory_valid: torch.Tensor = None,
-        query_pose_feats: torch.Tensor = None,
-        memory_pose_feats: torch.Tensor = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        visibility_mask: torch.Tensor,
+        valid_mask: torch.Tensor,
+        cam_feats: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
+        Bidirectional per-object cross-attention over all T frames.
+
+        Each object's masked tokens retrieve from that same object's
+        visible tokens across all frames. Visible tokens are also
+        refined by attending to other visible appearances.
+
         Args:
-            tokens: (N, d_model) — current hybrid tokens.
-            memory_tokens: (M, d_model) — episodic memory bank.
-            memory_valid: (M,) bool — valid mask for memory entries.
-            query_pose_feats: (N, d_camera) or None — current camera features per query.
-            memory_pose_feats: (M, d_camera) or None — capture camera features per memory entry.
+            tokens:          (T, N, d_model) — scaffold tokens (visible + masked).
+            visibility_mask: (T, N) bool — True where object is visible.
+            valid_mask:      (T, N) bool — True for real objects.
+            cam_feats:       (T, N, d_camera) or None — camera-relative features.
 
         Returns:
-            completed_tokens: (N, d_model) — auto-completed tokens.
-            attn_weights: (N, M) — last layer's attention weights
-                          (for contrastive loss supervision).
+            completed: (T, N, d_model) — auto-completed tokens.
         """
-        N = tokens.shape[0]
-        M = memory_tokens.shape[0]
+        T, N, D = tokens.shape
         device = tokens.device
 
-        # Handle empty memory: return tokens unchanged with zero attention
-        if M == 0:
-            return tokens, torch.zeros(N, 0, device=device)
+        # --- Reshape: (T, N, D) → (N, T, D) — per-object temporal sequences ---
+        x = tokens.permute(1, 0, 2)                  # (N, T, D)
+        vis = visibility_mask.permute(1, 0).contiguous()  # (N, T)
+        val = valid_mask.permute(1, 0).contiguous()       # (N, T)
 
-        # View-aware Q/K bias (4B)
-        if query_pose_feats is not None:
-            tokens = tokens + self.query_pose_proj(query_pose_feats)  # (N, d_model)
-        if memory_pose_feats is not None:
-            memory_tokens = memory_tokens + self.key_pose_proj(memory_pose_feats)  # (M, d_model)
-
-        # Add batch dimension: (1, N, d_model), (1, M, d_model)
-        query = tokens.unsqueeze(0)
-        memory = memory_tokens.unsqueeze(0)
-
-        # Memory padding mask: True = ignore, so invert valid
-        if memory_valid is not None:
-            memory_pad_mask = ~memory_valid.unsqueeze(0)  # (1, M)
+        # --- View-aware bias ---
+        if cam_feats is not None:
+            cam = cam_feats.permute(1, 0, 2)          # (N, T, d_camera)
+            q_bias = self.query_pose_proj(cam)        # (N, T, D)
+            k_bias = self.key_pose_proj(cam)          # (N, T, D)
         else:
-            memory_pad_mask = None
+            q_bias = torch.zeros_like(x)
+            k_bias = torch.zeros_like(x)
 
-        # Run through cross-attention layers
-        last_attn = None
-        for layer in self.layers:
-            query, attn_weights = layer(query, memory, memory_pad_mask)
-            last_attn = attn_weights
+        # --- Build K/V from visible tokens only ---
+        # Key padding mask for cross-attention: True = ignore
+        # For each object, ignore frames where it's NOT visible (or invalid)
+        kv_active = vis & val  # (N, T) — True where visible + valid
+        kv_padding_mask = ~kv_active  # (N, T) — True = ignore
 
-        completed = query.squeeze(0)  # (N, d_model)
+        # Failsafe: if an object has NO visible frames, unmask first frame
+        all_masked = kv_padding_mask.all(dim=1)  # (N,)
+        if all_masked.any():
+            kv_padding_mask = kv_padding_mask.clone()
+            kv_padding_mask[all_masked, 0] = False
 
-        return completed, last_attn
+        # --- Cross-attention layers ---
+        query = x + q_bias  # Add view bias to queries
+        kv = x + k_bias     # Add view bias to keys
 
+        for i in range(len(self.cross_attn_layers)):
+            # Cross-attention: Q = all tokens, K/V = visible tokens
+            attn_out, _ = self.cross_attn_layers[i](
+                query=query, key=kv, value=kv,
+                key_padding_mask=kv_padding_mask,
+            )
+            query = self.cross_norms1[i](query + attn_out)
+            ffn_out = self.cross_ffns[i](query)
+            query = self.cross_norms2[i](query + ffn_out)
+
+        # --- Zero out invalid ---
+        query = query * val.unsqueeze(-1).float()
+
+        # --- Reshape back: (N, T, D) → (T, N, D) ---
+        completed = query.permute(1, 0, 2)  # (T, N, D)
+
+        return completed

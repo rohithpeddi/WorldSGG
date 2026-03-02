@@ -142,8 +142,6 @@ class TrainAMWAE(TrainWSGGBase):
             lambda_contrastive=self._conf.lambda_contrastive,
             p_simulate_unseen=self._conf.p_simulate_unseen,
             label_smoothing=self._conf.label_smoothing_vlm,
-            use_physics_veto=self._conf.use_physics_veto,
-            physics_veto_thresh=self._conf.physics_veto_dist_thresh,
         )
 
     def is_temporal(self) -> bool:
@@ -151,23 +149,35 @@ class TrainAMWAE(TrainWSGGBase):
 
     def process_train_video(self, batch) -> dict:
         tensors = batch
-        self._model.reset_memory()
+
+        T = len(tensors) if isinstance(tensors, list) else 1
+        frames = tensors if isinstance(tensors, list) else [tensors]
+
+        pred = self._model.forward(
+            visual_features_seq=[f["visual_features"].to(self._device) for f in frames],
+            corners_seq=[f["corners"].to(self._device) for f in frames],
+            valid_mask_seq=[f["valid_mask"].to(self._device) for f in frames],
+            visibility_mask_seq=[f["visibility_mask"].to(self._device) for f in frames],
+            person_idx_seq=[f["person_idx"].to(self._device) for f in frames],
+            object_idx_seq=[f["object_idx"].to(self._device) for f in frames],
+            p_mask_visible=getattr(self._conf, 'p_mask_visible', 0.3),
+            camera_pose_seq=[f["camera_pose"].to(self._device) for f in frames] if "camera_pose" in frames[0] else None,
+        )
 
         total_losses = {}
-        T = len(tensors) if isinstance(tensors, list) else 1
-
         for t in range(T):
-            frame = tensors[t] if isinstance(tensors, list) else tensors
-            pred = self._model.forward_frame(
-                visual_features=frame["visual_features"].to(self._device),
-                corners=frame["corners"].to(self._device),
-                valid_mask=frame["valid_mask"].to(self._device),
-                visibility_mask=frame["visibility_mask"].to(self._device),
-                person_idx=frame["person_idx"].to(self._device),
-                object_idx=frame["object_idx"].to(self._device),
-            )
-
-            frame_losses = self._loss_fn(pred, frame, self._device)
+            frame = frames[t]
+            frame_pred = {
+                "node_logits": pred["node_logits"][t],
+                "attention_distribution": pred["attention_distribution"][t],
+                "spatial_distribution": pred["spatial_distribution"][t],
+                "contacting_distribution": pred["contacting_distribution"][t],
+                "is_masked": pred["is_masked"][t],
+                "original_visual": pred["original_visual"][t],
+                "reconstruction_predictions": pred["reconstruction_predictions"][t],
+                "reconstruction_targets": pred["reconstruction_targets"][t],
+            }
+            frame_losses = self._loss_fn(frame_pred, frame, self._device)
             for k, v in frame_losses.items():
                 total_losses[k] = total_losses.get(k, 0.0) + v
 
@@ -175,23 +185,28 @@ class TrainAMWAE(TrainWSGGBase):
 
     def process_test_video(self, batch) -> dict:
         tensors = batch
-        self._model.reset_memory()
-        all_preds = []
 
         T = len(tensors) if isinstance(tensors, list) else 1
-        for t in range(T):
-            frame = tensors[t] if isinstance(tensors, list) else tensors
-            pred = self._model.forward_frame(
-                visual_features=frame["visual_features"].to(self._device),
-                corners=frame["corners"].to(self._device),
-                valid_mask=frame["valid_mask"].to(self._device),
-                visibility_mask=frame["visibility_mask"].to(self._device),
-                person_idx=frame["person_idx"].to(self._device),
-                object_idx=frame["object_idx"].to(self._device),
-            )
-            all_preds.append(pred)
+        frames = tensors if isinstance(tensors, list) else [tensors]
 
-        return all_preds[-1] if all_preds else None
+        pred = self._model.forward(
+            visual_features_seq=[f["visual_features"].to(self._device) for f in frames],
+            corners_seq=[f["corners"].to(self._device) for f in frames],
+            valid_mask_seq=[f["valid_mask"].to(self._device) for f in frames],
+            visibility_mask_seq=[f["visibility_mask"].to(self._device) for f in frames],
+            person_idx_seq=[f["person_idx"].to(self._device) for f in frames],
+            object_idx_seq=[f["object_idx"].to(self._device) for f in frames],
+            camera_pose_seq=[f["camera_pose"].to(self._device) for f in frames] if "camera_pose" in frames[0] else None,
+        )
+
+        if T > 0:
+            return {
+                "node_logits": pred["node_logits"][-1],
+                "attention_distribution": pred["attention_distribution"][-1],
+                "spatial_distribution": pred["spatial_distribution"][-1],
+                "contacting_distribution": pred["contacting_distribution"][-1],
+            }
+        return None
 
 
 # ============================================================================

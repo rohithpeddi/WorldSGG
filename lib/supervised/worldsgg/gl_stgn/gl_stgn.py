@@ -2,7 +2,7 @@
 GL-STGN: Global-Local Spatio-Temporal Graph Network
 ======================================================
 
-Simplified single-pass pipeline:
+Single-pass pipeline:
 
   1. GlobalStructuralEncoder(corners)           → (T, N, d_struct)
   2. CameraPoseEncoder(pose, corners)           → (T, N, d_camera)
@@ -11,11 +11,11 @@ Simplified single-pass pipeline:
   5. TemporalObjectTransformer(features, vis)   → (T, N, d_memory)
   6. SpatialGNN(memory, corners, valid)         → (T, N, d_memory)
   7. NodePredictor(enriched)                    → (T, N, num_classes)
-  8. EdgeMLP(person ⊕ object)                  → (T, K_max, att+spa+con)
+  8. RelationshipPredictor(per-frame tokens)    → (T × K, d_rel)
+  9. TemporalEdgeAttention(per-pair across T)   → enriched edges
+ 10. predict_from_tokens                        → att/spa/con
 
-All batched with B=T. No per-frame loops. Temporal context flows
-through step 5 (per-object bidirectional attention over all frames).
-Spatial context propagates in step 6 (per-frame inter-object attention).
+All batched with B=T except edge token formation (variable K per frame).
 """
 
 import torch
@@ -24,8 +24,9 @@ from typing import Dict, List, Optional
 
 from .memory_bank import TemporalObjectTransformer
 from lib.supervised.worldsgg.worldsgg_base import (
-    GlobalStructuralEncoder, NodePredictor, SpatialGNN,
-    CameraPoseEncoder, CameraTemporalEncoder, MotionFeatureEncoder,
+    GlobalStructuralEncoder, NodePredictor, RelationshipPredictor,
+    SpatialGNN, CameraPoseEncoder, CameraTemporalEncoder,
+    MotionFeatureEncoder, TemporalEdgeAttention,
 )
 
 
@@ -36,8 +37,7 @@ class GLSTGN(nn.Module):
     Processes all T frames in a single forward pass with B=T batching.
     TemporalObjectTransformer provides per-object bidirectional attention
     across all frames. SpatialGNN provides per-frame inter-object context.
-    Edge predictions use a simple MLP on concatenated person+object states
-    (temporal context is already baked into both endpoints).
+    Edge predictions use RelationshipPredictor with temporal edge attention.
 
     Args:
         config: Method config namespace.
@@ -57,10 +57,6 @@ class GLSTGN(nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.num_object_classes = num_object_classes
-        self.attention_class_num = attention_class_num
-        self.spatial_class_num = spatial_class_num
-        self.contact_class_num = contact_class_num
 
         # Module 1: Structural Encoder — (B, N, 8, 3) → (B, N, d_struct)
         self.structural_encoder = GlobalStructuralEncoder(
@@ -106,22 +102,34 @@ class GLSTGN(nn.Module):
             dropout=config.dropout,
         )
 
-        # Module 7: Node Predictor — (B, N, d_memory) → (B, N, num_classes)
+        # Module 7: Node Predictor
         self.node_predictor = NodePredictor(
             d_memory=config.d_memory,
             num_classes=num_object_classes,
         )
 
-        # Module 8: Edge MLP — [person ⊕ object] → [att + spa + con]
-        total_edge_classes = attention_class_num + spatial_class_num + contact_class_num
-        d_rel = getattr(config, 'd_rel', 256)
-        self.edge_mlp = nn.Sequential(
-            nn.Linear(config.d_memory * 2, d_rel),
-            nn.ReLU(inplace=True),
-            nn.LayerNorm(d_rel),
-            nn.Linear(d_rel, d_rel),
-            nn.ReLU(inplace=True),
-            nn.Linear(d_rel, total_edge_classes),
+        # Module 8: Relationship Predictor
+        clip_path = getattr(config, 'clip_embeddings_path', '')
+        self.rel_predictor = RelationshipPredictor(
+            d_model=config.d_memory,
+            d_text=config.d_text,
+            d_rel=config.d_rel,
+            d_union_roi=config.d_union_roi,
+            attention_class_num=attention_class_num,
+            spatial_class_num=spatial_class_num,
+            contact_class_num=contact_class_num,
+            clip_embeddings_path=clip_path,
+            n_rel_layers=config.n_rel_layers,
+            n_rel_heads=config.n_rel_heads,
+            dropout=config.dropout,
+        )
+
+        # Module 9: Temporal Edge Attention
+        self.temporal_edge_attn = TemporalEdgeAttention(
+            d_rel=config.d_rel,
+            n_heads=config.n_rel_heads,
+            n_layers=config.n_temporal_edge_layers,
+            dropout=config.dropout,
         )
 
     def forward(
@@ -146,7 +154,7 @@ class GLSTGN(nn.Module):
             person_idx_seq:      T-list of (K_t,) long tensors.
             object_idx_seq:      T-list of (K_t,) long tensors.
             camera_pose_seq:     T-list of (4, 4) tensors or None.
-            union_features_seq:  Unused (kept for interface compat).
+            union_features_seq:  T-list of (K_t, d_union_roi) tensors or None.
 
         Returns:
             dict with per-frame lists: node_logits, att/spa/con distributions.
@@ -206,44 +214,40 @@ class GLSTGN(nn.Module):
         # ==================== Step 7: Node prediction (B=T) ====================
         node_logits_all = self.node_predictor(enriched_all)  # (T, N, num_classes)
 
-        # ==================== Step 8: Edge prediction (batched) ====================
-        # Pad person/object indices to K_max and batch-gather
-        K_per_frame = [p.shape[0] for p in person_idx_seq]
-        K_max = max(K_per_frame) if K_per_frame else 0
+        # ==================== Step 8: Rel tokens (per-frame, K varies) ====================
+        collected_rel = []
+        collected_pidx = []
+        collected_oidx = []
 
-        if K_max > 0:
-            # Pad indices to (T, K_max) for batched gather
-            padded_pidx = torch.zeros(T, K_max, dtype=torch.long, device=device)
-            padded_oidx = torch.zeros(T, K_max, dtype=torch.long, device=device)
-            edge_valid = torch.zeros(T, K_max, dtype=torch.bool, device=device)
+        for t in range(T):
+            enriched_t = enriched_all[t]
+            node_logits_t = node_logits_all[t]
+            person_idx = person_idx_seq[t]
+            object_idx = object_idx_seq[t]
 
-            for t in range(T):
-                K_t = K_per_frame[t]
-                if K_t > 0:
-                    padded_pidx[t, :K_t] = person_idx_seq[t]
-                    padded_oidx[t, :K_t] = object_idx_seq[t]
-                    edge_valid[t, :K_t] = True
+            person_class_idx = node_logits_t[person_idx].argmax(dim=-1)
+            object_class_idx = node_logits_t[object_idx].argmax(dim=-1)
 
-            # Gather person and object representations: (T, K_max, d_memory)
-            person_repr = torch.gather(
-                enriched_all, 1, padded_pidx.unsqueeze(-1).expand(-1, -1, enriched_all.shape[-1])
+            union_feat_t = union_features_seq[t] if union_features_seq is not None else None
+
+            rel_tokens = self.rel_predictor.form_rel_tokens(
+                enriched_states=enriched_t,
+                person_idx=person_idx,
+                object_idx=object_idx,
+                person_class_idx=person_class_idx,
+                object_class_idx=object_class_idx,
+                union_features=union_feat_t,
             )
-            object_repr = torch.gather(
-                enriched_all, 1, padded_oidx.unsqueeze(-1).expand(-1, -1, enriched_all.shape[-1])
-            )
+            rel_tokens = self.rel_predictor.self_attend(rel_tokens)
 
-            # Concatenate and predict: (T, K_max, d_memory*2) → (T, K_max, total_classes)
-            pair_input = torch.cat([person_repr, object_repr], dim=-1)
-            edge_logits = self.edge_mlp(pair_input)  # (T, K_max, att+spa+con)
+            collected_rel.append(rel_tokens)
+            collected_pidx.append(person_idx)
+            collected_oidx.append(object_idx)
 
-            # Split into att/spa/con
-            att_end = self.attention_class_num
-            spa_end = att_end + self.spatial_class_num
-            att_logits = edge_logits[:, :, :att_end]           # (T, K_max, 3)
-            spa_logits = edge_logits[:, :, att_end:spa_end]    # (T, K_max, 6)
-            con_logits = edge_logits[:, :, spa_end:]           # (T, K_max, 17)
+        # ==================== Step 9: Temporal edge attention ====================
+        enriched_rel = self.temporal_edge_attn(collected_rel, collected_pidx, collected_oidx)
 
-        # ==================== Build output lists ====================
+        # ==================== Step 10: Predict distributions ====================
         outputs: Dict[str, List] = {
             "node_logits": [],
             "attention_distribution": [],
@@ -252,15 +256,10 @@ class GLSTGN(nn.Module):
         }
 
         for t in range(T):
-            outputs["node_logits"].append(node_logits_all[t])  # (N, C)
-            K_t = K_per_frame[t]
-            if K_max > 0 and K_t > 0:
-                outputs["attention_distribution"].append(att_logits[t, :K_t])
-                outputs["spatial_distribution"].append(torch.sigmoid(spa_logits[t, :K_t]))
-                outputs["contacting_distribution"].append(torch.sigmoid(con_logits[t, :K_t]))
-            else:
-                outputs["attention_distribution"].append(torch.zeros(0, self.attention_class_num, device=device))
-                outputs["spatial_distribution"].append(torch.zeros(0, self.spatial_class_num, device=device))
-                outputs["contacting_distribution"].append(torch.zeros(0, self.contact_class_num, device=device))
+            outputs["node_logits"].append(node_logits_all[t])
+            edge_out = self.rel_predictor.predict_from_tokens(enriched_rel[t])
+            outputs["attention_distribution"].append(edge_out["attention_distribution"])
+            outputs["spatial_distribution"].append(edge_out["spatial_distribution"])
+            outputs["contacting_distribution"].append(edge_out["contacting_distribution"])
 
         return outputs

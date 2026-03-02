@@ -32,6 +32,7 @@ d_struct: 256
 d_visual: 256
 d_detector_roi: 1024
 d_camera: 128
+d_motion: 64
 n_heads: 4
 d_feedforward: 512
 max_objects: 64
@@ -62,12 +63,7 @@ datasize: large
 # ---- AMWAE Specific ----
 n_cross_attn_layers: 2
 n_self_attn_layers: 4
-n_retriever_layers: 2
-n_diffusion_layers: 4
-memory_bank_size: 128
-slots_per_object: 5
 p_mask_visible: 0.5
-temperature: 0.07
 
 # ---- Loss ----
 lambda_vlm: 0.2
@@ -76,5 +72,3 @@ p_simulate_unseen: 0.25
 lambda_reconstruction: 1.0
 lambda_recon_dominance: 5.0
 lambda_contrastive: 0.5
-use_physics_veto: true
-physics_veto_dist_thresh: 2.0

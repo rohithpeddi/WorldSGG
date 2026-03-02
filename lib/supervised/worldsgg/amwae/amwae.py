@@ -1,18 +1,24 @@
 """
-AMWAE: Associative Masked World Auto-Encoder
-==============================================
+AMWAE: Associative Masked World Auto-Encoder (Batched)
+========================================================
 
-Main model that wires together:
-  1. GlobalStructuralEncoder — encodes wireframe into geometry tokens
-  2. CameraPoseEncoder — camera viewpoint + per-object cam features
-  3. ScaffoldTokenizer — binds visual evidence or [MASK] + cam features to geometry tokens
-  4. PerObjectEpisodicMemory — K-slot per-object memory with viewpoint diversity eviction
-  5. AssociativeRetriever — view-aware cross-attention retrieval to auto-complete masked tokens
-  6. ContextualDiffusion — self-attention for context propagation
-  7. NodePredictor + RelationshipPredictor(+TemporalEdgeAttention) — scene graph
+Single-pass pipeline with B=T batching:
 
-The model initializes the graph TOP-DOWN from the complete wireframe scaffold,
-then auto-completes missing visual evidence via associative memory retrieval.
+  1. GlobalStructuralEncoder(corners)                → (T, N, d_struct)
+  2. CameraPoseEncoder(pose, corners)                → (T, N, d_camera)
+  3. CameraTemporalEncoder(pose_stack)               → (T, d_camera)
+  4. MotionFeatureEncoder(vel, acc)                   → (T, N, d_motion)
+  5. ScaffoldTokenizer(struct, vis, cam, motion, ego) → (T, N, d_model)
+  6. AssociativeRetriever(tokens, vis, valid, cam)    → (T, N, d_model)
+  7. + visibility_embedding                           → (T, N, d_model)
+  8. ContextualDiffusion(tokens, corners, valid)      → (T, N, d_model)
+  9. NodePredictor + RelationshipPredictor            → scene graph
+ 10. TemporalEdgeAttention                           → final distributions
+
+No per-frame loops (except edge token formation — variable K per frame).
+Associative retrieval uses bidirectional per-object cross-attention over
+ALL T frames. Visibility embedding after retrieval informs downstream
+modules about observation provenance (direct vs retrieved).
 """
 
 import torch
@@ -20,28 +26,27 @@ import torch.nn as nn
 from typing import Dict, List, Optional
 
 from .scaffold_tokenizer import ScaffoldTokenizer
-from .per_object_memory import PerObjectEpisodicMemory
 from .associative_retriever import AssociativeRetriever
 from .contextual_diffusion import ContextualDiffusion
 
 from lib.supervised.worldsgg.worldsgg_base import (
     GlobalStructuralEncoder, NodePredictor, RelationshipPredictor,
-    CameraPoseEncoder, TemporalEdgeAttention,
+    CameraPoseEncoder, CameraTemporalEncoder, MotionFeatureEncoder,
+    TemporalEdgeAttention,
 )
 
 
 class AMWAE(nn.Module):
     """
-    Associative Masked World Auto-Encoder.
+    Associative Masked World Auto-Encoder (batched).
 
-    Processes frames sequentially, but each frame is an independent
-    masked auto-encoding step (no RNN/GRU recurrence). The episodic
-    memory bank provides temporal context through cross-attention.
-    Camera-aware tokenization enhances viewpoint reasoning.
+    Processes all T frames in a single forward pass with B=T batching.
+    Includes ego-motion encoding, object motion features, and a learned
+    visibility embedding applied after associative retrieval.
 
     Args:
-        config: AMWAEConfig with architecture hyperparameters.
-        num_object_classes: Number of object categories.
+        config: Config with architecture hyperparameters.
+        num_object_classes: Object categories.
         attention_class_num: Attention relationship classes.
         spatial_class_num: Spatial relationship classes.
         contact_class_num: Contacting relationship classes.
@@ -58,37 +63,39 @@ class AMWAE(nn.Module):
         super().__init__()
         self.config = config
 
-        # Module 1: Global Structural Encoder
+        # Module 1: Structural Encoder — (B, N, 8, 3) → (B, N, d_struct)
         self.structural_encoder = GlobalStructuralEncoder(
             d_struct=config.d_struct,
             d_hidden=config.d_struct // 2,
         )
 
-        # Module 2: Camera Pose Encoder
+        # Module 2: Camera Pose Encoder — (B, 4, 4) → (B, N, d_camera)
         self.camera_encoder = CameraPoseEncoder(
             d_camera=config.d_camera,
         )
 
-        # Module 3: Scaffold Tokenizer (evidence binding + masking + camera)
+        # Module 3: Camera Temporal Encoder — (T, 4, 4) → (T, d_camera)
+        self.camera_temporal_encoder = CameraTemporalEncoder(
+            d_camera=config.d_camera,
+        )
+
+        # Module 4: Motion Feature Encoder — vel/acc → (B, N, d_motion)
+        d_motion = config.d_motion
+        self.motion_encoder = MotionFeatureEncoder(
+            d_motion=d_motion,
+        )
+
+        # Module 5: Scaffold Tokenizer — bind evidence + mask + all features (B=T)
         self.scaffold_tokenizer = ScaffoldTokenizer(
             d_struct=config.d_struct,
             d_visual=config.d_visual,
             d_model=config.d_model,
             d_detector_roi=config.d_detector_roi,
             d_camera=config.d_camera,
+            d_motion=d_motion,
         )
 
-        # Module 4: Per-Object Episodic Memory (4A — replaces FIFO)
-        self.memory_bank = PerObjectEpisodicMemory(
-            max_objects=config.max_objects,
-            slots_per_object=getattr(config, 'slots_per_object', 5),
-            d_memory=config.d_model,
-        )
-
-        # Camera feature projector for memory storage
-        self.mem_cam_proj = nn.Linear(config.d_camera, config.d_model)
-
-        # Module 5: Associative Retriever (view-aware cross-attention, 4B)
+        # Module 6: Associative Retriever — bidirectional per-object cross-attention
         self.retriever = AssociativeRetriever(
             d_model=config.d_model,
             n_layers=config.n_cross_attn_layers,
@@ -98,7 +105,11 @@ class AMWAE(nn.Module):
             d_camera=config.d_camera,
         )
 
-        # Module 6: Contextual Diffusion (self-attention)
+        # Module 7: Visibility Embedding — applied after retrieval
+        # Informs downstream modules: 0 = retrieved/inferred, 1 = directly observed
+        self.visibility_emb = nn.Embedding(2, config.d_model)
+
+        # Module 8: Contextual Diffusion — spatial context propagation (B=T)
         self.diffusion = ContextualDiffusion(
             d_model=config.d_model,
             n_layers=config.n_self_attn_layers,
@@ -107,35 +118,35 @@ class AMWAE(nn.Module):
             dropout=config.dropout,
         )
 
-        # Module 7: Prediction Heads
+        # Module 9: Node Predictor
         self.node_predictor = NodePredictor(
             d_memory=config.d_model,
             num_classes=num_object_classes,
         )
 
+        # Module 10: Relationship Predictor
         clip_path = getattr(config, 'clip_embeddings_path', '')
         self.rel_predictor = RelationshipPredictor(
             d_model=config.d_model,
-            d_text=getattr(config, 'd_text', 128),
-            d_rel=getattr(config, 'd_rel', 256),
-            d_union_roi=getattr(config, 'd_union_roi', 1024),
+            d_text=config.d_text,
+            d_rel=config.d_rel,
+            d_union_roi=config.d_union_roi,
             attention_class_num=attention_class_num,
             spatial_class_num=spatial_class_num,
             contact_class_num=contact_class_num,
             clip_embeddings_path=clip_path,
-            n_rel_layers=getattr(config, 'n_rel_layers', 2),
-            n_rel_heads=getattr(config, 'n_rel_heads', 4),
+            n_rel_layers=config.n_rel_layers,
+            n_rel_heads=config.n_rel_heads,
             dropout=config.dropout,
         )
 
-        # Module 7b: Temporal edge attention
+        # Module 11: Temporal Edge Attention
         self.temporal_edge_attn = TemporalEdgeAttention(
-            d_rel=getattr(config, 'd_rel', 256),
-            n_heads=getattr(config, 'n_rel_heads', 4),
-            n_layers=getattr(config, 'n_temporal_edge_layers', 1),
+            d_rel=config.d_rel,
+            n_heads=config.n_rel_heads,
+            n_layers=config.n_temporal_edge_layers,
             dropout=config.dropout,
         )
-
 
         # Cross-view reconstruction projection
         self.reconstruction_proj = nn.Linear(config.d_model, config.d_visual)
@@ -154,275 +165,157 @@ class AMWAE(nn.Module):
         bboxes_2d_seq: Optional[List[torch.Tensor]] = None,
     ) -> Dict[str, List]:
         """
-        Process a sequence of frames via masked auto-encoding.
+        Process a full video in a single batched forward pass.
 
         Args:
-            visual_features_seq: List of (N_t, d_detector_roi) — DINO features.
-            corners_seq: List of (N_t, 8, 3) — world-frame 3D corners.
-            valid_mask_seq: List of (N_t,) bool — valid objects.
-            visibility_mask_seq: List of (N_t,) bool — visible in FOV.
-            person_idx_seq: List of (K_t,) — person pair indices.
-            object_idx_seq: List of (K_t,) — object pair indices.
-            p_mask_visible: Training masking probability for visible objects.
-            camera_pose_seq: List of (4, 4) tensors or None.
-            union_features_seq: List of (K_t, 1024) tensors or None.
-            bboxes_2d_seq: List of (N_t, 4) tensors or None.
+            visual_features_seq: T-list of (N, d_detector_roi) tensors.
+            corners_seq:         T-list of (N, 8, 3) tensors.
+            valid_mask_seq:      T-list of (N,) bool tensors.
+            visibility_mask_seq: T-list of (N,) bool tensors.
+            person_idx_seq:      T-list of (K_t,) long tensors.
+            object_idx_seq:      T-list of (K_t,) long tensors.
+            p_mask_visible:      Training masking probability.
+            camera_pose_seq:     T-list of (4, 4) tensors or None.
+            union_features_seq:  T-list of (K_t, d_union_roi) tensors or None.
+            bboxes_2d_seq:       Unused (kept for interface compat).
 
         Returns:
-            dict with per-frame lists including node_logits,
-            attention/spatial/contacting distributions, masking info,
-            retrieved tokens, attention weights, and simulated-unseen outputs.
+            dict with per-frame lists: node_logits, att/spa/con distributions,
+            masking info, and reconstruction targets.
         """
         T = len(corners_seq)
         device = corners_seq[0].device
 
-        outputs = {
-            "node_logits": [],
-            "attention_distribution": [],
-            "spatial_distribution": [],
-            "contacting_distribution": [],
-            "is_masked": [],
-            "original_visual": [],
-            "retrieved_tokens": [],
-            "attn_weights": [],
-            "memory_object_ids": [],
-            # Simulated-unseen clean fine-tuning outputs
-            "simulated_unseen_predictions": [],
-            "simulated_unseen_gt": [],
-            # Cross-view reconstruction targets (4D)
-            "reconstruction_targets": [],
-            "reconstruction_predictions": [],
-        }
+        # ==================== Stack inputs (T, N, ...) ====================
+        visual_all = torch.stack(visual_features_seq)       # (T, N, d_roi)
+        corners_all = torch.stack(corners_seq)              # (T, N, 8, 3)
+        valid_all = torch.stack(valid_mask_seq)              # (T, N)
+        visibility_all = torch.stack(visibility_mask_seq)    # (T, N)
 
-        # Collection lists for Phase B temporal attention
+        # ==================== Step 1: Structural encoding (B=T) ====================
+        struct_all, _ = self.structural_encoder(corners_all, valid_all)  # (T, N, d_struct)
+
+        # ==================== Step 2-3: Camera encoding (B=T) ====================
+        cam_all = None
+        ego_tokens_all = None
+        if camera_pose_seq is not None:
+            camera_pose_all = torch.stack(camera_pose_seq)  # (T, 4, 4)
+            _, cam_all = self.camera_encoder(camera_pose_all, corners_all, valid_all)
+            ego_tokens_all = self.camera_temporal_encoder(camera_pose_all)  # (T, d_camera)
+
+        # ==================== Step 4: Motion features (B=T) ====================
+        centers_all = corners_all.mean(dim=2)  # (T, N, 3)
+        velocity_all = torch.zeros_like(centers_all)
+        accel_all = torch.zeros_like(centers_all)
+        velocity_all[1:] = centers_all[1:] - centers_all[:-1]
+        accel_all[2:] = velocity_all[2:] - velocity_all[1:-1]
+
+        camera_R_all = None
+        if camera_pose_seq is not None:
+            camera_R_all = torch.stack(camera_pose_seq)[:, :3, :3]
+
+        motion_all = self.motion_encoder(
+            velocity=velocity_all, acceleration=accel_all,
+            camera_R=camera_R_all, valid_mask=valid_all,
+        )  # (T, N, d_motion)
+
+        # ==================== Step 5: Scaffold tokenization (B=T) ====================
+        hybrid_tokens, is_masked_all, original_visual_all = self.scaffold_tokenizer(
+            geometry_tokens=struct_all,
+            visual_features=visual_all,
+            visibility_mask=visibility_all,
+            valid_mask=valid_all,
+            p_mask_visible=p_mask_visible if self.training else 0.0,
+            cam_feats=cam_all,
+            motion_feats=motion_all,
+            ego_tokens=ego_tokens_all,
+        )  # (T, N, d_model), (T, N), (T, N, d_visual)
+
+        # ==================== Step 6: Associative retrieval (bidirectional) ====================
+        completed_tokens = self.retriever(
+            tokens=hybrid_tokens,
+            visibility_mask=visibility_all,
+            valid_mask=valid_all,
+            cam_feats=cam_all,
+        )  # (T, N, d_model)
+
+        # ==================== Step 7: Visibility embedding (after retrieval) ====================
+        # 0 = masked/retrieved, 1 = directly observed
+        vis_ids = visibility_all.long()  # (T, N)
+        completed_tokens = completed_tokens + self.visibility_emb(vis_ids)
+
+        # ==================== Step 8: Contextual diffusion (B=T) ====================
+        diffusion_out = self.diffusion(
+            tokens=completed_tokens,
+            corners=corners_all,
+            valid_mask=valid_all,
+        )
+        if isinstance(diffusion_out, tuple):
+            enriched_all = diffusion_out[0]  # (T, N, d_model)
+        else:
+            enriched_all = diffusion_out     # (T, N, d_model)
+
+        # ==================== Step 9: Node prediction (B=T) ====================
+        node_logits_all = self.node_predictor(enriched_all)  # (T, N, C)
+
+        # ==================== Step 10: Cross-view reconstruction ====================
+        recon_pred_all = self.reconstruction_proj(completed_tokens)  # (T, N, d_visual)
+
+        # ==================== Step 11: Edge prediction ====================
         collected_rel = []
         collected_pidx = []
         collected_oidx = []
 
         for t in range(T):
-            corners_t = corners_seq[t]          # (N_t, 8, 3)
-            valid_t = valid_mask_seq[t]           # (N_t,)
-            vis_t = visibility_mask_seq[t]        # (N_t,)
-            visual_t = visual_features_seq[t]     # (N_t, d_detector_roi)
-            person_idx_t = person_idx_seq[t]
-            object_idx_t = object_idx_seq[t]
+            enriched_t = enriched_all[t]
+            node_logits_t = node_logits_all[t]
+            person_idx = person_idx_seq[t]
+            object_idx = object_idx_seq[t]
 
-            # Optional per-frame data
-            camera_pose_t = camera_pose_seq[t] if camera_pose_seq is not None else None
+            person_class_idx = node_logits_t[person_idx].argmax(dim=-1)
+            object_class_idx = node_logits_t[object_idx].argmax(dim=-1)
+
             union_feat_t = union_features_seq[t] if union_features_seq is not None else None
-            bboxes_2d_t = bboxes_2d_seq[t] if bboxes_2d_seq is not None else None
 
-            N_t = corners_t.shape[0]
-
-            # --- Step 1: Encode wireframe geometry ---
-            struct_tokens, _ = self.structural_encoder(
-                corners_t.unsqueeze(0),
-                valid_t.unsqueeze(0),
-            )
-            struct_tokens = struct_tokens.squeeze(0)  # (N_t, d_struct)
-
-            # --- Step 2: Camera pose encoding ---
-            cam_feats = None
-            if camera_pose_t is not None:
-                _, cam_feats = self.camera_encoder(
-                    camera_pose=camera_pose_t.unsqueeze(0),
-                    corners=corners_t.unsqueeze(0),
-                    valid_mask=valid_t.unsqueeze(0),
-                )  # cam_feats: (1, N_t, d_camera)
-                cam_feats = cam_feats.squeeze(0)  # (N_t, d_camera)
-
-            # --- Step 3: Scaffold tokenization (bind evidence / apply mask + camera) ---
-            hybrid_tokens, is_masked_t, original_visual_t = self.scaffold_tokenizer(
-                geometry_tokens=struct_tokens,
-                visual_features=visual_t,
-                visibility_mask=vis_t,
-                valid_mask=valid_t,
-                p_mask_visible=p_mask_visible if self.training else 0.0,
-                cam_feats=cam_feats,
-            )
-
-            # --- Step 4: Store visible tokens in per-object episodic memory ---
-            with torch.no_grad():
-                # Compute unmasked tokens for memory storage
-                cam_for_storage = cam_feats if cam_feats is not None else torch.zeros(
-                    N_t, self.config.d_camera, device=device,
-                )
-                unmasked_tokens = self.scaffold_tokenizer.fusion_proj(
-                    torch.cat([
-                        struct_tokens,
-                        self.scaffold_tokenizer.visual_projector(visual_t),
-                        cam_for_storage,
-                    ], dim=-1)
-                )
-
-            # Store visible objects in per-object memory slots
-            visible_indices = torch.where(vis_t & valid_t)[0]
-            if visible_indices.numel() > 0 and camera_pose_t is not None:
-                self.memory_bank.store(
-                    object_indices=visible_indices,
-                    features=unmasked_tokens[visible_indices],
-                    camera_pose=camera_pose_t,
-                )
-
-            # --- Step 5: View-aware associative retrieval from per-object memory ---
-            # Retrieve all stored memory entries
-            all_indices = torch.arange(N_t, device=device)
-            mem_entries, mem_poses, mem_mask = self.memory_bank.retrieve(all_indices)
-            # mem_entries: (N_t, K, d_model), mem_mask: (N_t, K)
-
-            # Flatten for cross-attention: (N_t * K, d_model)
-            K_slots = mem_entries.shape[1]
-            flat_mem = mem_entries.view(-1, self.config.d_model)  # (N_t * K, d_model)
-            flat_mask = mem_mask.view(-1)  # (N_t * K,)
-
-            # Compute camera features for memory entries (for view-aware retrieval)
-            query_pose_feats_t = cam_feats  # (N_t, d_camera) or None
-            memory_pose_feats_t = None
-            if cam_feats is not None and camera_pose_t is not None:
-                # For each memory entry, compute cam features from capture pose
-                # Simplified: use stored pose positions as features
-                mem_cam_raw = mem_poses.view(-1, 4, 4)  # (N_t*K, 4, 4)
-                # Use translation + view direction as compact pose representation
-                mem_positions = mem_cam_raw[:, :3, 3]  # (N_t*K, 3)
-                mem_view_dirs = -mem_cam_raw[:, :3, 2]  # (N_t*K, 3)
-                mem_pose_compact = torch.cat([mem_positions, mem_view_dirs], dim=-1)  # (N_t*K, 6)
-                # Project to d_camera via zero-padding + linear
-                mem_pose_padded = torch.zeros(mem_pose_compact.shape[0], self.config.d_camera, device=device)
-                mem_pose_padded[:, :6] = mem_pose_compact
-                memory_pose_feats_t = mem_pose_padded  # (N_t*K, d_camera)
-
-            completed_tokens, attn_weights_t = self.retriever(
-                tokens=hybrid_tokens,
-                memory_tokens=flat_mem,
-                memory_valid=flat_mask,
-                query_pose_feats=query_pose_feats_t,
-                memory_pose_feats=memory_pose_feats_t,
-            )
-
-            # --- Step 6: Contextual diffusion (batched interface) ---
-            diffusion_out = self.diffusion(
-                tokens=completed_tokens.unsqueeze(0),
-                corners=corners_t.unsqueeze(0),
-                valid_mask=valid_t.unsqueeze(0),
-            )
-            # Handle both ContextualDiffusion (tensor) and EnergyDiffusion (tuple)
-            if isinstance(diffusion_out, tuple):
-                enriched = diffusion_out[0].squeeze(0)
-                h_prev_t = diffusion_out[1].squeeze(0)
-                if "h_prev_seq" not in outputs:
-                    outputs["h_prev_seq"] = []
-                    outputs["enriched_seq"] = []
-                outputs["h_prev_seq"].append(h_prev_t)
-                outputs["enriched_seq"].append(enriched)
-            else:
-                enriched = diffusion_out.squeeze(0)
-
-            # --- Step 7a: Node prediction + form/self-attend rel tokens (COLLECT) ---
-            node_logits = self.node_predictor(enriched)
-
-            person_class_idx = node_logits[person_idx_t].argmax(dim=-1)
-            object_class_idx = node_logits[object_idx_t].argmax(dim=-1)
-
-            # Form and self-attend relationship tokens
             rel_tokens = self.rel_predictor.form_rel_tokens(
-                enriched_states=enriched,
-                person_idx=person_idx_t,
-                object_idx=object_idx_t,
+                enriched_states=enriched_t,
+                person_idx=person_idx,
+                object_idx=object_idx,
                 person_class_idx=person_class_idx,
                 object_class_idx=object_class_idx,
                 union_features=union_feat_t,
             )
             rel_tokens = self.rel_predictor.self_attend(rel_tokens)
 
-            # Collect for temporal attention
             collected_rel.append(rel_tokens)
-            collected_pidx.append(person_idx_t)
-            collected_oidx.append(object_idx_t)
+            collected_pidx.append(person_idx)
+            collected_oidx.append(object_idx)
 
-            # Collect non-edge outputs
-            outputs["node_logits"].append(node_logits)
-            outputs["is_masked"].append(is_masked_t)
-            outputs["original_visual"].append(original_visual_t)
-            outputs["retrieved_tokens"].append(completed_tokens)
-            outputs["attn_weights"].append(attn_weights_t)
-            outputs["memory_object_ids"].append(all_indices)
-
-            # Cross-view reconstruction output (4D)
-            recon_pred = self.reconstruction_proj(completed_tokens)  # (N_t, d_visual)
-            outputs["reconstruction_predictions"].append(recon_pred)
-            outputs["reconstruction_targets"].append(original_visual_t)
-
-            # --- Step 8: Structured Simulated-Unseen (4C, training only) ---
-            # NOTE: Sim-unseen predictions are per-frame (no temporal attention)
-            if self.training and getattr(self.config, 'p_simulate_unseen', 0) > 0:
-                p_sim = self.config.p_simulate_unseen
-                n_visible = vis_t.sum().item()
-                n_to_mask = max(1, int(n_visible * p_sim))
-
-                if n_visible > 1:
-                    visible_indices = torch.where(vis_t & valid_t)[0]
-                    perm = torch.randperm(len(visible_indices), device=device)
-                    sim_mask_indices = visible_indices[perm[:n_to_mask]]
-
-                    sim_vis_t = vis_t.clone()
-                    sim_vis_t[sim_mask_indices] = False
-
-                    sim_tokens, sim_is_masked, _ = self.scaffold_tokenizer(
-                        geometry_tokens=struct_tokens,
-                        visual_features=visual_t,
-                        visibility_mask=sim_vis_t,
-                        valid_mask=valid_t,
-                        p_mask_visible=0.0,
-                        cam_feats=cam_feats,
-                    )
-
-                    sim_completed, _ = self.retriever(
-                        tokens=sim_tokens,
-                        memory_tokens=flat_mem,
-                        memory_valid=flat_mask,
-                        query_pose_feats=query_pose_feats_t,
-                        memory_pose_feats=memory_pose_feats_t,
-                    )
-
-                    sim_enriched = self.diffusion(
-                        tokens=sim_completed.unsqueeze(0),
-                        corners=corners_t.unsqueeze(0),
-                        valid_mask=valid_t.unsqueeze(0),
-                    ).squeeze(0)
-
-                    sim_rel_tokens = self.rel_predictor.form_rel_tokens(
-                        enriched_states=sim_enriched,
-                        person_idx=person_idx_t,
-                        object_idx=object_idx_t,
-                        person_class_idx=person_class_idx,
-                        object_class_idx=object_class_idx,
-                        union_features=union_feat_t,
-                    )
-                    sim_rel_tokens = self.rel_predictor.self_attend(sim_rel_tokens)
-                    sim_edge_out = self.rel_predictor.predict_from_tokens(sim_rel_tokens)
-
-                    outputs["simulated_unseen_predictions"].append(sim_edge_out)
-                    outputs["simulated_unseen_gt"].append(None)
-                else:
-                    outputs["simulated_unseen_predictions"].append(None)
-                    outputs["simulated_unseen_gt"].append(None)
-            else:
-                outputs["simulated_unseen_predictions"].append(None)
-                outputs["simulated_unseen_gt"].append(None)
-
-        # ========== Phase B: Per-pair temporal self-attention (single pass) ==========
+        # ==================== Step 12: Temporal edge attention ====================
         enriched_rel = self.temporal_edge_attn(collected_rel, collected_pidx, collected_oidx)
 
-        # ========== Phase C: Predict from temporally-enriched tokens ==========
+        # ==================== Build output lists ====================
+        outputs: Dict[str, List] = {
+            "node_logits": [],
+            "attention_distribution": [],
+            "spatial_distribution": [],
+            "contacting_distribution": [],
+            "is_masked": [],
+            "original_visual": [],
+            "reconstruction_predictions": [],
+            "reconstruction_targets": [],
+        }
+
         for t in range(T):
+            outputs["node_logits"].append(node_logits_all[t])
+            outputs["is_masked"].append(is_masked_all[t])
+            outputs["original_visual"].append(original_visual_all[t])
+            outputs["reconstruction_predictions"].append(recon_pred_all[t])
+            outputs["reconstruction_targets"].append(original_visual_all[t])
+
             edge_out = self.rel_predictor.predict_from_tokens(enriched_rel[t])
             outputs["attention_distribution"].append(edge_out["attention_distribution"])
             outputs["spatial_distribution"].append(edge_out["spatial_distribution"])
             outputs["contacting_distribution"].append(edge_out["contacting_distribution"])
 
         return outputs
-
-    def reset_memory(self):
-        """Reset episodic memory bank (call between videos)."""
-        self.memory_bank.reset()
-
