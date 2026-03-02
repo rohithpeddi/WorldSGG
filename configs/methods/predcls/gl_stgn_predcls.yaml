@@ -39,14 +39,8 @@ d_feedforward: 512
 max_objects: 64
 dropout: 0.1
 
-# ---- Relationship Predictor ----
+# ---- Edge Prediction ----
 d_rel: 256
-d_text: 128
-d_union_roi: 1024
-n_rel_layers: 2
-n_rel_heads: 4
-n_temporal_edge_layers: 1
-clip_embeddings_path: features/clip_features/clip_text_embeddings.npy
 
 # ---- Training ----
 nepoch: 20
@@ -62,20 +56,12 @@ include_invisible: true
 datasize: large
 
 # ---- GL-STGN Specific ----
-n_gnn_layers: 3
 n_graph_layers: 3
-bptt_chunk_size: 5
-chunk_length: 16
-memory_init: zeros
-p_mask_visual: 0.3
-teacher_forcing_epochs: 5
+n_temporal_layers: 2
+max_T: 256
 
 # ---- Loss ----
 lambda_vlm: 0.2
 label_smoothing_vlm: 0.2
-detach_unseen_memory: true
 lambda_smooth: 0.1
 movement_thresh: 0.3
-lambda_unseen: 0.2
-use_physics_veto: true
-physics_veto_dist_thresh: 2.0

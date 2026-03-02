@@ -23,8 +23,6 @@ class LKSLoss(nn.Module):
         self,
         lambda_vlm: float = 0.2,
         label_smoothing: float = 0.2,
-        use_physics_veto: bool = True,  # DEPRECATED — kept for backward compat, ignored
-        physics_veto_thresh: float = 2.0,
         bce_loss: bool = True,
         mode: str = "predcls",
     ):
@@ -144,17 +142,28 @@ class LKSLoss(nn.Module):
         return losses
 
     def _build_multi_label_gt(self, gt_list, num_classes, device):
+        """Build multi-hot ground truth from list of index sets (vectorized)."""
         K = len(gt_list)
         if K == 0:
             return torch.zeros(0, num_classes, device=device)
-        target = torch.zeros(K, num_classes, dtype=torch.float32, device=device)
+
+        # Normalize all entries to long tensors and collect row/col indices
+        row_indices = []
+        col_indices = []
         for i, indices in enumerate(gt_list):
             if isinstance(indices, torch.Tensor):
-                idx = indices.long()
+                idx = indices.long().to(device)
             elif isinstance(indices, (list, tuple)):
                 idx = torch.tensor(indices, dtype=torch.long, device=device)
             else:
                 idx = torch.tensor([indices], dtype=torch.long, device=device)
             if len(idx) > 0:
-                target[i, idx] = 1.0
+                row_indices.append(torch.full((len(idx),), i, dtype=torch.long, device=device))
+                col_indices.append(idx)
+
+        target = torch.zeros(K, num_classes, dtype=torch.float32, device=device)
+        if row_indices:
+            rows = torch.cat(row_indices)
+            cols = torch.cat(col_indices)
+            target[rows, cols] = 1.0
         return target

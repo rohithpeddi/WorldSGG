@@ -65,5 +65,4 @@ n_gnn_layers: 3
 # ---- Loss ----
 lambda_vlm: 0.2
 label_smoothing_vlm: 0.2
-use_physics_veto: true
-physics_veto_dist_thresh: 2.0
+

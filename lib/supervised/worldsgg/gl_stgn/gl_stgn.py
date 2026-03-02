@@ -1,30 +1,31 @@
 """
 GL-STGN: Global-Local Spatio-Temporal Graph Network
-=====================================================
+======================================================
 
-Main model that wires together:
-  1. GlobalStructuralEncoder — encodes 3D bbox layout ("wireframe")
-  2. CameraPoseEncoder — camera viewpoint + per-object cam features
-  3. CameraTemporalEncoder — full-temporal ego-motion self-attention
-  4. MotionFeatureEncoder — velocity/acceleration from 4D trajectories
-  5. PersistentWorldMemoryBank — GRU-based temporal memory for all objects
-  6. RelationalGraphTransformer — spatial-aware context propagation
-  7. NodePredictor + RelationshipPredictor(+TemporalEdgeAttention) — scene graph
+Simplified single-pass pipeline:
 
-Processes a video's frames sequentially, maintaining the memory bank state,
-and outputs per-frame scene graph predictions for ALL objects (visible + unseen).
+  1. GlobalStructuralEncoder(corners)           → (T, N, d_struct)
+  2. CameraPoseEncoder(pose, corners)           → (T, N, d_camera)
+  3. CameraTemporalEncoder(pose_stack)          → (T, d_camera)
+  4. MotionFeatureEncoder(vel, acc)             → (T, N, d_motion)
+  5. TemporalObjectTransformer(features, vis)   → (T, N, d_memory)
+  6. SpatialGNN(memory, corners, valid)         → (T, N, d_memory)
+  7. NodePredictor(enriched)                    → (T, N, num_classes)
+  8. EdgeMLP(person ⊕ object)                  → (T, K_max, att+spa+con)
+
+All batched with B=T. No per-frame loops. Temporal context flows
+through step 5 (per-object bidirectional attention over all frames).
+Spatial context propagates in step 6 (per-frame inter-object attention).
 """
 
 import torch
 import torch.nn as nn
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
-from .memory_bank import PersistentWorldMemoryBank
-from .graph_transformer import RelationalGraphTransformer
+from .memory_bank import TemporalObjectTransformer
 from lib.supervised.worldsgg.worldsgg_base import (
-    GlobalStructuralEncoder, NodePredictor, RelationshipPredictor,
+    GlobalStructuralEncoder, NodePredictor, SpatialGNN,
     CameraPoseEncoder, CameraTemporalEncoder, MotionFeatureEncoder,
-    TemporalEdgeAttention,
 )
 
 
@@ -32,16 +33,18 @@ class GLSTGN(nn.Module):
     """
     Global-Local Spatio-Temporal Graph Network.
 
-    Processes a sequence of frames from a video, maintaining persistent memory
-    for all objects, and predicts the world scene graph at each timestep.
-    Camera pose and ego-motion inform the memory update and tokenization.
+    Processes all T frames in a single forward pass with B=T batching.
+    TemporalObjectTransformer provides per-object bidirectional attention
+    across all frames. SpatialGNN provides per-frame inter-object context.
+    Edge predictions use a simple MLP on concatenated person+object states
+    (temporal context is already baked into both endpoints).
 
     Args:
-        config: GLSTGNConfig with architecture hyperparameters.
-        num_object_classes: Number of object categories (incl. background).
-        attention_class_num: Number of attention relationship classes.
-        spatial_class_num: Number of spatial relationship classes.
-        contact_class_num: Number of contacting relationship classes.
+        config: Method config namespace.
+        num_object_classes: Object categories.
+        attention_class_num: Attention relationship classes.
+        spatial_class_num: Spatial relationship classes.
+        contact_class_num: Contacting relationship classes.
     """
 
     def __init__(
@@ -55,43 +58,47 @@ class GLSTGN(nn.Module):
         super().__init__()
         self.config = config
         self.num_object_classes = num_object_classes
+        self.attention_class_num = attention_class_num
+        self.spatial_class_num = spatial_class_num
+        self.contact_class_num = contact_class_num
 
-        # Module 1: Global Structural Encoder
+        # Module 1: Structural Encoder — (B, N, 8, 3) → (B, N, d_struct)
         self.structural_encoder = GlobalStructuralEncoder(
             d_struct=config.d_struct,
             d_hidden=config.d_struct // 2,
         )
 
-        # Module 2: Camera Pose Encoder
+        # Module 2: Camera Pose Encoder — (B, 4, 4) → (B, N, d_camera)
         self.camera_encoder = CameraPoseEncoder(
             d_camera=config.d_camera,
         )
 
-        # Module 3: Camera Temporal Encoder (ego-motion)
+        # Module 3: Camera Temporal Encoder — (T, 4, 4) → (T, d_camera)
         self.camera_temporal_encoder = CameraTemporalEncoder(
             d_camera=config.d_camera,
         )
 
-        # Module 4: Persistent World Memory Bank
-        self.memory_bank = PersistentWorldMemoryBank(
-            d_memory=config.d_memory,
+        # Module 4: Motion Feature Encoder — vel/acc → (B, N, d_motion)
+        self.motion_encoder = MotionFeatureEncoder(
+            d_motion=config.d_motion,
+        )
+
+        # Module 5: Temporal Object Transformer (world memory bank)
+        self.temporal_transformer = TemporalObjectTransformer(
             d_visual=config.d_visual,
             d_struct=config.d_struct,
-            d_detector_roi=config.d_detector_roi,
-            n_heads=config.n_heads,
-            dropout=config.dropout,
             d_camera=config.d_camera,
-            d_motion=getattr(config, 'd_motion', 64),
+            d_motion=config.d_motion,
+            d_detector_roi=config.d_detector_roi,
+            d_memory=config.d_memory,
+            n_heads=config.n_heads,
+            n_layers=config.n_temporal_layers,
+            dropout=config.dropout,
+            max_T=config.max_T,
         )
 
-        # Module 5: Motion Feature Encoder (4D trajectory dynamics)
-        d_motion = getattr(config, 'd_motion', 64)
-        self.motion_encoder = MotionFeatureEncoder(
-            d_motion=d_motion,
-        )
-
-        # Module 6: Relational Graph Transformer
-        self.graph_transformer = RelationalGraphTransformer(
+        # Module 6: Spatial GNN — per-frame inter-object context (B=T)
+        self.spatial_gnn = SpatialGNN(
             d_model=config.d_memory,
             n_layers=config.n_graph_layers,
             n_heads=config.n_heads,
@@ -99,33 +106,22 @@ class GLSTGN(nn.Module):
             dropout=config.dropout,
         )
 
-        # Module 7: Prediction Heads
+        # Module 7: Node Predictor — (B, N, d_memory) → (B, N, num_classes)
         self.node_predictor = NodePredictor(
             d_memory=config.d_memory,
             num_classes=num_object_classes,
         )
 
-        clip_path = getattr(config, 'clip_embeddings_path', '')
-        self.rel_predictor = RelationshipPredictor(
-            d_model=config.d_memory,
-            d_text=getattr(config, 'd_text', 128),
-            d_rel=getattr(config, 'd_rel', 256),
-            d_union_roi=getattr(config, 'd_union_roi', 1024),
-            attention_class_num=attention_class_num,
-            spatial_class_num=spatial_class_num,
-            contact_class_num=contact_class_num,
-            clip_embeddings_path=clip_path,
-            n_rel_layers=getattr(config, 'n_rel_layers', 2),
-            n_rel_heads=getattr(config, 'n_rel_heads', 4),
-            dropout=config.dropout,
-        )
-
-        # Module 7b: Temporal edge attention
-        self.temporal_edge_attn = TemporalEdgeAttention(
-            d_rel=getattr(config, 'd_rel', 256),
-            n_heads=getattr(config, 'n_rel_heads', 4),
-            n_layers=getattr(config, 'n_temporal_edge_layers', 1),
-            dropout=config.dropout,
+        # Module 8: Edge MLP — [person ⊕ object] → [att + spa + con]
+        total_edge_classes = attention_class_num + spatial_class_num + contact_class_num
+        d_rel = getattr(config, 'd_rel', 256)
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(config.d_memory * 2, d_rel),
+            nn.ReLU(inplace=True),
+            nn.LayerNorm(d_rel),
+            nn.Linear(d_rel, d_rel),
+            nn.ReLU(inplace=True),
+            nn.Linear(d_rel, total_edge_classes),
         )
 
     def forward(
@@ -136,190 +132,135 @@ class GLSTGN(nn.Module):
         visibility_mask_seq: List[torch.Tensor],
         person_idx_seq: List[torch.Tensor],
         object_idx_seq: List[torch.Tensor],
-        p_mask_visual: float = 0.0,
         camera_pose_seq: Optional[List[torch.Tensor]] = None,
         union_features_seq: Optional[List[torch.Tensor]] = None,
-        bboxes_2d_seq: Optional[List[torch.Tensor]] = None,
     ) -> Dict[str, List]:
         """
-        Process a sequence of frames and predict scene graphs.
+        Process a full video in a single batched forward pass.
 
         Args:
-            visual_features_seq: List of (N_t, d_detector_roi) tensors.
-            corners_seq: List of (N_t, 8, 3) tensors.
-            valid_mask_seq: List of (N_t,) bool tensors.
-            visibility_mask_seq: List of (N_t,) bool tensors.
-            person_idx_seq: List of (K_t,) long tensors.
-            object_idx_seq: List of (K_t,) long tensors.
-            p_mask_visual: Visual feature masking probability (training only).
-            camera_pose_seq: List of (4, 4) tensors or None.
-            union_features_seq: List of (K_t, 1024) tensors or None.
-            bboxes_2d_seq: List of (N_t, 4) tensors or None.
+            visual_features_seq: T-list of (N, d_detector_roi) tensors.
+            corners_seq:         T-list of (N, 8, 3) tensors.
+            valid_mask_seq:      T-list of (N,) bool tensors.
+            visibility_mask_seq: T-list of (N,) bool tensors.
+            person_idx_seq:      T-list of (K_t,) long tensors.
+            object_idx_seq:      T-list of (K_t,) long tensors.
+            camera_pose_seq:     T-list of (4, 4) tensors or None.
+            union_features_seq:  Unused (kept for interface compat).
 
         Returns:
-            dict with lists (one per frame):
-                node_logits, attention/spatial/contacting distributions,
-                memory_states, detached edge predictions for memory shielding.
+            dict with per-frame lists: node_logits, att/spa/con distributions.
         """
         T = len(corners_seq)
         device = corners_seq[0].device
 
-        outputs = {
+        # ==================== Stack inputs (T, N, ...) ====================
+        visual_all = torch.stack(visual_features_seq)       # (T, N, d_roi)
+        corners_all = torch.stack(corners_seq)              # (T, N, 8, 3)
+        valid_all = torch.stack(valid_mask_seq)              # (T, N)
+        visibility_all = torch.stack(visibility_mask_seq)    # (T, N)
+
+        # ==================== Step 1: Structural encoding (B=T) ====================
+        struct_all, _ = self.structural_encoder(corners_all, valid_all)  # (T, N, d_struct)
+
+        # ==================== Step 2-3: Camera encoding (B=T) ====================
+        cam_all = None
+        ego_tokens_all = None
+        if camera_pose_seq is not None:
+            camera_pose_all = torch.stack(camera_pose_seq)  # (T, 4, 4)
+            _, cam_all = self.camera_encoder(camera_pose_all, corners_all, valid_all)
+            ego_tokens_all = self.camera_temporal_encoder(camera_pose_all)  # (T, d_camera)
+
+        # ==================== Step 4: Motion features (B=T) ====================
+        centers_all = corners_all.mean(dim=2)  # (T, N, 3)
+        velocity_all = torch.zeros_like(centers_all)
+        accel_all = torch.zeros_like(centers_all)
+        velocity_all[1:] = centers_all[1:] - centers_all[:-1]
+        accel_all[2:] = velocity_all[2:] - velocity_all[1:-1]
+
+        camera_R_all = None
+        if camera_pose_seq is not None:
+            camera_R_all = torch.stack(camera_pose_seq)[:, :3, :3]
+
+        motion_all = self.motion_encoder(
+            velocity=velocity_all, acceleration=accel_all,
+            camera_R=camera_R_all, valid_mask=valid_all,
+        )  # (T, N, d_motion)
+
+        # ==================== Step 5: Temporal Object Transformer ====================
+        if ego_tokens_all is None:
+            ego_tokens_all = torch.zeros(T, self.config.d_camera, device=device)
+
+        memory_all = self.temporal_transformer(
+            visual_features=visual_all, struct_tokens=struct_all,
+            cam_feats=cam_all, motion_feats=motion_all,
+            ego_tokens=ego_tokens_all, visibility_mask=visibility_all,
+            valid_mask=valid_all,
+        )  # (T, N, d_memory)
+
+        # ==================== Step 6: Spatial GNN (B=T) ====================
+        enriched_all = self.spatial_gnn(
+            tokens=memory_all, corners=corners_all, valid_mask=valid_all,
+        )  # (T, N, d_memory)
+
+        # ==================== Step 7: Node prediction (B=T) ====================
+        node_logits_all = self.node_predictor(enriched_all)  # (T, N, num_classes)
+
+        # ==================== Step 8: Edge prediction (batched) ====================
+        # Pad person/object indices to K_max and batch-gather
+        K_per_frame = [p.shape[0] for p in person_idx_seq]
+        K_max = max(K_per_frame) if K_per_frame else 0
+
+        if K_max > 0:
+            # Pad indices to (T, K_max) for batched gather
+            padded_pidx = torch.zeros(T, K_max, dtype=torch.long, device=device)
+            padded_oidx = torch.zeros(T, K_max, dtype=torch.long, device=device)
+            edge_valid = torch.zeros(T, K_max, dtype=torch.bool, device=device)
+
+            for t in range(T):
+                K_t = K_per_frame[t]
+                if K_t > 0:
+                    padded_pidx[t, :K_t] = person_idx_seq[t]
+                    padded_oidx[t, :K_t] = object_idx_seq[t]
+                    edge_valid[t, :K_t] = True
+
+            # Gather person and object representations: (T, K_max, d_memory)
+            person_repr = torch.gather(
+                enriched_all, 1, padded_pidx.unsqueeze(-1).expand(-1, -1, enriched_all.shape[-1])
+            )
+            object_repr = torch.gather(
+                enriched_all, 1, padded_oidx.unsqueeze(-1).expand(-1, -1, enriched_all.shape[-1])
+            )
+
+            # Concatenate and predict: (T, K_max, d_memory*2) → (T, K_max, total_classes)
+            pair_input = torch.cat([person_repr, object_repr], dim=-1)
+            edge_logits = self.edge_mlp(pair_input)  # (T, K_max, att+spa+con)
+
+            # Split into att/spa/con
+            att_end = self.attention_class_num
+            spa_end = att_end + self.spatial_class_num
+            att_logits = edge_logits[:, :, :att_end]           # (T, K_max, 3)
+            spa_logits = edge_logits[:, :, att_end:spa_end]    # (T, K_max, 6)
+            con_logits = edge_logits[:, :, spa_end:]           # (T, K_max, 17)
+
+        # ==================== Build output lists ====================
+        outputs: Dict[str, List] = {
             "node_logits": [],
             "attention_distribution": [],
             "spatial_distribution": [],
             "contacting_distribution": [],
-            "memory_states": [],
         }
 
-        memory = None
-        prev_corners = None
-        prev_velocity = None
-
-        # Collection lists for Phase B temporal attention
-        collected_rel = []
-        collected_pidx = []
-        collected_oidx = []
-
-        # --- Pre-compute full-temporal ego-motion tokens ---
-        ego_tokens_all = None
-        if camera_pose_seq is not None:
-            pose_stack = torch.stack(camera_pose_seq, dim=0)  # (T, 4, 4)
-            ego_tokens_all = self.camera_temporal_encoder(pose_stack)  # (T, d_camera)
-
         for t in range(T):
-            corners_t = corners_seq[t]          # (N_t, 8, 3)
-            valid_t = valid_mask_seq[t]           # (N_t,)
-            vis_t = visibility_mask_seq[t]        # (N_t,)
-            visual_t = visual_features_seq[t]     # (N_t, d_detector_roi)
-            person_idx_t = person_idx_seq[t]      # (K_t,)
-            object_idx_t = object_idx_seq[t]      # (K_t,)
-
-            # Optional per-frame data
-            camera_pose_t = camera_pose_seq[t] if camera_pose_seq is not None else None
-            union_feat_t = union_features_seq[t] if union_features_seq is not None else None
-            bboxes_2d_t = bboxes_2d_seq[t] if bboxes_2d_seq is not None else None
-
-            N_t = corners_t.shape[0]
-
-            # --- Step 1: Encode global structure ---
-            struct_tokens, global_token = self.structural_encoder(
-                corners_t.unsqueeze(0),  # (1, N_t, 8, 3)
-                valid_t.unsqueeze(0),    # (1, N_t)
-            )
-            struct_tokens = struct_tokens.squeeze(0)  # (N_t, d_struct)
-            global_token = global_token.squeeze(0)    # (d_struct,)
-
-            # --- Step 2: Camera pose encoding ---
-            cam_feats = None
-            ego_motion_token = None
-            if camera_pose_t is not None:
-                _, cam_feats = self.camera_encoder(
-                    camera_pose=camera_pose_t.unsqueeze(0),
-                    corners=corners_t.unsqueeze(0),
-                    valid_mask=valid_t.unsqueeze(0),
-                )  # cam_feats: (1, N_t, d_camera)
-                cam_feats = cam_feats.squeeze(0)  # (N_t, d_camera)
-
-                ego_motion_token = ego_tokens_all[t]  # (d_camera,)
-
-            # --- Step 3: Compute motion features from 4D trajectories ---
-            velocity = None
-            acceleration = None
-            if prev_corners is not None:
-                velocity = MotionFeatureEncoder.compute_velocity(corners_t, prev_corners)
-                if prev_velocity is not None:
-                    acceleration = velocity - prev_velocity
-
-            camera_R = camera_pose_t[:3, :3].unsqueeze(0) if camera_pose_t is not None else None
-            motion_feats = self.motion_encoder(
-                velocity=velocity.unsqueeze(0) if velocity is not None else None,
-                acceleration=acceleration.unsqueeze(0) if acceleration is not None else None,
-                camera_R=camera_R,
-                valid_mask=valid_t.unsqueeze(0),
-            ).squeeze(0)  # (N_t, d_motion)
-
-            # Track for next frame
-            prev_corners = corners_t.detach()
-            prev_velocity = velocity.detach() if velocity is not None else None
-
-            # --- Step 4: Update memory bank ---
-            if memory is None:
-                # First frame: initialize memory
-                memory = self.memory_bank.initialize_memory(
-                    visual_features=visual_t,
-                    struct_tokens=struct_tokens,
-                    valid_mask=valid_t,
-                    cam_feats=cam_feats,
-                    motion_feats=motion_feats,
-                )
+            outputs["node_logits"].append(node_logits_all[t])  # (N, C)
+            K_t = K_per_frame[t]
+            if K_max > 0 and K_t > 0:
+                outputs["attention_distribution"].append(att_logits[t, :K_t])
+                outputs["spatial_distribution"].append(torch.sigmoid(spa_logits[t, :K_t]))
+                outputs["contacting_distribution"].append(torch.sigmoid(con_logits[t, :K_t]))
             else:
-                # Handle size changes (new objects appearing)
-                N_prev = memory.shape[0]
-                if N_t > N_prev:
-                    new_mem = torch.zeros(
-                        N_t - N_prev, self.config.d_memory,
-                        device=device,
-                    )
-                    memory = torch.cat([memory, new_mem], dim=0)
-                elif N_t < N_prev:
-                    memory = memory[:N_t]
-
-                # Update memory with ego-motion for unseen cross-attention
-                memory = self.memory_bank.step(
-                    memory=memory,
-                    visual_features=visual_t,
-                    struct_tokens=struct_tokens,
-                    global_struct_tokens=struct_tokens,
-                    visibility_mask=vis_t,
-                    valid_mask=valid_t,
-                    p_mask_visual=p_mask_visual if self.training else 0.0,
-                    cam_feats=cam_feats,
-                    ego_motion_token=ego_motion_token,
-                    motion_feats=motion_feats,
-                )
-
-            # --- Step 5: Relational reasoning via Graph Transformer (batched interface) ---
-            enriched = self.graph_transformer(
-                memory_states=memory.unsqueeze(0),
-                corners=corners_t.unsqueeze(0),
-                valid_mask=valid_t.unsqueeze(0),
-            ).squeeze(0)  # (N_t, d_memory)
-
-            # --- Step 6: Node prediction + form/self-attend rel tokens (COLLECT) ---
-            node_logits = self.node_predictor(enriched)  # (N_t, num_classes)
-
-            person_class_idx = node_logits[person_idx_t].argmax(dim=-1)
-            object_class_idx = node_logits[object_idx_t].argmax(dim=-1)
-
-            rel_tokens = self.rel_predictor.form_rel_tokens(
-                enriched_states=enriched,
-                person_idx=person_idx_t,
-                object_idx=object_idx_t,
-                person_class_idx=person_class_idx,
-                object_class_idx=object_class_idx,
-                union_features=union_feat_t,
-            )
-            rel_tokens = self.rel_predictor.self_attend(rel_tokens)
-
-            # Collect for temporal attention
-            collected_rel.append(rel_tokens)
-            collected_pidx.append(person_idx_t)
-            collected_oidx.append(object_idx_t)
-
-            # Collect non-edge outputs
-            outputs["node_logits"].append(node_logits)
-            outputs["memory_states"].append(memory.detach().clone())
-
-        # ========== Phase B: Per-pair temporal self-attention (single pass) ==========
-        enriched_rel = self.temporal_edge_attn(collected_rel, collected_pidx, collected_oidx)
-
-        # ========== Phase C: Predict from temporally-enriched tokens ==========
-        for t in range(T):
-            edge_out = self.rel_predictor.predict_from_tokens(enriched_rel[t])
-            outputs["attention_distribution"].append(edge_out["attention_distribution"])
-            outputs["spatial_distribution"].append(edge_out["spatial_distribution"])
-            outputs["contacting_distribution"].append(edge_out["contacting_distribution"])
+                outputs["attention_distribution"].append(torch.zeros(0, self.attention_class_num, device=device))
+                outputs["spatial_distribution"].append(torch.zeros(0, self.spatial_class_num, device=device))
+                outputs["contacting_distribution"].append(torch.zeros(0, self.contact_class_num, device=device))
 
         return outputs
-
