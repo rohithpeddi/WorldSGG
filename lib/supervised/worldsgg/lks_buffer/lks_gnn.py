@@ -23,6 +23,7 @@ No per-frame loops — fully batched.
 """
 
 import logging
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -103,6 +104,7 @@ class LKSGNN(nn.Module):
 
         # Module 6: Relationship predictor
         clip_path = getattr(config, 'clip_embeddings_path', '')
+        clip_path = Path(config.data_path) / clip_path if clip_path else None
         self.rel_predictor = RelationshipPredictor(
             d_model=config.d_model,
             d_text=config.d_text,
