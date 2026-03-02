@@ -2,7 +2,7 @@
 WSGG Training Methods
 ======================
 
-Thin per-method training classes. Each overrides:
+Per-method training classes. Each overrides:
   - init_model()               → create model
   - init_loss_fn()             → create loss module
   - is_temporal()              → sequential or frame-shuffled
@@ -10,7 +10,10 @@ Thin per-method training classes. Each overrides:
   - process_test_video(batch)  → inference
 
 Usage:
-  python train_wsgg_methods.py --config configs/wsgg.yaml --method_name gl_stgn
+  python train_wsgg_methods.py --config configs/methods/predcls/gl_stgn_predcls.yaml
+  python train_wsgg_methods.py --config configs/methods/predcls/amwae_predcls.yaml
+  python train_wsgg_methods.py --config configs/methods/predcls/amwae_pp_predcls.yaml
+  python train_wsgg_methods.py --config configs/methods/predcls/lks_buffer_predcls.yaml
 """
 
 import torch
@@ -20,7 +23,7 @@ from train_wsgg_base import TrainWSGGBase
 
 
 # ============================================================================
-# GL-STGN (Method 1: Recurrent Temporal Memory)
+# GL-STGN (Recurrent Temporal Memory)
 # ============================================================================
 
 class TrainGLSTGN(TrainWSGGBase):
@@ -42,12 +45,12 @@ class TrainGLSTGN(TrainWSGGBase):
     def init_loss_fn(self):
         from lib.supervised.worldsgg.gl_stgn.loss import GLSTGNLoss
         self._loss_fn = GLSTGNLoss(
-            lambda_vlm=getattr(self._conf, 'lambda_vlm', 0.2),
-            label_smoothing=getattr(self._conf, 'label_smoothing_vlm', 0.2),
-            use_physics_veto=getattr(self._conf, 'use_physics_veto', True),
-            physics_veto_thresh=getattr(self._conf, 'physics_veto_dist_thresh', 2.0),
-            lambda_smooth=getattr(self._conf, 'lambda_smooth', 0.1),
-            movement_thresh=getattr(self._conf, 'movement_thresh', 0.3),
+            lambda_vlm=self._conf.lambda_vlm,
+            label_smoothing=self._conf.label_smoothing_vlm,
+            use_physics_veto=self._conf.use_physics_veto,
+            physics_veto_thresh=self._conf.physics_veto_dist_thresh,
+            lambda_smooth=self._conf.lambda_smooth,
+            movement_thresh=self._conf.movement_thresh,
         )
 
     def is_temporal(self) -> bool:
@@ -55,10 +58,8 @@ class TrainGLSTGN(TrainWSGGBase):
 
     def process_train_video(self, batch) -> dict:
         tensors = batch
-        self._model.reset_memory(self._device)
-
         total_losses = {}
-        chunk_size = getattr(self._conf, 'bptt_chunk_size', 5)
+        chunk_size = self._conf.bptt_chunk_size
         T = len(tensors) if isinstance(tensors, list) else 1
 
         for t in range(T):
@@ -76,13 +77,11 @@ class TrainGLSTGN(TrainWSGGBase):
             for k, v in frame_losses.items():
                 total_losses[k] = total_losses.get(k, 0.0) + v
 
-            # BPTT: truncate gradients every chunk_size frames
             if (t + 1) % chunk_size == 0 and t < T - 1:
                 loss = sum(total_losses.values())
                 loss.backward()
                 self._optimizer.step()
                 self._optimizer.zero_grad()
-                self._model.detach_memory()
                 total_losses = {}
 
         remaining = T % chunk_size or chunk_size
@@ -90,7 +89,6 @@ class TrainGLSTGN(TrainWSGGBase):
 
     def process_test_video(self, batch) -> dict:
         tensors = batch
-        self._model.reset_memory(self._device)
         all_preds = []
 
         T = len(tensors) if isinstance(tensors, list) else 1
@@ -110,7 +108,7 @@ class TrainGLSTGN(TrainWSGGBase):
 
 
 # ============================================================================
-# AMWAE (Method 2: Associative Masked World Auto-Encoder)
+# AMWAE (Associative Masked World Auto-Encoder)
 # ============================================================================
 
 class TrainAMWAE(TrainWSGGBase):
@@ -132,14 +130,14 @@ class TrainAMWAE(TrainWSGGBase):
     def init_loss_fn(self):
         from lib.supervised.worldsgg.amwae.loss import AMWAELoss
         self._loss_fn = AMWAELoss(
-            lambda_vlm=getattr(self._conf, 'lambda_vlm', 0.2),
-            lambda_recon=getattr(self._conf, 'lambda_reconstruction', 1.0),
-            lambda_recon_dominance=getattr(self._conf, 'lambda_recon_dominance', 5.0),
-            lambda_contrastive=getattr(self._conf, 'lambda_contrastive', 0.5),
-            p_simulate_unseen=getattr(self._conf, 'p_simulate_unseen', 0.25),
-            label_smoothing=getattr(self._conf, 'label_smoothing_vlm', 0.2),
-            use_physics_veto=getattr(self._conf, 'use_physics_veto', True),
-            physics_veto_thresh=getattr(self._conf, 'physics_veto_dist_thresh', 2.0),
+            lambda_vlm=self._conf.lambda_vlm,
+            lambda_recon=self._conf.lambda_reconstruction,
+            lambda_recon_dominance=self._conf.lambda_recon_dominance,
+            lambda_contrastive=self._conf.lambda_contrastive,
+            p_simulate_unseen=self._conf.p_simulate_unseen,
+            label_smoothing=self._conf.label_smoothing_vlm,
+            use_physics_veto=self._conf.use_physics_veto,
+            physics_veto_thresh=self._conf.physics_veto_dist_thresh,
         )
 
     def is_temporal(self) -> bool:
@@ -191,7 +189,7 @@ class TrainAMWAE(TrainWSGGBase):
 
 
 # ============================================================================
-# LKS Buffer (Baseline 1: Passive Memory)
+# LKS Buffer (Passive Memory Baseline)
 # ============================================================================
 
 class TrainLKSGNN(TrainWSGGBase):
@@ -213,10 +211,10 @@ class TrainLKSGNN(TrainWSGGBase):
     def init_loss_fn(self):
         from lib.supervised.worldsgg.lks_buffer.loss import LKSLoss
         self._loss_fn = LKSLoss(
-            lambda_vlm=getattr(self._conf, 'lambda_vlm', 0.2),
-            label_smoothing=getattr(self._conf, 'label_smoothing_vlm', 0.2),
-            use_physics_veto=getattr(self._conf, 'use_physics_veto', True),
-            physics_veto_thresh=getattr(self._conf, 'physics_veto_dist_thresh', 2.0),
+            lambda_vlm=self._conf.lambda_vlm,
+            label_smoothing=self._conf.label_smoothing_vlm,
+            use_physics_veto=self._conf.use_physics_veto,
+            physics_veto_thresh=self._conf.physics_veto_dist_thresh,
         )
 
     def is_temporal(self) -> bool:
@@ -224,12 +222,10 @@ class TrainLKSGNN(TrainWSGGBase):
 
     def process_train_video(self, batch) -> dict:
         tensors = batch
-        self._model.reset_memory(self._device)
 
         T = len(tensors) if isinstance(tensors, list) else 1
         frames = tensors if isinstance(tensors, list) else [tensors]
 
-        # Build sequence inputs for forward()
         pred = self._model.forward(
             visual_features_seq=[f["visual_features"].to(self._device) for f in frames],
             corners_seq=[f["corners"].to(self._device) for f in frames],
@@ -239,7 +235,6 @@ class TrainLKSGNN(TrainWSGGBase):
             object_idx_seq=[f["object_idx"].to(self._device) for f in frames],
         )
 
-        # Compute loss per frame
         total_losses = {}
         for t in range(T):
             frame = frames[t]
@@ -257,7 +252,6 @@ class TrainLKSGNN(TrainWSGGBase):
 
     def process_test_video(self, batch) -> dict:
         tensors = batch
-        self._model.reset_memory(self._device)
 
         T = len(tensors) if isinstance(tensors, list) else 1
         frames = tensors if isinstance(tensors, list) else [tensors]
@@ -271,7 +265,6 @@ class TrainLKSGNN(TrainWSGGBase):
             object_idx_seq=[f["object_idx"].to(self._device) for f in frames],
         )
 
-        # Return last frame prediction
         if T > 0:
             return {
                 "node_logits": pred["node_logits"][-1],
@@ -282,10 +275,8 @@ class TrainLKSGNN(TrainWSGGBase):
         return None
 
 
-
-
 # ============================================================================
-# AMWAE++ (Method 2b: Energy Transformer variant)
+# AMWAE++ (Energy Transformer variant)
 # ============================================================================
 
 class TrainAMWAEPP(TrainWSGGBase):
@@ -307,13 +298,13 @@ class TrainAMWAEPP(TrainWSGGBase):
     def init_loss_fn(self):
         from lib.supervised.worldsgg.amwae.loss import AMWAELoss
         self._loss_fn = AMWAELoss(
-            lambda_vlm=getattr(self._conf, 'lambda_vlm', 0.2),
-            lambda_recon=getattr(self._conf, 'lambda_reconstruction', 1.0),
-            lambda_recon_dominance=getattr(self._conf, 'lambda_recon_dominance', 5.0),
-            lambda_contrastive=getattr(self._conf, 'lambda_contrastive', 0.5),
-            p_simulate_unseen=getattr(self._conf, 'p_simulate_unseen', 0.25),
-            label_smoothing=getattr(self._conf, 'label_smoothing_vlm', 0.2),
-            lambda_stability=getattr(self._conf, 'lambda_stability', 0.1),
+            lambda_vlm=self._conf.lambda_vlm,
+            lambda_recon=self._conf.lambda_reconstruction,
+            lambda_recon_dominance=self._conf.lambda_recon_dominance,
+            lambda_contrastive=self._conf.lambda_contrastive,
+            p_simulate_unseen=self._conf.p_simulate_unseen,
+            label_smoothing=self._conf.label_smoothing_vlm,
+            lambda_stability=self._conf.lambda_stability,
         )
 
     def is_temporal(self) -> bool:
@@ -378,7 +369,7 @@ METHOD_MAP = {
 
 def main():
     conf = load_wsgg_config()
-    method_name = getattr(conf, 'method_name', 'gl_stgn')
+    method_name = conf.method_name
 
     if method_name not in METHOD_MAP:
         raise ValueError(f"Unknown method: {method_name}. Choose from: {list(METHOD_MAP.keys())}")

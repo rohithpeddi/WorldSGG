@@ -1,138 +1,74 @@
 """
-LKS Memory Buffer
-===================
+LKS Memory Buffer (Vectorized)
+================================
 
-Non-differentiable zero-order hold memory buffer.
-The core mechanic: "objects freeze when the camera looks away."
+Non-differentiable zero-order hold memory — fully vectorized over T frames.
+Replaces the sequential LKSMemoryBuffer class with a pure function.
 
-Update rule (hard-coded, NO neural parameters):
-  - Visible (i ∈ FOV):  M[i] ← V_i^t   (overwrite with fresh features)
-  - Not visible:         M[i] ← M[i]    (keep stale, staleness++)
-  - Never seen:          M[i] = zeros    (no prior info)
+Update rule per object n at frame t:
+  - If visible at t:  buffer[t,n] = projected_visual[t,n]  (fresh)
+  - If not visible:   buffer[t,n] = buffer[last_seen,n]    (stale)
+  - If never seen:    buffer[t,n] = zeros                  (fog of war)
 
-All operations use .detach() — NO gradients flow through time.
-This is NOT an nn.Module. It is purely programmatic state.
+Implementation uses cummax to find the most recent visible frame for
+each (t, n) pair, then advanced indexing to gather features in O(1).
 """
 
 import torch
-from typing import Optional
 
 
-class LKSMemoryBuffer:
+@torch.no_grad()
+def vectorized_lks_buffer(
+    projected_visual: torch.Tensor,
+    visibility_mask: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> tuple:
     """
-    Persistent state buffer storing the "last known" visual feature
-    for every object in the scene.
+    Compute the LKS buffer state for ALL frames simultaneously.
 
     Args:
-        max_objects: Maximum number of object slots.
-        d_visual: Dimension of projected visual features.
-        device: Torch device.
+        projected_visual: (T, N, d_visual) — projected DINO features per frame.
+        visibility_mask:  (T, N) bool — True if object detected this frame.
+        valid_mask:       (T, N) bool — True for real (non-padding) objects.
+
+    Returns:
+        buffer_features: (T, N, d_visual) — detached buffered features.
+        staleness:       (T, N) long — frames since last seen (0 = just seen).
     """
+    T, N, D = projected_visual.shape
+    device = projected_visual.device
 
-    def __init__(
-        self,
-        max_objects: int,
-        d_visual: int,
-        device: str = "cpu",
-    ):
-        self.max_objects = max_objects
-        self.d_visual = d_visual
-        self.device = torch.device(device)
+    # Overwrite mask: visible AND valid
+    overwrite = visibility_mask & valid_mask  # (T, N)
 
-        # The buffer: (N, d_visual) — initialized to zeros ("fog of war")
-        self.buffer = torch.zeros(
-            max_objects, d_visual,
-            dtype=torch.float32,
-            device=self.device,
-        )
+    # Frame indices: (T, 1) broadcast to (T, N)
+    frame_ids = torch.arange(T, device=device).unsqueeze(1).expand(T, N)  # (T, N)
 
-        # Track how many frames since each object was last seen
-        self.staleness = torch.zeros(
-            max_objects, dtype=torch.long, device=self.device,
-        )
+    # For each (t, n): frame index if overwrite, else -1
+    last_seen_raw = torch.where(overwrite, frame_ids, torch.full_like(frame_ids, -1))  # (T, N)
 
-        # Track whether each object has EVER been seen
-        self.ever_seen = torch.zeros(
-            max_objects, dtype=torch.bool, device=self.device,
-        )
+    # Cumulative max propagates the most recent visible frame forward in time
+    last_seen_at, _ = last_seen_raw.cummax(dim=0)  # (T, N)
 
-    def reset(self, N: int = None):
-        """
-        Reset buffer to fog of war (call at start of each video).
+    # Staleness: current frame - last seen frame (0 = just seen)
+    staleness = frame_ids - last_seen_at  # (T, N)
 
-        Args:
-            N: Optional new max_objects count. If None, reuses current size.
-        """
-        if N is not None and N != self.max_objects:
-            self.max_objects = N
-            self.buffer = torch.zeros(
-                N, self.d_visual,
-                dtype=torch.float32,
-                device=self.device,
-            )
-            self.staleness = torch.zeros(N, dtype=torch.long, device=self.device)
-            self.ever_seen = torch.zeros(N, dtype=torch.bool, device=self.device)
-        else:
-            self.buffer.zero_()
-            self.staleness.zero_()
-            self.ever_seen.fill_(False)
+    # Never-seen objects have last_seen_at == -1
+    never_seen = last_seen_at < 0  # (T, N)
+    staleness = staleness.clamp(min=0)
 
-    @torch.no_grad()
-    def update(
-        self,
-        visual_features: torch.Tensor,
-        visibility_mask: torch.Tensor,
-        valid_mask: torch.Tensor,
-        camera_pose: Optional[torch.Tensor] = None,
-        corners: Optional[torch.Tensor] = None,
-    ):
-        """
-        Zero-order hold update.
+    # Gather features from the last-seen frame
+    # Clamp indices for safe gather (never-seen will be zeroed out below)
+    gather_idx = last_seen_at.clamp(min=0)  # (T, N)
 
-        Args:
-            visual_features: (N, d_visual) — projected DINO features.
-            visibility_mask: (N,) bool — True if detected this frame.
-            valid_mask: (N,) bool — True for real objects.
-            camera_pose: (4, 4) or None — current camera extrinsic (unused, kept for API compat).
-            corners: (N, 8, 3) or None — 3D bbox corners (unused, kept for API compat).
-        """
-        N = visual_features.shape[0]
-        assert N <= self.max_objects, \
-            f"Got {N} objects but buffer has {self.max_objects} slots"
+    # Advanced indexing: buffer_features[t, n] = projected_visual[gather_idx[t,n], n]
+    n_idx = torch.arange(N, device=device).unsqueeze(0).expand(T, N)  # (T, N)
+    buffer_features = projected_visual[gather_idx, n_idx]  # (T, N, D)
 
-        # Hard overwrite for visible + valid objects
-        overwrite_mask = visibility_mask & valid_mask  # (N,)
-        self.buffer[:N][overwrite_mask] = visual_features[overwrite_mask].detach()
+    # Zero out never-seen objects (fog of war)
+    buffer_features = buffer_features.masked_fill(never_seen.unsqueeze(-1), 0.0)
 
-        # Track staleness
-        self.staleness[:N] += 1  # Everything gets one frame older
-        self.staleness[:N][overwrite_mask] = 0  # Reset for freshly seen
+    # Zero out invalid (padding) objects
+    buffer_features = buffer_features * valid_mask.unsqueeze(-1).float()
 
-        # Track ever-seen
-        self.ever_seen[:N] |= overwrite_mask
-
-    def get_features(self, N: int = None) -> torch.Tensor:
-        """
-        Return current buffer state (detached).
-
-        Args:
-            N: Number of objects to return (default: all).
-
-        Returns:
-            (N, d_visual) — detached visual features.
-        """
-        if N is None:
-            N = self.max_objects
-        return self.buffer[:N].detach().clone()
-
-    def get_staleness(self, N: int = None) -> torch.Tensor:
-        """Return staleness counts (frames since last seen)."""
-        if N is None:
-            N = self.max_objects
-        return self.staleness[:N]
-
-    def get_ever_seen(self, N: int = None) -> torch.Tensor:
-        """Return ever-seen mask."""
-        if N is None:
-            N = self.max_objects
-        return self.ever_seen[:N]
+    return buffer_features.detach(), staleness

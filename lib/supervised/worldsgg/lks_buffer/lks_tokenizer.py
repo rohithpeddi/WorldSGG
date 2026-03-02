@@ -1,17 +1,14 @@
 """
-LKS Tokenizer
-===============
+LKS Tokenizer (Batched)
+=========================
 
 Fuses CURRENT wireframe geometry (live from the global wireframe)
 with BUFFERED visual features (potentially stale from the LKS buffer)
 and CAMERA-RELATIVE features.
 
-X_k = Proj([G_k^t ⊕ M_t[k] ⊕ cam_feats_k ⊕ log_staleness_k])
+X[b,k] = Proj([G[b,k] ⊕ M[b,k] ⊕ cam[b,k] ⊕ log_staleness[b,k]])
 
-Where M_t[k] is:
-  - Fresh DINO features (if object was just seen)
-  - Stale DINO features (if object was seen N frames ago)
-  - Zeros (if object has never been seen)
+All ops broadcast over arbitrary leading batch dimensions (B, N, ...).
 """
 
 import torch
@@ -22,7 +19,7 @@ from typing import Optional
 class LKSTokenizer(nn.Module):
     """
     Fuses live geometry with buffered visual features, camera features,
-    and staleness metadata.
+    and staleness metadata. Supports batched input (B, N, ...).
 
     Args:
         d_struct: Structural token dim.
@@ -59,33 +56,33 @@ class LKSTokenizer(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            geometry_tokens: (N, d_struct) — LIVE per-object structural tokens.
-            buffer_features: (N, d_visual) — from LKS buffer (detached, possibly stale).
-            valid_mask: (N,) bool — True for real objects.
-            cam_feats: (N, d_camera) or None — per-object camera-relative features.
-            staleness: (N,) long or None — frames since last visible.
+            geometry_tokens: (B, N, d_struct) — LIVE per-object structural tokens.
+            buffer_features: (B, N, d_visual) — from LKS buffer (detached, possibly stale).
+            valid_mask: (B, N) bool — True for real objects.
+            cam_feats: (B, N, d_camera) or None — per-object camera-relative features.
+            staleness: (B, N) long or None — frames since last visible.
 
         Returns:
-            tokens: (N, d_model) — hybrid tokens.
+            tokens: (B, N, d_model) — hybrid tokens.
         """
-        N = geometry_tokens.shape[0]
+        B, N = geometry_tokens.shape[:2]
         device = geometry_tokens.device
 
         # Camera-relative features (zeros if not provided)
         if cam_feats is None:
-            cam_feats = torch.zeros(N, self.d_camera, device=device)
+            cam_feats = torch.zeros(B, N, self.d_camera, device=device)
 
         # Log-scaled staleness (default: 0)
         if staleness is None:
-            staleness = torch.zeros(N, dtype=torch.long, device=device)
-        log_staleness = torch.log(staleness.float() + 1.0).unsqueeze(-1)  # (N, 1)
+            staleness = torch.zeros(B, N, dtype=torch.long, device=device)
+        log_staleness = torch.log(staleness.float() + 1.0).unsqueeze(-1)  # (B, N, 1)
 
         # Concatenate all inputs
         fused = torch.cat([
             geometry_tokens, buffer_features, cam_feats,
             log_staleness,
-        ], dim=-1)
-        tokens = self.fusion_proj(fused)  # (N, d_model)
+        ], dim=-1)  # (B, N, fusion_input_dim)
+        tokens = self.fusion_proj(fused)  # (B, N, d_model)
 
         # Zero out padding
         tokens = tokens * valid_mask.unsqueeze(-1).float()

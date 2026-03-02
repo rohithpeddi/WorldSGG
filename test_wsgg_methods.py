@@ -2,13 +2,16 @@
 WSGG Testing Methods
 =====================
 
-Thin per-method testing classes. Each overrides:
+Per-method testing classes. Each overrides:
   - init_model()                → create model
   - is_temporal()               → sequential or frame-shuffled
   - process_test_video(batch)   → inference
 
 Usage:
-  python test_wsgg_methods.py --config configs/wsgg.yaml --method_name gl_stgn --ckpt path/to/ckpt.tar
+  python test_wsgg_methods.py --config configs/methods/predcls/gl_stgn_predcls.yaml --ckpt path/to/ckpt.tar
+  python test_wsgg_methods.py --config configs/methods/predcls/amwae_predcls.yaml --ckpt path/to/ckpt.tar
+  python test_wsgg_methods.py --config configs/methods/predcls/amwae_pp_predcls.yaml --ckpt path/to/ckpt.tar
+  python test_wsgg_methods.py --config configs/methods/predcls/lks_buffer_predcls.yaml --ckpt path/to/ckpt.tar
 """
 
 import torch
@@ -207,7 +210,7 @@ METHOD_MAP = {
 
 def main():
     conf = load_wsgg_config()
-    method_name = getattr(conf, 'method_name', 'gl_stgn')
+    method_name = conf.method_name
 
     if method_name not in METHOD_MAP:
         raise ValueError(f"Unknown method: {method_name}. Choose from: {list(METHOD_MAP.keys())}")

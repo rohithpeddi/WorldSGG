@@ -3,19 +3,19 @@ WSGG Base Class
 ================
 
 Shared infrastructure for all WSGG train/test classes.
-Analogous to stsg_base.py in the SGG pipeline.
 
 Provides:
   - Config loading (YAML + CLI override via load_wsgg_config)
-  - Config initialization (device, paths, WandB)
+  - Config initialization (device, experiment directory, WandB)
   - Optimizer / scheduler
-  - Checkpoint load / save
+  - Full-state checkpoint save / resume (model + optimizer + scheduler + scaler)
+  - Model-only checkpoint load (for testing)
   - Evaluator initialization
   - Detector initialization (config-driven: dino_mono3d / frcnn / none)
 """
 
+import gc
 import os
-import sys
 from abc import abstractmethod
 from argparse import ArgumentParser
 from types import SimpleNamespace
@@ -31,7 +31,7 @@ from lib.supervised.worldsgg.worldsgg_base import DINOFeatureExtractor
 
 
 # ============================================================================
-# YAML Config Loader (replaces wsgg_config.py)
+# YAML Config Loader
 # ============================================================================
 
 def load_wsgg_config(yaml_path: str = None) -> SimpleNamespace:
@@ -39,20 +39,21 @@ def load_wsgg_config(yaml_path: str = None) -> SimpleNamespace:
     Load WSGG config from YAML, merge with CLI overrides.
 
     Usage:
-        conf = load_wsgg_config()                       # auto-detect --config
-        conf = load_wsgg_config("configs/wsgg.yaml")    # explicit path
+        conf = load_wsgg_config()                                         # auto-detect --config
+        conf = load_wsgg_config("configs/methods/predcls/gl_stgn_predcls.yaml")  # explicit path
 
     CLI args override YAML values:
-        python script.py --config configs/wsgg.yaml --method_name amwae --lr 5e-5
+        python script.py --config configs/methods/predcls/amwae_predcls.yaml --lr 5e-5
     """
     parser = ArgumentParser(description="WSGG")
-    parser.add_argument("--config", default="configs/wsgg.yaml", type=str)
+    parser.add_argument("--config", default="configs/methods/predcls/gl_stgn_predcls.yaml", type=str)
     # Add all possible overrides (non-None default = "not specified")
     parser.add_argument("--method_name", default=None, type=str)
     parser.add_argument("--mode", default=None, type=str)
     parser.add_argument("--data_path", default=None, type=str)
     parser.add_argument("--save_path", default=None, type=str)
     parser.add_argument("--ckpt", default=None, type=str)
+    parser.add_argument("--experiment_name", default=None, type=str)
     parser.add_argument("--detector_ckpt", default=None, type=str)
     parser.add_argument("--detector_model", default=None, type=str)
     parser.add_argument("--detector_type", default=None, type=str)
@@ -98,7 +99,15 @@ def load_wsgg_config(yaml_path: str = None) -> SimpleNamespace:
 class WSGGBase:
     """
     Root base class for all WSGG methods.
-    Mirrors STSGBase from stsg_base.py with WSGG-specific adaptations.
+
+    Checkpoint layout (matches DinoAGTrainer3D):
+        save_path/
+        └── experiment_name/
+            ├── checkpoint_0/checkpoint_state.pth
+            ├── checkpoint_1/checkpoint_state.pth
+            └── ...
+
+    Resume: set config.ckpt = "checkpoint_5" to resume from epoch 5.
     """
 
     def __init__(self, conf):
@@ -109,12 +118,14 @@ class WSGGBase:
         self._evaluator = None
         self._optimizer = None
         self._scheduler = None
+        self._scaler = None
 
         self._train_dataset = None
         self._test_dataset = None
 
-        self._checkpoint_name = None
-        self._checkpoint_save_dir_path = None
+        self._experiment_name = None
+        self._experiment_dir = None
+        self._starting_epoch = 0
 
         self._enable_wandb = getattr(conf, 'use_wandb', False)
 
@@ -122,47 +133,49 @@ class WSGGBase:
     # Config
     # ------------------------------------------------------------------
     def _init_config(self, is_train=True):
-        """Initialize device, checkpoint paths, and WandB."""
-        print("The CKPT saved here:", self._conf.save_path)
-        os.makedirs(self._conf.save_path, exist_ok=True)
-
+        """Initialize device, experiment directory, and WandB."""
         self._device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-        if self._conf.ckpt is not None and self._conf.ckpt != "null":
-            self._checkpoint_name_with_epoch = os.path.basename(self._conf.ckpt).split('.')[0]
-            self._checkpoint_name = "_".join(self._checkpoint_name_with_epoch.split('_')[:-2])
-            print("--------------------------------------------------------")
-            print(f"Loading checkpoint with name: {self._checkpoint_name}")
-            print(f"Mode: {self._conf.mode}")
-            print("--------------------------------------------------------")
-        else:
-            self._checkpoint_name = f"{self._conf.method_name}_{self._conf.mode}"
-            print("--------------------------------------------------------")
-            print(f"Training model with name: {self._checkpoint_name}")
-            print("--------------------------------------------------------")
-
-        self._checkpoint_save_dir_path = os.path.join(
-            self._conf.save_path, self._conf.task_name, self._conf.method_name
+        # Experiment directory: save_path / experiment_name
+        self._experiment_name = getattr(
+            self._conf, 'experiment_name',
+            f"{self._conf.method_name}_{self._conf.mode}",
         )
-        os.makedirs(self._checkpoint_save_dir_path, exist_ok=True)
+        self._experiment_dir = os.path.join(self._conf.save_path, self._experiment_name)
+        os.makedirs(self._experiment_dir, exist_ok=True)
+
+        ckpt = getattr(self._conf, 'ckpt', None)
+        if ckpt is not None and ckpt != "null" and ckpt != "":
+            print("━" * 60)
+            print(f"  Experiment : {self._experiment_name}")
+            print(f"  Resume from: {ckpt}")
+            print(f"  Mode       : {self._conf.mode}")
+            print("━" * 60)
+        else:
+            action = "Training" if is_train else "Testing"
+            print("━" * 60)
+            print(f"  Experiment: {self._experiment_name}")
+            print(f"  {action} from scratch")
+            print(f"  Mode      : {self._conf.mode}")
+            print("━" * 60)
 
         # WandB
         if self._enable_wandb:
-            wandb.init(project=self._checkpoint_name, config=self._conf.args)
+            wandb.init(project=self._experiment_name, config=self._conf.args)
 
-        print("-------------------- CONFIGURATION DETAILS ------------------------")
+        print("─── Configuration ───")
         for k, v in sorted(self._conf.args.items()):
             print(f"  {k}: {v}")
-        print("-------------------------------------------------------------------")
+        print("─" * 40)
 
     # ------------------------------------------------------------------
     # Optimizer / Scheduler
     # ------------------------------------------------------------------
     def _init_optimizer(self):
         """Initialize optimizer from config."""
-        opt_name = getattr(self._conf, 'optimizer', 'adamw').lower()
-        lr = getattr(self._conf, 'lr', 1e-4)
-        wd = getattr(self._conf, 'weight_decay', 1e-4)
+        opt_name = self._conf.optimizer.lower()
+        lr = self._conf.lr
+        wd = self._conf.weight_decay
 
         if opt_name == "adamw":
             self._optimizer = optim.AdamW(self._model.parameters(), lr=lr, weight_decay=wd)
@@ -178,41 +191,125 @@ class WSGGBase:
         self._scheduler = ReduceLROnPlateau(self._optimizer, "max", patience=1, factor=0.5, verbose=True)
 
     # ------------------------------------------------------------------
-    # Checkpoint
+    # Checkpoint — Full-State Save (train)
     # ------------------------------------------------------------------
-    def _load_checkpoint(self):
-        """Load model weights from checkpoint if specified."""
+    def _save_checkpoint(self, epoch: int) -> None:
+        """
+        Save full training state to experiment_dir/checkpoint_{epoch}/.
+
+        Saved keys:
+          - epoch
+          - model_state_dict
+          - optimizer_state_dict
+          - scheduler_state_dict
+          - scaler_state_dict (None if AMP disabled)
+        """
+        ckpt_dir = os.path.join(self._experiment_dir, f"checkpoint_{epoch}")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        ckpt_file = os.path.join(ckpt_dir, "checkpoint_state.pth")
+
+        checkpoint_dict = {
+            "epoch": epoch,
+            "model_state_dict": self._model.state_dict(),
+            "optimizer_state_dict": self._optimizer.state_dict(),
+            "scheduler_state_dict": self._scheduler.state_dict(),
+            "scaler_state_dict": self._scaler.state_dict() if self._scaler else None,
+        }
+        torch.save(checkpoint_dict, ckpt_file)
+        print(f"✓ Checkpoint saved: epoch {epoch + 1} → {ckpt_file}")
+
+    # ------------------------------------------------------------------
+    # Checkpoint — Full-State Resume (train)
+    # ------------------------------------------------------------------
+    def _maybe_resume(self) -> None:
+        """
+        Resume full training state from a checkpoint directory.
+
+        Expects config.ckpt = "checkpoint_5" (directory name under experiment_dir).
+        Restores model, optimizer, scheduler, and scaler state dicts sequentially
+        with gc.collect() calls to avoid GPU memory spikes.
+        """
+        ckpt = getattr(self._conf, 'ckpt', None)
+        if ckpt is None or ckpt == "null" or ckpt == "":
+            self._starting_epoch = 0
+            return
+
+        ckpt_path = os.path.join(self._experiment_dir, ckpt, "checkpoint_state.pth")
+        if not os.path.exists(ckpt_path):
+            print(f"⚠️  Checkpoint not found: {ckpt_path}")
+            # Try to infer epoch from directory name (e.g., checkpoint_5 → epoch 5)
+            try:
+                self._starting_epoch = int(ckpt.split("_")[-1]) + 1
+            except (ValueError, IndexError):
+                self._starting_epoch = 0
+            print(f"  Starting from epoch {self._starting_epoch}")
+            return
+
+        print(f"Resuming from: {ckpt_path}")
+
+        # Load to CPU to avoid GPU memory spike
+        checkpoint_state = torch.load(ckpt_path, map_location="cpu")
+
+        # 1. Restore model weights, then free CPU copy
+        self._model.load_state_dict(checkpoint_state["model_state_dict"])
+        del checkpoint_state["model_state_dict"]
+        gc.collect()
+        print("  ✓ Model state restored")
+
+        # 2. Restore scheduler (small — just scalar state)
+        if "scheduler_state_dict" in checkpoint_state and self._scheduler is not None:
+            self._scheduler.load_state_dict(checkpoint_state["scheduler_state_dict"])
+        del checkpoint_state["scheduler_state_dict"]
+        print("  ✓ Scheduler state restored")
+
+        # 3. Restore optimizer (largest: 2× param memory for Adam momentum buffers)
+        optimizer_state = checkpoint_state.pop("optimizer_state_dict")
+        self._starting_epoch = checkpoint_state.get("epoch", 0) + 1
+
+        # 4. Restore scaler if present
+        if checkpoint_state.get("scaler_state_dict") is not None and self._scaler is not None:
+            self._scaler.load_state_dict(checkpoint_state["scaler_state_dict"])
+            print("  ✓ AMP scaler state restored")
+
+        del checkpoint_state
+        gc.collect()
+
+        self._optimizer.load_state_dict(optimizer_state)
+        del optimizer_state
+        gc.collect()
+        torch.cuda.empty_cache()
+        print("  ✓ Optimizer state restored")
+
+        print(f"✓ Resumed from epoch {self._starting_epoch} (GPU cache cleared)")
+
+    # ------------------------------------------------------------------
+    # Checkpoint — Model-Only Load (test)
+    # ------------------------------------------------------------------
+    def _load_checkpoint(self) -> None:
+        """
+        Load model weights only from a checkpoint (for testing/inference).
+
+        Expects config.ckpt = "checkpoint_5" (directory name under experiment_dir).
+        Only restores model_state_dict — no optimizer/scheduler.
+        """
         if self._model is None:
             raise ValueError("Model is not initialized")
 
-        ckpt_path = getattr(self._conf, 'ckpt', None)
-        if ckpt_path is None or ckpt_path == "null" or ckpt_path == "":
+        ckpt = getattr(self._conf, 'ckpt', None)
+        if ckpt is None or ckpt == "null" or ckpt == "":
             return
 
+        ckpt_path = os.path.join(self._experiment_dir, ckpt, "checkpoint_state.pth")
         if not os.path.exists(ckpt_path):
-            raise ValueError(f"Checkpoint file {ckpt_path} does not exist")
+            raise ValueError(f"Checkpoint not found: {ckpt_path}")
 
-        try:
-            ckpt = torch.load(ckpt_path, map_location=self._device)
-            state_dict_key = 'state_dict' if 'state_dict' in ckpt else f'{self._conf.method_name}_state_dict'
-            self._model.load_state_dict(ckpt[state_dict_key], strict=False)
-            print(f"Loaded model from checkpoint {ckpt_path}")
-        except FileNotFoundError:
-            print(f"Error: Checkpoint file {ckpt_path} not found.")
-        except KeyError:
-            print(f"Error: Appropriate state_dict not found in the checkpoint.")
-        except Exception as e:
-            print(f"An error occurred loading checkpoint: {str(e)}")
-
-    @staticmethod
-    def _save_model(model, epoch, checkpoint_save_file_path, checkpoint_name, method_name):
-        """Save model checkpoint."""
-        save_path = os.path.join(checkpoint_save_file_path, f"{checkpoint_name}_epoch_{epoch}.tar")
-        torch.save({
-            f"{method_name}_state_dict": model.state_dict(),
-            "epoch": epoch,
-        }, save_path)
-        print(f"Model saved: {save_path}")
+        print(f"Loading model weights from: {ckpt_path}")
+        checkpoint_state = torch.load(ckpt_path, map_location=self._device)
+        self._model.load_state_dict(checkpoint_state["model_state_dict"], strict=False)
+        epoch = checkpoint_state.get("epoch", "?")
+        del checkpoint_state
+        gc.collect()
+        print(f"  ✓ Model loaded (epoch {epoch})")
 
     # ------------------------------------------------------------------
     # Evaluators
@@ -239,16 +336,16 @@ class WSGGBase:
           - "frcnn": Standard FasterRCNN from lib_b.Detector
           - "none": No detector (precomputed features / zeros)
         """
-        detector_type = getattr(self._conf, 'detector_type', 'none')
+        detector_type = self._conf.detector_type
 
         if detector_type == "dino_mono3d":
             self._detector = DINOFeatureExtractor(
-                detector_ckpt=getattr(self._conf, 'detector_ckpt', ''),
-                detector_model=getattr(self._conf, 'detector_model', 'v3l'),
-                num_classes=getattr(self._conf, 'num_detector_classes', 37),
+                detector_ckpt=self._conf.detector_ckpt,
+                detector_model=self._conf.detector_model,
+                num_classes=self._conf.num_detector_classes,
                 device=str(self._device),
             )
-            if getattr(self._conf, 'detector_frozen', True):
+            if self._conf.detector_frozen:
                 self._detector.load_detector()
             print(f"[WSGGBase] Initialized DINO detector (model={self._conf.detector_model})")
 

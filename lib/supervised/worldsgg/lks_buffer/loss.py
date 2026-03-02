@@ -97,8 +97,6 @@ class LKSLoss(nn.Module):
                 b_con_pred = con_pred[mask]
                 b_con_gt = con_gt[mask]
 
-
-
                 # Label smoothing
                 if self._label_smoother is not None:
                     b_spa_gt = self._label_smoother.smooth_bce_target(b_spa_gt)

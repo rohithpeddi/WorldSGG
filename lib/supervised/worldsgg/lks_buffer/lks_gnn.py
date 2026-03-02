@@ -1,30 +1,33 @@
 """
-LKS GNN: Last-Known-State Graph Neural Network
-=================================================
+LKS GNN: Last-Known-State Graph Neural Network (Batched)
+==========================================================
 
-Main model for Baseline 1. Pairs a hard-coded, non-differentiable
-LKS memory buffer with a stateless feed-forward GNN predictor.
-Camera-aware tokenization and union feature edge prediction.
+Pairs a vectorized, non-differentiable LKS memory buffer with a
+stateless feed-forward GNN predictor. All T frames are processed
+in a single forward pass with B=T batching — no per-frame loops
+except for relationship token formation (variable K per frame).
 
-Sequential processing:
-  1. LKSMemoryBuffer.update(DINO, visibility) → detached update
-  2. GlobalStructuralEncoder(corners)          → geometry tokens
-  3. CameraPoseEncoder(pose, corners)          → camera features
-  4. LKSTokenizer(geometry, buffer, cam, stale) → hybrid tokens
-  5. SpatialGNN(hybrid_tokens, corners)        → enriched tokens
-  6. NodePredictor + EdgePredictor(+union)     → scene graph
+Single-pass pipeline:
+  1. visual_projector(visual_all)                  → (T, N, d_visual)
+  2. vectorized_lks_buffer(projected, vis, valid)  → (T, N, d_visual), (T, N)
+  3. GlobalStructuralEncoder(corners_all)           → (T, N, d_struct)
+  4. CameraPoseEncoder(pose_all, corners_all)       → (T, N, d_camera)
+  5. LKSTokenizer(struct, buffer, cam, staleness)   → (T, N, d_model)
+  6. SpatialGNN(tokens, corners, valid)             → (T, N, d_model)
+  7. RelationshipPredictor per frame (K varies)     → T × (K_t, d_rel)
+  8. TemporalEdgeAttention across frames            → T × (K_t, d_rel)
+  9. Predict from enriched tokens                   → distributions
 
-Gradients only flow through steps 2-6 at the current frame.
+Gradients only flow through steps 1-9 at the current forward pass.
 """
 
 import torch
 import torch.nn as nn
 from typing import Any, Dict, List, Optional
 
-from .lks_memory import LKSMemoryBuffer
+from .lks_memory import vectorized_lks_buffer
 from .lks_tokenizer import LKSTokenizer
 
-# Shared components from worldsgg_base
 from lib.supervised.worldsgg.worldsgg_base import (
     GlobalStructuralEncoder, NodePredictor, RelationshipPredictor, SpatialGNN,
     CameraPoseEncoder, TemporalEdgeAttention,
@@ -33,14 +36,14 @@ from lib.supervised.worldsgg.worldsgg_base import (
 
 class LKSGNN(nn.Module):
     """
-    Last-Known-State GNN — passive memory baseline.
+    Last-Known-State GNN — passive memory baseline (batched).
 
-    Processes frames sequentially. The memory buffer is updated via
-    hard copy-paste (non-differentiable), NOT learned routing. The
-    GNN predictor at each frame is fully stateless.
+    Processes all T frames in a single forward pass. The memory buffer
+    is computed via vectorized cummax (non-differentiable). The GNN
+    predictor is fully stateless and batched over T.
 
     Args:
-        config: LKSConfig.
+        config: Method config namespace.
         num_object_classes: Object categories.
         attention_class_num: Attention relationship classes.
         spatial_class_num: Spatial relationship classes.
@@ -64,7 +67,7 @@ class LKSGNN(nn.Module):
             d_hidden=config.d_struct // 2,
         )
 
-        # Visual projector: raw DINO ROI → d_visual (for buffer storage)
+        # Visual projector: raw DINO ROI → d_visual
         self.visual_projector = nn.Sequential(
             nn.Linear(config.d_detector_roi, config.d_visual),
             nn.ReLU(inplace=True),
@@ -93,153 +96,35 @@ class LKSGNN(nn.Module):
             dropout=config.dropout,
         )
 
-        # Module 5: Relationship predictor
+        # Module 5: Node predictor
+        self.node_predictor = NodePredictor(
+            d_model=config.d_model,
+            num_classes=num_object_classes,
+        )
+
+        # Module 6: Relationship predictor
         clip_path = getattr(config, 'clip_embeddings_path', '')
         self.rel_predictor = RelationshipPredictor(
             d_model=config.d_model,
-            d_text=getattr(config, 'd_text', 128),
-            d_rel=getattr(config, 'd_rel', 256),
-            d_union_roi=getattr(config, 'd_union_roi', 1024),
+            d_text=config.d_text,
+            d_rel=config.d_rel,
+            d_union_roi=config.d_union_roi,
             attention_class_num=attention_class_num,
             spatial_class_num=spatial_class_num,
             contact_class_num=contact_class_num,
             clip_embeddings_path=clip_path,
-            n_rel_layers=getattr(config, 'n_rel_layers', 2),
-            n_rel_heads=getattr(config, 'n_rel_heads', 4),
+            n_rel_layers=config.n_rel_layers,
+            n_rel_heads=config.n_rel_heads,
             dropout=config.dropout,
         )
 
-        # Module 5b: Temporal edge attention
+        # Module 7: Temporal edge attention
         self.temporal_edge_attn = TemporalEdgeAttention(
-            d_rel=getattr(config, 'd_rel', 256),
-            n_heads=getattr(config, 'n_rel_heads', 4),
-            n_layers=getattr(config, 'n_temporal_edge_layers', 1),
+            d_rel=config.d_rel,
+            n_heads=config.n_rel_heads,
+            n_layers=config.n_temporal_edge_layers,
             dropout=config.dropout,
         )
-
-        # Non-differentiable memory buffer (not an nn.Module)
-        self.memory_buffer = None  # Initialized in reset_memory()
-
-    def reset_memory(self, device: torch.device = None):
-        """Reset the LKS buffer (call at start of each video)."""
-        if device is None:
-            device = next(self.parameters()).device
-        self.memory_buffer = LKSMemoryBuffer(
-            max_objects=self.config.max_objects,
-            d_visual=self.config.d_visual,
-            device=str(device),
-        )
-
-    def forward_frame(
-        self,
-        visual_features: torch.Tensor,
-        corners: torch.Tensor,
-        valid_mask: torch.Tensor,
-        visibility_mask: torch.Tensor,
-        person_idx: torch.Tensor,
-        object_idx: torch.Tensor,
-        camera_pose: Optional[torch.Tensor] = None,
-        union_features: Optional[torch.Tensor] = None,
-        bboxes_2d: Optional[torch.Tensor] = None,
-        class_indices: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Process a SINGLE frame with passive memory.
-
-        Args:
-            visual_features: (N, d_detector_roi) — raw DINO features.
-            corners: (N, 8, 3) — 3D bbox corners.
-            valid_mask: (N,) bool.
-            visibility_mask: (N,) bool.
-            person_idx: (K,) long.
-            object_idx: (K,) long.
-            camera_pose: (4, 4) or None — camera extrinsic matrix.
-            union_features: (K, 1024) or None — union ROI features per pair.
-            bboxes_2d: (N, 4) or None — 2D bounding boxes xyxy.
-            class_indices: (N,) long or None — object class indices.
-
-        Returns:
-            dict with node_logits, attention/spatial/contacting distributions.
-        """
-        N = corners.shape[0]
-
-        # --- Step 1: Project visual features and update buffer ---
-        with torch.no_grad():
-            projected_visual = self.visual_projector(visual_features)  # (N, d_visual)
-
-        # Ensure buffer exists
-        if self.memory_buffer is None:
-            self.reset_memory(corners.device)
-
-        # Handle size changes
-        if N > self.memory_buffer.max_objects:
-            self.memory_buffer.reset(N)
-
-        # Zero-order hold update
-        self.memory_buffer.update(
-            projected_visual, visibility_mask, valid_mask,
-            camera_pose=camera_pose, corners=corners,
-        )
-
-        # Get buffered features (all detached)
-        buffer_features = self.memory_buffer.get_features(N)  # (N, d_visual)
-        staleness = self.memory_buffer.get_staleness(N)        # (N,) long
-
-        # --- Step 3: Encode wireframe geometry ---
-        struct_tokens, _ = self.structural_encoder(
-            corners.unsqueeze(0),
-            valid_mask.unsqueeze(0),
-        )
-        struct_tokens = struct_tokens.squeeze(0)  # (N, d_struct)
-
-        # --- Step 3: Camera pose encoding ---
-        cam_feats = None
-        if camera_pose is not None:
-            _, cam_feats = self.camera_encoder(
-                camera_pose=camera_pose.unsqueeze(0),
-                corners=corners.unsqueeze(0),
-                valid_mask=valid_mask.unsqueeze(0),
-            )  # cam_feats: (1, N, d_camera)
-            cam_feats = cam_feats.squeeze(0)  # (N, d_camera)
-
-        # --- Step 4: Fuse geometry + buffered visual + camera ---
-        tokens = self.tokenizer(
-            geometry_tokens=struct_tokens,
-            buffer_features=buffer_features,
-            valid_mask=valid_mask,
-            cam_feats=cam_feats,
-            staleness=staleness,
-        )  # (N, d_model)
-
-        # --- Step 5: Spatial GNN (batched interface) ---
-        enriched = self.spatial_gnn(
-            tokens=tokens.unsqueeze(0),
-            corners=corners.unsqueeze(0),
-            valid_mask=valid_mask.unsqueeze(0),
-        ).squeeze(0)  # (N, d_model)
-
-        # --- Step 6: Node prediction + form/self-attend rel tokens ---
-        node_logits = self.node_predictor(enriched)
-
-        person_class_idx = node_logits[person_idx].argmax(dim=-1)
-        object_class_idx = node_logits[object_idx].argmax(dim=-1)
-
-        rel_tokens = self.rel_predictor.form_rel_tokens(
-            enriched_states=enriched,
-            person_idx=person_idx,
-            object_idx=object_idx,
-            person_class_idx=person_class_idx,
-            object_class_idx=object_class_idx,
-            union_features=union_features,
-        )
-        rel_tokens = self.rel_predictor.self_attend(rel_tokens)
-
-        return {
-            "node_logits": node_logits,
-            "rel_tokens": rel_tokens,
-            "person_idx": person_idx,
-            "object_idx": object_idx,
-        }
 
     def forward(
         self,
@@ -251,21 +136,109 @@ class LKSGNN(nn.Module):
         object_idx_seq: List[torch.Tensor],
         camera_pose_seq: Optional[List[torch.Tensor]] = None,
         union_features_seq: Optional[List[torch.Tensor]] = None,
-        bboxes_2d_seq: Optional[List[torch.Tensor]] = None,
-        class_indices_seq: Optional[List[torch.Tensor]] = None,
     ) -> Dict[str, List]:
         """
-        Process a full video with per-pair temporal self-attention.
+        Process a full video in a single batched forward pass.
 
-        Phase A: per-frame upstream + collect rel_tokens
-        Phase B: temporal self-attention across all frames
-        Phase C: predict from enriched tokens
+        Args:
+            visual_features_seq: T-list of (N, d_roi) tensors.
+            corners_seq:         T-list of (N, 8, 3) tensors.
+            valid_mask_seq:      T-list of (N,) bool tensors.
+            visibility_mask_seq: T-list of (N,) bool tensors.
+            person_idx_seq:      T-list of (K_t,) long tensors.
+            object_idx_seq:      T-list of (K_t,) long tensors.
+            camera_pose_seq:     T-list of (4,4) tensors or None.
+            union_features_seq:  T-list of (K_t, d_union_roi) tensors or None.
 
         Returns:
             dict with per-frame lists: node_logits, att/spa/con distributions.
         """
         T = len(corners_seq)
 
+        # ==================== Stack inputs (T, N, ...) ====================
+        visual_all = torch.stack(visual_features_seq)       # (T, N, d_roi)
+        corners_all = torch.stack(corners_seq)              # (T, N, 8, 3)
+        valid_all = torch.stack(valid_mask_seq)              # (T, N)
+        visibility_all = torch.stack(visibility_mask_seq)    # (T, N)
+
+        # ==================== Step 1: Batch visual projection ====================
+        projected_all = self.visual_projector(visual_all)    # (T, N, d_visual)
+
+        # ==================== Step 2: Vectorized LKS buffer ====================
+        buffer_all, staleness_all = vectorized_lks_buffer(
+            projected_visual=projected_all,
+            visibility_mask=visibility_all,
+            valid_mask=valid_all,
+        )  # (T, N, d_visual), (T, N)
+
+        # ==================== Step 3: Batch structural encoding ====================
+        struct_all, _ = self.structural_encoder(
+            corners_all, valid_all,
+        )  # (T, N, d_struct)
+
+        # ==================== Step 4: Batch camera encoding ====================
+        cam_all = None
+        if camera_pose_seq is not None:
+            camera_pose_all = torch.stack(camera_pose_seq)  # (T, 4, 4)
+            _, cam_all = self.camera_encoder(
+                camera_pose=camera_pose_all,
+                corners=corners_all,
+                valid_mask=valid_all,
+            )  # (T, N, d_camera)
+
+        # ==================== Step 5: Batch tokenizer ====================
+        tokens_all = self.tokenizer(
+            geometry_tokens=struct_all,
+            buffer_features=buffer_all,
+            valid_mask=valid_all,
+            cam_feats=cam_all,
+            staleness=staleness_all,
+        )  # (T, N, d_model)
+
+        # ==================== Step 6: Batch spatial GNN ====================
+        enriched_all = self.spatial_gnn(
+            tokens=tokens_all,
+            corners=corners_all,
+            valid_mask=valid_all,
+        )  # (T, N, d_model)
+
+        # ==================== Step 7: Node prediction (batched) ====================
+        node_logits_all = self.node_predictor(enriched_all)  # (T, N, num_classes)
+
+        # ==================== Step 8: Rel tokens (per-frame, K varies) ====================
+        collected_rel = []
+        collected_pidx = []
+        collected_oidx = []
+
+        for t in range(T):
+            enriched_t = enriched_all[t]       # (N, d_model)
+            node_logits_t = node_logits_all[t]  # (N, num_classes)
+            person_idx = person_idx_seq[t]
+            object_idx = object_idx_seq[t]
+
+            person_class_idx = node_logits_t[person_idx].argmax(dim=-1)
+            object_class_idx = node_logits_t[object_idx].argmax(dim=-1)
+
+            union_feat_t = union_features_seq[t] if union_features_seq is not None else None
+
+            rel_tokens = self.rel_predictor.form_rel_tokens(
+                enriched_states=enriched_t,
+                person_idx=person_idx,
+                object_idx=object_idx,
+                person_class_idx=person_class_idx,
+                object_class_idx=object_class_idx,
+                union_features=union_feat_t,
+            )
+            rel_tokens = self.rel_predictor.self_attend(rel_tokens)
+
+            collected_rel.append(rel_tokens)
+            collected_pidx.append(person_idx)
+            collected_oidx.append(object_idx)
+
+        # ==================== Step 9: Temporal edge attention ====================
+        enriched_rel = self.temporal_edge_attn(collected_rel, collected_pidx, collected_oidx)
+
+        # ==================== Step 10: Predict distributions ====================
         outputs = {
             "node_logits": [],
             "attention_distribution": [],
@@ -273,44 +246,11 @@ class LKSGNN(nn.Module):
             "contacting_distribution": [],
         }
 
-        # ========== Phase A: Sequential per-frame processing ==========
-        collected_rel = []
-        collected_pidx = []
-        collected_oidx = []
-
         for t in range(T):
-            camera_pose_t = camera_pose_seq[t] if camera_pose_seq is not None else None
-            union_feat_t = union_features_seq[t] if union_features_seq is not None else None
-            bboxes_2d_t = bboxes_2d_seq[t] if bboxes_2d_seq is not None else None
-            class_idx_t = class_indices_seq[t] if class_indices_seq is not None else None
-
-            frame_out = self.forward_frame(
-                visual_features=visual_features_seq[t],
-                corners=corners_seq[t],
-                valid_mask=valid_mask_seq[t],
-                visibility_mask=visibility_mask_seq[t],
-                person_idx=person_idx_seq[t],
-                object_idx=object_idx_seq[t],
-                camera_pose=camera_pose_t,
-                union_features=union_feat_t,
-                bboxes_2d=bboxes_2d_t,
-                class_indices=class_idx_t,
-            )
-
-            outputs["node_logits"].append(frame_out["node_logits"])
-            collected_rel.append(frame_out["rel_tokens"])
-            collected_pidx.append(frame_out["person_idx"])
-            collected_oidx.append(frame_out["object_idx"])
-
-        # ========== Phase B: Per-pair temporal self-attention ==========
-        enriched_rel = self.temporal_edge_attn(collected_rel, collected_pidx, collected_oidx)
-
-        # ========== Phase C: Predict from enriched tokens ==========
-        for t in range(T):
+            outputs["node_logits"].append(node_logits_all[t])
             edge_out = self.rel_predictor.predict_from_tokens(enriched_rel[t])
             outputs["attention_distribution"].append(edge_out["attention_distribution"])
             outputs["spatial_distribution"].append(edge_out["spatial_distribution"])
             outputs["contacting_distribution"].append(edge_out["contacting_distribution"])
 
         return outputs
-

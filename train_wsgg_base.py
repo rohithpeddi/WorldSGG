@@ -161,13 +161,13 @@ class TrainWSGGBase(WSGGBase):
     # ------------------------------------------------------------------
     def _train_model(self):
         """Main training loop over epochs."""
-        use_amp = getattr(self._conf, 'use_amp', True) and torch.cuda.is_available()
+        use_amp = self._conf.use_amp and torch.cuda.is_available()
         if use_amp:
             self._scaler = torch.amp.GradScaler()
 
-        log_every = getattr(self._conf, 'log_every', 100)
+        log_every = self._conf.log_every
 
-        for epoch in range(self._conf.nepoch):
+        for epoch in range(self._starting_epoch, self._conf.nepoch):
             self._model.train()
             train_iter = iter(self._dataloader_train)
             tr = []
@@ -176,13 +176,12 @@ class TrainWSGGBase(WSGGBase):
             for batch_idx in tqdm(range(len(self._dataloader_train)), desc=f"Epoch {epoch + 1}/{self._conf.nepoch}"):
                 batch = next(train_iter)
 
-                # ---------- Method-specific forward pass ----------
+                # Method-specific forward pass
                 if use_amp:
                     with torch.amp.autocast(device_type="cuda"):
                         losses = self.process_train_video(batch)
                 else:
                     losses = self.process_train_video(batch)
-                # --------------------------------------------------
 
                 # Compute total loss
                 loss = sum(losses.values())
@@ -200,7 +199,7 @@ class TrainWSGGBase(WSGGBase):
                     self._scaler.unscale_(self._optimizer)
                     torch.nn.utils.clip_grad_norm_(
                         self._model.parameters(),
-                        max_norm=getattr(self._conf, 'grad_clip', 5.0),
+                        max_norm=self._conf.grad_clip,
                     )
                     self._scaler.step(self._optimizer)
                     self._scaler.update()
@@ -208,7 +207,7 @@ class TrainWSGGBase(WSGGBase):
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(
                         self._model.parameters(),
-                        max_norm=getattr(self._conf, 'grad_clip', 5.0),
+                        max_norm=self._conf.grad_clip,
                     )
                     self._optimizer.step()
 
@@ -224,14 +223,8 @@ class TrainWSGGBase(WSGGBase):
                     mn = pd.concat(tr[-log_every:], axis=1).mean(1)
                     print(mn)
 
-            # Save checkpoint
-            self._save_model(
-                model=self._model,
-                epoch=epoch,
-                checkpoint_save_file_path=self._checkpoint_save_dir_path,
-                checkpoint_name=self._checkpoint_name,
-                method_name=self._conf.method_name,
-            )
+            # Save full-state checkpoint
+            self._save_checkpoint(epoch)
 
             # End-of-epoch evaluation
             score = self._evaluate_after_epoch()
@@ -277,7 +270,6 @@ class TrainWSGGBase(WSGGBase):
         self.init_model()
         self.init_loss_fn()
         self._init_loss_functions()
-        self._load_checkpoint()
 
         # 4. Detector
         self._init_detector()
@@ -287,12 +279,16 @@ class TrainWSGGBase(WSGGBase):
         self._init_optimizer()
         self._init_scheduler()
 
-        # 6. Train
-        print("-----------------------------------------------------")
-        print(f"Initialized training for: {self._conf.method_name}")
-        print(f"  Temporal: {self.is_temporal()}")
-        print(f"  Detector: {getattr(self._conf, 'detector_type', 'none')}")
-        print("-----------------------------------------------------")
+        # 6. Resume from checkpoint (must come after optimizer/scheduler init)
+        self._maybe_resume()
+
+        # 7. Train
+        print("━" * 60)
+        print(f"  Method   : {self._conf.method_name}")
+        print(f"  Temporal : {self.is_temporal()}")
+        print(f"  Detector : {self._conf.detector_type}")
+        print(f"  Epochs   : {self._starting_epoch} → {self._conf.nepoch}")
+        print("━" * 60)
         self._train_model()
 
     # ------------------------------------------------------------------

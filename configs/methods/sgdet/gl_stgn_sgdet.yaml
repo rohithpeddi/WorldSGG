@@ -1,0 +1,81 @@
+# ============================================================================
+# GL-STGN — SGDet Setting
+# ============================================================================
+# Usage:
+#   python train_wsgg_methods.py --config configs/methods/sgdet/gl_stgn_sgdet.yaml
+#   python test_wsgg_methods.py --config configs/methods/sgdet/gl_stgn_sgdet.yaml --ckpt path/to/ckpt.tar
+# ============================================================================
+
+# ---- Method & Setting ----
+method_name: gl_stgn
+mode: sgdet
+task_name: worldsgg
+experiment_name: gl_stgn_sgdet
+
+# ---- Paths ----
+data_path: /data/rohith/ag
+save_path: /data/rohith/ag/checkpoints
+results_path: results
+ckpt: null  # Set to "checkpoint_5" to resume from epoch 5
+world_sg_dir: ""
+
+# ---- Detector (sgdet = DINO mono3d) ----
+detector_type: dino_mono3d
+detector_ckpt: ""  # TODO: set path to trained detector checkpoint
+detector_model: v3l
+detector_frozen: true
+num_detector_classes: 37
+
+# ---- Shared Architecture ----
+d_model: 256
+d_memory: 256
+d_struct: 256
+d_visual: 256
+d_detector_roi: 1024
+d_camera: 128
+d_motion: 64
+n_heads: 4
+d_feedforward: 512
+max_objects: 64
+dropout: 0.1
+
+# ---- Relationship Predictor ----
+d_rel: 256
+d_text: 128
+d_union_roi: 1024
+n_rel_layers: 2
+n_rel_heads: 4
+n_temporal_edge_layers: 1
+clip_embeddings_path: features/clip_features/clip_text_embeddings.npy
+
+# ---- Training ----
+nepoch: 20
+lr: 1e-4
+weight_decay: 1e-4
+grad_clip: 5.0
+optimizer: adamw
+bce_loss: true
+use_wandb: false
+use_amp: true
+log_every: 100
+include_invisible: true
+datasize: large
+
+# ---- GL-STGN Specific ----
+n_gnn_layers: 3
+n_graph_layers: 3
+bptt_chunk_size: 5
+chunk_length: 16
+memory_init: zeros
+p_mask_visual: 0.3
+teacher_forcing_epochs: 5
+
+# ---- Loss ----
+lambda_vlm: 0.2
+label_smoothing_vlm: 0.2
+detach_unseen_memory: true
+lambda_smooth: 0.1
+movement_thresh: 0.3
+lambda_unseen: 0.2
+use_physics_veto: true
+physics_veto_dist_thresh: 2.0
