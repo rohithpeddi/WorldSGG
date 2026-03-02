@@ -152,44 +152,45 @@ class AMWAE(nn.Module):
 
     def forward(
         self,
-        visual_features_seq: List[torch.Tensor],
-        corners_seq: List[torch.Tensor],
-        valid_mask_seq: List[torch.Tensor],
-        visibility_mask_seq: List[torch.Tensor],
-        person_idx_seq: List[torch.Tensor],
-        object_idx_seq: List[torch.Tensor],
+        visual_features_seq: torch.Tensor,
+        corners_seq: torch.Tensor,
+        valid_mask_seq: torch.Tensor,
+        visibility_mask_seq: torch.Tensor,
+        person_idx_seq: torch.Tensor,
+        object_idx_seq: torch.Tensor,
+        pair_valid: torch.Tensor,
         p_mask_visible: float = 0.0,
-        camera_pose_seq: Optional[List[torch.Tensor]] = None,
-        union_features_seq: Optional[List[torch.Tensor]] = None,
-        bboxes_2d_seq: Optional[List[torch.Tensor]] = None,
-    ) -> Dict[str, List]:
+        camera_pose_seq: Optional[torch.Tensor] = None,
+        union_features_seq: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
         """
         Process a full video in a single batched forward pass.
 
+        All inputs are pre-padded (T, N_max, ...) or (T, K_max, ...) tensors.
+
         Args:
-            visual_features_seq: T-list of (N, d_detector_roi) tensors.
-            corners_seq:         T-list of (N, 8, 3) tensors.
-            valid_mask_seq:      T-list of (N,) bool tensors.
-            visibility_mask_seq: T-list of (N,) bool tensors.
-            person_idx_seq:      T-list of (K_t,) long tensors.
-            object_idx_seq:      T-list of (K_t,) long tensors.
+            visual_features_seq: (T, N_max, d_detector_roi)
+            corners_seq:         (T, N_max, 8, 3)
+            valid_mask_seq:      (T, N_max) bool
+            visibility_mask_seq: (T, N_max) bool
+            person_idx_seq:      (T, K_max) long
+            object_idx_seq:      (T, K_max) long
+            pair_valid:          (T, K_max) bool
             p_mask_visible:      Training masking probability.
-            camera_pose_seq:     T-list of (4, 4) tensors or None.
-            union_features_seq:  T-list of (K_t, d_union_roi) tensors or None.
-            bboxes_2d_seq:       Unused (kept for interface compat).
+            camera_pose_seq:     (T, 4, 4) or None
+            union_features_seq:  (T, K_max, d_union_roi) or None
 
         Returns:
-            dict with per-frame lists: node_logits, att/spa/con distributions,
-            masking info, and reconstruction targets.
+            dict with (T, ...) padded tensors.
         """
-        T = len(corners_seq)
-        device = corners_seq[0].device
+        T = corners_seq.shape[0]
+        device = corners_seq.device
 
-        # ==================== Stack inputs (T, N, ...) ====================
-        visual_all = torch.stack(visual_features_seq)       # (T, N, d_roi)
-        corners_all = torch.stack(corners_seq)              # (T, N, 8, 3)
-        valid_all = torch.stack(valid_mask_seq)              # (T, N)
-        visibility_all = torch.stack(visibility_mask_seq)    # (T, N)
+        # Inputs already (T, N_max, ...) — no stacking needed
+        visual_all = visual_features_seq
+        corners_all = corners_seq
+        valid_all = valid_mask_seq
+        visibility_all = visibility_mask_seq
 
         # ==================== Step 1: Structural encoding (B=T) ====================
         struct_all, _ = self.structural_encoder(corners_all, valid_all)  # (T, N, d_struct)
@@ -198,7 +199,7 @@ class AMWAE(nn.Module):
         cam_all = None
         ego_tokens_all = None
         if camera_pose_seq is not None:
-            camera_pose_all = torch.stack(camera_pose_seq)  # (T, 4, 4)
+            camera_pose_all = camera_pose_seq
             _, cam_all = self.camera_encoder(camera_pose_all, corners_all, valid_all)
             ego_tokens_all = self.camera_temporal_encoder(camera_pose_all)  # (T, d_camera)
 
@@ -211,7 +212,7 @@ class AMWAE(nn.Module):
 
         camera_R_all = None
         if camera_pose_seq is not None:
-            camera_R_all = torch.stack(camera_pose_seq)[:, :3, :3]
+            camera_R_all = camera_pose_seq[:, :3, :3]
 
         motion_all = self.motion_encoder(
             velocity=velocity_all, acceleration=accel_all,
@@ -257,27 +258,30 @@ class AMWAE(nn.Module):
         recon_pred_all = self.reconstruction_proj(completed_tokens)  # (T, N, d_visual)
 
         # ==================== Step 11: Batched edge prediction ====================
-        rel_tokens, pair_valid, padded_pidx, padded_oidx = self.rel_predictor.batched_form_and_attend(
-            enriched_all, node_logits_all, person_idx_seq, object_idx_seq, union_features_seq,
-        )  # (T, K_max, d_rel), (T, K_max), (T, K_max), (T, K_max)
+        rel_tokens, pair_valid_out = self.rel_predictor.batched_form_and_attend(
+            enriched_all, node_logits_all, person_idx_seq, object_idx_seq,
+            pair_valid, union_features_seq,
+        )  # (T, K_max, d_rel), (T, K_max)
 
         # ==================== Step 12: Temporal edge attention ====================
-        enriched_rel = self.temporal_edge_attn(rel_tokens, pair_valid, padded_pidx, padded_oidx)
+        enriched_rel = self.temporal_edge_attn(rel_tokens, pair_valid_out, person_idx_seq, object_idx_seq)
 
         # ==================== Step 13: Predict distributions ====================
-        edge_out = self.rel_predictor.batched_predict(enriched_rel, pair_valid)
+        edge_out = self.rel_predictor.batched_predict(enriched_rel, pair_valid_out)
 
         # ==================== Build output ====================
-        T = enriched_all.shape[0]
-        outputs: Dict[str, List] = {
-            "node_logits": [node_logits_all[t] for t in range(T)],
-            "attention_distribution": edge_out["attention_distribution"],
-            "spatial_distribution": edge_out["spatial_distribution"],
-            "contacting_distribution": edge_out["contacting_distribution"],
-            "is_masked": [is_masked_all[t] for t in range(T)],
-            "original_visual": [original_visual_all[t] for t in range(T)],
-            "reconstruction_predictions": [recon_pred_all[t] for t in range(T)],
-            "reconstruction_targets": [original_visual_all[t] for t in range(T)],
+        outputs = {
+            "node_logits": node_logits_all,                              # (T, N, C)
+            "attention_distribution": edge_out["attention_distribution"],  # (T, K_max, 3)
+            "spatial_distribution": edge_out["spatial_distribution"],      # (T, K_max, 6)
+            "contacting_distribution": edge_out["contacting_distribution"],# (T, K_max, 17)
+            "is_masked": is_masked_all,                                    # (T, N)
+            "original_visual": original_visual_all,                        # (T, N, d_visual)
+            "reconstruction_predictions": recon_pred_all,                  # (T, N, d_visual)
+            "reconstruction_targets": original_visual_all,                 # (T, N, d_visual)
         }
 
         return outputs
+
+
+

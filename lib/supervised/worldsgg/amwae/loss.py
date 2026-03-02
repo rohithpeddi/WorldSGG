@@ -1,41 +1,28 @@
 """
-AMWAE Triple-Objective Loss — VLM Noisy Label Training
-=======================================================
+AMWAE Triple-Objective Loss — VLM Noisy Label Training (Padded Tensor API)
+===========================================================================
+
+Accepts pre-padded (T, K_max, C) tensors with pair_valid mask from dataset.
+No per-frame loops or _build_multi_label_gt needed.
 
 L_total = L_vis + λ_vlm * L_masked + λ_recon * λ_recon_dominance * L_recon
         + λ_contra * L_contrastive + L_simulated_unseen
-
-Changes from baseline:
-  1. λ_vlm discounting (0.2 vs old 2.0)
-  2. Label smoothing on masked/unseen GT
-  3. Feature reconstruction dominance (λ_recon_dominance = 5x)
-  4. Simulated-unseen clean fine-tuning (the "silver bullet")
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from constants import Constants as const
 from lib.supervised.worldsgg.worldsgg_base import LabelSmoother
 
 
 class AMWAELoss(nn.Module):
-    """
-    Triple-objective loss with VLM noise handling + simulated-unseen.
+    """Triple-objective loss with VLM noise handling + simulated-unseen.
 
-    Args:
-        lambda_vlm: Weight for masked/unseen (VLM) edges.
-        lambda_recon: Feature reconstruction loss base weight.
-        lambda_recon_dominance: Multiplier on reconstruction (>>1 emphasizes visual reality).
-        lambda_contrastive: InfoNCE contrastive loss weight.
-        p_simulate_unseen: Fraction of visible objects to artificially mask.
-        label_smoothing: Epsilon for VLM label smoothing.
-
-        temperature: InfoNCE temperature.
-        bce_loss: Use BCE for spatial/contacting.
-        mode: Task mode.
+    All edge-level inputs are pre-padded (T, K_max, ...) tensors with
+    pair_valid masks. No _build_multi_label_gt or per-frame loops needed.
     """
 
     def __init__(
@@ -46,7 +33,6 @@ class AMWAELoss(nn.Module):
         lambda_contrastive: float = 0.5,
         p_simulate_unseen: float = 0.25,
         label_smoothing: float = 0.2,
-        use_physics_veto: bool = True,  # DEPRECATED — kept for backward compat, ignored
         physics_veto_thresh: float = 2.0,
         temperature: float = 0.07,
         bce_loss: bool = True,
@@ -59,9 +45,11 @@ class AMWAELoss(nn.Module):
         self.lambda_recon_dominance = lambda_recon_dominance
         self.lambda_contrastive = lambda_contrastive
         self.p_simulate_unseen = p_simulate_unseen
+        self.physics_veto_thresh = physics_veto_thresh
         self.temperature = temperature
         self.bce_loss = bce_loss
         self.mode = mode
+        self.lambda_stability = lambda_stability
 
         self._ce_loss = nn.CrossEntropyLoss()
         self._bce_loss = nn.BCELoss()
@@ -69,51 +57,60 @@ class AMWAELoss(nn.Module):
 
         self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
 
-        # Energy Transformer stability loss (AMWAE++ only)
-        self.lambda_stability = lambda_stability
-
-
     def forward(
         self,
-        predictions: Dict[str, List],
-        gt_attention: List[torch.Tensor],
-        gt_spatial: List[List],
-        gt_contacting: List[List],
-        gt_node_labels: Optional[List[torch.Tensor]] = None,
-        visibility_mask_seq: Optional[List[torch.Tensor]] = None,
-        person_idx_seq: Optional[List[torch.Tensor]] = None,
-        object_idx_seq: Optional[List[torch.Tensor]] = None,
-        valid_mask_seq: Optional[List[torch.Tensor]] = None,
-        corners_seq: Optional[List[torch.Tensor]] = None,
+        predictions: Dict[str, torch.Tensor],
+        gt_attention: torch.Tensor,
+        gt_spatial: torch.Tensor,
+        gt_contacting: torch.Tensor,
+        pair_valid: torch.Tensor,
+        visibility_mask: torch.Tensor,
+        person_idx: torch.Tensor,
+        object_idx: torch.Tensor,
+        valid_mask: Optional[torch.Tensor] = None,
+        corners: Optional[torch.Tensor] = None,
+        gt_node_labels: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Compute triple-objective loss with VLM noise handling."""
-        device = predictions["attention_distribution"][0].device
+        """
+        Compute triple-objective loss on pre-padded tensors.
+
+        Args:
+            predictions: dict with (T, K_max, C) padded tensors
+            gt_attention: (T, K_max) long
+            gt_spatial: (T, K_max, 6) float multi-hot
+            gt_contacting: (T, K_max, 17) float multi-hot
+            pair_valid: (T, K_max) bool
+            visibility_mask: (T, N_max) bool
+            person_idx: (T, K_max) long
+            object_idx: (T, K_max) long
+        """
+        device = predictions["attention_distribution"].device
         losses = {}
 
-        # 1. Scene graph loss (split visible/masked with VLM handling)
+        # 1. Scene graph loss (split visible/masked)
         sg_losses = self._compute_scene_graph_loss(
             predictions, gt_attention, gt_spatial, gt_contacting,
-            gt_node_labels, visibility_mask_seq, person_idx_seq,
-            object_idx_seq, valid_mask_seq, corners_seq, device,
+            pair_valid, visibility_mask, person_idx, object_idx,
+            valid_mask, gt_node_labels, device,
         )
         losses.update(sg_losses)
 
-        # 2. Feature reconstruction loss (DOMINANT — drives visual fidelity)
+        # 2. Feature reconstruction loss
         recon_loss = self._compute_reconstruction_loss(predictions, device)
         losses["recon_loss"] = recon_loss * self.lambda_recon * self.lambda_recon_dominance
 
-        # 3. Contrastive loss (InfoNCE on cross-attention)
+        # 3. Contrastive loss
         contra_loss = self._compute_contrastive_loss(predictions, device)
         losses["contrastive_loss"] = contra_loss * self.lambda_contrastive
 
-        # 4. Simulated-unseen clean fine-tuning (the "silver bullet")
+        # 4. Simulated-unseen fine-tuning
         sim_loss = self._compute_simulated_unseen_loss(predictions, device)
         losses["simulated_unseen_loss"] = sim_loss
 
-        # 5. Attractor stability loss (AMWAE++ Energy Transformer only)
+        # 5. Attractor stability loss (AMWAE++ only)
         if self.lambda_stability > 0 and "h_prev_seq" in predictions and predictions["h_prev_seq"]:
-            h_final_all = torch.stack(predictions["enriched_seq"])   # (T, N, d)
-            h_prev_all = torch.stack(predictions["h_prev_seq"])     # (T, N, d)
+            h_final_all = torch.stack(predictions["enriched_seq"])
+            h_prev_all = torch.stack(predictions["h_prev_seq"])
             L_stability = F.mse_loss(h_final_all, h_prev_all.detach())
             losses["stability_loss"] = self.lambda_stability * L_stability
 
@@ -122,192 +119,162 @@ class AMWAELoss(nn.Module):
 
         return losses
 
-    # ------------------------------------------------------------------
-    # Scene Graph Loss
-    # ------------------------------------------------------------------
     def _compute_scene_graph_loss(
         self, predictions, gt_attention, gt_spatial, gt_contacting,
-        gt_node_labels, visibility_mask_seq, person_idx_seq,
-        object_idx_seq, valid_mask_seq, corners_seq, device,
+        pair_valid, visibility_mask, person_idx, object_idx,
+        valid_mask, gt_node_labels, device,
     ) -> Dict[str, torch.Tensor]:
-        """Split visible/masked SG loss with VLM noise handling."""
-        T = len(predictions["attention_distribution"])
-
-        vis_att_p, vis_att_g = [], []
-        vis_spa_p, vis_spa_g = [], []
-        vis_con_p, vis_con_g = [], []
-        mask_att_p, mask_att_g = [], []
-        mask_spa_p, mask_spa_g = [], []
-        mask_con_p, mask_con_g = [], []
-        node_p, node_g = [], []
-
-        for t in range(T):
-            att_pred = predictions["attention_distribution"][t]
-            spa_pred = predictions["spatial_distribution"][t]
-            con_pred = predictions["contacting_distribution"][t]
-
-            K_t = att_pred.shape[0]
-            if K_t == 0:
-                continue
-
-            att_gt = gt_attention[t].to(device)
-            spa_gt = self._build_multi_label_gt(gt_spatial[t], 6, device)
-            con_gt = self._build_multi_label_gt(gt_contacting[t], 17, device)
-
-            if visibility_mask_seq is not None and person_idx_seq is not None:
-                vis_t = visibility_mask_seq[t]
-                p_idx = person_idx_seq[t]
-                o_idx = object_idx_seq[t]
-                pair_visible = vis_t[p_idx] & vis_t[o_idx]
-                pair_masked = ~pair_visible
-
-                # Visible: clean manual GT
-                if pair_visible.any():
-                    vis_att_p.append(att_pred[pair_visible])
-                    vis_att_g.append(att_gt[pair_visible])
-                    vis_spa_p.append(spa_pred[pair_visible])
-                    vis_spa_g.append(spa_gt[pair_visible])
-                    vis_con_p.append(con_pred[pair_visible])
-                    vis_con_g.append(con_gt[pair_visible])
-
-                # Masked: VLM pseudo-labels
-                if pair_masked.any():
-                    m_att_pred = att_pred[pair_masked]
-                    m_att_gt = att_gt[pair_masked]
-                    m_spa_pred = spa_pred[pair_masked]
-                    m_spa_gt = spa_gt[pair_masked]
-                    m_con_pred = con_pred[pair_masked]
-                    m_con_gt = con_gt[pair_masked]
-
-
-
-                    # Label smoothing
-                    if self._label_smoother is not None:
-                        m_spa_gt = self._label_smoother.smooth_bce_target(m_spa_gt)
-                        m_con_gt = self._label_smoother.smooth_bce_target(m_con_gt)
-
-                    if len(m_att_pred) > 0:
-                        mask_att_p.append(m_att_pred)
-                        mask_att_g.append(m_att_gt)
-                        mask_spa_p.append(m_spa_pred)
-                        mask_spa_g.append(m_spa_gt)
-                        mask_con_p.append(m_con_pred)
-                        mask_con_g.append(m_con_gt)
-            else:
-                vis_att_p.append(att_pred)
-                vis_att_g.append(att_gt)
-                vis_spa_p.append(spa_pred)
-                vis_spa_g.append(spa_gt)
-                vis_con_p.append(con_pred)
-                vis_con_g.append(con_gt)
-
-            # Node classification
-            if gt_node_labels is not None and self.mode in [const.SGCLS, const.SGDET]:
-                node_pred_t = predictions["node_logits"][t]
-                node_gt_t = gt_node_labels[t].to(device)
-                if valid_mask_seq is not None:
-                    valid_t = valid_mask_seq[t]
-                    node_pred_t = node_pred_t[valid_t]
-                    node_gt_t = node_gt_t[valid_t]
-                if len(node_gt_t) > 0:
-                    node_p.append(node_pred_t)
-                    node_g.append(node_gt_t)
-
-        losses = {}
+        """Split visible/masked SG loss on pre-padded tensors."""
         zero = torch.tensor(0.0, device=device, requires_grad=True)
 
+        valid = pair_valid.bool()
+        if not valid.any():
+            return {
+                const.ATTENTION_RELATION_LOSS: zero,
+                const.SPATIAL_RELATION_LOSS: zero,
+                const.CONTACTING_RELATION_LOSS: zero,
+            }
+
+        # Flatten all valid pairs across T
+        att_pred = predictions["attention_distribution"][valid]
+        spa_pred = predictions["spatial_distribution"][valid]
+        con_pred = predictions["contacting_distribution"][valid]
+
+        att_gt = gt_attention[valid].to(device)
+        spa_gt = gt_spatial[valid].to(device)
+        con_gt = gt_contacting[valid].to(device)
+
+        # Split by visibility
+        p_vis = visibility_mask.gather(1, person_idx)[valid]
+        o_vis = visibility_mask.gather(1, object_idx)[valid]
+        pair_visible = p_vis & o_vis
+        pair_masked = ~pair_visible
+
+        losses = {}
+
         # Visible losses (full weight, clean GT)
-        vis_losses = self._relationship_losses(vis_att_p, vis_att_g, vis_spa_p, vis_spa_g, vis_con_p, vis_con_g, device)
-        for k, v in vis_losses.items():
-            losses[f"vis_{k}"] = v
+        if pair_visible.any():
+            losses["vis_att"] = self._ce_loss(att_pred[pair_visible], att_gt[pair_visible])
+            losses["vis_spa"] = self._bce_loss(spa_pred[pair_visible], spa_gt[pair_visible])
+            losses["vis_con"] = self._bce_loss(con_pred[pair_visible], con_gt[pair_visible])
+        else:
+            losses["vis_att"] = zero
+            losses["vis_spa"] = zero
+            losses["vis_con"] = zero
 
         # Masked losses (λ_vlm weighted, smoothed)
-        mask_losses = self._relationship_losses(
-            mask_att_p, mask_att_g, mask_spa_p, mask_spa_g, mask_con_p, mask_con_g, device,
-            smoothed_ce=True,
-        )
-        for k, v in mask_losses.items():
-            losses[f"masked_{k}"] = v * self.lambda_vlm
+        if pair_masked.any():
+            m_att_pred = att_pred[pair_masked]
+            m_att_gt = att_gt[pair_masked]
+            m_spa_pred = spa_pred[pair_masked]
+            m_spa_gt = spa_gt[pair_masked]
+            m_con_pred = con_pred[pair_masked]
+            m_con_gt = con_gt[pair_masked]
+
+            if self._label_smoother is not None:
+                m_spa_gt = self._label_smoother.smooth_bce_target(m_spa_gt)
+                m_con_gt = self._label_smoother.smooth_bce_target(m_con_gt)
+                smoothed = self._label_smoother.smooth_ce_target(m_att_gt, 3)
+                losses["masked_att"] = self._kl_loss(
+                    F.log_softmax(m_att_pred, dim=-1), smoothed
+                ) * self.lambda_vlm
+            else:
+                losses["masked_att"] = self._ce_loss(m_att_pred, m_att_gt) * self.lambda_vlm
+
+            losses["masked_spa"] = self._bce_loss(m_spa_pred, m_spa_gt) * self.lambda_vlm
+            losses["masked_con"] = self._bce_loss(m_con_pred, m_con_gt) * self.lambda_vlm
+        else:
+            losses["masked_att"] = zero
+            losses["masked_spa"] = zero
+            losses["masked_con"] = zero
+
+        losses[const.ATTENTION_RELATION_LOSS] = losses["vis_att"] + losses["masked_att"]
+        losses[const.SPATIAL_RELATION_LOSS] = losses["vis_spa"] + losses["masked_spa"]
+        losses[const.CONTACTING_RELATION_LOSS] = losses["vis_con"] + losses["masked_con"]
 
         # Node loss
-        if node_p:
-            losses[const.OBJECT_LOSS] = self._ce_loss(torch.cat(node_p), torch.cat(node_g))
+        if gt_node_labels is not None and self.mode in [const.SGCLS, const.SGDET]:
+            node_pred = predictions["node_logits"]
+            node_gt = gt_node_labels.to(device)
+            if valid_mask is not None:
+                node_pred = node_pred[valid_mask]
+                node_gt = node_gt[valid_mask]
+            if len(node_gt) > 0:
+                losses[const.OBJECT_LOSS] = self._ce_loss(node_pred, node_gt)
 
         return losses
 
-    # ------------------------------------------------------------------
-    # Feature Reconstruction Loss
-    # ------------------------------------------------------------------
     def _compute_reconstruction_loss(self, predictions, device):
-        """
-        MSE between retrieved tokens and original DINO features for masked tokens.
+        """MSE between retrieved tokens and original DINO features for masked tokens.
 
-        This is the dominant loss for M2 — drives visual fidelity over VLM text.
         Vectorized: stacks all T frames and computes masked MSE in one shot.
         """
         zero = torch.tensor(0.0, device=device, requires_grad=True)
-        T = len(predictions.get("is_masked", []))
-        if T == 0:
+
+        recon_pred = predictions.get("reconstruction_predictions", None)
+        recon_target = predictions.get("reconstruction_targets", None)
+        is_masked = predictions.get("is_masked", None)
+
+        if recon_pred is None or recon_target is None or is_masked is None:
             return zero
 
-        # Stack all frames: (T, N, ...)
-        is_masked_all = torch.stack(predictions["is_masked"])          # (T, N)
-        if not is_masked_all.any():
+        # These should already be (T, N, D) tensors from the model
+        if isinstance(recon_pred, list):
+            if len(recon_pred) == 0:
+                return zero
+            recon_pred = torch.stack(recon_pred)
+            recon_target = torch.stack(recon_target)
+            is_masked = torch.stack(is_masked)
+
+        # is_masked: (T, N) bool
+        if not is_masked.any():
             return zero
 
-        retrieved_all = torch.stack(predictions["retrieved_tokens"])   # (T, N, d_model)
-        original_all = torch.stack(predictions["original_visual"])    # (T, N, d_visual)
+        pred_masked = recon_pred[is_masked]
+        target_masked = recon_target[is_masked]
 
-        # Handle dimension mismatch if needed
-        if retrieved_all.shape[-1] != original_all.shape[-1]:
-            original_all = F.adaptive_avg_pool1d(
-                original_all.reshape(-1, original_all.shape[-1]).unsqueeze(1),
-                retrieved_all.shape[-1],
-            ).squeeze(1).reshape(original_all.shape[0], original_all.shape[1], -1)
+        return F.mse_loss(pred_masked, target_masked)
 
-        # Select only masked tokens and compute MSE
-        masked_retrieved = retrieved_all[is_masked_all]  # (M, d)
-        masked_original = original_all[is_masked_all]    # (M, d)
-
-        if masked_retrieved.numel() == 0:
-            return zero
-
-        return F.mse_loss(masked_retrieved, masked_original)
-
-    # ------------------------------------------------------------------
-    # Contrastive Loss (InfoNCE)
-    # ------------------------------------------------------------------
     def _compute_contrastive_loss(self, predictions, device):
-        """
-        InfoNCE on cross-attention weights.
+        """InfoNCE on cross-attention weights for masked tokens.
 
         For each masked token, attention to SAME object (positive) should be higher.
         """
         zero = torch.tensor(0.0, device=device, requires_grad=True)
-        T = len(predictions.get("attn_weights", []))
+
+        attn_weights_list = predictions.get("attn_weights", None)
+        is_masked_list = predictions.get("is_masked", None)
+        mem_ids_list = predictions.get("memory_object_ids", None)
+
+        if attn_weights_list is None or is_masked_list is None or mem_ids_list is None:
+            return zero
+
+        # These may be lists if model hasn't been updated yet
+        if not isinstance(attn_weights_list, list):
+            return zero
+
+        T = len(attn_weights_list)
         if T == 0:
             return zero
 
         losses = []
         for t in range(T):
-            is_masked = predictions["is_masked"][t]  # (N_t,) bool
-            attn_weights = predictions["attn_weights"][t]  # (N_t, M)
-            mem_obj_ids = predictions["memory_object_ids"][t]  # (M,)
+            is_masked = is_masked_list[t]
+            attn_weights = attn_weights_list[t]
+            mem_obj_ids = mem_ids_list[t]
 
             if not is_masked.any() or attn_weights is None:
                 continue
 
-            N_t = is_masked.shape[0]
             masked_indices = torch.where(is_masked)[0]
 
             for i in masked_indices:
-                obj_id = i  # Object slot ID matches index
-                # Positive: memory slots belonging to same object
+                obj_id = i
                 pos_mask = (mem_obj_ids == obj_id)
                 if not pos_mask.any():
                     continue
 
-                attn_i = attn_weights[i]  # (M,)
+                attn_i = attn_weights[i]
                 pos_score = attn_i[pos_mask].sum()
                 total_score = attn_i.sum()
 
@@ -319,22 +286,10 @@ class AMWAELoss(nn.Module):
 
         return torch.stack(losses).mean()
 
-    # ------------------------------------------------------------------
-    # Simulated-Unseen Clean Fine-Tuning (The Silver Bullet)
-    # ------------------------------------------------------------------
     def _compute_simulated_unseen_loss(self, predictions, device):
-        """
-        Loss for artificially masked visible objects.
-
-        During training, p_simulate_unseen fraction of VISIBLE objects get [MASK]ed.
-        The model must retrieve features and predict SG using memory.
-        Loss is against PERFECT MANUAL GT (not VLM labels).
-
-        This teaches flawless retrieval without VLM noise.
-        """
+        """Loss for artificially masked visible objects — uses clean GT."""
         zero = torch.tensor(0.0, device=device, requires_grad=True)
 
-        # Simulated-unseen predictions are stored separately by the model
         sim_preds = predictions.get("simulated_unseen_predictions", None)
         sim_gt = predictions.get("simulated_unseen_gt", None)
 
@@ -349,68 +304,22 @@ class AMWAELoss(nn.Module):
             pred = sim_preds[t]
             gt = sim_gt[t]
 
-            # Standard CE/BCE on perfect manual GT
             if "attention" in pred and "attention" in gt:
                 att_loss = self._ce_loss(pred["attention"], gt["attention"].to(device))
                 losses.append(att_loss)
             if "spatial" in pred and "spatial" in gt:
-                spa_gt = self._build_multi_label_gt(gt["spatial"], 6, device)
-                spa_loss = self._bce_loss(pred["spatial"], spa_gt)
-                losses.append(spa_loss)
+                # Simulated GT should already be multi-hot tensors from the model
+                spa_gt = gt["spatial"].to(device) if isinstance(gt["spatial"], torch.Tensor) else gt["spatial"]
+                if isinstance(spa_gt, torch.Tensor):
+                    spa_loss = self._bce_loss(pred["spatial"], spa_gt)
+                    losses.append(spa_loss)
             if "contacting" in pred and "contacting" in gt:
-                con_gt = self._build_multi_label_gt(gt["contacting"], 17, device)
-                con_loss = self._bce_loss(pred["contacting"], con_gt)
-                losses.append(con_loss)
+                con_gt = gt["contacting"].to(device) if isinstance(gt["contacting"], torch.Tensor) else gt["contacting"]
+                if isinstance(con_gt, torch.Tensor):
+                    con_loss = self._bce_loss(pred["contacting"], con_gt)
+                    losses.append(con_loss)
 
         if not losses:
             return zero
 
         return torch.stack(losses).mean()
-
-    # ------------------------------------------------------------------
-    # Shared Helpers
-    # ------------------------------------------------------------------
-    def _relationship_losses(self, att_p, att_g, spa_p, spa_g, con_p, con_g, device, smoothed_ce=False):
-        """Compute relationship losses from accumulated tensors."""
-        losses = {}
-        zero = torch.tensor(0.0, device=device, requires_grad=True)
-
-        if att_p:
-            all_att_pred = torch.cat(att_p)
-            all_att_gt = torch.cat(att_g)
-            if smoothed_ce and self._label_smoother is not None:
-                smoothed = self._label_smoother.smooth_ce_target(all_att_gt, 3)
-                losses["att"] = self._kl_loss(F.log_softmax(all_att_pred, dim=-1), smoothed)
-            else:
-                losses["att"] = self._ce_loss(all_att_pred, all_att_gt)
-        else:
-            losses["att"] = zero
-
-        if spa_p:
-            losses["spa"] = self._bce_loss(torch.cat(spa_p), torch.cat(spa_g))
-        else:
-            losses["spa"] = zero
-
-        if con_p:
-            losses["con"] = self._bce_loss(torch.cat(con_p), torch.cat(con_g))
-        else:
-            losses["con"] = zero
-
-        return losses
-
-    def _build_multi_label_gt(self, gt_list, num_classes, device):
-        """Convert list of GT index lists to multi-hot BCE targets."""
-        K = len(gt_list)
-        if K == 0:
-            return torch.zeros(0, num_classes, device=device)
-        target = torch.zeros(K, num_classes, dtype=torch.float32, device=device)
-        for i, indices in enumerate(gt_list):
-            if isinstance(indices, torch.Tensor):
-                idx = indices.long()
-            elif isinstance(indices, (list, tuple)):
-                idx = torch.tensor(indices, dtype=torch.long, device=device)
-            else:
-                idx = torch.tensor([indices], dtype=torch.long, device=device)
-            if len(idx) > 0:
-                target[i, idx] = 1.0
-        return target

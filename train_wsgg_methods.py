@@ -1,6 +1,6 @@
 """
-WSGG Training Methods
-======================
+WSGG Training Methods (Padded Tensor API)
+==========================================
 
 Per-method training classes. Each overrides:
   - init_model()               → create model
@@ -9,17 +9,28 @@ Per-method training classes. Each overrides:
   - process_train_video(batch) → forward + loss dict
   - process_test_video(batch)  → inference
 
+The dataset returns a single dict with (T, N_max, ...) and (T, K_max, ...)
+pre-padded tensors per video. No per-frame loops needed.
+
 Usage:
-  python train_wsgg_methods.py --config configs/methods/predcls/gl_stgn_predcls.yaml
-  python train_wsgg_methods.py --config configs/methods/predcls/amwae_predcls.yaml
-  python train_wsgg_methods.py --config configs/methods/predcls/amwae_pp_predcls.yaml
-  python train_wsgg_methods.py --config configs/methods/predcls/lks_buffer_predcls.yaml
+  python train_wsgg_methods.py --config configs/methods/predcls/gl_stgn_predcls_dinov2b.yaml
 """
 
 import torch
 
 from wsgg_base import WSGGBase, load_wsgg_config
 from train_wsgg_base import TrainWSGGBase
+
+
+def _to_device(batch, device):
+    """Move all tensor values in batch dict to device."""
+    out = {}
+    for k, v in batch.items():
+        if isinstance(v, torch.Tensor):
+            out[k] = v.to(device)
+        else:
+            out[k] = v
+    return out
 
 
 # ============================================================================
@@ -55,57 +66,55 @@ class TrainGLSTGN(TrainWSGGBase):
         return True
 
     def process_train_video(self, batch) -> dict:
-        tensors = batch
-
-        T = len(tensors) if isinstance(tensors, list) else 1
-        frames = tensors if isinstance(tensors, list) else [tensors]
+        b = _to_device(batch, self._device)
 
         pred = self._model.forward(
-            visual_features_seq=[f["visual_features"].to(self._device) for f in frames],
-            corners_seq=[f["corners"].to(self._device) for f in frames],
-            valid_mask_seq=[f["valid_mask"].to(self._device) for f in frames],
-            visibility_mask_seq=[f["visibility_mask"].to(self._device) for f in frames],
-            person_idx_seq=[f["person_idx"].to(self._device) for f in frames],
-            object_idx_seq=[f["object_idx"].to(self._device) for f in frames],
-            camera_pose_seq=[f["camera_pose"].to(self._device) for f in frames] if "camera_pose" in frames[0] else None,
-            union_features_seq=[f["union_features"].to(self._device) for f in frames] if "union_features" in frames[0] else None,
+            visual_features_seq=b["visual_features"],     # (T, N_max, D)
+            corners_seq=b["corners"],                       # (T, N_max, 8, 3)
+            valid_mask_seq=b["valid_mask"],                 # (T, N_max)
+            visibility_mask_seq=b["visibility_mask"],       # (T, N_max)
+            person_idx_seq=b["person_idx"],                 # (T, K_max)
+            object_idx_seq=b["object_idx"],                 # (T, K_max)
+            pair_valid=b["pair_valid"],                     # (T, K_max)
+            camera_pose_seq=b.get("camera_poses"),
+            union_features_seq=b.get("union_features"),
         )
 
-        total_losses = {}
-        for t in range(T):
-            frame = frames[t]
-            frame_pred = {
-                "node_logits": pred["node_logits"][t],
-                "attention_distribution": pred["attention_distribution"][t],
-                "spatial_distribution": pred["spatial_distribution"][t],
-                "contacting_distribution": pred["contacting_distribution"][t],
-            }
-            frame_losses = self._loss_fn(frame_pred, frame, self._device)
-            for k, v in frame_losses.items():
-                total_losses[k] = total_losses.get(k, 0.0) + v
+        losses = self._loss_fn(
+            predictions=pred,
+            gt_attention=b["gt_attention"],
+            gt_spatial=b["gt_spatial"],
+            gt_contacting=b["gt_contacting"],
+            pair_valid=b["pair_valid"],
+            visibility_mask=b["visibility_mask"],
+            person_idx=b["person_idx"],
+            object_idx=b["object_idx"],
+            valid_mask=b.get("valid_mask"),
+            corners=b.get("corners"),
+            gt_node_labels=b.get("object_classes"),
+        )
 
-        return {k: v / T for k, v in total_losses.items()} if total_losses else {"loss": torch.tensor(0.0)}
+        return losses
 
     def process_test_video(self, batch) -> dict:
-        tensors = batch
-
-        T = len(tensors) if isinstance(tensors, list) else 1
-        frames = tensors if isinstance(tensors, list) else [tensors]
+        b = _to_device(batch, self._device)
 
         pred = self._model.forward(
-            visual_features_seq=[f["visual_features"].to(self._device) for f in frames],
-            corners_seq=[f["corners"].to(self._device) for f in frames],
-            valid_mask_seq=[f["valid_mask"].to(self._device) for f in frames],
-            visibility_mask_seq=[f["visibility_mask"].to(self._device) for f in frames],
-            person_idx_seq=[f["person_idx"].to(self._device) for f in frames],
-            object_idx_seq=[f["object_idx"].to(self._device) for f in frames],
-            camera_pose_seq=[f["camera_pose"].to(self._device) for f in frames] if "camera_pose" in frames[0] else None,
-            union_features_seq=[f["union_features"].to(self._device) for f in frames] if "union_features" in frames[0] else None,
+            visual_features_seq=b["visual_features"],
+            corners_seq=b["corners"],
+            valid_mask_seq=b["valid_mask"],
+            visibility_mask_seq=b["visibility_mask"],
+            person_idx_seq=b["person_idx"],
+            object_idx_seq=b["object_idx"],
+            pair_valid=b["pair_valid"],
+            camera_pose_seq=b.get("camera_poses"),
+            union_features_seq=b.get("union_features"),
         )
 
+        # Return last-frame predictions for evaluation
+        T = b["visual_features"].shape[0]
         if T > 0:
             return {
-                "node_logits": pred["node_logits"][-1],
                 "attention_distribution": pred["attention_distribution"][-1],
                 "spatial_distribution": pred["spatial_distribution"][-1],
                 "contacting_distribution": pred["contacting_distribution"][-1],
@@ -148,60 +157,53 @@ class TrainAMWAE(TrainWSGGBase):
         return True
 
     def process_train_video(self, batch) -> dict:
-        tensors = batch
-
-        T = len(tensors) if isinstance(tensors, list) else 1
-        frames = tensors if isinstance(tensors, list) else [tensors]
+        b = _to_device(batch, self._device)
 
         pred = self._model.forward(
-            visual_features_seq=[f["visual_features"].to(self._device) for f in frames],
-            corners_seq=[f["corners"].to(self._device) for f in frames],
-            valid_mask_seq=[f["valid_mask"].to(self._device) for f in frames],
-            visibility_mask_seq=[f["visibility_mask"].to(self._device) for f in frames],
-            person_idx_seq=[f["person_idx"].to(self._device) for f in frames],
-            object_idx_seq=[f["object_idx"].to(self._device) for f in frames],
+            visual_features_seq=b["visual_features"],
+            corners_seq=b["corners"],
+            valid_mask_seq=b["valid_mask"],
+            visibility_mask_seq=b["visibility_mask"],
+            person_idx_seq=b["person_idx"],
+            object_idx_seq=b["object_idx"],
+            pair_valid=b["pair_valid"],
             p_mask_visible=getattr(self._conf, 'p_mask_visible', 0.3),
-            camera_pose_seq=[f["camera_pose"].to(self._device) for f in frames] if "camera_pose" in frames[0] else None,
+            camera_pose_seq=b.get("camera_poses"),
         )
 
-        total_losses = {}
-        for t in range(T):
-            frame = frames[t]
-            frame_pred = {
-                "node_logits": pred["node_logits"][t],
-                "attention_distribution": pred["attention_distribution"][t],
-                "spatial_distribution": pred["spatial_distribution"][t],
-                "contacting_distribution": pred["contacting_distribution"][t],
-                "is_masked": pred["is_masked"][t],
-                "original_visual": pred["original_visual"][t],
-                "reconstruction_predictions": pred["reconstruction_predictions"][t],
-                "reconstruction_targets": pred["reconstruction_targets"][t],
-            }
-            frame_losses = self._loss_fn(frame_pred, frame, self._device)
-            for k, v in frame_losses.items():
-                total_losses[k] = total_losses.get(k, 0.0) + v
+        losses = self._loss_fn(
+            predictions=pred,
+            gt_attention=b["gt_attention"],
+            gt_spatial=b["gt_spatial"],
+            gt_contacting=b["gt_contacting"],
+            pair_valid=b["pair_valid"],
+            visibility_mask=b["visibility_mask"],
+            person_idx=b["person_idx"],
+            object_idx=b["object_idx"],
+            valid_mask=b.get("valid_mask"),
+            corners=b.get("corners"),
+            gt_node_labels=b.get("object_classes"),
+        )
 
-        return {k: v / T for k, v in total_losses.items()} if total_losses else {"loss": torch.tensor(0.0)}
+        return losses
 
     def process_test_video(self, batch) -> dict:
-        tensors = batch
-
-        T = len(tensors) if isinstance(tensors, list) else 1
-        frames = tensors if isinstance(tensors, list) else [tensors]
+        b = _to_device(batch, self._device)
 
         pred = self._model.forward(
-            visual_features_seq=[f["visual_features"].to(self._device) for f in frames],
-            corners_seq=[f["corners"].to(self._device) for f in frames],
-            valid_mask_seq=[f["valid_mask"].to(self._device) for f in frames],
-            visibility_mask_seq=[f["visibility_mask"].to(self._device) for f in frames],
-            person_idx_seq=[f["person_idx"].to(self._device) for f in frames],
-            object_idx_seq=[f["object_idx"].to(self._device) for f in frames],
-            camera_pose_seq=[f["camera_pose"].to(self._device) for f in frames] if "camera_pose" in frames[0] else None,
+            visual_features_seq=b["visual_features"],
+            corners_seq=b["corners"],
+            valid_mask_seq=b["valid_mask"],
+            visibility_mask_seq=b["visibility_mask"],
+            person_idx_seq=b["person_idx"],
+            object_idx_seq=b["object_idx"],
+            pair_valid=b["pair_valid"],
+            camera_pose_seq=b.get("camera_poses"),
         )
 
+        T = b["visual_features"].shape[0]
         if T > 0:
             return {
-                "node_logits": pred["node_logits"][-1],
                 "attention_distribution": pred["attention_distribution"][-1],
                 "spatial_distribution": pred["spatial_distribution"][-1],
                 "contacting_distribution": pred["contacting_distribution"][-1],
@@ -234,61 +236,55 @@ class TrainLKSGNN(TrainWSGGBase):
         self._loss_fn = LKSLoss(
             lambda_vlm=self._conf.lambda_vlm,
             label_smoothing=self._conf.label_smoothing_vlm,
-            use_physics_veto=self._conf.use_physics_veto,
-            physics_veto_thresh=self._conf.physics_veto_dist_thresh,
         )
 
     def is_temporal(self) -> bool:
         return True
 
     def process_train_video(self, batch) -> dict:
-        tensors = batch
-
-        T = len(tensors) if isinstance(tensors, list) else 1
-        frames = tensors if isinstance(tensors, list) else [tensors]
+        b = _to_device(batch, self._device)
 
         pred = self._model.forward(
-            visual_features_seq=[f["visual_features"].to(self._device) for f in frames],
-            corners_seq=[f["corners"].to(self._device) for f in frames],
-            valid_mask_seq=[f["valid_mask"].to(self._device) for f in frames],
-            visibility_mask_seq=[f["visibility_mask"].to(self._device) for f in frames],
-            person_idx_seq=[f["person_idx"].to(self._device) for f in frames],
-            object_idx_seq=[f["object_idx"].to(self._device) for f in frames],
+            visual_features_seq=b["visual_features"],
+            corners_seq=b["corners"],
+            valid_mask_seq=b["valid_mask"],
+            visibility_mask_seq=b["visibility_mask"],
+            person_idx_seq=b["person_idx"],
+            object_idx_seq=b["object_idx"],
+            pair_valid=b["pair_valid"],
         )
 
-        total_losses = {}
-        for t in range(T):
-            frame = frames[t]
-            frame_pred = {
-                "node_logits": pred["node_logits"][t],
-                "attention_distribution": pred["attention_distribution"][t],
-                "spatial_distribution": pred["spatial_distribution"][t],
-                "contacting_distribution": pred["contacting_distribution"][t],
-            }
-            frame_losses = self._loss_fn(frame_pred, frame, self._device)
-            for k, v in frame_losses.items():
-                total_losses[k] = total_losses.get(k, 0.0) + v
+        losses = self._loss_fn(
+            predictions=pred,
+            gt_attention=b["gt_attention"],
+            gt_spatial=b["gt_spatial"],
+            gt_contacting=b["gt_contacting"],
+            pair_valid=b["pair_valid"],
+            visibility_mask=b["visibility_mask"],
+            person_idx=b["person_idx"],
+            object_idx=b["object_idx"],
+            valid_mask=b.get("valid_mask"),
+            gt_node_labels=b.get("object_classes"),
+        )
 
-        return {k: v / T for k, v in total_losses.items()} if total_losses else {"loss": torch.tensor(0.0)}
+        return losses
 
     def process_test_video(self, batch) -> dict:
-        tensors = batch
-
-        T = len(tensors) if isinstance(tensors, list) else 1
-        frames = tensors if isinstance(tensors, list) else [tensors]
+        b = _to_device(batch, self._device)
 
         pred = self._model.forward(
-            visual_features_seq=[f["visual_features"].to(self._device) for f in frames],
-            corners_seq=[f["corners"].to(self._device) for f in frames],
-            valid_mask_seq=[f["valid_mask"].to(self._device) for f in frames],
-            visibility_mask_seq=[f["visibility_mask"].to(self._device) for f in frames],
-            person_idx_seq=[f["person_idx"].to(self._device) for f in frames],
-            object_idx_seq=[f["object_idx"].to(self._device) for f in frames],
+            visual_features_seq=b["visual_features"],
+            corners_seq=b["corners"],
+            valid_mask_seq=b["valid_mask"],
+            visibility_mask_seq=b["visibility_mask"],
+            person_idx_seq=b["person_idx"],
+            object_idx_seq=b["object_idx"],
+            pair_valid=b["pair_valid"],
         )
 
+        T = b["visual_features"].shape[0]
         if T > 0:
             return {
-                "node_logits": pred["node_logits"][-1],
                 "attention_distribution": pred["attention_distribution"][-1],
                 "spatial_distribution": pred["spatial_distribution"][-1],
                 "contacting_distribution": pred["contacting_distribution"][-1],
@@ -332,48 +328,69 @@ class TrainAMWAEPP(TrainWSGGBase):
         return True
 
     def process_train_video(self, batch) -> dict:
-        tensors = batch
+        b = _to_device(batch, self._device)
         self._model.reset_memory()
+        T = b["visual_features"].shape[0]
 
-        total_losses = {}
-        T = len(tensors) if isinstance(tensors, list) else 1
-
+        # AMWAE++ processes frame-by-frame (recurrent memory)
+        # but we still pass the full batch for loss after all frames
+        all_preds = []
         for t in range(T):
-            frame = tensors[t] if isinstance(tensors, list) else tensors
-            pred = self._model.forward_frame(
-                visual_features=frame["visual_features"].to(self._device),
-                corners=frame["corners"].to(self._device),
-                valid_mask=frame["valid_mask"].to(self._device),
-                visibility_mask=frame["visibility_mask"].to(self._device),
-                person_idx=frame["person_idx"].to(self._device),
-                object_idx=frame["object_idx"].to(self._device),
+            frame_pred = self._model.forward_frame(
+                visual_features=b["visual_features"][t],
+                corners=b["corners"][t],
+                valid_mask=b["valid_mask"][t],
+                visibility_mask=b["visibility_mask"][t],
+                person_idx=b["person_idx"][t],
+                object_idx=b["object_idx"][t],
+                pair_valid=b["pair_valid"][t],
             )
+            all_preds.append(frame_pred)
 
-            frame_losses = self._loss_fn(pred, frame, self._device)
-            for k, v in frame_losses.items():
-                total_losses[k] = total_losses.get(k, 0.0) + v
+        # Stack per-frame predictions into (T, ...) for batched loss
+        stacked_pred = {}
+        for key in ["attention_distribution", "spatial_distribution", "contacting_distribution"]:
+            if key in all_preds[0]:
+                stacked_pred[key] = torch.stack([p[key] for p in all_preds])
+        # Pass through non-stackable items
+        for key in all_preds[0]:
+            if key not in stacked_pred:
+                stacked_pred[key] = [p.get(key) for p in all_preds]
 
-        return {k: v / T for k, v in total_losses.items()} if total_losses else {"loss": torch.tensor(0.0)}
+        losses = self._loss_fn(
+            predictions=stacked_pred,
+            gt_attention=b["gt_attention"],
+            gt_spatial=b["gt_spatial"],
+            gt_contacting=b["gt_contacting"],
+            pair_valid=b["pair_valid"],
+            visibility_mask=b["visibility_mask"],
+            person_idx=b["person_idx"],
+            object_idx=b["object_idx"],
+            valid_mask=b.get("valid_mask"),
+            corners=b.get("corners"),
+            gt_node_labels=b.get("object_classes"),
+        )
+
+        return losses
 
     def process_test_video(self, batch) -> dict:
-        tensors = batch
+        b = _to_device(batch, self._device)
         self._model.reset_memory()
-        all_preds = []
+        T = b["visual_features"].shape[0]
 
-        T = len(tensors) if isinstance(tensors, list) else 1
+        last_pred = None
         for t in range(T):
-            frame = tensors[t] if isinstance(tensors, list) else tensors
-            pred = self._model.forward_frame(
-                visual_features=frame["visual_features"].to(self._device),
-                corners=frame["corners"].to(self._device),
-                valid_mask=frame["valid_mask"].to(self._device),
-                visibility_mask=frame["visibility_mask"].to(self._device),
-                person_idx=frame["person_idx"].to(self._device),
-                object_idx=frame["object_idx"].to(self._device),
+            last_pred = self._model.forward_frame(
+                visual_features=b["visual_features"][t],
+                corners=b["corners"][t],
+                valid_mask=b["valid_mask"][t],
+                visibility_mask=b["visibility_mask"][t],
+                person_idx=b["person_idx"][t],
+                object_idx=b["object_idx"][t],
+                pair_valid=b["pair_valid"][t],
             )
-            all_preds.append(pred)
 
-        return all_preds[-1] if all_preds else None
+        return last_pred
 
 
 # ============================================================================

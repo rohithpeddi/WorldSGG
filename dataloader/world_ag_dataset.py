@@ -205,7 +205,8 @@ class WorldAG(Dataset):
     # ------------------------------------------------------------------
 
     def _build_video_list(self):
-        """Discover videos present in both feature and annotation dirs."""
+        """Discover videos present in both feature and annotation dirs,
+        keeping only those with >= 2 common frames."""
         if not self._feat_dir.exists():
             raise FileNotFoundError(
                 f"Feature directory not found: {self._feat_dir}"
@@ -224,21 +225,40 @@ class WorldAG(Dataset):
             annot_videos.add(name)
 
         # Intersection: try matching with and without .mp4 suffix
-        common = set()
+        candidates = set()
         for vid in feat_videos:
             if vid in annot_videos:
-                common.add(vid)
+                candidates.add(vid)
             elif vid + ".mp4" in annot_videos:
-                common.add(vid)
+                candidates.add(vid)
 
-        if not common:
+        if not candidates:
             print(
                 f"[WorldAG] WARNING: No common videos found!\n"
                 f"  Features ({len(feat_videos)}): {list(feat_videos)[:5]}...\n"
                 f"  Annotations ({len(annot_videos)}): {list(annot_videos)[:5]}..."
             )
+            self.video_list = []
+            return
 
-        self.video_list = sorted(common)
+        # Filter: keep only videos with >= 2 common frames
+        valid = []
+        skipped = 0
+        for vid in sorted(candidates):
+            feat_data = self._load_feature_pkl(vid)
+            annot_data = self._load_annotation_pkl(vid)
+            common_frames, _ = self._align_frames(feat_data, annot_data)
+            if len(common_frames) >= 2:
+                valid.append(vid)
+            else:
+                skipped += 1
+
+        if skipped > 0:
+            print(
+                f"[WorldAG] Skipped {skipped} videos with < 2 common frames"
+            )
+
+        self.video_list = valid
 
     # ------------------------------------------------------------------
     # PKL loading helpers
@@ -470,9 +490,10 @@ class WorldAG(Dataset):
             feat_data, annot_data
         )
 
-        if len(common_frames) < 2:
-            # Fallback: return minimal valid tensors
-            return self._empty_sample(video_id)
+        assert len(common_frames) >= 2, (
+            f"Video {video_id} has {len(common_frames)} common frames; "
+            f"should have been filtered during _build_video_list"
+        )
 
         T = len(common_frames)
 
@@ -648,32 +669,7 @@ class WorldAG(Dataset):
 
         return result
 
-    def _empty_sample(self, video_id: str) -> Dict[str, Any]:
-        """Return a minimal valid sample when a video has < 2 frames."""
-        T, N, K, D = 2, 1, 1, 1024
-        return {
-            "video_id": video_id,
-            "T": T,
-            "N_max": N,
-            "K_max": K,
-            "frame_names": [],
-            "visual_features": torch.zeros(T, N, D),
-            "corners": torch.zeros(T, N, 8, 3),
-            "bboxes_2d": torch.zeros(T, N, 4),
-            "valid_mask": torch.zeros(T, N, dtype=torch.bool),
-            "visibility_mask": torch.zeros(T, N, dtype=torch.bool),
-            "object_classes": torch.zeros(T, N, dtype=torch.long),
-            "person_idx": torch.zeros(T, K, dtype=torch.long),
-            "object_idx": torch.zeros(T, K, dtype=torch.long),
-            "pair_valid": torch.zeros(T, K, dtype=torch.bool),
-            "gt_attention": torch.zeros(T, K, dtype=torch.long),
-            "gt_spatial": torch.zeros(T, K, NUM_SPATIAL),
-            "gt_contacting": torch.zeros(T, K, NUM_CONTACTING),
-            "pair_source": torch.zeros(T, K, dtype=torch.long),
-            "camera_poses": None,
-            "union_features": None,
-            "gt_annotations": [],
-        }
+
 
 
 def world_collate_fn(batch):

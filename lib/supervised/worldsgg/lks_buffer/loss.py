@@ -1,8 +1,9 @@
 """
-LKS Buffer Loss — VLM Noisy Label Training
-============================================
+LKS Buffer Loss — VLM Noisy Label Training (Padded Tensor API)
+================================================================
 
-Same stratified structure as GL-STGN loss (standard 3-bucket split).
+Accepts pre-padded (T, K_max, C) tensors with pair_valid mask from dataset.
+No per-frame loops or _build_multi_label_gt needed.
 
   Vis-Vis: full loss on clean manual labels
   Vis-Unseen / Unseen-Unseen: λ_vlm weighted, smoothed
@@ -11,7 +12,7 @@ Same stratified structure as GL-STGN loss (standard 3-bucket split).
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from constants import Constants as const
 from lib.supervised.worldsgg.worldsgg_base import LabelSmoother
@@ -37,40 +38,56 @@ class LKSLoss(nn.Module):
 
         self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
 
-
     def forward(
         self,
         predictions: Dict[str, torch.Tensor],
         gt_attention: torch.Tensor,
-        gt_spatial: List,
-        gt_contacting: List,
+        gt_spatial: torch.Tensor,
+        gt_contacting: torch.Tensor,
+        pair_valid: torch.Tensor,
         visibility_mask: torch.Tensor,
         person_idx: torch.Tensor,
         object_idx: torch.Tensor,
-        valid_mask: torch.Tensor,
-        corners: torch.Tensor = None,
+        valid_mask: Optional[torch.Tensor] = None,
         gt_node_labels: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
+        """
+        Compute bucketed loss on pre-padded tensors.
+
+        All inputs are (T, K_max, ...) or (T, N_max, ...) padded tensors.
+        Uses pair_valid mask to select real pairs, then flattens across T.
+
+        Args:
+            predictions: dict with (T, K_max, C) tensors
+            gt_attention: (T, K_max) long
+            gt_spatial: (T, K_max, 6) float multi-hot
+            gt_contacting: (T, K_max, 17) float multi-hot
+            pair_valid: (T, K_max) bool
+            visibility_mask: (T, N_max) bool
+            person_idx: (T, K_max) long
+            object_idx: (T, K_max) long
+        """
         device = predictions["attention_distribution"].device
-        K = predictions["attention_distribution"].shape[0]
         zero = torch.tensor(0.0, device=device, requires_grad=True)
         losses = {}
 
-        if K == 0:
+        # Flatten: select only valid pairs across all T frames
+        valid = pair_valid.bool()  # (T, K_max)
+        if not valid.any():
             losses["total"] = zero
             return losses
 
-        att_pred = predictions["attention_distribution"]
-        spa_pred = predictions["spatial_distribution"]
-        con_pred = predictions["contacting_distribution"]
+        att_pred = predictions["attention_distribution"][valid]  # (K_total, 3)
+        spa_pred = predictions["spatial_distribution"][valid]    # (K_total, 6)
+        con_pred = predictions["contacting_distribution"][valid]  # (K_total, 17)
 
-        att_gt = gt_attention.to(device)
-        spa_gt = self._build_multi_label_gt(gt_spatial, 6, device)
-        con_gt = self._build_multi_label_gt(gt_contacting, 17, device)
+        att_gt = gt_attention[valid].to(device)       # (K_total,)
+        spa_gt = gt_spatial[valid].to(device)          # (K_total, 6)
+        con_gt = gt_contacting[valid].to(device)       # (K_total, 17)
 
-        # Classify pairs into 3 buckets
-        p_vis = visibility_mask[person_idx]
-        o_vis = visibility_mask[object_idx]
+        # Classify pairs into 3 buckets using visibility
+        p_vis = visibility_mask.gather(1, person_idx)[valid]  # (K_total,)
+        o_vis = visibility_mask.gather(1, object_idx)[valid]  # (K_total,)
         vis_vis = p_vis & o_vis
         vis_unseen = p_vis ^ o_vis
         unseen_unseen = ~p_vis & ~o_vis
@@ -140,30 +157,3 @@ class LKSLoss(nn.Module):
         losses["total"] = sum(losses[k] for k in total_keys)
 
         return losses
-
-    def _build_multi_label_gt(self, gt_list, num_classes, device):
-        """Build multi-hot ground truth from list of index sets (vectorized)."""
-        K = len(gt_list)
-        if K == 0:
-            return torch.zeros(0, num_classes, device=device)
-
-        # Normalize all entries to long tensors and collect row/col indices
-        row_indices = []
-        col_indices = []
-        for i, indices in enumerate(gt_list):
-            if isinstance(indices, torch.Tensor):
-                idx = indices.long().to(device)
-            elif isinstance(indices, (list, tuple)):
-                idx = torch.tensor(indices, dtype=torch.long, device=device)
-            else:
-                idx = torch.tensor([indices], dtype=torch.long, device=device)
-            if len(idx) > 0:
-                row_indices.append(torch.full((len(idx),), i, dtype=torch.long, device=device))
-                col_indices.append(idx)
-
-        target = torch.zeros(K, num_classes, dtype=torch.float32, device=device)
-        if row_indices:
-            rows = torch.cat(row_indices)
-            cols = torch.cat(col_indices)
-            target[rows, cols] = 1.0
-        return target

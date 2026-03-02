@@ -23,7 +23,7 @@ world_sg_dir: ""
 # ---- Detector (predcls = GT boxes, no detector) ----
 detector_type: none
 detector_ckpt: ""
-detector_model: v3l
+detector_model: v2
 detector_frozen: true
 num_detector_classes: 37
 

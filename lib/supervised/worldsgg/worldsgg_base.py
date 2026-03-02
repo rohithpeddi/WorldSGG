@@ -421,69 +421,52 @@ class RelationshipPredictor(nn.Module):
         self,
         enriched_all: torch.Tensor,
         node_logits_all: torch.Tensor,
-        person_idx_seq: List[torch.Tensor],
-        object_idx_seq: List[torch.Tensor],
-        union_features_seq: Optional[List[torch.Tensor]] = None,
+        person_idx: torch.Tensor,
+        object_idx: torch.Tensor,
+        pair_valid: torch.Tensor,
+        union_features: Optional[torch.Tensor] = None,
     ) -> tuple:
         """
-        Batched Phase 2 + Phase 3: form rel tokens + self-attend for ALL T frames at once.
+        Batched Phase 2 + Phase 3: form rel tokens + self-attend for ALL T frames.
 
-        Pads variable K_t to K_max, runs batched gather/CLIP/projection/self-attend.
+        Accepts pre-padded (T, K_max) tensors from the dataset.
 
         Args:
             enriched_all: (T, N, d_model)
             node_logits_all: (T, N, num_classes)
-            person_idx_seq: T-list of (K_t,) long
-            object_idx_seq: T-list of (K_t,) long
-            union_features_seq: T-list of (K_t, d_union_roi) or None
+            person_idx: (T, K_max) long — pre-padded person indices
+            object_idx: (T, K_max) long — pre-padded object indices
+            pair_valid: (T, K_max) bool — True for real pairs
+            union_features: (T, K_max, d_union_roi) or None — pre-padded
 
         Returns:
-            rel_tokens: (T, K_max, d_rel) — padded relationship tokens
-            pair_valid: (T, K_max) bool — True for real pairs
-            padded_pidx: (T, K_max) long — padded person indices
-            padded_oidx: (T, K_max) long — padded object indices
+            rel_tokens: (T, K_max, d_rel) — relationship tokens
+            pair_valid: (T, K_max) bool — validity mask (passed through)
         """
         T = enriched_all.shape[0]
+        K_max = person_idx.shape[1] if person_idx.dim() > 1 else 0
         device = enriched_all.device
-        K_counts = [p.shape[0] for p in person_idx_seq]
-        K_max = max(K_counts) if K_counts else 0
 
         if K_max == 0:
             return (
                 torch.zeros(T, 0, self.d_rel, device=device),
                 torch.zeros(T, 0, dtype=torch.bool, device=device),
-                torch.zeros(T, 0, dtype=torch.long, device=device),
-                torch.zeros(T, 0, dtype=torch.long, device=device),
             )
 
-        d_union = self.no_union_embedding.shape[0]
-
-        # Pad indices to K_max
-        padded_pidx = torch.zeros(T, K_max, dtype=torch.long, device=device)
-        padded_oidx = torch.zeros(T, K_max, dtype=torch.long, device=device)
-        pair_valid = torch.zeros(T, K_max, dtype=torch.bool, device=device)
-
-        for t in range(T):
-            K_t = K_counts[t]
-            if K_t > 0:
-                padded_pidx[t, :K_t] = person_idx_seq[t]
-                padded_oidx[t, :K_t] = object_idx_seq[t]
-                pair_valid[t, :K_t] = True
-
         # Batched gather person/object representations: (T, K_max, d_model)
-        pidx_exp = padded_pidx.unsqueeze(-1).expand(T, K_max, enriched_all.shape[-1])
-        oidx_exp = padded_oidx.unsqueeze(-1).expand(T, K_max, enriched_all.shape[-1])
+        pidx_exp = person_idx.unsqueeze(-1).expand(T, K_max, enriched_all.shape[-1])
+        oidx_exp = object_idx.unsqueeze(-1).expand(T, K_max, enriched_all.shape[-1])
         person_repr = torch.gather(enriched_all, 1, pidx_exp)  # (T, K_max, d_model)
         object_repr = torch.gather(enriched_all, 1, oidx_exp)  # (T, K_max, d_model)
 
         # Batched class predictions
         person_class_idx = torch.gather(
             node_logits_all, 1,
-            padded_pidx.unsqueeze(-1).expand(T, K_max, node_logits_all.shape[-1]),
+            person_idx.unsqueeze(-1).expand(T, K_max, node_logits_all.shape[-1]),
         ).argmax(dim=-1)  # (T, K_max)
         object_class_idx = torch.gather(
             node_logits_all, 1,
-            padded_oidx.unsqueeze(-1).expand(T, K_max, node_logits_all.shape[-1]),
+            object_idx.unsqueeze(-1).expand(T, K_max, node_logits_all.shape[-1]),
         ).argmax(dim=-1)  # (T, K_max)
 
         # Batched CLIP text features: (T, K_max, d_text)
@@ -491,13 +474,8 @@ class RelationshipPredictor(nn.Module):
         object_text = self._get_text_features(object_class_idx)
 
         # Batched union features: (T, K_max, d_union)
-        if union_features_seq is not None:
-            padded_union = torch.zeros(T, K_max, union_features_seq[0].shape[-1], device=device)
-            for t in range(T):
-                K_t = K_counts[t]
-                if K_t > 0 and union_features_seq[t] is not None:
-                    padded_union[t, :K_t] = union_features_seq[t]
-            union_feat = self.union_proj(padded_union)  # (T, K_max, d_union)
+        if union_features is not None:
+            union_feat = self.union_proj(union_features)  # (T, K_max, d_union)
         else:
             union_feat = self.no_union_embedding.view(1, 1, -1).expand(T, K_max, -1)
 
@@ -524,42 +502,39 @@ class RelationshipPredictor(nn.Module):
         # Re-zero padding
         rel_tokens = rel_tokens * pair_valid.unsqueeze(-1).float()
 
-        return rel_tokens, pair_valid, padded_pidx, padded_oidx
+        return rel_tokens, pair_valid
 
     def batched_predict(
         self,
         rel_tokens: torch.Tensor,
         pair_valid: torch.Tensor,
-    ) -> Dict[str, List]:
+    ) -> Dict[str, torch.Tensor]:
         """
-        Batched Phase 5: run 3 MLP heads, split back to per-frame lists.
+        Batched Phase 5: run 3 MLP heads on padded tokens.
 
         Args:
             rel_tokens: (T, K_max, d_rel)
             pair_valid: (T, K_max) bool
 
         Returns:
-            dict with T-lists of (K_t, C) tensors per relationship type.
+            dict with (T, K_max, C) padded tensors per relationship type.
+            Padded positions are zeroed out.
         """
-        T = rel_tokens.shape[0]
-
         # Batched heads: (T, K_max, C)
         att_all = self.att_head(rel_tokens)
         spa_all = torch.sigmoid(self.spa_head(rel_tokens))
         con_all = torch.sigmoid(self.con_head(rel_tokens))
 
-        # Split per frame using pair_valid
-        att_list, spa_list, con_list = [], [], []
-        for t in range(T):
-            mask_t = pair_valid[t]  # (K_max,)
-            att_list.append(att_all[t][mask_t])
-            spa_list.append(spa_all[t][mask_t])
-            con_list.append(con_all[t][mask_t])
+        # Zero out padded positions
+        mask = pair_valid.unsqueeze(-1).float()  # (T, K_max, 1)
+        att_all = att_all * mask
+        spa_all = spa_all * mask
+        con_all = con_all * mask
 
         return {
-            "attention_distribution": att_list,
-            "spatial_distribution": spa_list,
-            "contacting_distribution": con_list,
+            "attention_distribution": att_all,   # (T, K_max, 3)
+            "spatial_distribution": spa_all,      # (T, K_max, 6)
+            "contacting_distribution": con_all,   # (T, K_max, 17)
         }
 
     def form_rel_tokens(
