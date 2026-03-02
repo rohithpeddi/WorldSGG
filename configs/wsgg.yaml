@@ -7,7 +7,7 @@
 # ============================================================================
 
 # ---- Method Selection ----
-method_name: gl_stgn         # gl_stgn | amwae | lks_buffer
+method_name: gl_stgn         # gl_stgn | amwae | amwae_pp | lks_buffer
 mode: predcls                # predcls | sgcls | sgdet
 task_name: worldsgg
 
@@ -102,3 +102,9 @@ lambda_contrastive: 0.5
 
 # ---- Baselines: same universal params apply ----
 lambda_unseen: 0.2           # Backward compat alias → lambda_vlm
+
+# ---- AMWAE++ (Energy Transformer) ----
+energy_train_iters: 4        # Fixed unroll steps during training
+energy_eval_iters: 15        # Max steps during inference (early stops if converged)
+energy_epsilon: 1e-3         # Convergence threshold (max L2 delta)
+lambda_stability: 0.1        # Attractor stability loss weight

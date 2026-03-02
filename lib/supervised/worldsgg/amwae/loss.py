@@ -51,6 +51,7 @@ class AMWAELoss(nn.Module):
         temperature: float = 0.07,
         bce_loss: bool = True,
         mode: str = "predcls",
+        lambda_stability: float = 0.0,
     ):
         super().__init__()
         self.lambda_vlm = lambda_vlm
@@ -67,6 +68,9 @@ class AMWAELoss(nn.Module):
         self._kl_loss = nn.KLDivLoss(reduction='batchmean')
 
         self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
+
+        # Energy Transformer stability loss (AMWAE++ only)
+        self.lambda_stability = lambda_stability
 
 
     def forward(
@@ -105,6 +109,14 @@ class AMWAELoss(nn.Module):
         # 4. Simulated-unseen clean fine-tuning (the "silver bullet")
         sim_loss = self._compute_simulated_unseen_loss(predictions, device)
         losses["simulated_unseen_loss"] = sim_loss
+
+        # 5. Attractor stability loss (AMWAE++ Energy Transformer only)
+        if self.lambda_stability > 0 and "h_prev_seq" in predictions and predictions["h_prev_seq"]:
+            stability_losses = []
+            for h_final, h_prev in zip(predictions["enriched_seq"], predictions["h_prev_seq"]):
+                stability_losses.append(F.mse_loss(h_final, h_prev.detach()))
+            L_stability = torch.stack(stability_losses).mean()
+            losses["stability_loss"] = self.lambda_stability * L_stability
 
         # Total
         losses["total"] = sum(v for v in losses.values() if isinstance(v, torch.Tensor) and v.requires_grad)

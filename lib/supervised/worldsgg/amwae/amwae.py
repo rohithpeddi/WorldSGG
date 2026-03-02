@@ -304,11 +304,22 @@ class AMWAE(nn.Module):
             )
 
             # --- Step 6: Contextual diffusion (batched interface) ---
-            enriched = self.diffusion(
+            diffusion_out = self.diffusion(
                 tokens=completed_tokens.unsqueeze(0),
                 corners=corners_t.unsqueeze(0),
                 valid_mask=valid_t.unsqueeze(0),
-            ).squeeze(0)
+            )
+            # Handle both ContextualDiffusion (tensor) and EnergyDiffusion (tuple)
+            if isinstance(diffusion_out, tuple):
+                enriched = diffusion_out[0].squeeze(0)
+                h_prev_t = diffusion_out[1].squeeze(0)
+                if "h_prev_seq" not in outputs:
+                    outputs["h_prev_seq"] = []
+                    outputs["enriched_seq"] = []
+                outputs["h_prev_seq"].append(h_prev_t)
+                outputs["enriched_seq"].append(enriched)
+            else:
+                enriched = diffusion_out.squeeze(0)
 
             # --- Step 7a: Node prediction + form/self-attend rel tokens (COLLECT) ---
             node_logits = self.node_predictor(enriched)
