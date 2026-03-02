@@ -2,11 +2,24 @@
 World Scene Graph Dataset
 ==========================
 
-PyTorch Dataset that loads pre-built world scene graph PKLs (produced by
-``world_scene_graph_generator.py``) for downstream training.
+PyTorch Dataset that loads pre-extracted ROI features and pre-built
+world4D relationship annotations per video.
 
-Each PKL contains merged augmented relationships + corrected 4D bboxes
-per frame, with both visible (GT/GDino) and RAG-predicted objects.
+Two PKL sources per video:
+
+1. **Features**:
+   ``<data_path>/features/roi_features/<mode>/<feature_model>/<phase>/<video>.pkl``
+   — ROI features, bboxes, labels, pair_indices, union_features.
+
+2. **Annotations**:
+   ``<data_path>/world4d_rel_annotations/<phase>/<video>.pkl``
+   — GT+RAG relationships, 3D corners, camera poses, visibility.
+
+A video is valid only if present in **both** directories.
+
+All outputs are pre-padded tensors (T, N_max, ...) and (T, K_max, ...),
+eliminating ragged list formats that previously caused for-loops in
+models and loss functions.
 
 Usage::
 
@@ -16,19 +29,15 @@ Usage::
     dataset = WorldAG(
         phase="train",
         data_path="/data/rohith/ag",
-        world_sg_dir="/data/rohith/ag/world_annotations/world_scene_graph",
+        mode="predcls",
+        feature_model="dinov2b",
     )
-    loader = DataLoader(dataset, collate_fn=world_collate_fn, ...)
+    loader = DataLoader(dataset, batch_size=1, collate_fn=world_collate_fn)
 
     for batch in loader:
-        video_id = batch["video_id"]
-        for frame_ann in batch["gt_annotations"]:
-            person_entry = frame_ann[0]   # {"person_bbox": ..., "frame": ...}
-            for obj in frame_ann[1:]:     # objects
-                label = obj["class"]
-                corners = obj["corners_final"]      # (8,3) or None
-                att_rel = obj["attention_relationship"]  # LongTensor
-                ...
+        print(batch["video_id"])
+        print(batch["visual_features"].shape)  # (T, N_max, D)
+        print(batch["gt_spatial"].shape)        # (T, K_max, 6)
 """
 
 import os
@@ -40,58 +49,90 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from constants import Constants as const
-
 
 # ---------------------------------------------------------------------------
-# Relationship label vocabulary (must match BaseAG.fetch_relationship_classes)
+# Relationship label vocabularies (canonical ordering)
 # ---------------------------------------------------------------------------
 
-def _build_relationship_classes(data_path: str):
-    """Load and normalize relationship class lists, matching BaseAG logic."""
-    rel_path = os.path.join(data_path, const.ANNOTATIONS, const.RELATIONSHIP_CLASSES_FILE)
-    classes = []
-    with open(rel_path, "r") as f:
-        for line in f:
-            classes.append(line.strip("\n"))
+ATTENTION_RELATIONSHIPS = ["looking_at", "not_looking_at", "unsure"]
+SPATIAL_RELATIONSHIPS = [
+    "above", "beneath", "in_front_of", "behind", "on_the_side_of", "in",
+]
+CONTACTING_RELATIONSHIPS = [
+    "carrying", "covered_by", "drinking_from", "eating",
+    "have_it_on_the_back", "holding", "leaning_on", "lying_on",
+    "not_contacting", "other_relationship", "sitting_on", "standing_on",
+    "touching", "twisting", "wearing", "wiping", "writing_on",
+]
 
-    # Apply the same normalization as BaseAG
-    classes[0] = "looking_at"
-    classes[1] = "not_looking_at"
-    classes[5] = "in_front_of"
-    classes[7] = "on_the_side_of"
-    classes[10] = "covered_by"
-    classes[11] = "drinking_from"
-    classes[13] = "have_it_on_the_back"
-    classes[15] = "leaning_on"
-    classes[16] = "lying_on"
-    classes[17] = "not_contacting"
-    classes[18] = "other_relationship"
-    classes[19] = "sitting_on"
-    classes[20] = "standing_on"
-    classes[25] = "writing_on"
+NUM_ATTENTION = len(ATTENTION_RELATIONSHIPS)    # 3
+NUM_SPATIAL = len(SPATIAL_RELATIONSHIPS)         # 6
+NUM_CONTACTING = len(CONTACTING_RELATIONSHIPS)  # 17
 
-    attention = classes[0:3]
-    spatial = classes[3:9]
-    contacting = classes[9:]
-    return classes, attention, spatial, contacting
+# Build reverse lookup dicts
+_ATT_LABEL_TO_IDX = {r: i for i, r in enumerate(ATTENTION_RELATIONSHIPS)}
+_SPA_LABEL_TO_IDX = {r: i for i, r in enumerate(SPATIAL_RELATIONSHIPS)}
+_CON_LABEL_TO_IDX = {r: i for i, r in enumerate(CONTACTING_RELATIONSHIPS)}
+
+# Short-form ↔ full AG name mappings (for matching between PKLs)
+LABEL_NORMALIZE_MAP = {
+    "closet/cabinet": "closet", "cup/glass/bottle": "cup",
+    "paper/notebook": "paper", "sofa/couch": "sofa",
+    "phone/camera": "phone",
+}
+LABEL_DENORMALIZE_MAP = {v: k for k, v in LABEL_NORMALIZE_MAP.items()}
+
+# Object class list (AG vocabulary, 1-indexed; 0 = background)
+OBJECT_CLASSES = [
+    "__background__", "person", "bag", "bed", "blanket", "book", "box",
+    "broom", "chair", "closet/cabinet", "clothes", "cup/glass/bottle",
+    "dish", "door", "doorknob", "doorway", "floor", "food", "groceries",
+    "laptop", "light", "medicine", "mirror", "paper/notebook",
+    "phone/camera", "picture", "pillow", "refrigerator", "sandwich",
+    "shelf", "shoe", "sofa/couch", "table", "television", "towel",
+    "vacuum", "window",
+]
+NAME_TO_IDX = {name: idx for idx, name in enumerate(OBJECT_CLASSES) if idx > 0}
+# Also register short forms
+for _short, _full in LABEL_DENORMALIZE_MAP.items():
+    NAME_TO_IDX[_short] = NAME_TO_IDX[_full]
 
 
-def _build_object_classes(data_path: str) -> List[str]:
-    """Load and normalize object class list, matching BaseAG logic."""
-    obj_path = os.path.join(data_path, const.ANNOTATIONS, const.OBJECT_CLASSES_FILE)
-    classes = [const.BACKGROUND]
-    with open(obj_path, "r", encoding="utf-8") as f:
-        for line in f:
-            classes.append(line.strip("\n"))
+def _to_short(label: str) -> str:
+    """Full AG name → short form. E.g. 'closet/cabinet' → 'closet'."""
+    return LABEL_NORMALIZE_MAP.get(label, label)
 
-    # Same patches as BaseAG
-    classes[9] = "closet/cabinet"
-    classes[11] = "cup/glass/bottle"
-    classes[23] = "paper/notebook"
-    classes[24] = "phone/camera"
-    classes[31] = "sofa/couch"
-    return classes
+
+def _multi_hot(rel_strings: List[str], label_to_idx: Dict[str, int],
+               num_classes: int) -> torch.Tensor:
+    """Convert a list of relationship label strings to a multi-hot float tensor.
+
+    Args:
+        rel_strings: e.g. ["above", "in"]
+        label_to_idx: maps label string → index
+        num_classes: size of output tensor
+
+    Returns:
+        (num_classes,) float tensor with 1.0 at active indices.
+    """
+    target = torch.zeros(num_classes)
+    for r in rel_strings:
+        idx = label_to_idx.get(r, -1)
+        if idx >= 0:
+            target[idx] = 1.0
+    return target
+
+
+def _attention_label_to_idx(rel_strings: List[str]) -> int:
+    """Convert attention relationship strings to a single class index.
+
+    Attention is single-label: take the first valid label.
+    """
+    for r in rel_strings:
+        idx = _ATT_LABEL_TO_IDX.get(r, -1)
+        if idx >= 0:
+            return idx
+    return 0  # default to "looking_at"
 
 
 # ---------------------------------------------------------------------------
@@ -100,399 +141,314 @@ def _build_object_classes(data_path: str) -> List[str]:
 
 class WorldAG(Dataset):
     """
-    PyTorch Dataset that loads world scene graph PKLs.
+    PyTorch Dataset that loads ROI features and world4D relationship
+    annotations per video, producing pre-padded tensors.
 
-    Each item corresponds to one video and returns the same schema as
-    ``StandardAG.__getitem__``, extended with 3D geometry:
-
-    Returns::
-
-        {
-            "video_id": str,
-            "frame_names": [str, ...],
-            "gt_annotations": [
-                [  # per frame
-                    {"person_bbox": ..., "frame": ...},   # person entry
-                    {                                       # per object
-                        "class": int,
-                        "bbox": np.ndarray | None,
-                        "visible": bool,
-                        "attention_relationship": LongTensor,
-                        "contacting_relationship": LongTensor,
-                        "spatial_relationship": LongTensor,
-                        "corners_final": np.ndarray(8,3) | None,
-                        "center_3d": np.ndarray(3,) | None,
-                        "obb_floor_parallel_corners": np.ndarray(8,3) | None,
-                        "obb_arbitrary_corners": np.ndarray(8,3) | None,
-                        "source": str,
-                        "world4d_filled": bool,
-                    },
-                    ...
-                ],
-                ...
-            ]
-        }
+    Each ``__getitem__`` returns a dict with all tensors padded to
+    ``(T, N_max, ...)`` for per-node data and ``(T, K_max, ...)`` for
+    per-edge data, along with validity masks.
     """
 
     def __init__(
         self,
         phase: str,
         data_path: str,
-        world_sg_dir: Optional[str] = None,
-        filter_nonperson_box_frame: bool = True,
+        mode: str = "predcls",
+        feature_model: str = "dinov2b",
         include_invisible: bool = True,
+        max_objects: int = 64,
     ):
         """
         Args:
             phase: "train" or "test"
             data_path: Root directory of Action Genome dataset
-            world_sg_dir: Directory with world scene graph PKLs.
-                Defaults to ``<data_path>/world_annotations/world_scene_graph``.
-            filter_nonperson_box_frame: If True, skip frames without a person bbox.
-            include_invisible: If True, include RAG-predicted (invisible) objects.
+            mode: "predcls" or "sgdet"
+            feature_model: Feature model directory name (e.g. "dinov2b")
+            include_invisible: If True, include RAG-predicted objects
+            max_objects: Maximum number of objects per frame (N_max cap)
         """
         super().__init__()
 
         self._phase = phase
-        self._data_path = data_path
+        self._data_path = Path(data_path)
+        self._mode = mode
+        self._feature_model = feature_model
         self._include_invisible = include_invisible
-        self._filter_nonperson = filter_nonperson_box_frame
+        self._max_objects = max_objects
 
-        if world_sg_dir:
-            self._world_sg_dir = Path(world_sg_dir)
-        else:
-            self._world_sg_dir = Path(data_path) / "world_annotations" / "world_scene_graph"
+        # Directories
+        self._feat_dir = (
+            self._data_path / "features" / "roi_features"
+            / mode / feature_model / phase
+        )
+        self._annot_dir = (
+            self._data_path / "world4d_rel_annotations" / phase
+        )
 
-        # Load class vocabularies
-        self.object_classes = _build_object_classes(data_path)
-        (
-            self.relationship_classes,
-            self.attention_relationships,
-            self.spatial_relationships,
-            self.contacting_relationships,
-        ) = _build_relationship_classes(data_path)
+        # Expose vocabularies for model construction
+        self.attention_relationships = ATTENTION_RELATIONSHIPS
+        self.spatial_relationships = SPATIAL_RELATIONSHIPS
+        self.contacting_relationships = CONTACTING_RELATIONSHIPS
+        self.object_classes = OBJECT_CLASSES
 
-        # Build video list
-        self.video_list: List[str] = []          # video_id per entry
-        self.frame_names_list: List[List[str]] = []  # frame keys per video
-        self.gt_annotations: List[Any] = []      # parsed annotations per video
+        # Build video list: intersection of feature & annotation PKLs
+        self.video_list: List[str] = []
+        self._build_video_list()
 
-        self._build_dataset()
-
-        print(f"[WorldAG][{phase}] {len(self.video_list)} videos, "
-              f"{sum(len(f) for f in self.frame_names_list)} total frames")
+        print(
+            f"[WorldAG][{phase}] mode={mode}, features={feature_model}, "
+            f"{len(self.video_list)} videos"
+        )
 
     # ------------------------------------------------------------------
     # Dataset construction
     # ------------------------------------------------------------------
 
-    def _build_dataset(self):
-        """Discover and load all world scene graph PKLs."""
-        if not self._world_sg_dir.exists():
+    def _build_video_list(self):
+        """Discover videos present in both feature and annotation dirs."""
+        if not self._feat_dir.exists():
             raise FileNotFoundError(
-                f"World scene graph directory not found: {self._world_sg_dir}"
+                f"Feature directory not found: {self._feat_dir}"
+            )
+        if not self._annot_dir.exists():
+            raise FileNotFoundError(
+                f"Annotation directory not found: {self._annot_dir}"
             )
 
-        pkl_files = sorted(self._world_sg_dir.glob("*.pkl"))
-        if not pkl_files:
-            raise FileNotFoundError(
-                f"No PKL files found in {self._world_sg_dir}"
+        feat_videos = {p.stem for p in self._feat_dir.glob("*.pkl")}
+        # Annotation PKLs may be named <video_id>.pkl where video_id
+        # includes ".mp4" suffix, so stem = "001YG.mp4"
+        annot_videos = set()
+        for p in self._annot_dir.glob("*.pkl"):
+            name = p.name.replace(".pkl", "")
+            annot_videos.add(name)
+
+        # Intersection: try matching with and without .mp4 suffix
+        common = set()
+        for vid in feat_videos:
+            if vid in annot_videos:
+                common.add(vid)
+            elif vid + ".mp4" in annot_videos:
+                common.add(vid)
+
+        if not common:
+            print(
+                f"[WorldAG] WARNING: No common videos found!\n"
+                f"  Features ({len(feat_videos)}): {list(feat_videos)[:5]}...\n"
+                f"  Annotations ({len(annot_videos)}): {list(annot_videos)[:5]}..."
             )
 
-        skipped = 0
-        for pkl_path in pkl_files:
-            with open(pkl_path, "rb") as f:
-                data = pickle.load(f)
+        self.video_list = sorted(common)
 
-            video_id = data.get("video_id", pkl_path.stem)
-            frames_map = data.get("frames", {})
-            if not frames_map:
-                skipped += 1
+    # ------------------------------------------------------------------
+    # PKL loading helpers
+    # ------------------------------------------------------------------
+
+    def _load_feature_pkl(self, video_id: str) -> Dict[str, Any]:
+        """Load the ROI feature PKL for a video."""
+        path = self._feat_dir / f"{video_id}.pkl"
+        with open(path, "rb") as f:
+            return pickle.load(f)
+
+    def _load_annotation_pkl(self, video_id: str) -> Dict[str, Any]:
+        """Load the world4D relationship annotation PKL for a video."""
+        # Try with and without .mp4 suffix
+        for suffix in ["", ".mp4"]:
+            path = self._annot_dir / f"{video_id}{suffix}.pkl"
+            if path.exists():
+                with open(path, "rb") as f:
+                    return pickle.load(f)
+        raise FileNotFoundError(
+            f"Annotation PKL not found for video: {video_id}"
+        )
+
+    # ------------------------------------------------------------------
+    # Frame alignment
+    # ------------------------------------------------------------------
+
+    def _align_frames(
+        self,
+        feat_data: Dict[str, Any],
+        annot_data: Dict[str, Any],
+    ) -> List[str]:
+        """Find common frames between feature and annotation PKLs.
+
+        Returns sorted list of frame filenames present in both.
+        """
+        feat_frames = set(feat_data.get("frames", {}).keys())
+        annot_frames_raw = set(annot_data.get("frames", {}).keys())
+
+        # Annotation frame keys are "video_id/frame.png"; extract filename
+        annot_frame_to_key = {}
+        for key in annot_frames_raw:
+            frame_file = key.split("/")[-1] if "/" in key else key
+            annot_frame_to_key[frame_file] = key
+
+        common = sorted(feat_frames & set(annot_frame_to_key.keys()))
+        return common, annot_frame_to_key
+
+    # ------------------------------------------------------------------
+    # Per-frame tensor construction
+    # ------------------------------------------------------------------
+
+    def _build_frame_tensors(
+        self,
+        feat_frame: Dict[str, Any],
+        annot_frame: Dict[str, Any],
+        max_N: int,
+    ):
+        """Build padded tensors for a single frame.
+
+        Args:
+            feat_frame: feature PKL entry for this frame
+            annot_frame: annotation PKL entry for this frame
+            max_N: N_max for padding
+
+        Returns:
+            Tuple of (node_tensors, edge_tensors, n_objects, n_pairs)
+        """
+        # --- Feature data ---
+        roi_features = feat_frame.get("roi_features", np.zeros((0, 1024)))
+        if isinstance(roi_features, np.ndarray):
+            roi_features = torch.from_numpy(roi_features).float()
+        feat_labels = feat_frame.get("labels", [])
+        feat_label_ids = feat_frame.get("label_ids", [])
+        feat_sources = feat_frame.get("sources", [])
+        bboxes_xyxy = feat_frame.get("bboxes_xyxy", np.zeros((0, 4)))
+        if isinstance(bboxes_xyxy, np.ndarray):
+            bboxes_xyxy = torch.from_numpy(bboxes_xyxy).float()
+        feat_pair_indices = feat_frame.get("pair_indices", [])
+
+        N_feat = len(feat_labels)
+        D = roi_features.shape[-1] if roi_features.numel() > 0 else 1024
+
+        # --- Annotation data ---
+        person_info = annot_frame.get("person_info", {})
+        object_info_list = annot_frame.get("object_info_list", [])
+
+        # Build label→annotation map for matching
+        annot_by_short_label = {}
+        for obj in object_info_list:
+            short = obj.get("label", _to_short(obj.get("class", "")))
+            if short not in annot_by_short_label:
+                annot_by_short_label[short] = obj
+
+        # --- Build per-object arrays ---
+        N = min(N_feat, max_N)
+
+        visual_features = torch.zeros(max_N, D)
+        corners = torch.zeros(max_N, 8, 3)
+        bboxes_2d = torch.zeros(max_N, 4)
+        valid_mask = torch.zeros(max_N, dtype=torch.bool)
+        visibility_mask = torch.zeros(max_N, dtype=torch.bool)
+        object_classes = torch.zeros(max_N, dtype=torch.long)
+
+        for i in range(N):
+            visual_features[i] = roi_features[i]
+            if i < bboxes_xyxy.shape[0]:
+                bboxes_2d[i] = bboxes_xyxy[i]
+            valid_mask[i] = True
+
+            # Class
+            class_idx = feat_label_ids[i] if i < len(feat_label_ids) else 0
+            object_classes[i] = class_idx
+
+            # Source determines visibility
+            src = feat_sources[i] if i < len(feat_sources) else "gt"
+            is_visible = src not in ("rag", "gdino")
+            visibility_mask[i] = is_visible
+
+            # Skip invisible if requested
+            if not is_visible and not self._include_invisible:
+                valid_mask[i] = False
                 continue
 
-            # Sort frames
-            sorted_keys = sorted(
-                frames_map.keys(),
-                key=lambda k: int(Path(k).stem) if Path(k).stem.isdigit() else k,
-            )
+            # Match to annotation for 3D corners
+            label_str = feat_labels[i] if i < len(feat_labels) else ""
+            short_label = _to_short(label_str)
+            annot_obj = annot_by_short_label.get(short_label)
 
-            # Parse per-frame annotations
-            frame_names = []
-            gt_annotations_video = []
-
-            for frame_key in sorted_keys:
-                frame_data = frames_map[frame_key]
-                person_bbox = frame_data.get("person_bbox", None)
-
-                if self._filter_nonperson and person_bbox is None:
-                    continue
-
-                # Ensure person_bbox is ndarray
-                if person_bbox is not None:
-                    person_bbox = np.asarray(person_bbox, dtype=np.float32)
-
-                # Build frame annotation list (same shape as StandardAG)
-                frame_ann = [
-                    {
-                        const.PERSON_BOUNDING_BOX: person_bbox,
-                        const.FRAME: frame_key,
-                    }
-                ]
-
-                for obj in frame_data.get("objects", []):
-                    parsed = self._parse_object(obj)
-                    if parsed is not None:
-                        frame_ann.append(parsed)
-
-                if len(frame_ann) > 1:  # has at least one object
-                    frame_names.append(frame_key)
-                    gt_annotations_video.append(frame_ann)
-
-            if len(frame_names) > 1:  # at least 2 frames
-                self.video_list.append(video_id)
-                self.frame_names_list.append(frame_names)
-                self.gt_annotations.append(gt_annotations_video)
-            else:
-                skipped += 1
-
-        if skipped > 0:
-            print(f"[WorldAG] Skipped {skipped} videos (no valid frames)")
-
-    def _parse_object(self, obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Parse a single object dict from the world SG PKL into training format."""
-        visible = obj.get("visible", True)
-        source = obj.get("source", "unknown")
-        rel_source = obj.get("rel_source", "unknown")
-
-        # Skip invisible objects if not requested
-        if not visible and not self._include_invisible:
-            return None
-
-        # Class index
-        class_idx = obj.get("class", -1)
-        if class_idx <= 0:
-            return None
-
-        # 2D bbox (may be None for RAG-predicted objects)
-        bbox_2d = obj.get("bbox_2d", None)
-        if bbox_2d is not None:
-            bbox_2d = np.asarray(bbox_2d, dtype=np.float32)
-
-        # Relationship tensors
-        att_rel = self._rel_str_to_tensor(
-            obj.get("attention_relationship", []),
-            self.attention_relationships,
-        )
-        spa_rel = self._rel_str_to_tensor(
-            obj.get("spatial_relationship", []),
-            self.spatial_relationships,
-        )
-        con_rel = self._rel_str_to_tensor(
-            obj.get("contacting_relationship", []),
-            self.contacting_relationships,
-        )
-
-        # 3D geometry
-        corners_final = obj.get("corners_final", None)
-        if corners_final is not None:
-            corners_final = np.asarray(corners_final, dtype=np.float32)
-            if corners_final.shape != (8, 3):
-                corners_final = None
-
-        center_3d = obj.get("center_3d", None)
-        if center_3d is not None:
-            center_3d = np.asarray(center_3d, dtype=np.float32)
-
-        obb_fp = obj.get("obb_floor_parallel_corners", None)
-        if obb_fp is not None:
-            obb_fp = np.asarray(obb_fp, dtype=np.float32)
-            if obb_fp.shape != (8, 3):
-                obb_fp = None
-
-        obb_arb = obj.get("obb_arbitrary_corners", None)
-        if obb_arb is not None:
-            obb_arb = np.asarray(obb_arb, dtype=np.float32)
-            if obb_arb.shape != (8, 3):
-                obb_arb = None
-
-        return {
-            const.CLASS: class_idx,
-            const.BOUNDING_BOX: bbox_2d,
-            const.VISIBLE: visible,
-            const.ATTENTION_RELATIONSHIP: att_rel,
-            const.SPATIAL_RELATIONSHIP: spa_rel,
-            const.CONTACTING_RELATIONSHIP: con_rel,
-            "corners_final": corners_final,
-            "center_3d": center_3d,
-            "obb_floor_parallel_corners": obb_fp,
-            "obb_arbitrary_corners": obb_arb,
-            "source": source,
-            "rel_source": rel_source,
-            "world4d_filled": obj.get("world4d_filled", False),
-        }
-
-    def _rel_str_to_tensor(
-        self,
-        rel_strings: List[str],
-        vocab: List[str],
-    ) -> torch.Tensor:
-        """Convert relationship string labels to a LongTensor of indices."""
-        if not rel_strings:
-            return torch.zeros(0, dtype=torch.long)
-
-        indices = []
-        for r in rel_strings:
-            if r in vocab:
-                indices.append(vocab.index(r))
-        if not indices:
-            return torch.zeros(0, dtype=torch.long)
-        return torch.tensor(indices, dtype=torch.long)
-
-    # ------------------------------------------------------------------
-    # GL-STGN tensor preparation
-    # ------------------------------------------------------------------
-
-    def get_glstgn_tensors(self, index: int, max_objects: int = 64) -> Dict[str, Any]:
-        """
-        Build padded per-frame tensors for the GL-STGN pipeline.
-
-        Returns dict with:
-            video_id: str
-            T: int — number of frames
-            N_max: int — max objects across frames (capped at max_objects)
-            corners_seq: List of (N_max, 8, 3) float32 — 3D bbox corners
-            valid_mask_seq: List of (N_max,) bool — True for real objects
-            visibility_mask_seq: List of (N_max,) bool — True if in FOV
-            object_classes_seq: List of (N_max,) long — object class indices
-            person_idx_seq: List of (K_t,) long — person indices in pairs
-            object_idx_seq: List of (K_t,) long — object indices in pairs
-            gt_attention_seq: List of (K_t,) long — GT attention class
-            gt_spatial_seq: List of List[List[int]] — GT spatial rel indices
-            gt_contacting_seq: List of List[List[int]] — GT contacting rel indices
-            gt_annotations: original annotations (for evaluator compatibility)
-        """
-        video_id = self.video_list[index]
-        frame_names = self.frame_names_list[index]
-        gt_annotations = self.gt_annotations[index]
-        T = len(frame_names)
-
-        # First pass: determine N_max across all frames
-        n_objects_per_frame = []
-        for frame_ann in gt_annotations:
-            # frame_ann[0] is person, frame_ann[1:] are objects
-            n_objects_per_frame.append(len(frame_ann))  # person + objects
-        N_max = min(max(n_objects_per_frame), max_objects)
-
-        corners_seq = []
-        valid_mask_seq = []
-        visibility_mask_seq = []
-        object_classes_seq = []
-        person_idx_seq = []
-        object_idx_seq = []
-        gt_attention_seq = []
-        gt_spatial_seq = []
-        gt_contacting_seq = []
-
-        for t, frame_ann in enumerate(gt_annotations):
-            N_t = min(len(frame_ann), N_max)
-
-            corners = np.zeros((N_max, 8, 3), dtype=np.float32)
-            valid_mask = np.zeros(N_max, dtype=bool)
-            vis_mask = np.zeros(N_max, dtype=bool)
-            obj_classes = np.zeros(N_max, dtype=np.int64)
-
-            person_indices = []
-            object_indices = []
-            att_labels = []
-            spa_labels = []
-            con_labels = []
-
-            # Person entry is at index 0
-            person_entry = frame_ann[0]
-            person_bbox = person_entry.get(const.PERSON_BOUNDING_BOX, None)
-
-            # Person always occupies slot 0
-            valid_mask[0] = True
-            vis_mask[0] = True  # Person is always visible when frame exists
-            obj_classes[0] = 1  # Person class (index 1 typically)
-
-            # Use person 3D corners if available from other objects' geometry
-            # For now, person corners stay zero (person has 2D bbox only in AG)
-
-            # Objects at indices 1..N_t-1
-            for i in range(1, N_t):
-                obj = frame_ann[i]
-
-                valid_mask[i] = True
-                vis_mask[i] = obj.get(const.VISIBLE, True)
-                obj_classes[i] = obj.get(const.CLASS, 0)
-
-                # 3D corners
-                c = obj.get("corners_final", None)
+            if annot_obj is not None:
+                c = annot_obj.get("corners_final", None)
                 if c is not None:
                     c = np.asarray(c, dtype=np.float32)
                     if c.shape == (8, 3):
-                        corners[i] = c
+                        corners[i] = torch.from_numpy(c)
 
-                # Relationship labels (person → object)
-                att_rel = obj.get(const.ATTENTION_RELATIONSHIP, None)
-                spa_rel = obj.get(const.SPATIAL_RELATIONSHIP, None)
-                con_rel = obj.get(const.CONTACTING_RELATIONSHIP, None)
+                # Update visibility from annotation if available
+                if not annot_obj.get("visible", True):
+                    visibility_mask[i] = False
 
-                if att_rel is not None and len(att_rel) > 0:
-                    person_indices.append(0)
-                    object_indices.append(i)
+        # --- Person 3D corners (slot 0) ---
+        person_corners = person_info.get("corners_final", None)
+        if person_corners is not None:
+            person_corners = np.asarray(person_corners, dtype=np.float32)
+            if person_corners.shape == (8, 3):
+                corners[0] = torch.from_numpy(person_corners)
 
-                    # Attention: single-label (take first)
-                    if isinstance(att_rel, torch.Tensor):
-                        att_labels.append(att_rel[0].item())
-                    else:
-                        att_labels.append(int(att_rel[0]) if len(att_rel) > 0 else 0)
+        # --- Build per-edge arrays ---
+        K = len(feat_pair_indices)
 
-                    # Spatial: multi-label
-                    if isinstance(spa_rel, torch.Tensor):
-                        spa_labels.append(spa_rel.tolist())
-                    else:
-                        spa_labels.append(list(spa_rel) if spa_rel else [])
+        # Determine K_max for this frame (will be padded to video K_max later)
+        person_indices = []
+        object_indices = []
+        att_labels = []
+        spa_multi_hot = []
+        con_multi_hot = []
+        pair_sources = []
 
-                    # Contacting: multi-label
-                    if isinstance(con_rel, torch.Tensor):
-                        con_labels.append(con_rel.tolist())
-                    else:
-                        con_labels.append(list(con_rel) if con_rel else [])
+        for pidx, oidx in feat_pair_indices:
+            if pidx >= max_N or oidx >= max_N:
+                continue
+            if not valid_mask[pidx] or not valid_mask[oidx]:
+                continue
 
-            corners_seq.append(torch.from_numpy(corners))
-            valid_mask_seq.append(torch.from_numpy(valid_mask))
-            visibility_mask_seq.append(torch.from_numpy(vis_mask))
-            object_classes_seq.append(torch.from_numpy(obj_classes))
+            person_indices.append(pidx)
+            object_indices.append(oidx)
 
-            person_idx_seq.append(
-                torch.tensor(person_indices, dtype=torch.long)
+            # Get relationship labels from annotation
+            obj_label = feat_labels[oidx] if oidx < len(feat_labels) else ""
+            short_label = _to_short(obj_label)
+            annot_obj = annot_by_short_label.get(short_label)
+
+            if annot_obj is not None:
+                att_rel = annot_obj.get("attention_relationship", [])
+                spa_rel = annot_obj.get("spatial_relationship", [])
+                con_rel = annot_obj.get("contacting_relationship", [])
+                obj_source = annot_obj.get("source", "gt")
+            else:
+                att_rel = []
+                spa_rel = []
+                con_rel = []
+                obj_source = "gt"
+
+            att_labels.append(_attention_label_to_idx(att_rel))
+            spa_multi_hot.append(
+                _multi_hot(spa_rel, _SPA_LABEL_TO_IDX, NUM_SPATIAL)
             )
-            object_idx_seq.append(
-                torch.tensor(object_indices, dtype=torch.long)
+            con_multi_hot.append(
+                _multi_hot(con_rel, _CON_LABEL_TO_IDX, NUM_CONTACTING)
             )
-            gt_attention_seq.append(
-                torch.tensor(att_labels, dtype=torch.long)
-            )
-            gt_spatial_seq.append(spa_labels)
-            gt_contacting_seq.append(con_labels)
+            pair_sources.append(0 if obj_source == "gt" else 1)
+
+        K_valid = len(person_indices)
 
         return {
-            "video_id": video_id,
-            "T": T,
-            "N_max": N_max,
-            "frame_names": frame_names,
-            "corners_seq": corners_seq,
-            "valid_mask_seq": valid_mask_seq,
-            "visibility_mask_seq": visibility_mask_seq,
-            "object_classes_seq": object_classes_seq,
-            "person_idx_seq": person_idx_seq,
-            "object_idx_seq": object_idx_seq,
-            "gt_attention_seq": gt_attention_seq,
-            "gt_spatial_seq": gt_spatial_seq,
-            "gt_contacting_seq": gt_contacting_seq,
-            "gt_annotations": gt_annotations,
+            # Node tensors (max_N, ...)
+            "visual_features": visual_features,
+            "corners": corners,
+            "bboxes_2d": bboxes_2d,
+            "valid_mask": valid_mask,
+            "visibility_mask": visibility_mask,
+            "object_classes": object_classes,
+            # Edge data (lists, will be padded to K_max later)
+            "person_indices": person_indices,
+            "object_indices": object_indices,
+            "att_labels": att_labels,
+            "spa_multi_hot": spa_multi_hot,
+            "con_multi_hot": con_multi_hot,
+            "pair_sources": pair_sources,
+            "K_valid": K_valid,
         }
 
     # ------------------------------------------------------------------
@@ -504,13 +460,219 @@ class WorldAG(Dataset):
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
         video_id = self.video_list[index]
-        frame_names = self.frame_names_list[index]
-        gt_annotations = self.gt_annotations[index]
 
+        # Load both PKLs
+        feat_data = self._load_feature_pkl(video_id)
+        annot_data = self._load_annotation_pkl(video_id)
+
+        # Align frames
+        common_frames, annot_frame_to_key = self._align_frames(
+            feat_data, annot_data
+        )
+
+        if len(common_frames) < 2:
+            # Fallback: return minimal valid tensors
+            return self._empty_sample(video_id)
+
+        T = len(common_frames)
+
+        # First pass: determine N_max and K_max across all frames
+        feat_frames = feat_data["frames"]
+        annot_frames = annot_data["frames"]
+
+        n_objects_per_frame = []
+        k_pairs_per_frame = []
+        D = 1024  # default feature dim
+
+        for frame_file in common_frames:
+            ff = feat_frames[frame_file]
+            roi = ff.get("roi_features", np.zeros((0, 1024)))
+            n_obj = roi.shape[0] if isinstance(roi, np.ndarray) else len(roi)
+            n_objects_per_frame.append(n_obj)
+            pairs = ff.get("pair_indices", [])
+            k_pairs_per_frame.append(len(pairs))
+            if isinstance(roi, np.ndarray) and roi.ndim == 2 and roi.shape[0] > 0:
+                D = roi.shape[1]
+
+        N_max = min(max(n_objects_per_frame) if n_objects_per_frame else 1,
+                    self._max_objects)
+        K_max = max(k_pairs_per_frame) if k_pairs_per_frame else 1
+
+        # Second pass: build per-frame tensors
+        all_visual = []
+        all_corners = []
+        all_bboxes = []
+        all_valid = []
+        all_vis = []
+        all_classes = []
+
+        all_pidx = []
+        all_oidx = []
+        all_pair_valid = []
+        all_att = []
+        all_spa = []
+        all_con = []
+        all_psrc = []
+
+        # For evaluator compatibility
+        gt_annotations = []
+
+        for frame_file in common_frames:
+            ff = feat_frames[frame_file]
+            af_key = annot_frame_to_key.get(frame_file, frame_file)
+            af = annot_frames.get(af_key, {})
+
+            frame_tensors = self._build_frame_tensors(ff, af, N_max)
+
+            # Node tensors (already N_max padded)
+            all_visual.append(frame_tensors["visual_features"])
+            all_corners.append(frame_tensors["corners"])
+            all_bboxes.append(frame_tensors["bboxes_2d"])
+            all_valid.append(frame_tensors["valid_mask"])
+            all_vis.append(frame_tensors["visibility_mask"])
+            all_classes.append(frame_tensors["object_classes"])
+
+            # Edge tensors: pad to K_max
+            K_v = frame_tensors["K_valid"]
+            pidx = torch.zeros(K_max, dtype=torch.long)
+            oidx = torch.zeros(K_max, dtype=torch.long)
+            pair_valid = torch.zeros(K_max, dtype=torch.bool)
+            att = torch.zeros(K_max, dtype=torch.long)
+            spa = torch.zeros(K_max, NUM_SPATIAL)
+            con = torch.zeros(K_max, NUM_CONTACTING)
+            psrc = torch.zeros(K_max, dtype=torch.long)
+
+            if K_v > 0:
+                pidx[:K_v] = torch.tensor(
+                    frame_tensors["person_indices"], dtype=torch.long
+                )
+                oidx[:K_v] = torch.tensor(
+                    frame_tensors["object_indices"], dtype=torch.long
+                )
+                pair_valid[:K_v] = True
+                att[:K_v] = torch.tensor(
+                    frame_tensors["att_labels"], dtype=torch.long
+                )
+                spa[:K_v] = torch.stack(frame_tensors["spa_multi_hot"])
+                con[:K_v] = torch.stack(frame_tensors["con_multi_hot"])
+                psrc[:K_v] = torch.tensor(
+                    frame_tensors["pair_sources"], dtype=torch.long
+                )
+
+            all_pidx.append(pidx)
+            all_oidx.append(oidx)
+            all_pair_valid.append(pair_valid)
+            all_att.append(att)
+            all_spa.append(spa)
+            all_con.append(con)
+            all_psrc.append(psrc)
+
+            # Raw annotation for evaluator
+            gt_annotations.append(af)
+
+        # Stack all frames → (T, ...)
+        result = {
+            "video_id": video_id,
+            "T": T,
+            "N_max": N_max,
+            "K_max": K_max,
+            "frame_names": common_frames,
+
+            # Per-node: (T, N_max, ...)
+            "visual_features": torch.stack(all_visual),         # (T, N_max, D)
+            "corners": torch.stack(all_corners),                 # (T, N_max, 8, 3)
+            "bboxes_2d": torch.stack(all_bboxes),               # (T, N_max, 4)
+            "valid_mask": torch.stack(all_valid),                 # (T, N_max)
+            "visibility_mask": torch.stack(all_vis),             # (T, N_max)
+            "object_classes": torch.stack(all_classes),           # (T, N_max)
+
+            # Per-edge: (T, K_max, ...)
+            "person_idx": torch.stack(all_pidx),                 # (T, K_max)
+            "object_idx": torch.stack(all_oidx),                 # (T, K_max)
+            "pair_valid": torch.stack(all_pair_valid),           # (T, K_max)
+
+            # GT labels (pre-encoded)
+            "gt_attention": torch.stack(all_att),                 # (T, K_max)
+            "gt_spatial": torch.stack(all_spa),                   # (T, K_max, 6)
+            "gt_contacting": torch.stack(all_con),               # (T, K_max, 17)
+
+            # Edge metadata
+            "pair_source": torch.stack(all_psrc),                # (T, K_max)
+
+            # Raw annotations for evaluator
+            "gt_annotations": gt_annotations,
+        }
+
+        # Camera poses (from annotation PKL)
+        camera_poses = annot_data.get("camera_poses", None)
+        camera_frame_keys = annot_data.get("camera_frame_keys", [])
+        if camera_poses is not None and len(camera_frame_keys) > 0:
+            # Filter to common frames only
+            cam_key_to_idx = {
+                k.split("/")[-1] if "/" in k else k: i
+                for i, k in enumerate(camera_frame_keys)
+            }
+            cam_indices = [
+                cam_key_to_idx[f] for f in common_frames
+                if f in cam_key_to_idx
+            ]
+            if len(cam_indices) == T:
+                cam = np.asarray(camera_poses, dtype=np.float32)
+                result["camera_poses"] = torch.from_numpy(cam[cam_indices])
+            else:
+                result["camera_poses"] = None
+        else:
+            result["camera_poses"] = None
+
+        # Union features (from feature PKL, per-pair)
+        has_union = any(
+            "union_features" in feat_frames[f] for f in common_frames
+        )
+        if has_union:
+            union_all = []
+            for frame_file in common_frames:
+                ff = feat_frames[frame_file]
+                uf = ff.get("union_features", None)
+                K_v_union = len(ff.get("pair_indices", []))
+                union_padded = torch.zeros(K_max, D)
+                if uf is not None and K_v_union > 0:
+                    uf_t = torch.from_numpy(
+                        np.asarray(uf, dtype=np.float32)
+                    )
+                    K_use = min(K_v_union, K_max, uf_t.shape[0])
+                    union_padded[:K_use] = uf_t[:K_use]
+                union_all.append(union_padded)
+            result["union_features"] = torch.stack(union_all)  # (T, K_max, D)
+        else:
+            result["union_features"] = None
+
+        return result
+
+    def _empty_sample(self, video_id: str) -> Dict[str, Any]:
+        """Return a minimal valid sample when a video has < 2 frames."""
+        T, N, K, D = 2, 1, 1, 1024
         return {
             "video_id": video_id,
-            "frame_names": frame_names,
-            "gt_annotations": gt_annotations,
+            "T": T,
+            "N_max": N,
+            "K_max": K,
+            "frame_names": [],
+            "visual_features": torch.zeros(T, N, D),
+            "corners": torch.zeros(T, N, 8, 3),
+            "bboxes_2d": torch.zeros(T, N, 4),
+            "valid_mask": torch.zeros(T, N, dtype=torch.bool),
+            "visibility_mask": torch.zeros(T, N, dtype=torch.bool),
+            "object_classes": torch.zeros(T, N, dtype=torch.long),
+            "person_idx": torch.zeros(T, K, dtype=torch.long),
+            "object_idx": torch.zeros(T, K, dtype=torch.long),
+            "pair_valid": torch.zeros(T, K, dtype=torch.bool),
+            "gt_attention": torch.zeros(T, K, dtype=torch.long),
+            "gt_spatial": torch.zeros(T, K, NUM_SPATIAL),
+            "gt_contacting": torch.zeros(T, K, NUM_CONTACTING),
+            "pair_source": torch.zeros(T, K, dtype=torch.long),
+            "camera_poses": None,
+            "union_features": None,
+            "gt_annotations": [],
         }
 
 

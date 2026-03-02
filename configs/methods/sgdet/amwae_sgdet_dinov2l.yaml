@@ -2,15 +2,16 @@
 # AMWAE — SGDet Setting
 # ============================================================================
 # Usage:
-#   python train_wsgg_methods.py --config configs/methods/sgdet/amwae_sgdet.yaml
-#   python test_wsgg_methods.py --config configs/methods/sgdet/amwae_sgdet.yaml --ckpt path/to/ckpt.tar
+#   python train_wsgg_methods.py --config configs/methods/sgdet/amwae_sgdet_dinov2l.yaml
+#   python test_wsgg_methods.py --config configs/methods/sgdet/amwae_sgdet_dinov2l.yaml --ckpt path/to/ckpt.tar
 # ============================================================================
 
 # ---- Method & Setting ----
 method_name: amwae
 mode: sgdet
+feature_model: dinov2l
 task_name: worldsgg
-experiment_name: amwae_sgdet
+experiment_name: amwae_sgdet_dinov2l
 
 # ---- Paths ----
 data_path: /data/rohith/ag

@@ -55,23 +55,25 @@ class TrainWSGGBase(WSGGBase):
     # ------------------------------------------------------------------
     def init_dataset(self):
         """Initialize WorldAG train/test datasets and dataloaders."""
-        from dataloader.supervised.generation.world_ag.world_ag_dataset import WorldAG
+        from dataloader.world_ag_dataset import WorldAG, world_collate_fn
 
         print("Initializing WorldAG datasets...")
 
         self._train_dataset = WorldAG(
             phase="train",
             data_path=self._conf.data_path,
-            datasize=getattr(self._conf, 'datasize', 'large'),
-            world_sg_dir=getattr(self._conf, 'world_sg_dir', ''),
+            mode=self._conf.mode,
+            feature_model=getattr(self._conf, 'feature_model', 'dinov2b'),
             include_invisible=getattr(self._conf, 'include_invisible', True),
+            max_objects=getattr(self._conf, 'max_objects', 64),
         )
         self._test_dataset = WorldAG(
             phase="test",
             data_path=self._conf.data_path,
-            datasize=getattr(self._conf, 'datasize', 'large'),
-            world_sg_dir=getattr(self._conf, 'world_sg_dir', ''),
+            mode=self._conf.mode,
+            feature_model=getattr(self._conf, 'feature_model', 'dinov2b'),
             include_invisible=getattr(self._conf, 'include_invisible', True),
+            max_objects=getattr(self._conf, 'max_objects', 64),
         )
 
         self._object_classes = self._train_dataset.object_classes
@@ -79,9 +81,11 @@ class TrainWSGGBase(WSGGBase):
         # Dataloaders: batch_size=1 for temporal (all methods are temporal)
         self._dataloader_train = DataLoader(
             self._train_dataset, batch_size=1, shuffle=True, num_workers=0,
+            collate_fn=world_collate_fn,
         )
         self._dataloader_test = DataLoader(
             self._test_dataset, batch_size=1, shuffle=False, num_workers=0,
+            collate_fn=world_collate_fn,
         )
 
         print(f"  Train: {len(self._train_dataset)} items | Test: {len(self._test_dataset)} items")

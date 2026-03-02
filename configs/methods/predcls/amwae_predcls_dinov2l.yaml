@@ -2,15 +2,16 @@
 # AMWAE — PredCls Setting
 # ============================================================================
 # Usage:
-#   python train_wsgg_methods.py --config configs/methods/predcls/amwae_predcls.yaml
-#   python test_wsgg_methods.py --config configs/methods/predcls/amwae_predcls.yaml --ckpt path/to/ckpt.tar
+#   python train_wsgg_methods.py --config configs/methods/predcls/amwae_predcls_dinov2l.yaml
+#   python test_wsgg_methods.py --config configs/methods/predcls/amwae_predcls_dinov2l.yaml --ckpt path/to/ckpt.tar
 # ============================================================================
 
 # ---- Method & Setting ----
 method_name: amwae
 mode: predcls
+feature_model: dinov2l
 task_name: worldsgg
-experiment_name: amwae_predcls
+experiment_name: amwae_predcls_dinov2l
 
 # ---- Paths ----
 data_path: /data/rohith/ag

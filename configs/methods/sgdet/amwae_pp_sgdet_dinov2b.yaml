@@ -2,15 +2,16 @@
 # AMWAE++ (Energy Transformer) — SGDet Setting
 # ============================================================================
 # Usage:
-#   python train_wsgg_methods.py --config configs/methods/sgdet/amwae_pp_sgdet.yaml
-#   python test_wsgg_methods.py --config configs/methods/sgdet/amwae_pp_sgdet.yaml --ckpt path/to/ckpt.tar
+#   python train_wsgg_methods.py --config configs/methods/sgdet/amwae_pp_sgdet_dinov2b.yaml
+#   python test_wsgg_methods.py --config configs/methods/sgdet/amwae_pp_sgdet_dinov2b.yaml --ckpt path/to/ckpt.tar
 # ============================================================================
 
 # ---- Method & Setting ----
 method_name: amwae_pp
 mode: sgdet
+feature_model: dinov2b
 task_name: worldsgg
-experiment_name: amwae_pp_sgdet
+experiment_name: amwae_pp_sgdet_dinov2b
 
 # ---- Paths ----
 data_path: /data/rohith/ag

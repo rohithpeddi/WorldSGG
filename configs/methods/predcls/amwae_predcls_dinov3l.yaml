@@ -1,16 +1,17 @@
 # ============================================================================
-# LKS Buffer (Passive Memory Baseline) — PredCls Setting
+# AMWAE — PredCls Setting
 # ============================================================================
 # Usage:
-#   python train_wsgg_methods.py --config configs/methods/predcls/lks_buffer_predcls.yaml
-#   python test_wsgg_methods.py --config configs/methods/predcls/lks_buffer_predcls.yaml --ckpt path/to/ckpt.tar
+#   python train_wsgg_methods.py --config configs/methods/predcls/amwae_predcls_dinov3l.yaml
+#   python test_wsgg_methods.py --config configs/methods/predcls/amwae_predcls_dinov3l.yaml --ckpt path/to/ckpt.tar
 # ============================================================================
 
 # ---- Method & Setting ----
-method_name: lks_buffer
+method_name: amwae
 mode: predcls
+feature_model: dinov3l
 task_name: worldsgg
-experiment_name: lks_buffer_predcls
+experiment_name: amwae_predcls_dinov3l
 
 # ---- Paths ----
 data_path: /data/rohith/ag
@@ -32,6 +33,7 @@ d_struct: 256
 d_visual: 256
 d_detector_roi: 1024
 d_camera: 128
+d_motion: 64
 n_heads: 4
 d_feedforward: 512
 max_objects: 64
@@ -59,10 +61,15 @@ log_every: 100
 include_invisible: true
 datasize: large
 
-# ---- LKS Buffer Specific ----
-n_gnn_layers: 3
+# ---- AMWAE Specific ----
+n_cross_attn_layers: 2
+n_self_attn_layers: 4
+p_mask_visible: 0.5
 
 # ---- Loss ----
 lambda_vlm: 0.2
 label_smoothing_vlm: 0.2
-
+p_simulate_unseen: 0.25
+lambda_reconstruction: 1.0
+lambda_recon_dominance: 5.0
+lambda_contrastive: 0.5

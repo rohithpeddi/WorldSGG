@@ -1,16 +1,17 @@
 # ============================================================================
-# GL-STGN — SGDet Setting
+# AMWAE++ (Energy Transformer) — SGDet Setting
 # ============================================================================
 # Usage:
-#   python train_wsgg_methods.py --config configs/methods/sgdet/gl_stgn_sgdet.yaml
-#   python test_wsgg_methods.py --config configs/methods/sgdet/gl_stgn_sgdet.yaml --ckpt path/to/ckpt.tar
+#   python train_wsgg_methods.py --config configs/methods/sgdet/amwae_pp_sgdet_dinov2l.yaml
+#   python test_wsgg_methods.py --config configs/methods/sgdet/amwae_pp_sgdet_dinov2l.yaml --ckpt path/to/ckpt.tar
 # ============================================================================
 
 # ---- Method & Setting ----
-method_name: gl_stgn
+method_name: amwae_pp
 mode: sgdet
+feature_model: dinov2l
 task_name: worldsgg
-experiment_name: gl_stgn_sgdet
+experiment_name: amwae_pp_sgdet_dinov2l
 
 # ---- Paths ----
 data_path: /data/rohith/ag
@@ -28,7 +29,6 @@ num_detector_classes: 37
 
 # ---- Shared Architecture ----
 d_model: 256
-d_memory: 256
 d_struct: 256
 d_visual: 256
 d_detector_roi: 1024
@@ -61,13 +61,21 @@ log_every: 100
 include_invisible: true
 datasize: large
 
-# ---- GL-STGN Specific ----
-n_graph_layers: 3
-n_temporal_layers: 2
-max_T: 256
+# ---- AMWAE Base Architecture ----
+n_cross_attn_layers: 2
+n_self_attn_layers: 4
+p_mask_visible: 0.5
+
+# ---- AMWAE++ Energy Transformer ----
+energy_train_iters: 4
+energy_eval_iters: 15
+energy_epsilon: 1e-3
 
 # ---- Loss ----
 lambda_vlm: 0.2
 label_smoothing_vlm: 0.2
-lambda_smooth: 0.1
-movement_thresh: 0.3
+p_simulate_unseen: 0.25
+lambda_reconstruction: 1.0
+lambda_recon_dominance: 5.0
+lambda_contrastive: 0.5
+lambda_stability: 0.1
