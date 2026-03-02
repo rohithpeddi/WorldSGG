@@ -11,7 +11,8 @@ Components:
   2. SpatialPositionalEncoding — 3D geometry-aware PE
   3. SpatialGNN — Transformer encoder with spatial PE
   4. NodePredictor — Object class MLP
-  5. EdgePredictor — Relationship MLP with spatial + union features
+  5. RelationshipPredictor — Unified edge prediction (visual+union+CLIP→self-attn→3 heads)
+  5b. TemporalEdgeAttention — Cross-temporal edge reasoning
   6. CameraPoseEncoder — Camera extrinsic → viewpoint tokens
   7. CameraTemporalEncoder — Ego-motion between consecutive frames
   8. LabelSmoother — Soft targets for VLM pseudo-labels
@@ -281,191 +282,236 @@ class NodePredictor(nn.Module):
 
 
 # ============================================================================
-# 5. Edge Predictor
+# 5. Relationship Predictor — Unified Edge Prediction Pipeline
 # ============================================================================
 
-class EdgePredictor(nn.Module):
+class RelationshipPredictor(nn.Module):
     """
-    Relationship prediction for person-object pairs.
+    Unified relationship prediction pipeline.
 
-    Concatenates:
-      - Person representation (d_memory)
-      - Object representation (d_memory)
-      - 3D spatial features: rel_center(3) + dist(1) + log_vol_ratio(1) = 5
-      - 2D spatial features: IoU(1) + rel_center_2d(2) + log_area_ratio(1) = 4
-      - Union features: projected union ROI features (d_hidden), or [NO_UNION]
+    Phase 2: Form (K, d_rel) relationship tokens by concatenating:
+       - person visual features (d_model)
+       - object visual features (d_model)
+       - union ROI features (d_union, projected from d_union_roi)
+       - CLIP text features for person + object labels (d_text × 2)
 
-    Output: attention (K, 3), spatial (K, 6), contacting (K, 17)
+    Phase 3: Self-attention across all K relationship tokens.
+
+    Phase 5: 3 simple MLP heads → att/spa/con logits.
+
+    Phase 4 (temporal edge attention) is applied externally by each method
+    between Phase 3 and Phase 5 via the decomposed interface:
+        rel_tokens = predictor.form_rel_tokens(...)      # Phase 2
+        rel_tokens = predictor.self_attend(rel_tokens)    # Phase 3
+        rel_tokens = temporal_edge_attn(rel_tokens, ...)  # Phase 4 (external)
+        edge_out   = predictor.predict_from_tokens(...)   # Phase 5
 
     Args:
-        d_memory: Enriched representation dimension.
-        attention_class_num: Number of attention relationship classes.
-        spatial_class_num: Number of spatial relationship classes.
-        contact_class_num: Number of contacting relationship classes.
-        d_hidden: Hidden dimension in prediction MLPs.
-        d_union_roi: Raw union ROI feature dimension (1024 from DINO).
+        d_model: Per-object enriched token dimension.
+        d_text: CLIP text projection dimension.
+        d_rel: Relationship token dimension.
+        d_union_roi: Raw union ROI feature dimension (e.g. 1024 from DINO).
+        attention_class_num: Output size for attention head.
+        spatial_class_num: Output size for spatial head.
+        contact_class_num: Output size for contacting head.
+        clip_embeddings_path: Path to precomputed CLIP .npy file.
+        n_rel_layers: Number of self-attention layers.
+        n_rel_heads: Number of self-attention heads.
+        dropout: Dropout probability.
     """
 
     def __init__(
         self,
-        d_memory: int,
+        d_model: int = 256,
+        d_text: int = 128,
+        d_rel: int = 256,
+        d_union_roi: int = 1024,
         attention_class_num: int = 3,
         spatial_class_num: int = 6,
         contact_class_num: int = 17,
-        d_hidden: int = 256,
-        d_union_roi: int = 1024,
+        clip_embeddings_path: str = "",
+        n_rel_layers: int = 2,
+        n_rel_heads: int = 4,
+        dropout: float = 0.1,
     ):
         super().__init__()
+        self.d_rel = d_rel
         self.attention_class_num = attention_class_num
         self.spatial_class_num = spatial_class_num
         self.contact_class_num = contact_class_num
-        self.d_hidden = d_hidden
 
-        # 3D spatial: 5 dims (rel_center + dist + log_vol_ratio)
-        # 2D spatial: 4 dims (IoU + rel_center_2d + log_area_ratio)
-        self.spatial_encoder = nn.Sequential(
-            nn.Linear(9, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, d_hidden),
-        )
-
-        # Union feature projector (1024 → d_hidden)
-        self.union_projector = nn.Sequential(
-            nn.Linear(d_union_roi, d_hidden),
-            nn.ReLU(inplace=True),
-            nn.LayerNorm(d_hidden),
-        )
-
-        # Learnable fallback for pairs without union features (unseen objects)
-        self.no_union_embedding = nn.Parameter(torch.randn(d_hidden) * 0.02)
-
-        # pair_input = person(d_memory) + object(d_memory) + spatial(d_hidden) + union(d_hidden)
-        pair_input_dim = d_memory * 2 + d_hidden * 2
-        self.pair_mlp = nn.Sequential(
-            nn.Linear(pair_input_dim, d_hidden),
-            nn.ReLU(inplace=True),
-            nn.LayerNorm(d_hidden),
-            nn.Dropout(0.1),
-            nn.Linear(d_hidden, d_hidden),
-            nn.ReLU(inplace=True),
-        )
-
-        self.a_rel_compress = nn.Linear(d_hidden, attention_class_num)
-        self.s_rel_compress = nn.Linear(d_hidden, spatial_class_num)
-        self.c_rel_compress = nn.Linear(d_hidden, contact_class_num)
-
-    def _compute_2d_iou(
-        self, boxes_a: torch.Tensor, boxes_b: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Compute IoU between paired 2D boxes.
-
-        Args:
-            boxes_a: (K, 4) xyxy format.
-            boxes_b: (K, 4) xyxy format.
-
-        Returns:
-            iou: (K, 1)
-        """
-        x1 = torch.max(boxes_a[:, 0], boxes_b[:, 0])
-        y1 = torch.max(boxes_a[:, 1], boxes_b[:, 1])
-        x2 = torch.min(boxes_a[:, 2], boxes_b[:, 2])
-        y2 = torch.min(boxes_a[:, 3], boxes_b[:, 3])
-
-        inter = (x2 - x1).clamp(min=0) * (y2 - y1).clamp(min=0)
-        area_a = (boxes_a[:, 2] - boxes_a[:, 0]).clamp(min=1e-6) * (boxes_a[:, 3] - boxes_a[:, 1]).clamp(min=1e-6)
-        area_b = (boxes_b[:, 2] - boxes_b[:, 0]).clamp(min=1e-6) * (boxes_b[:, 3] - boxes_b[:, 1]).clamp(min=1e-6)
-        union = area_a + area_b - inter
-        iou = inter / union.clamp(min=1e-6)
-        return iou.unsqueeze(-1)  # (K, 1)
-
-    def compute_pair_spatial(
-        self,
-        person_corners: torch.Tensor,
-        object_corners: torch.Tensor,
-        person_bboxes_2d: Optional[torch.Tensor] = None,
-        object_bboxes_2d: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Compute combined 3D + 2D spatial features for person-object pairs.
-
-        Args:
-            person_corners: (K, 8, 3) person 3D bbox corners.
-            object_corners: (K, 8, 3) object 3D bbox corners.
-            person_bboxes_2d: (K, 4) xyxy or None.
-            object_bboxes_2d: (K, 4) xyxy or None.
-
-        Returns:
-            spatial_feats: (K, 9) — [3D(5) + 2D(4)]
-        """
-        K = person_corners.shape[0]
-        device = person_corners.device
-
-        # --- 3D spatial features (existing) ---
-        p_center = person_corners.mean(dim=1)
-        o_center = object_corners.mean(dim=1)
-        rel_center = o_center - p_center
-        dist = rel_center.norm(dim=-1, keepdim=True)
-
-        p_mins, _ = person_corners.min(dim=1)
-        p_maxs, _ = person_corners.max(dim=1)
-        p_vol = (p_maxs - p_mins).clamp(min=1e-6).prod(dim=-1)
-
-        o_mins, _ = object_corners.min(dim=1)
-        o_maxs, _ = object_corners.max(dim=1)
-        o_vol = (o_maxs - o_mins).clamp(min=1e-6).prod(dim=-1)
-
-        log_vol_ratio = (torch.log(o_vol + 1e-6) - torch.log(p_vol + 1e-6)).unsqueeze(-1)
-        feats_3d = torch.cat([rel_center, dist, log_vol_ratio], dim=-1)  # (K, 5)
-
-        # --- 2D spatial features ---
-        if person_bboxes_2d is not None and object_bboxes_2d is not None:
-            # IoU
-            iou_2d = self._compute_2d_iou(person_bboxes_2d, object_bboxes_2d)  # (K, 1)
-
-            # Relative center in 2D (normalized by person bbox size)
-            p_cx = (person_bboxes_2d[:, 0] + person_bboxes_2d[:, 2]) / 2
-            p_cy = (person_bboxes_2d[:, 1] + person_bboxes_2d[:, 3]) / 2
-            o_cx = (object_bboxes_2d[:, 0] + object_bboxes_2d[:, 2]) / 2
-            o_cy = (object_bboxes_2d[:, 1] + object_bboxes_2d[:, 3]) / 2
-            p_w = (person_bboxes_2d[:, 2] - person_bboxes_2d[:, 0]).clamp(min=1e-6)
-            p_h = (person_bboxes_2d[:, 3] - person_bboxes_2d[:, 1]).clamp(min=1e-6)
-            rel_cx = ((o_cx - p_cx) / p_w).unsqueeze(-1)
-            rel_cy = ((o_cy - p_cy) / p_h).unsqueeze(-1)
-
-            # Log area ratio
-            p_area = p_w * p_h
-            o_w = (object_bboxes_2d[:, 2] - object_bboxes_2d[:, 0]).clamp(min=1e-6)
-            o_h = (object_bboxes_2d[:, 3] - object_bboxes_2d[:, 1]).clamp(min=1e-6)
-            o_area = o_w * o_h
-            log_area_ratio = (torch.log(o_area + 1e-6) - torch.log(p_area + 1e-6)).unsqueeze(-1)
-
-            feats_2d = torch.cat([iou_2d, rel_cx, rel_cy, log_area_ratio], dim=-1)  # (K, 4)
+        # --- CLIP text embeddings (frozen, precomputed) ---
+        if clip_embeddings_path:
+            import numpy as np
+            emb = np.load(clip_embeddings_path)  # (C, 512)
+            self.register_buffer('clip_embeddings', torch.from_numpy(emb).float())
+            d_clip = emb.shape[1]  # 512
         else:
-            feats_2d = torch.zeros(K, 4, device=device)
+            # Fallback: random init for testing without CLIP file
+            self.register_buffer('clip_embeddings', torch.randn(37, 512))
+            d_clip = 512
+        self.text_proj = nn.Linear(d_clip, d_text)
 
-        return torch.cat([feats_3d, feats_2d], dim=-1)  # (K, 9)
+        # --- Union feature projector ---
+        d_union = d_rel // 4
+        self.union_proj = nn.Sequential(
+            nn.Linear(d_union_roi, d_union),
+            nn.ReLU(inplace=True),
+            nn.LayerNorm(d_union),
+        )
+        self.no_union_embedding = nn.Parameter(torch.randn(d_union) * 0.02)
+
+        # --- Input projection: concat → d_rel ---
+        # person(d_model) + object(d_model) + union(d_union) + person_text(d_text) + object_text(d_text)
+        d_input = d_model * 2 + d_union + d_text * 2
+        self.input_proj = nn.Sequential(
+            nn.Linear(d_input, d_rel),
+            nn.ReLU(inplace=True),
+            nn.LayerNorm(d_rel),
+        )
+
+        # --- Phase 3: Relationship self-attention ---
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_rel,
+            nhead=n_rel_heads,
+            dim_feedforward=d_rel * 2,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.rel_transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=n_rel_layers,
+            norm=nn.LayerNorm(d_rel),
+        )
+
+        # --- Phase 5: 3 simple MLP heads ---
+        self.att_head = nn.Sequential(
+            nn.Linear(d_rel, d_rel // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(d_rel // 2, attention_class_num),
+        )
+        self.spa_head = nn.Sequential(
+            nn.Linear(d_rel, d_rel // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(d_rel // 2, spatial_class_num),
+        )
+        self.con_head = nn.Sequential(
+            nn.Linear(d_rel, d_rel // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(d_rel // 2, contact_class_num),
+        )
+
+    def _get_text_features(self, class_indices: torch.Tensor) -> torch.Tensor:
+        """Look up precomputed CLIP embeddings and project.
+
+        Args:
+            class_indices: (K,) long — class indices.
+
+        Returns:
+            text_feat: (K, d_text)
+        """
+        # Clamp to valid range
+        idx = class_indices.clamp(0, self.clip_embeddings.shape[0] - 1)
+        raw = self.clip_embeddings[idx]  # (K, 512)
+        return self.text_proj(raw)       # (K, d_text)
+
+    def form_rel_tokens(
+        self,
+        enriched_states: torch.Tensor,
+        person_idx: torch.Tensor,
+        object_idx: torch.Tensor,
+        person_class_idx: torch.Tensor,
+        object_class_idx: torch.Tensor,
+        union_features: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Phase 2: Form relationship tokens.
+
+        Args:
+            enriched_states: (N, d_model) context-enriched object representations.
+            person_idx: (K,) long — person indices.
+            object_idx: (K,) long — object indices.
+            person_class_idx: (K,) long — predicted class for each person.
+            object_class_idx: (K,) long — predicted class for each object.
+            union_features: (K, d_union_roi) or None.
+
+        Returns:
+            rel_tokens: (K, d_rel)
+        """
+        K = person_idx.shape[0]
+
+        # Visual features
+        person_vis = enriched_states[person_idx]   # (K, d_model)
+        object_vis = enriched_states[object_idx]   # (K, d_model)
+
+        # Union features
+        if union_features is not None and union_features.shape[0] > 0:
+            union_feat = self.union_proj(union_features)  # (K, d_union)
+        else:
+            union_feat = self.no_union_embedding.unsqueeze(0).expand(K, -1)
+
+        # CLIP text features
+        person_text = self._get_text_features(person_class_idx)  # (K, d_text)
+        object_text = self._get_text_features(object_class_idx)  # (K, d_text)
+
+        # Concatenate and project
+        concat = torch.cat([person_vis, object_vis, union_feat,
+                            person_text, object_text], dim=-1)
+        return self.input_proj(concat)  # (K, d_rel)
+
+    def self_attend(self, rel_tokens: torch.Tensor) -> torch.Tensor:
+        """
+        Phase 3: Relationship self-attention.
+
+        Args:
+            rel_tokens: (K, d_rel)
+
+        Returns:
+            attended: (K, d_rel)
+        """
+        if rel_tokens.shape[0] == 0:
+            return rel_tokens
+        # Add batch dim → (1, K, d_rel), attend, squeeze
+        return self.rel_transformer(rel_tokens.unsqueeze(0)).squeeze(0)
+
+    def predict_from_tokens(self, rel_tokens: torch.Tensor) -> dict:
+        """
+        Phase 5: 3 simple MLP heads.
+
+        Args:
+            rel_tokens: (K, d_rel) — final relationship representations.
+
+        Returns:
+            dict with attention/spatial/contacting distributions.
+        """
+        return {
+            "attention_distribution": self.att_head(rel_tokens),
+            "spatial_distribution": torch.sigmoid(self.spa_head(rel_tokens)),
+            "contacting_distribution": torch.sigmoid(self.con_head(rel_tokens)),
+        }
 
     def forward(
         self,
         enriched_states: torch.Tensor,
         person_idx: torch.Tensor,
         object_idx: torch.Tensor,
-        corners: torch.Tensor,
+        person_class_idx: torch.Tensor,
+        object_class_idx: torch.Tensor,
         union_features: Optional[torch.Tensor] = None,
-        bboxes_2d: Optional[torch.Tensor] = None,
     ) -> dict:
         """
-        Args:
-            enriched_states: (N, d_memory) context-enriched representations.
-            person_idx: (K,) long — person indices in each pair.
-            object_idx: (K,) long — object indices in each pair.
-            corners: (N, 8, 3) 3D bbox corners.
-            union_features: (K, d_union_roi) or None — union ROI features per pair.
-            bboxes_2d: (N, 4) or None — 2D bounding boxes in xyxy format.
+        Full Phase 2 → 3 → 5 pipeline (no temporal).
 
         Returns:
-            dict with attention/spatial/contacting distributions.
+            dict with:
+                attention_distribution: (K, att_classes)
+                spatial_distribution: (K, spa_classes)
+                contacting_distribution: (K, con_classes)
+                rel_tokens: (K, d_rel) — for external temporal attention
         """
         K = person_idx.shape[0]
         if K == 0:
@@ -474,34 +520,93 @@ class EdgePredictor(nn.Module):
                 "attention_distribution": torch.zeros(0, self.attention_class_num, device=device),
                 "spatial_distribution": torch.zeros(0, self.spatial_class_num, device=device),
                 "contacting_distribution": torch.zeros(0, self.contact_class_num, device=device),
+                "rel_tokens": torch.zeros(0, self.d_rel, device=device),
             }
 
-        person_repr = enriched_states[person_idx]
-        object_repr = enriched_states[object_idx]
-
-        # Spatial features (3D + 2D)
-        person_bboxes_2d = bboxes_2d[person_idx] if bboxes_2d is not None else None
-        object_bboxes_2d = bboxes_2d[object_idx] if bboxes_2d is not None else None
-        spatial_feats = self.compute_pair_spatial(
-            corners[person_idx], corners[object_idx],
-            person_bboxes_2d, object_bboxes_2d,
+        # Phase 2
+        rel_tokens = self.form_rel_tokens(
+            enriched_states, person_idx, object_idx,
+            person_class_idx, object_class_idx, union_features,
         )
-        spatial_encoded = self.spatial_encoder(spatial_feats)
+        # Phase 3
+        rel_tokens = self.self_attend(rel_tokens)
+        # Phase 5
+        preds = self.predict_from_tokens(rel_tokens)
+        preds["rel_tokens"] = rel_tokens
+        return preds
 
-        # Union features
-        if union_features is not None:
-            union_proj = self.union_projector(union_features)  # (K, d_hidden)
-        else:
-            union_proj = self.no_union_embedding.unsqueeze(0).expand(K, -1)  # (K, d_hidden)
 
-        pair_input = torch.cat([person_repr, object_repr, spatial_encoded, union_proj], dim=-1)
-        pair_features = self.pair_mlp(pair_input)
+# ============================================================================
+# 5b. Temporal Edge Attention — Cross-Temporal Relationship Reasoning
+# ============================================================================
 
-        return {
-            "attention_distribution": self.a_rel_compress(pair_features),
-            "spatial_distribution": torch.sigmoid(self.s_rel_compress(pair_features)),
-            "contacting_distribution": torch.sigmoid(self.c_rel_compress(pair_features)),
-        }
+class TemporalEdgeAttention(nn.Module):
+    """
+    Cross-attention from current-frame relationship tokens to
+    previous frames' cached relationship tokens.
+
+    Allows temporal consistency: "person was holding cup last frame"
+    informs current frame's edge predictions.
+
+    Args:
+        d_rel: Relationship token dimension.
+        n_heads: Number of attention heads.
+        n_layers: Number of decoder layers.
+        dropout: Dropout probability.
+
+    Input:
+        current_rel: (K_t, d_rel) — current frame relationship tokens.
+        prev_rels: (K_prev, d_rel) — cached from prior frame(s).
+    Output:
+        temporally_enriched: (K_t, d_rel)
+    """
+
+    def __init__(
+        self,
+        d_rel: int = 256,
+        n_heads: int = 4,
+        n_layers: int = 1,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_rel,
+            nhead=n_heads,
+            dim_feedforward=d_rel * 2,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.decoder = nn.TransformerDecoder(
+            decoder_layer,
+            num_layers=n_layers,
+            norm=nn.LayerNorm(d_rel),
+        )
+
+    def forward(
+        self,
+        current_rel: torch.Tensor,
+        prev_rels: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            current_rel: (K_t, d_rel) — current frame edges.
+            prev_rels: (K_prev, d_rel) — previous frame edges.
+
+        Returns:
+            enriched: (K_t, d_rel) — temporally-informed edges.
+        """
+        if current_rel.shape[0] == 0 or prev_rels.shape[0] == 0:
+            return current_rel
+
+        # Add batch dim: (1, K, d_rel)
+        out = self.decoder(
+            current_rel.unsqueeze(0),
+            prev_rels.unsqueeze(0),
+        ).squeeze(0)
+        return out
+
+
 
 # ============================================================================
 # 6. Camera Pose Encoder

@@ -267,60 +267,6 @@ class TrainLKSGNN(TrainWSGGBase):
         return all_preds[-1] if all_preds else None
 
 
-# ============================================================================
-# Amnesic Geometric GNN (Baseline 2: Zero Memory)
-# ============================================================================
-
-class TrainAmnesicGNN(TrainWSGGBase):
-
-    def __init__(self, conf):
-        super().__init__(conf)
-
-    def init_model(self):
-        from lib.supervised.worldsgg.amnesic_gnn.amnesic_gnn import AmnesicGNN
-
-        self._model = AmnesicGNN(
-            config=self._conf,
-            num_object_classes=len(self._object_classes),
-            attention_class_num=len(self._train_dataset.attention_relationships),
-            spatial_class_num=len(self._train_dataset.spatial_relationships),
-            contact_class_num=len(self._train_dataset.contacting_relationships),
-        ).to(self._device)
-
-    def init_loss_fn(self):
-        from lib.supervised.worldsgg.amnesic_gnn.loss import AmnesicGNNLoss
-        self._loss_fn = AmnesicGNNLoss(
-            lambda_vlm=getattr(self._conf, 'lambda_vlm', 0.2),
-            label_smoothing=getattr(self._conf, 'label_smoothing_vlm', 0.2),
-            use_physics_veto=getattr(self._conf, 'use_physics_veto', True),
-            physics_veto_thresh=getattr(self._conf, 'physics_veto_dist_thresh', 2.0),
-        )
-
-    def is_temporal(self) -> bool:
-        return False
-
-    def process_train_video(self, batch) -> dict:
-        frame = batch
-        pred = self._model(
-            visual_features=frame["visual_features"].to(self._device),
-            corners=frame["corners"].to(self._device),
-            valid_mask=frame["valid_mask"].to(self._device),
-            visibility_mask=frame["visibility_mask"].to(self._device),
-            person_idx=frame["person_idx"].to(self._device),
-            object_idx=frame["object_idx"].to(self._device),
-        )
-        return self._loss_fn(pred, frame, self._device)
-
-    def process_test_video(self, batch) -> dict:
-        frame = batch
-        return self._model(
-            visual_features=frame["visual_features"].to(self._device),
-            corners=frame["corners"].to(self._device),
-            valid_mask=frame["valid_mask"].to(self._device),
-            visibility_mask=frame["visibility_mask"].to(self._device),
-            person_idx=frame["person_idx"].to(self._device),
-            object_idx=frame["object_idx"].to(self._device),
-        )
 
 
 # ============================================================================
@@ -331,7 +277,6 @@ METHOD_MAP = {
     "gl_stgn": TrainGLSTGN,
     "amwae": TrainAMWAE,
     "lks_buffer": TrainLKSGNN,
-    "amnesic_gnn": TrainAmnesicGNN,
 }
 
 

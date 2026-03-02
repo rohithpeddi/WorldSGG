@@ -76,22 +76,13 @@ class TrainWSGGBase(WSGGBase):
 
         self._object_classes = self._train_dataset.object_classes
 
-        # Dataloaders: batch_size=1 for temporal (per-video), configurable for stateless
-        if self.is_temporal():
-            self._dataloader_train = DataLoader(
-                self._train_dataset, batch_size=1, shuffle=True, num_workers=0,
-            )
-            self._dataloader_test = DataLoader(
-                self._test_dataset, batch_size=1, shuffle=False, num_workers=0,
-            )
-        else:
-            bs = getattr(self._conf, 'batch_size', 16)
-            self._dataloader_train = DataLoader(
-                self._train_dataset, batch_size=bs, shuffle=True, num_workers=0,
-            )
-            self._dataloader_test = DataLoader(
-                self._test_dataset, batch_size=1, shuffle=False, num_workers=0,
-            )
+        # Dataloaders: batch_size=1 for temporal (all methods are temporal)
+        self._dataloader_train = DataLoader(
+            self._train_dataset, batch_size=1, shuffle=True, num_workers=0,
+        )
+        self._dataloader_test = DataLoader(
+            self._test_dataset, batch_size=1, shuffle=False, num_workers=0,
+        )
 
         print(f"  Train: {len(self._train_dataset)} items | Test: {len(self._test_dataset)} items")
 
@@ -309,7 +300,7 @@ class TrainWSGGBase(WSGGBase):
     # ------------------------------------------------------------------
     @abstractmethod
     def is_temporal(self) -> bool:
-        """True for sequential (GL-STGN, AMWAE, LKS), False for frame-shuffled (Amnesic)."""
+        """True for sequential (GL-STGN, AMWAE, LKS)."""
         pass
 
     @abstractmethod

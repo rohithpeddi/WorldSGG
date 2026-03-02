@@ -149,39 +149,6 @@ class TestLKSGNN(TestWSGGBase):
         return all_preds[-1] if all_preds else None
 
 
-# ============================================================================
-# Amnesic Geometric GNN
-# ============================================================================
-
-class TestAmnesicGNN(TestWSGGBase):
-
-    def __init__(self, conf):
-        super().__init__(conf)
-
-    def init_model(self):
-        from lib.supervised.worldsgg.amnesic_gnn.amnesic_gnn import AmnesicGNN
-
-        self._model = AmnesicGNN(
-            config=self._conf,
-            num_object_classes=len(self._test_dataset.object_classes),
-            attention_class_num=len(self._test_dataset.attention_relationships),
-            spatial_class_num=len(self._test_dataset.spatial_relationships),
-            contact_class_num=len(self._test_dataset.contacting_relationships),
-        ).to(self._device)
-
-    def is_temporal(self) -> bool:
-        return False
-
-    def process_test_video(self, batch) -> dict:
-        frame = batch
-        return self._model(
-            visual_features=frame["visual_features"].to(self._device),
-            corners=frame["corners"].to(self._device),
-            valid_mask=frame["valid_mask"].to(self._device),
-            visibility_mask=frame["visibility_mask"].to(self._device),
-            person_idx=frame["person_idx"].to(self._device),
-            object_idx=frame["object_idx"].to(self._device),
-        )
 
 
 # ============================================================================
@@ -192,7 +159,6 @@ METHOD_MAP = {
     "gl_stgn": TestGLSTGN,
     "amwae": TestAMWAE,
     "lks_buffer": TestLKSGNN,
-    "amnesic_gnn": TestAmnesicGNN,
 }
 
 

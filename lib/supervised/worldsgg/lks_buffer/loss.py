@@ -2,7 +2,7 @@
 LKS Buffer Loss — VLM Noisy Label Training
 ============================================
 
-Same stratified structure as AmnesicGNNLoss (they test the same hypothesis).
+Same stratified structure as GL-STGN loss (standard 3-bucket split).
 
   Vis-Vis: full loss on clean manual labels
   Vis-Unseen / Unseen-Unseen: λ_vlm weighted, smoothed

@@ -9,7 +9,7 @@ Main model that wires together:
   4. PerObjectEpisodicMemory — K-slot per-object memory with viewpoint diversity eviction
   5. AssociativeRetriever — view-aware cross-attention retrieval to auto-complete masked tokens
   6. ContextualDiffusion — self-attention for context propagation
-  7. NodePredictor + EdgePredictor(+union, +2D) — scene graph prediction
+  7. NodePredictor + RelationshipPredictor(+TemporalEdgeAttention) — scene graph
   8. ObservabilityClassifier — structured masking for simulated-unseen training
 
 The model initializes the graph TOP-DOWN from the complete wireframe scaffold,
@@ -26,8 +26,8 @@ from .associative_retriever import AssociativeRetriever
 from .contextual_diffusion import ContextualDiffusion
 
 from lib.supervised.worldsgg.worldsgg_base import (
-    GlobalStructuralEncoder, NodePredictor, EdgePredictor,
-    CameraPoseEncoder, ObservabilityClassifier,
+    GlobalStructuralEncoder, NodePredictor, RelationshipPredictor,
+    CameraPoseEncoder, ObservabilityClassifier, TemporalEdgeAttention,
 )
 
 
@@ -114,12 +114,31 @@ class AMWAE(nn.Module):
             num_classes=num_object_classes,
         )
 
-        self.edge_predictor = EdgePredictor(
-            d_memory=config.d_model,
+        clip_path = getattr(config, 'clip_embeddings_path', '')
+        self.rel_predictor = RelationshipPredictor(
+            d_model=config.d_model,
+            d_text=getattr(config, 'd_text', 128),
+            d_rel=getattr(config, 'd_rel', 256),
+            d_union_roi=getattr(config, 'd_union_roi', 1024),
             attention_class_num=attention_class_num,
             spatial_class_num=spatial_class_num,
             contact_class_num=contact_class_num,
+            clip_embeddings_path=clip_path,
+            n_rel_layers=getattr(config, 'n_rel_layers', 2),
+            n_rel_heads=getattr(config, 'n_rel_heads', 4),
+            dropout=config.dropout,
         )
+
+        # Module 7b: Temporal edge attention
+        self.temporal_edge_attn = TemporalEdgeAttention(
+            d_rel=getattr(config, 'd_rel', 256),
+            n_heads=getattr(config, 'n_rel_heads', 4),
+            n_layers=getattr(config, 'n_temporal_edge_layers', 1),
+            dropout=config.dropout,
+        )
+
+        # Edge cache for temporal cross-attention
+        self.prev_edge_tokens = None
 
         # Module 8: Observability Classifier (for structured masking, 4C)
         self.obs_classifier = ObservabilityClassifier(
@@ -292,14 +311,30 @@ class AMWAE(nn.Module):
             # --- Step 7: Scene graph prediction ---
             node_logits = self.node_predictor(enriched)
 
-            edge_out = self.edge_predictor(
+            # Derive class indices from node predictions
+            person_class_idx = node_logits[person_idx_t].argmax(dim=-1)
+            object_class_idx = node_logits[object_idx_t].argmax(dim=-1)
+
+            # Phase 2: Form relationship tokens
+            rel_tokens = self.rel_predictor.form_rel_tokens(
                 enriched_states=enriched,
                 person_idx=person_idx_t,
                 object_idx=object_idx_t,
-                corners=corners_t,
+                person_class_idx=person_class_idx,
+                object_class_idx=object_class_idx,
                 union_features=union_feat_t,
-                bboxes_2d=bboxes_2d_t,
             )
+
+            # Phase 3: Relationship self-attention
+            rel_tokens = self.rel_predictor.self_attend(rel_tokens)
+
+            # Phase 4: Temporal edge attention
+            if self.prev_edge_tokens is not None:
+                rel_tokens = self.temporal_edge_attn(rel_tokens, self.prev_edge_tokens)
+            self.prev_edge_tokens = rel_tokens.detach()
+
+            # Phase 5: 3 MLP heads
+            edge_out = self.rel_predictor.predict_from_tokens(rel_tokens)
 
             # Collect outputs
             outputs["node_logits"].append(node_logits)
@@ -382,14 +417,17 @@ class AMWAE(nn.Module):
                         valid_mask=valid_t.unsqueeze(0),
                     ).squeeze(0)
 
-                    sim_edge_out = self.edge_predictor(
+                    # Simulated-unseen edge prediction through new pipeline
+                    sim_rel_tokens = self.rel_predictor.form_rel_tokens(
                         enriched_states=sim_enriched,
                         person_idx=person_idx_t,
                         object_idx=object_idx_t,
-                        corners=corners_t,
+                        person_class_idx=person_class_idx,
+                        object_class_idx=object_class_idx,
                         union_features=union_feat_t,
-                        bboxes_2d=bboxes_2d_t,
                     )
+                    sim_rel_tokens = self.rel_predictor.self_attend(sim_rel_tokens)
+                    sim_edge_out = self.rel_predictor.predict_from_tokens(sim_rel_tokens)
 
                     outputs["simulated_unseen_predictions"].append(sim_edge_out)
                     outputs["simulated_unseen_gt"].append(None)
@@ -403,7 +441,6 @@ class AMWAE(nn.Module):
         return outputs
 
     def reset_memory(self):
-        """Reset episodic memory bank (call between videos)."""
+        """Reset episodic memory bank and edge cache (call between videos)."""
         self.memory_bank.reset()
-
-
+        self.prev_edge_tokens = None

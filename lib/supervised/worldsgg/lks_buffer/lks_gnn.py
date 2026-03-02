@@ -26,8 +26,8 @@ from .lks_tokenizer import LKSTokenizer
 
 # Shared components from worldsgg_base
 from lib.supervised.worldsgg.worldsgg_base import (
-    GlobalStructuralEncoder, NodePredictor, EdgePredictor, SpatialGNN,
-    CameraPoseEncoder, FeatureAging,
+    GlobalStructuralEncoder, NodePredictor, RelationshipPredictor, SpatialGNN,
+    CameraPoseEncoder, FeatureAging, TemporalEdgeAttention,
 )
 
 
@@ -93,17 +93,32 @@ class LKSGNN(nn.Module):
             dropout=config.dropout,
         )
 
-        # Module 5: Prediction heads
-        self.node_predictor = NodePredictor(
-            d_memory=config.d_model,
-            num_classes=num_object_classes,
-        )
-        self.edge_predictor = EdgePredictor(
-            d_memory=config.d_model,
+        # Module 5: Relationship predictor
+        clip_path = getattr(config, 'clip_embeddings_path', '')
+        self.rel_predictor = RelationshipPredictor(
+            d_model=config.d_model,
+            d_text=getattr(config, 'd_text', 128),
+            d_rel=getattr(config, 'd_rel', 256),
+            d_union_roi=getattr(config, 'd_union_roi', 1024),
             attention_class_num=attention_class_num,
             spatial_class_num=spatial_class_num,
             contact_class_num=contact_class_num,
+            clip_embeddings_path=clip_path,
+            n_rel_layers=getattr(config, 'n_rel_layers', 2),
+            n_rel_heads=getattr(config, 'n_rel_heads', 4),
+            dropout=config.dropout,
         )
+
+        # Module 5b: Temporal edge attention
+        self.temporal_edge_attn = TemporalEdgeAttention(
+            d_rel=getattr(config, 'd_rel', 256),
+            n_heads=getattr(config, 'n_rel_heads', 4),
+            n_layers=getattr(config, 'n_temporal_edge_layers', 1),
+            dropout=config.dropout,
+        )
+
+        # Edge buffer for temporal cross-attention (set in reset_memory)
+        self.prev_rel_tokens = None
 
         # Non-differentiable memory buffer (not an nn.Module)
         self.memory_buffer = None  # Initialized in reset_memory()
@@ -115,7 +130,7 @@ class LKSGNN(nn.Module):
         )
 
     def reset_memory(self, device: torch.device = None):
-        """Reset the LKS buffer (call at start of each video)."""
+        """Reset the LKS buffer and edge cache (call at start of each video)."""
         if device is None:
             device = next(self.parameters()).device
         self.memory_buffer = LKSMemoryBuffer(
@@ -123,6 +138,7 @@ class LKSGNN(nn.Module):
             d_visual=self.config.d_visual,
             device=str(device),
         )
+        self.prev_rel_tokens = None
 
     def forward_frame(
         self,
@@ -228,14 +244,31 @@ class LKSGNN(nn.Module):
 
         # --- Step 6: Predict scene graph ---
         node_logits = self.node_predictor(enriched)
-        edge_out = self.edge_predictor(
+
+        # Derive class indices from node predictions
+        person_class_idx = node_logits[person_idx].argmax(dim=-1)
+        object_class_idx = node_logits[object_idx].argmax(dim=-1)
+
+        # Phase 2: Form relationship tokens
+        rel_tokens = self.rel_predictor.form_rel_tokens(
             enriched_states=enriched,
             person_idx=person_idx,
             object_idx=object_idx,
-            corners=corners,
+            person_class_idx=person_class_idx,
+            object_class_idx=object_class_idx,
             union_features=union_features,
-            bboxes_2d=bboxes_2d,
         )
+
+        # Phase 3: Relationship self-attention
+        rel_tokens = self.rel_predictor.self_attend(rel_tokens)
+
+        # Phase 4: Temporal edge attention
+        if self.prev_rel_tokens is not None:
+            rel_tokens = self.temporal_edge_attn(rel_tokens, self.prev_rel_tokens)
+        self.prev_rel_tokens = rel_tokens.detach()
+
+        # Phase 5: 3 MLP heads
+        edge_out = self.rel_predictor.predict_from_tokens(rel_tokens)
 
         return {
             "node_logits": node_logits,

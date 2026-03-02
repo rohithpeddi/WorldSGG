@@ -9,7 +9,7 @@ Main model that wires together:
   4. MotionFeatureEncoder — velocity/acceleration from 4D trajectories
   5. PersistentWorldMemoryBank — GRU-based temporal memory for all objects
   6. RelationalGraphTransformer — spatial-aware context propagation
-  7. NodePredictor + EdgePredictor(+union, +2D) — scene graph prediction
+  7. NodePredictor + RelationshipPredictor(+TemporalEdgeAttention) — scene graph
 
 Processes a video's frames sequentially, maintaining the memory bank state,
 and outputs per-frame scene graph predictions for ALL objects (visible + unseen).
@@ -22,9 +22,9 @@ from typing import Any, Dict, List, Optional
 from .memory_bank import PersistentWorldMemoryBank
 from .graph_transformer import RelationalGraphTransformer
 from lib.supervised.worldsgg.worldsgg_base import (
-    GlobalStructuralEncoder, NodePredictor, EdgePredictor,
+    GlobalStructuralEncoder, NodePredictor, RelationshipPredictor,
     CameraPoseEncoder, CameraTemporalEncoder, MotionFeatureEncoder,
-    ObservabilityClassifier,
+    ObservabilityClassifier, TemporalEdgeAttention,
 )
 
 
@@ -110,12 +110,31 @@ class GLSTGN(nn.Module):
             num_classes=num_object_classes,
         )
 
-        self.edge_predictor = EdgePredictor(
-            d_memory=config.d_memory,
+        clip_path = getattr(config, 'clip_embeddings_path', '')
+        self.rel_predictor = RelationshipPredictor(
+            d_model=config.d_memory,
+            d_text=getattr(config, 'd_text', 128),
+            d_rel=getattr(config, 'd_rel', 256),
+            d_union_roi=getattr(config, 'd_union_roi', 1024),
             attention_class_num=attention_class_num,
             spatial_class_num=spatial_class_num,
             contact_class_num=contact_class_num,
+            clip_embeddings_path=clip_path,
+            n_rel_layers=getattr(config, 'n_rel_layers', 2),
+            n_rel_heads=getattr(config, 'n_rel_heads', 4),
+            dropout=config.dropout,
         )
+
+        # Module 7b: Temporal edge attention
+        self.temporal_edge_attn = TemporalEdgeAttention(
+            d_rel=getattr(config, 'd_rel', 256),
+            n_heads=getattr(config, 'n_rel_heads', 4),
+            n_layers=getattr(config, 'n_temporal_edge_layers', 1),
+            dropout=config.dropout,
+        )
+
+        # Edge memory for temporal cross-attention
+        self.prev_edge_memory = None
 
     def forward(
         self,
@@ -297,25 +316,42 @@ class GLSTGN(nn.Module):
             # --- Step 7: Predict scene graph ---
             node_logits = self.node_predictor(enriched)  # (N_t, num_classes)
 
-            # Full-gradient edge predictions (used for visible edges in loss)
-            edge_out = self.edge_predictor(
+            # Derive class indices from node predictions
+            person_class_idx = node_logits[person_idx_t].argmax(dim=-1)
+            object_class_idx = node_logits[object_idx_t].argmax(dim=-1)
+
+            # Phase 2: Form relationship tokens (full-gradient)
+            rel_tokens = self.rel_predictor.form_rel_tokens(
                 enriched_states=enriched,
                 person_idx=person_idx_t,
                 object_idx=object_idx_t,
-                corners=corners_t,
+                person_class_idx=person_class_idx,
+                object_class_idx=object_class_idx,
                 union_features=union_feat_t,
-                bboxes_2d=bboxes_2d_t,
             )
 
-            # Graded-shielded edge predictions (used for non-visible edges in loss)
-            edge_out_shielded = self.edge_predictor(
+            # Phase 3: Relationship self-attention
+            rel_tokens = self.rel_predictor.self_attend(rel_tokens)
+
+            # Phase 4: Temporal edge attention
+            if self.prev_edge_memory is not None:
+                rel_tokens = self.temporal_edge_attn(rel_tokens, self.prev_edge_memory)
+            self.prev_edge_memory = rel_tokens.detach()
+
+            # Phase 5: 3 MLP heads (full-gradient)
+            edge_out = self.rel_predictor.predict_from_tokens(rel_tokens)
+
+            # Graded-shielded variant for unseen edges
+            rel_tokens_sh = self.rel_predictor.form_rel_tokens(
                 enriched_states=enriched_shielded,
                 person_idx=person_idx_t,
                 object_idx=object_idx_t,
-                corners=corners_t,
+                person_class_idx=person_class_idx,
+                object_class_idx=object_class_idx,
                 union_features=union_feat_t,
-                bboxes_2d=bboxes_2d_t,
             )
+            rel_tokens_sh = self.rel_predictor.self_attend(rel_tokens_sh)
+            edge_out_shielded = self.rel_predictor.predict_from_tokens(rel_tokens_sh)
 
             # Collect outputs
             outputs["node_logits"].append(node_logits)
@@ -337,11 +373,12 @@ class GLSTGN(nn.Module):
         return outputs
 
     def reset_memory(self):
-        """Reset memory bank state (call between videos)."""
-        pass
+        """Reset memory bank state and edge memory (call between videos)."""
+        self.prev_edge_memory = None
 
     def detach_memory(self):
         """Detach memory for BPTT truncation (called between chunks)."""
-        pass
+        if self.prev_edge_memory is not None:
+            self.prev_edge_memory = self.prev_edge_memory.detach()
 
 
