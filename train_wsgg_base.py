@@ -113,7 +113,7 @@ class TrainWSGGBase(WSGGBase):
         """Main training loop over epochs."""
         use_amp = self._conf.use_amp and torch.cuda.is_available()
         if use_amp:
-            self._scaler = torch.amp.GradScaler(device="cuda")
+            self._scaler = torch.cuda.amp.GradScaler()
 
         log_every = self._conf.log_every
 
@@ -126,24 +126,23 @@ class TrainWSGGBase(WSGGBase):
             for batch_idx in tqdm(range(len(self._dataloader_train)), desc=f"Epoch {epoch + 1}/{self._conf.nepoch}"):
                 batch = next(train_iter)
 
-                # Method-specific forward pass
+                self._optimizer.zero_grad(set_to_none=True)
+
+                # Forward + loss
                 if use_amp:
-                    with torch.amp.autocast(device_type="cuda"):
+                    with torch.cuda.amp.autocast():
                         losses = self.process_train_video(batch)
+                        loss = sum(losses.values())
                 else:
                     losses = self.process_train_video(batch)
-
-                # Compute total loss
-                loss = sum(losses.values())
+                    loss = sum(losses.values())
 
                 # Skip NaN/Inf
                 if not torch.isfinite(loss):
-                    self._optimizer.zero_grad(set_to_none=True)
                     logger.warning(f"  NaN/Inf loss at batch {batch_idx}, skipping")
                     continue
 
-                # Backward
-                self._optimizer.zero_grad()
+                # Backward + step
                 if use_amp and self._scaler is not None:
                     self._scaler.scale(loss).backward()
                     self._scaler.unscale_(self._optimizer)
