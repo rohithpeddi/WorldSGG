@@ -132,14 +132,16 @@ class TrainWSGGBase(WSGGBase):
                 if use_amp:
                     with torch.cuda.amp.autocast():
                         losses = self.process_train_video(batch)
-                        loss = sum(losses.values())
                 else:
                     losses = self.process_train_video(batch)
-                    loss = sum(losses.values())
 
-                # Skip NaN/Inf
-                if not torch.isfinite(loss):
-                    logger.warning(f"  NaN/Inf loss at batch {batch_idx}, skipping")
+                # Use pre-computed total (loss functions return a "total" key)
+                loss = losses.get("total", sum(losses.values()))
+
+                # Skip NaN/Inf or zero-grad losses (e.g., no valid pairs)
+                if not torch.isfinite(loss) or loss.item() == 0.0:
+                    if not torch.isfinite(loss):
+                        logger.warning(f"  NaN/Inf loss at batch {batch_idx}, skipping")
                     continue
 
                 # Backward + step
