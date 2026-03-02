@@ -150,13 +150,10 @@ class TestWSGGBase(WSGGBase):
         self.init_model()
         self._load_checkpoint()
 
-        # 4. Detector
-        self._init_detector()
-
-        # 5. Test
+        # 4. Test
         self._test_model()
 
-        # 6. Results
+        # 5. Results
         self._publish_evaluation_results()
 
     # ------------------------------------------------------------------

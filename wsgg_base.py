@@ -24,10 +24,9 @@ import yaml
 import torch
 import wandb
 from torch import optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
 from lib.supervised import BasicSceneGraphEvaluator
-from lib.supervised.worldsgg.worldsgg_base import DINOFeatureExtractor
 
 
 # ============================================================================
@@ -54,9 +53,6 @@ def load_wsgg_config(yaml_path: str = None) -> SimpleNamespace:
     parser.add_argument("--save_path", default=None, type=str)
     parser.add_argument("--ckpt", default=None, type=str)
     parser.add_argument("--experiment_name", default=None, type=str)
-    parser.add_argument("--detector_ckpt", default=None, type=str)
-    parser.add_argument("--detector_model", default=None, type=str)
-    parser.add_argument("--detector_type", default=None, type=str)
     parser.add_argument("--nepoch", default=None, type=int)
     parser.add_argument("--lr", default=None, type=float)
     parser.add_argument("--weight_decay", default=None, type=float)
@@ -113,7 +109,6 @@ class WSGGBase:
     def __init__(self, conf):
         self._conf = conf
         self._model = None
-        self._detector = None
         self._device = None
         self._evaluator = None
         self._optimizer = None
@@ -186,9 +181,32 @@ class WSGGBase:
         else:
             raise NotImplementedError(f"Unknown optimizer: {opt_name}")
 
-    def _init_scheduler(self):
-        """Initialize learning rate scheduler."""
-        self._scheduler = ReduceLROnPlateau(self._optimizer, "max", patience=1, factor=0.5, verbose=True)
+    def _init_scheduler(self, total_steps: int):
+        """Initialize warmup → cosine annealing LR scheduler.
+
+        Args:
+            total_steps: total training iterations (epochs × batches_per_epoch).
+        """
+        warmup_fraction = getattr(self._conf, 'warmup_fraction', 0.1)
+        warmup_steps = int(warmup_fraction * total_steps)
+        lr = self._conf.lr
+
+        warmup = LinearLR(
+            self._optimizer,
+            start_factor=0.1, end_factor=1.0,
+            total_iters=warmup_steps,
+        )
+        cosine = CosineAnnealingLR(
+            self._optimizer,
+            T_max=max(total_steps - warmup_steps, 1),
+            eta_min=lr * 0.01,
+        )
+        self._scheduler = SequentialLR(
+            self._optimizer,
+            schedulers=[warmup, cosine],
+            milestones=[warmup_steps],
+        )
+        print(f"  Scheduler: warmup({warmup_steps}) → cosine({total_steps - warmup_steps}) | eta_min={lr * 0.01:.2e}")
 
     # ------------------------------------------------------------------
     # Checkpoint — Full-State Save (train)
@@ -324,52 +342,7 @@ class WSGGBase:
             constraint="with",
         )
 
-    # ------------------------------------------------------------------
-    # Detector Initialization (config-driven)
-    # ------------------------------------------------------------------
-    def _init_detector(self):
-        """
-        Initialize detector based on config.detector_type.
 
-        Supported:
-          - "dino_mono3d": DinoV3Monocular3D via DINOFeatureExtractor
-          - "frcnn": Standard FasterRCNN from lib_b.Detector
-          - "none": No detector (precomputed features / zeros)
-        """
-        detector_type = self._conf.detector_type
-
-        if detector_type == "dino_mono3d":
-            self._detector = DINOFeatureExtractor(
-                detector_ckpt=self._conf.detector_ckpt,
-                detector_model=self._conf.detector_model,
-                num_classes=self._conf.num_detector_classes,
-                device=str(self._device),
-            )
-            if self._conf.detector_frozen:
-                self._detector.load_detector()
-            print(f"[WSGGBase] Initialized DINO detector (model={self._conf.detector_model})")
-
-        elif detector_type == "frcnn":
-            from lib_b.object_detector import Detector
-            object_classes = (
-                self._train_dataset.object_classes
-                if self._train_dataset else self._test_dataset.object_classes
-            )
-            self._detector = Detector(
-                train=False,
-                object_classes=object_classes,
-                use_SUPPLY=True,
-                mode=self._conf.mode,
-            ).to(self._device)
-            self._detector.eval()
-            print("[WSGGBase] Initialized FRCNN detector")
-
-        elif detector_type == "none":
-            self._detector = None
-            print("[WSGGBase] No detector initialized (using precomputed features)")
-
-        else:
-            raise ValueError(f"Unknown detector_type: {detector_type}")
 
     # ------------------------------------------------------------------
     # Abstract

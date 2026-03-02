@@ -319,13 +319,22 @@ class WorldAG(Dataset):
     ):
         """Build padded tensors for a single frame.
 
+        3D corners and object labels are sourced differently by mode:
+          - **predcls**: GT corners from annotation ``corners_final``,
+            GT labels from annotation-derived ``label_ids``.
+          - **sgdet**: Detector-predicted corners from ``boxes_3d`` in the
+            features PKL, detector-predicted labels from ``label_ids``.
+
+        Pair indices always come from the features PKL, which stores
+        GT pairs (predcls) or detector-matched + supply pairs (sgdet).
+
         Args:
             feat_frame: feature PKL entry for this frame
             annot_frame: annotation PKL entry for this frame
             max_N: N_max for padding
 
         Returns:
-            Tuple of (node_tensors, edge_tensors, n_objects, n_pairs)
+            Dict of node and edge tensors for this frame.
         """
         # --- Feature data ---
         roi_features = feat_frame.get("roi_features", np.zeros((0, 1024)))
@@ -342,7 +351,7 @@ class WorldAG(Dataset):
         N_feat = len(feat_labels)
         D = roi_features.shape[-1] if roi_features.numel() > 0 else 1024
 
-        # --- Annotation data ---
+        # --- Annotation data (always needed for relationship GT labels) ---
         person_info = annot_frame.get("person_info", {})
         object_info_list = annot_frame.get("object_info_list", [])
 
@@ -352,6 +361,19 @@ class WorldAG(Dataset):
             short = obj.get("label", _to_short(obj.get("class", "")))
             if short not in annot_by_short_label:
                 annot_by_short_label[short] = obj
+
+        # --- SGDet: load detector-predicted 3D boxes from features PKL ---
+        feat_boxes_3d = None
+        if self._mode == "sgdet":
+            raw_3d = feat_frame.get("boxes_3d", None)
+            if raw_3d is not None:
+                if isinstance(raw_3d, np.ndarray):
+                    feat_boxes_3d = torch.from_numpy(
+                        raw_3d.astype(np.float32)
+                    )
+                else:
+                    feat_boxes_3d = raw_3d.float()
+                # Expected shape: (N_feat, 8, 3)
 
         # --- Build per-object arrays ---
         N = min(N_feat, max_N)
@@ -369,7 +391,8 @@ class WorldAG(Dataset):
                 bboxes_2d[i] = bboxes_xyxy[i]
             valid_mask[i] = True
 
-            # Class
+            # Object class label (GT for predcls, detector for sgdet —
+            # both stored in feat_label_ids by their extraction scripts)
             class_idx = feat_label_ids[i] if i < len(feat_label_ids) else 0
             object_classes[i] = class_idx
 
@@ -383,33 +406,66 @@ class WorldAG(Dataset):
                 valid_mask[i] = False
                 continue
 
-            # Match to annotation for 3D corners
+            # --- 3D corners: mode-dependent source ---
             label_str = feat_labels[i] if i < len(feat_labels) else ""
             short_label = _to_short(label_str)
             annot_obj = annot_by_short_label.get(short_label)
 
-            if annot_obj is not None:
-                c = annot_obj.get("corners_final", None)
-                if c is not None:
-                    c = np.asarray(c, dtype=np.float32)
-                    if c.shape == (8, 3):
-                        corners[i] = torch.from_numpy(c)
+            if self._mode == "sgdet":
+                # SGDet: use detector-predicted 3D corners from features PKL
+                if feat_boxes_3d is not None and i < feat_boxes_3d.shape[0]:
+                    box3d = feat_boxes_3d[i]
+                    if box3d.shape == (8, 3):
+                        corners[i] = box3d
+                else:
+                    # Fallback: detector did not produce 3D for this object,
+                    # try annotation corners (e.g. for GT-supplied boxes)
+                    if annot_obj is not None:
+                        c = annot_obj.get("corners_final", None)
+                        if c is not None:
+                            c = np.asarray(c, dtype=np.float32)
+                            if c.shape == (8, 3):
+                                corners[i] = torch.from_numpy(c)
+            else:
+                # PredCls: use GT 3D corners from annotation PKL
+                if annot_obj is not None:
+                    c = annot_obj.get("corners_final", None)
+                    if c is not None:
+                        c = np.asarray(c, dtype=np.float32)
+                        if c.shape == (8, 3):
+                            corners[i] = torch.from_numpy(c)
 
-                # Update visibility from annotation if available
-                if not annot_obj.get("visible", True):
-                    visibility_mask[i] = False
+            # Update visibility from annotation if available (applies to both modes)
+            if annot_obj is not None and not annot_obj.get("visible", True):
+                visibility_mask[i] = False
 
-        # --- Person 3D corners (slot 0) ---
-        person_corners = person_info.get("corners_final", None)
-        if person_corners is not None:
-            person_corners = np.asarray(person_corners, dtype=np.float32)
-            if person_corners.shape == (8, 3):
-                corners[0] = torch.from_numpy(person_corners)
+        # --- Person 3D corners (slot 0): mode-dependent ---
+        if self._mode == "sgdet":
+            # SGDet: person 3D from detector prediction (slot 0 in boxes_3d)
+            if feat_boxes_3d is not None and feat_boxes_3d.shape[0] > 0:
+                if feat_boxes_3d[0].shape == (8, 3):
+                    corners[0] = feat_boxes_3d[0]
+            else:
+                # Fallback to GT person corners if detector didn't provide
+                person_corners = person_info.get("corners_final", None)
+                if person_corners is not None:
+                    person_corners = np.asarray(person_corners, dtype=np.float32)
+                    if person_corners.shape == (8, 3):
+                        corners[0] = torch.from_numpy(person_corners)
+        else:
+            # PredCls: person 3D from GT annotation
+            person_corners = person_info.get("corners_final", None)
+            if person_corners is not None:
+                person_corners = np.asarray(person_corners, dtype=np.float32)
+                if person_corners.shape == (8, 3):
+                    corners[0] = torch.from_numpy(person_corners)
 
         # --- Build per-edge arrays ---
+        # Pair indices come from the features PKL, which is mode-appropriate:
+        #   predcls → GT person-object pairs
+        #   sgdet   → detector-matched + GT-supply pairs
         K = len(feat_pair_indices)
 
-        # Determine K_max for this frame (will be padded to video K_max later)
         person_indices = []
         object_indices = []
         att_labels = []
@@ -426,7 +482,7 @@ class WorldAG(Dataset):
             person_indices.append(pidx)
             object_indices.append(oidx)
 
-            # Get relationship labels from annotation
+            # Relationship GT labels always from annotation PKL
             obj_label = feat_labels[oidx] if oidx < len(feat_labels) else ""
             short_label = _to_short(obj_label)
             annot_obj = annot_by_short_label.get(short_label)

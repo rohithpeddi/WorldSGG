@@ -54,9 +54,10 @@ class TrainWSGGBase(WSGGBase):
     # Dataset
     # ------------------------------------------------------------------
     def init_dataset(self):
-        """Initialize WorldAG train/test datasets and dataloaders."""
+        """Initialize WorldAG train (and optionally test) datasets."""
         from dataloader.world_ag_dataset import WorldAG, world_collate_fn
 
+        skip_test = getattr(self._conf, 'skip_test', False)
         print("Initializing WorldAG datasets...")
 
         self._train_dataset = WorldAG(
@@ -67,28 +68,30 @@ class TrainWSGGBase(WSGGBase):
             include_invisible=getattr(self._conf, 'include_invisible', True),
             max_objects=getattr(self._conf, 'max_objects', 64),
         )
-        self._test_dataset = WorldAG(
-            phase="test",
-            data_path=self._conf.data_path,
-            mode=self._conf.mode,
-            feature_model=getattr(self._conf, 'feature_model', 'dinov2b'),
-            include_invisible=getattr(self._conf, 'include_invisible', True),
-            max_objects=getattr(self._conf, 'max_objects', 64),
-        )
 
         self._object_classes = self._train_dataset.object_classes
 
-        # Dataloaders: batch_size=1 for temporal (all methods are temporal)
         self._dataloader_train = DataLoader(
             self._train_dataset, batch_size=1, shuffle=True, num_workers=0,
             collate_fn=world_collate_fn,
         )
-        self._dataloader_test = DataLoader(
-            self._test_dataset, batch_size=1, shuffle=False, num_workers=0,
-            collate_fn=world_collate_fn,
-        )
 
-        print(f"  Train: {len(self._train_dataset)} items | Test: {len(self._test_dataset)} items")
+        if not skip_test:
+            self._test_dataset = WorldAG(
+                phase="test",
+                data_path=self._conf.data_path,
+                mode=self._conf.mode,
+                feature_model=getattr(self._conf, 'feature_model', 'dinov2b'),
+                include_invisible=getattr(self._conf, 'include_invisible', True),
+                max_objects=getattr(self._conf, 'max_objects', 64),
+            )
+            self._dataloader_test = DataLoader(
+                self._test_dataset, batch_size=1, shuffle=False, num_workers=0,
+                collate_fn=world_collate_fn,
+            )
+            print(f"  Train: {len(self._train_dataset)} items | Test: {len(self._test_dataset)} items")
+        else:
+            print(f"  Train: {len(self._train_dataset)} items | Test: SKIPPED")
 
     # ------------------------------------------------------------------
     # Loss Functions
@@ -98,67 +101,7 @@ class TrainWSGGBase(WSGGBase):
         self._ce_loss = nn.CrossEntropyLoss()
         self._bce_loss = nn.BCELoss()
 
-    # ------------------------------------------------------------------
-    # Monocular3D Trained Detector Loader
-    # ------------------------------------------------------------------
-    def _load_trained_detector(self):
-        """
-        Load a trained monocular3d detector checkpoint.
 
-        Follows the pattern from lib/detector/monocular3d/trainer.py:
-          1. Create DinoV3Monocular3D(num_classes, model, head_3d_mode)
-          2. Load state_dict from checkpoint
-          3. Freeze all params + eval()
-          4. Wrap in DINOFeatureExtractor for ROI extraction
-        """
-        from lib.supervised.worldsgg.worldsgg_base import DINOFeatureExtractor
-
-        detector_ckpt = getattr(self._conf, 'detector_ckpt', '')
-        if not detector_ckpt:
-            print("[TrainWSGGBase] No detector checkpoint specified, skipping detector load.")
-            return
-
-        detector_type = getattr(self._conf, 'detector_type', 'none')
-        if detector_type != 'dino_mono3d':
-            return
-
-        from lib.detector.monocular3d.models.dino_mono_3d import DinoV3Monocular3D
-
-        print(f"[TrainWSGGBase] Loading trained detector from: {detector_ckpt}")
-
-        detector = DinoV3Monocular3D(
-            num_classes=getattr(self._conf, 'num_detector_classes', 37),
-            pretrained=False,
-            model=getattr(self._conf, 'detector_model', 'v3l'),
-            head_3d_mode="unified",
-        )
-
-        # Load checkpoint
-        ckpt = torch.load(detector_ckpt, map_location="cpu")
-        if "model_state_dict" in ckpt:
-            detector.load_state_dict(ckpt["model_state_dict"], strict=False)
-        elif "state_dict" in ckpt:
-            detector.load_state_dict(ckpt["state_dict"], strict=False)
-        else:
-            detector.load_state_dict(ckpt, strict=False)
-        del ckpt
-        gc.collect()
-
-        # Freeze + eval
-        detector.to(self._device)
-        detector.eval()
-        for p in detector.parameters():
-            p.requires_grad = False
-
-        # Wrap in DINOFeatureExtractor
-        self._detector = DINOFeatureExtractor(
-            detector_ckpt="",  # Already loaded
-            detector_model=getattr(self._conf, 'detector_model', 'v3l'),
-            num_classes=getattr(self._conf, 'num_detector_classes', 37),
-            device=str(self._device),
-        )
-        self._detector._detector = detector  # Inject pre-loaded model
-        print(f"[TrainWSGGBase] Detector loaded and frozen ({sum(p.numel() for p in detector.parameters()):,} params)")
 
     # ------------------------------------------------------------------
     # Training Loop
@@ -218,7 +161,11 @@ class TrainWSGGBase(WSGGBase):
                 # Logging
                 if self._enable_wandb:
                     wandb.log({k: v.item() for k, v in losses.items()})
+                    wandb.log({"lr": self._optimizer.param_groups[0]["lr"]})
                 tr.append(pd.Series({k: v.item() for k, v in losses.items()}))
+
+                # Step scheduler (per-iteration warmup → cosine)
+                self._scheduler.step()
 
                 if batch_idx % log_every == 0 and batch_idx > 0:
                     elapsed = time.time() - start_time
@@ -230,9 +177,9 @@ class TrainWSGGBase(WSGGBase):
             # Save full-state checkpoint
             self._save_checkpoint(epoch)
 
-            # End-of-epoch evaluation
-            score = self._evaluate_after_epoch()
-            self._scheduler.step(score)
+            # End-of-epoch evaluation (skip if no test dataset)
+            if self._dataloader_test is not None:
+                self._evaluate_after_epoch()
 
     def _evaluate_after_epoch(self) -> float:
         """Run test evaluation after each epoch. Returns score for scheduler."""
@@ -267,30 +214,29 @@ class TrainWSGGBase(WSGGBase):
         # 1. Dataset
         self.init_dataset()
 
-        # 2. Evaluators
-        self._init_evaluators()
+        # 2. Evaluators (skip if no test dataset)
+        if not getattr(self._conf, 'skip_test', False):
+            self._init_evaluators()
 
         # 3. Model + Loss
         self.init_model()
         self.init_loss_fn()
         self._init_loss_functions()
 
-        # 4. Detector
-        self._init_detector()
-        self._load_trained_detector()
-
-        # 5. Optimizer + Scheduler
+        # 4. Optimizer + Scheduler
         self._init_optimizer()
-        self._init_scheduler()
+        total_steps = self._conf.nepoch * len(self._dataloader_train)
+        self._init_scheduler(total_steps)
 
-        # 6. Resume from checkpoint (must come after optimizer/scheduler init)
+        # 5. Resume from checkpoint (must come after optimizer/scheduler init)
         self._maybe_resume()
 
-        # 7. Train
+        # 6. Train
         print("━" * 60)
         print(f"  Method   : {self._conf.method_name}")
         print(f"  Temporal : {self.is_temporal()}")
-        print(f"  Detector : {self._conf.detector_type}")
+        print(f"  Mode     : {self._conf.mode}")
+        print(f"  Features : {getattr(self._conf, 'feature_model', 'unknown')}")
         print(f"  Epochs   : {self._starting_epoch} → {self._conf.nepoch}")
         print("━" * 60)
         self._train_model()

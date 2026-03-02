@@ -20,13 +20,6 @@ results_path: results
 ckpt: null  # Set to "checkpoint_5" to resume from epoch 5
 world_sg_dir: ""
 
-# ---- Detector (predcls = GT boxes, no detector) ----
-detector_type: none
-detector_ckpt: ""
-detector_model: v2l
-detector_frozen: true
-num_detector_classes: 37
-
 # ---- Shared Architecture ----
 d_model: 256
 d_struct: 256
@@ -52,6 +45,7 @@ clip_embeddings_path: features/clip_features/clip_text_embeddings.npy
 nepoch: 20
 lr: 1e-4
 weight_decay: 1e-4
+warmup_fraction: 0.1
 grad_clip: 5.0
 optimizer: adamw
 bce_loss: true
@@ -60,6 +54,7 @@ use_amp: true
 log_every: 100
 include_invisible: true
 datasize: large
+skip_test: true  # Set to false when test dataset is ready
 
 # ---- AMWAE Specific ----
 n_cross_attn_layers: 2
