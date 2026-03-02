@@ -133,9 +133,6 @@ class GLSTGN(nn.Module):
             dropout=config.dropout,
         )
 
-        # Edge memory for temporal cross-attention
-        self.prev_edge_memory = None
-
     def forward(
         self,
         visual_features_seq: List[torch.Tensor],
@@ -185,6 +182,12 @@ class GLSTGN(nn.Module):
         prev_pose = None
         prev_corners = None
         prev_velocity = None
+
+        # Collection lists for Phase B temporal attention
+        collected_rel = []
+        collected_rel_sh = []
+        collected_pidx = []
+        collected_oidx = []
 
         for t in range(T):
             corners_t = corners_seq[t]          # (N_t, 8, 3)
@@ -313,14 +316,13 @@ class GLSTGN(nn.Module):
             enriched_detached = enriched.detach()
             enriched_shielded = enriched_detached + grad_scale * (enriched - enriched_detached)
 
-            # --- Step 7: Predict scene graph ---
+            # --- Step 7a: Node prediction + form/self-attend rel tokens (COLLECT) ---
             node_logits = self.node_predictor(enriched)  # (N_t, num_classes)
 
-            # Derive class indices from node predictions
             person_class_idx = node_logits[person_idx_t].argmax(dim=-1)
             object_class_idx = node_logits[object_idx_t].argmax(dim=-1)
 
-            # Phase 2: Form relationship tokens (full-gradient)
+            # Full-gradient rel tokens
             rel_tokens = self.rel_predictor.form_rel_tokens(
                 enriched_states=enriched,
                 person_idx=person_idx_t,
@@ -329,19 +331,9 @@ class GLSTGN(nn.Module):
                 object_class_idx=object_class_idx,
                 union_features=union_feat_t,
             )
-
-            # Phase 3: Relationship self-attention
             rel_tokens = self.rel_predictor.self_attend(rel_tokens)
 
-            # Phase 4: Temporal edge attention
-            if self.prev_edge_memory is not None:
-                rel_tokens = self.temporal_edge_attn(rel_tokens, self.prev_edge_memory)
-            self.prev_edge_memory = rel_tokens.detach()
-
-            # Phase 5: 3 MLP heads (full-gradient)
-            edge_out = self.rel_predictor.predict_from_tokens(rel_tokens)
-
-            # Graded-shielded variant for unseen edges
+            # Graded-shielded rel tokens
             rel_tokens_sh = self.rel_predictor.form_rel_tokens(
                 enriched_states=enriched_shielded,
                 person_idx=person_idx_t,
@@ -351,34 +343,47 @@ class GLSTGN(nn.Module):
                 union_features=union_feat_t,
             )
             rel_tokens_sh = self.rel_predictor.self_attend(rel_tokens_sh)
-            edge_out_shielded = self.rel_predictor.predict_from_tokens(rel_tokens_sh)
 
-            # Collect outputs
+            # Collect for temporal attention
+            collected_rel.append(rel_tokens)
+            collected_rel_sh.append(rel_tokens_sh)
+            collected_pidx.append(person_idx_t)
+            collected_oidx.append(object_idx_t)
+
+            # Collect non-edge outputs
             outputs["node_logits"].append(node_logits)
-            outputs["attention_distribution"].append(edge_out["attention_distribution"])
-            outputs["spatial_distribution"].append(edge_out["spatial_distribution"])
-            outputs["contacting_distribution"].append(edge_out["contacting_distribution"])
             outputs["memory_states"].append(memory.detach().clone())
             outputs["obs_type"].append(obs_type_t)
 
-            # Graded-shielded predictions for non-visible edges
-            if "attention_distribution_shielded" not in outputs:
-                outputs["attention_distribution_shielded"] = []
-                outputs["spatial_distribution_shielded"] = []
-                outputs["contacting_distribution_shielded"] = []
-            outputs["attention_distribution_shielded"].append(edge_out_shielded["attention_distribution"])
-            outputs["spatial_distribution_shielded"].append(edge_out_shielded["spatial_distribution"])
-            outputs["contacting_distribution_shielded"].append(edge_out_shielded["contacting_distribution"])
+        # ========== Phase B: Per-pair temporal self-attention (single pass) ==========
+        enriched_rel = self.temporal_edge_attn(collected_rel, collected_pidx, collected_oidx)
+        enriched_rel_sh = self.temporal_edge_attn(collected_rel_sh, collected_pidx, collected_oidx)
+
+        # ========== Phase C: Predict from temporally-enriched tokens ==========
+        outputs["attention_distribution_shielded"] = []
+        outputs["spatial_distribution_shielded"] = []
+        outputs["contacting_distribution_shielded"] = []
+
+        for t in range(T):
+            # Full-gradient predictions
+            edge_out = self.rel_predictor.predict_from_tokens(enriched_rel[t])
+            outputs["attention_distribution"].append(edge_out["attention_distribution"])
+            outputs["spatial_distribution"].append(edge_out["spatial_distribution"])
+            outputs["contacting_distribution"].append(edge_out["contacting_distribution"])
+
+            # Shielded predictions
+            edge_out_sh = self.rel_predictor.predict_from_tokens(enriched_rel_sh[t])
+            outputs["attention_distribution_shielded"].append(edge_out_sh["attention_distribution"])
+            outputs["spatial_distribution_shielded"].append(edge_out_sh["spatial_distribution"])
+            outputs["contacting_distribution_shielded"].append(edge_out_sh["contacting_distribution"])
 
         return outputs
 
     def reset_memory(self):
-        """Reset memory bank state and edge memory (call between videos)."""
-        self.prev_edge_memory = None
+        """Reset memory bank state (call between videos)."""
+        pass
 
     def detach_memory(self):
         """Detach memory for BPTT truncation (called between chunks)."""
-        if self.prev_edge_memory is not None:
-            self.prev_edge_memory = self.prev_edge_memory.detach()
-
+        pass
 

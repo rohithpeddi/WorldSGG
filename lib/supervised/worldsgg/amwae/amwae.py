@@ -137,9 +137,6 @@ class AMWAE(nn.Module):
             dropout=config.dropout,
         )
 
-        # Edge cache for temporal cross-attention
-        self.prev_edge_tokens = None
-
         # Module 8: Observability Classifier (for structured masking, 4C)
         self.obs_classifier = ObservabilityClassifier(
             frustum_thresh=getattr(config, 'frustum_thresh', -0.1),
@@ -201,6 +198,11 @@ class AMWAE(nn.Module):
             "reconstruction_targets": [],
             "reconstruction_predictions": [],
         }
+
+        # Collection lists for Phase B temporal attention
+        collected_rel = []
+        collected_pidx = []
+        collected_oidx = []
 
         for t in range(T):
             corners_t = corners_seq[t]          # (N_t, 8, 3)
@@ -308,14 +310,13 @@ class AMWAE(nn.Module):
                 valid_mask=valid_t.unsqueeze(0),
             ).squeeze(0)
 
-            # --- Step 7: Scene graph prediction ---
+            # --- Step 7a: Node prediction + form/self-attend rel tokens (COLLECT) ---
             node_logits = self.node_predictor(enriched)
 
-            # Derive class indices from node predictions
             person_class_idx = node_logits[person_idx_t].argmax(dim=-1)
             object_class_idx = node_logits[object_idx_t].argmax(dim=-1)
 
-            # Phase 2: Form relationship tokens
+            # Form and self-attend relationship tokens
             rel_tokens = self.rel_predictor.form_rel_tokens(
                 enriched_states=enriched,
                 person_idx=person_idx_t,
@@ -324,23 +325,15 @@ class AMWAE(nn.Module):
                 object_class_idx=object_class_idx,
                 union_features=union_feat_t,
             )
-
-            # Phase 3: Relationship self-attention
             rel_tokens = self.rel_predictor.self_attend(rel_tokens)
 
-            # Phase 4: Temporal edge attention
-            if self.prev_edge_tokens is not None:
-                rel_tokens = self.temporal_edge_attn(rel_tokens, self.prev_edge_tokens)
-            self.prev_edge_tokens = rel_tokens.detach()
+            # Collect for temporal attention
+            collected_rel.append(rel_tokens)
+            collected_pidx.append(person_idx_t)
+            collected_oidx.append(object_idx_t)
 
-            # Phase 5: 3 MLP heads
-            edge_out = self.rel_predictor.predict_from_tokens(rel_tokens)
-
-            # Collect outputs
+            # Collect non-edge outputs
             outputs["node_logits"].append(node_logits)
-            outputs["attention_distribution"].append(edge_out["attention_distribution"])
-            outputs["spatial_distribution"].append(edge_out["spatial_distribution"])
-            outputs["contacting_distribution"].append(edge_out["contacting_distribution"])
             outputs["is_masked"].append(is_masked_t)
             outputs["original_visual"].append(original_visual_t)
             outputs["retrieved_tokens"].append(completed_tokens)
@@ -353,6 +346,7 @@ class AMWAE(nn.Module):
             outputs["reconstruction_targets"].append(original_visual_t)
 
             # --- Step 8: Structured Simulated-Unseen (4C, training only) ---
+            # NOTE: Sim-unseen predictions are per-frame (no temporal attention)
             if self.training and getattr(self.config, 'p_simulate_unseen', 0) > 0:
                 p_sim = self.config.p_simulate_unseen
                 n_visible = vis_t.sum().item()
@@ -361,9 +355,6 @@ class AMWAE(nn.Module):
                 if n_visible > 1:
                     visible_indices = torch.where(vis_t & valid_t)[0]
 
-                    # Structured masking (4C): classify observability to pick
-                    # which visible objects to mask. Prefer objects near
-                    # frustum boundary (more realistic unseen simulation).
                     if camera_pose_t is not None:
                         obs_type_t = self.obs_classifier(
                             camera_pose=camera_pose_t,
@@ -371,7 +362,6 @@ class AMWAE(nn.Module):
                             visibility_mask=vis_t,
                             valid_mask=valid_t,
                         )
-                        # Compute view alignment for prioritized masking
                         R = camera_pose_t[:3, :3]
                         cam_pos = camera_pose_t[:3, 3]
                         view_dir = -R[:, 2]
@@ -381,19 +371,16 @@ class AMWAE(nn.Module):
                         cam_to_obj_norm = cam_to_obj / (cam_to_obj.norm(dim=-1, keepdim=True) + 1e-8)
                         view_align = (cam_to_obj_norm * view_dir.unsqueeze(0)).sum(dim=-1)
 
-                        # Prefer masking objects near frustum edge (lower alignment)
                         vis_alignment = view_align[visible_indices]
                         _, sort_order = vis_alignment.sort()
                         sim_mask_indices = visible_indices[sort_order[:n_to_mask]]
                     else:
-                        # Fallback: random masking
                         perm = torch.randperm(len(visible_indices), device=device)
                         sim_mask_indices = visible_indices[perm[:n_to_mask]]
 
                     sim_vis_t = vis_t.clone()
                     sim_vis_t[sim_mask_indices] = False
 
-                    # Re-tokenize with simulated mask + camera features
                     sim_tokens, sim_is_masked, _ = self.scaffold_tokenizer(
                         geometry_tokens=struct_tokens,
                         visual_features=visual_t,
@@ -417,7 +404,6 @@ class AMWAE(nn.Module):
                         valid_mask=valid_t.unsqueeze(0),
                     ).squeeze(0)
 
-                    # Simulated-unseen edge prediction through new pipeline
                     sim_rel_tokens = self.rel_predictor.form_rel_tokens(
                         enriched_states=sim_enriched,
                         person_idx=person_idx_t,
@@ -438,9 +424,19 @@ class AMWAE(nn.Module):
                 outputs["simulated_unseen_predictions"].append(None)
                 outputs["simulated_unseen_gt"].append(None)
 
+        # ========== Phase B: Per-pair temporal self-attention (single pass) ==========
+        enriched_rel = self.temporal_edge_attn(collected_rel, collected_pidx, collected_oidx)
+
+        # ========== Phase C: Predict from temporally-enriched tokens ==========
+        for t in range(T):
+            edge_out = self.rel_predictor.predict_from_tokens(enriched_rel[t])
+            outputs["attention_distribution"].append(edge_out["attention_distribution"])
+            outputs["spatial_distribution"].append(edge_out["spatial_distribution"])
+            outputs["contacting_distribution"].append(edge_out["contacting_distribution"])
+
         return outputs
 
     def reset_memory(self):
-        """Reset episodic memory bank and edge cache (call between videos)."""
+        """Reset episodic memory bank (call between videos)."""
         self.memory_bank.reset()
-        self.prev_edge_tokens = None
+

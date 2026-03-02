@@ -537,28 +537,33 @@ class RelationshipPredictor(nn.Module):
 
 
 # ============================================================================
-# 5b. Temporal Edge Attention — Cross-Temporal Relationship Reasoning
+# 5b. Temporal Edge Attention — Per-Pair Temporal Self-Attention
 # ============================================================================
 
 class TemporalEdgeAttention(nn.Module):
     """
-    Cross-attention from current-frame relationship tokens to
-    previous frames' cached relationship tokens.
+    Per-pair temporal self-attention over the full video.
 
-    Allows temporal consistency: "person was holding cup last frame"
-    informs current frame's edge predictions.
+    Receives relationship tokens from ALL T frames at once.
+    Groups tokens by (person, object) pair, self-attends each pair's
+    temporal sequence, and returns enriched tokens for all frames.
+
+    Stateless — no internal buffer, single forward pass with full
+    gradient flow through all timesteps.
 
     Args:
         d_rel: Relationship token dimension.
         n_heads: Number of attention heads.
-        n_layers: Number of decoder layers.
+        n_layers: Number of encoder layers.
         dropout: Dropout probability.
+        max_time: Maximum number of frames (for temporal PE).
 
     Input:
-        current_rel: (K_t, d_rel) — current frame relationship tokens.
-        prev_rels: (K_prev, d_rel) — cached from prior frame(s).
+        rel_tokens_seq: List[Tensor(K_t, d_rel)] for t=0..T-1
+        person_idx_seq: List[Tensor(K_t,)] for t=0..T-1
+        object_idx_seq: List[Tensor(K_t,)] for t=0..T-1
     Output:
-        temporally_enriched: (K_t, d_rel)
+        List[Tensor(K_t, d_rel)] — temporally-enriched tokens per frame
     """
 
     def __init__(
@@ -567,9 +572,16 @@ class TemporalEdgeAttention(nn.Module):
         n_heads: int = 4,
         n_layers: int = 1,
         dropout: float = 0.1,
+        max_time: int = 300,
     ):
         super().__init__()
-        decoder_layer = nn.TransformerDecoderLayer(
+        self.d_rel = d_rel
+
+        # Learnable temporal positional encoding
+        self.temporal_pe = nn.Embedding(max_time, d_rel)
+
+        # Self-attention encoder over temporal sequences
+        encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_rel,
             nhead=n_heads,
             dim_feedforward=d_rel * 2,
@@ -577,34 +589,103 @@ class TemporalEdgeAttention(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        self.decoder = nn.TransformerDecoder(
-            decoder_layer,
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer,
             num_layers=n_layers,
             norm=nn.LayerNorm(d_rel),
         )
 
     def forward(
         self,
-        current_rel: torch.Tensor,
-        prev_rels: torch.Tensor,
-    ) -> torch.Tensor:
+        rel_tokens_seq: List[torch.Tensor],
+        person_idx_seq: List[torch.Tensor],
+        object_idx_seq: List[torch.Tensor],
+    ) -> List[torch.Tensor]:
         """
         Args:
-            current_rel: (K_t, d_rel) — current frame edges.
-            prev_rels: (K_prev, d_rel) — previous frame edges.
+            rel_tokens_seq: T-length list of (K_t, d_rel) tensors.
+            person_idx_seq: T-length list of (K_t,) long tensors.
+            object_idx_seq: T-length list of (K_t,) long tensors.
 
         Returns:
-            enriched: (K_t, d_rel) — temporally-informed edges.
+            List of T tensors, each (K_t, d_rel) — temporally enriched.
         """
-        if current_rel.shape[0] == 0 or prev_rels.shape[0] == 0:
-            return current_rel
+        T = len(rel_tokens_seq)
+        total_K = sum(rt.shape[0] for rt in rel_tokens_seq)
 
-        # Add batch dim: (1, K, d_rel)
-        out = self.decoder(
-            current_rel.unsqueeze(0),
-            prev_rels.unsqueeze(0),
-        ).squeeze(0)
-        return out
+        # Edge case: no edges at all
+        if total_K == 0:
+            return rel_tokens_seq
+
+        device = rel_tokens_seq[0].device
+
+        # --- Step 1: Flatten all tokens and build pair index maps ---
+        all_tokens = torch.cat(rel_tokens_seq, dim=0)  # (total_K, d_rel)
+
+        pair_to_id: Dict[tuple, int] = {}
+        flat_pair_ids = torch.zeros(total_K, dtype=torch.long, device=device)
+        flat_temporal_pos = torch.zeros(total_K, dtype=torch.long, device=device)
+        flat_frame_ids = torch.zeros(total_K, dtype=torch.long, device=device)
+
+        pair_counters: Dict[tuple, int] = {}
+        flat_idx = 0
+
+        for t in range(T):
+            K_t = rel_tokens_seq[t].shape[0]
+            for k in range(K_t):
+                p = person_idx_seq[t][k].item()
+                o = object_idx_seq[t][k].item()
+                pair_key = (p, o)
+
+                if pair_key not in pair_to_id:
+                    pair_to_id[pair_key] = len(pair_to_id)
+                pid = pair_to_id[pair_key]
+
+                if pair_key not in pair_counters:
+                    pair_counters[pair_key] = 0
+                tpos = pair_counters[pair_key]
+                pair_counters[pair_key] += 1
+
+                flat_pair_ids[flat_idx] = pid
+                flat_temporal_pos[flat_idx] = tpos
+                flat_frame_ids[flat_idx] = t
+                flat_idx += 1
+
+        num_pairs = len(pair_to_id)
+        if num_pairs == 0:
+            return rel_tokens_seq
+
+        T_max = max(pair_counters.values())
+
+        # --- Step 2: Scatter into (num_pairs, T_max, d_rel) batch ---
+        batch = torch.zeros(num_pairs, T_max, self.d_rel, device=device)
+        batch[flat_pair_ids, flat_temporal_pos] = all_tokens  # gradient flows
+
+        # Padding mask: True = ignore
+        padding_mask = torch.ones(num_pairs, T_max, dtype=torch.bool, device=device)
+        padding_mask[flat_pair_ids, flat_temporal_pos] = False
+
+        # Frame indices for temporal PE
+        frame_indices = torch.zeros(num_pairs, T_max, dtype=torch.long, device=device)
+        frame_indices[flat_pair_ids, flat_temporal_pos] = flat_frame_ids
+
+        # --- Step 3: Add temporal positional encoding ---
+        batch = batch + self.temporal_pe(frame_indices)
+
+        # --- Step 4: Self-attend ---
+        attended = self.encoder(batch, src_key_padding_mask=padding_mask)
+
+        # --- Step 5: Gather back to flat, then split per frame ---
+        enriched_flat = attended[flat_pair_ids, flat_temporal_pos]  # (total_K, d_rel)
+
+        output_seq: List[torch.Tensor] = []
+        offset = 0
+        for t in range(T):
+            K_t = rel_tokens_seq[t].shape[0]
+            output_seq.append(enriched_flat[offset:offset + K_t])
+            offset += K_t
+
+        return output_seq
 
 
 

@@ -226,21 +226,30 @@ class TrainLKSGNN(TrainWSGGBase):
         tensors = batch
         self._model.reset_memory(self._device)
 
-        total_losses = {}
         T = len(tensors) if isinstance(tensors, list) else 1
+        frames = tensors if isinstance(tensors, list) else [tensors]
 
+        # Build sequence inputs for forward()
+        pred = self._model.forward(
+            visual_features_seq=[f["visual_features"].to(self._device) for f in frames],
+            corners_seq=[f["corners"].to(self._device) for f in frames],
+            valid_mask_seq=[f["valid_mask"].to(self._device) for f in frames],
+            visibility_mask_seq=[f["visibility_mask"].to(self._device) for f in frames],
+            person_idx_seq=[f["person_idx"].to(self._device) for f in frames],
+            object_idx_seq=[f["object_idx"].to(self._device) for f in frames],
+        )
+
+        # Compute loss per frame
+        total_losses = {}
         for t in range(T):
-            frame = tensors[t] if isinstance(tensors, list) else tensors
-            pred = self._model.forward_frame(
-                visual_features=frame["visual_features"].to(self._device),
-                corners=frame["corners"].to(self._device),
-                valid_mask=frame["valid_mask"].to(self._device),
-                visibility_mask=frame["visibility_mask"].to(self._device),
-                person_idx=frame["person_idx"].to(self._device),
-                object_idx=frame["object_idx"].to(self._device),
-            )
-
-            frame_losses = self._loss_fn(pred, frame, self._device)
+            frame = frames[t]
+            frame_pred = {
+                "node_logits": pred["node_logits"][t],
+                "attention_distribution": pred["attention_distribution"][t],
+                "spatial_distribution": pred["spatial_distribution"][t],
+                "contacting_distribution": pred["contacting_distribution"][t],
+            }
+            frame_losses = self._loss_fn(frame_pred, frame, self._device)
             for k, v in frame_losses.items():
                 total_losses[k] = total_losses.get(k, 0.0) + v
 
@@ -249,22 +258,28 @@ class TrainLKSGNN(TrainWSGGBase):
     def process_test_video(self, batch) -> dict:
         tensors = batch
         self._model.reset_memory(self._device)
-        all_preds = []
 
         T = len(tensors) if isinstance(tensors, list) else 1
-        for t in range(T):
-            frame = tensors[t] if isinstance(tensors, list) else tensors
-            pred = self._model.forward_frame(
-                visual_features=frame["visual_features"].to(self._device),
-                corners=frame["corners"].to(self._device),
-                valid_mask=frame["valid_mask"].to(self._device),
-                visibility_mask=frame["visibility_mask"].to(self._device),
-                person_idx=frame["person_idx"].to(self._device),
-                object_idx=frame["object_idx"].to(self._device),
-            )
-            all_preds.append(pred)
+        frames = tensors if isinstance(tensors, list) else [tensors]
 
-        return all_preds[-1] if all_preds else None
+        pred = self._model.forward(
+            visual_features_seq=[f["visual_features"].to(self._device) for f in frames],
+            corners_seq=[f["corners"].to(self._device) for f in frames],
+            valid_mask_seq=[f["valid_mask"].to(self._device) for f in frames],
+            visibility_mask_seq=[f["visibility_mask"].to(self._device) for f in frames],
+            person_idx_seq=[f["person_idx"].to(self._device) for f in frames],
+            object_idx_seq=[f["object_idx"].to(self._device) for f in frames],
+        )
+
+        # Return last frame prediction
+        if T > 0:
+            return {
+                "node_logits": pred["node_logits"][-1],
+                "attention_distribution": pred["attention_distribution"][-1],
+                "spatial_distribution": pred["spatial_distribution"][-1],
+                "contacting_distribution": pred["contacting_distribution"][-1],
+            }
+        return None
 
 
 

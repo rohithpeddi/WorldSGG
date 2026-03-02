@@ -19,7 +19,7 @@ Gradients only flow through steps 2-6 at the current frame.
 
 import torch
 import torch.nn as nn
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .lks_memory import LKSMemoryBuffer
 from .lks_tokenizer import LKSTokenizer
@@ -118,7 +118,7 @@ class LKSGNN(nn.Module):
         )
 
         # Edge buffer for temporal cross-attention (set in reset_memory)
-        self.prev_rel_tokens = None
+        # (no longer needed — temporal attention is stateless)
 
         # Non-differentiable memory buffer (not an nn.Module)
         self.memory_buffer = None  # Initialized in reset_memory()
@@ -130,7 +130,7 @@ class LKSGNN(nn.Module):
         )
 
     def reset_memory(self, device: torch.device = None):
-        """Reset the LKS buffer and edge cache (call at start of each video)."""
+        """Reset the LKS buffer (call at start of each video)."""
         if device is None:
             device = next(self.parameters()).device
         self.memory_buffer = LKSMemoryBuffer(
@@ -138,7 +138,6 @@ class LKSGNN(nn.Module):
             d_visual=self.config.d_visual,
             device=str(device),
         )
-        self.prev_rel_tokens = None
 
     def forward_frame(
         self,
@@ -242,14 +241,12 @@ class LKSGNN(nn.Module):
             valid_mask=valid_mask.unsqueeze(0),
         ).squeeze(0)  # (N, d_model)
 
-        # --- Step 6: Predict scene graph ---
+        # --- Step 6: Node prediction + form/self-attend rel tokens ---
         node_logits = self.node_predictor(enriched)
 
-        # Derive class indices from node predictions
         person_class_idx = node_logits[person_idx].argmax(dim=-1)
         object_class_idx = node_logits[object_idx].argmax(dim=-1)
 
-        # Phase 2: Form relationship tokens
         rel_tokens = self.rel_predictor.form_rel_tokens(
             enriched_states=enriched,
             person_idx=person_idx,
@@ -258,22 +255,85 @@ class LKSGNN(nn.Module):
             object_class_idx=object_class_idx,
             union_features=union_features,
         )
-
-        # Phase 3: Relationship self-attention
         rel_tokens = self.rel_predictor.self_attend(rel_tokens)
-
-        # Phase 4: Temporal edge attention
-        if self.prev_rel_tokens is not None:
-            rel_tokens = self.temporal_edge_attn(rel_tokens, self.prev_rel_tokens)
-        self.prev_rel_tokens = rel_tokens.detach()
-
-        # Phase 5: 3 MLP heads
-        edge_out = self.rel_predictor.predict_from_tokens(rel_tokens)
 
         return {
             "node_logits": node_logits,
-            "attention_distribution": edge_out["attention_distribution"],
-            "spatial_distribution": edge_out["spatial_distribution"],
-            "contacting_distribution": edge_out["contacting_distribution"],
+            "rel_tokens": rel_tokens,
+            "person_idx": person_idx,
+            "object_idx": object_idx,
         }
+
+    def forward(
+        self,
+        visual_features_seq: List[torch.Tensor],
+        corners_seq: List[torch.Tensor],
+        valid_mask_seq: List[torch.Tensor],
+        visibility_mask_seq: List[torch.Tensor],
+        person_idx_seq: List[torch.Tensor],
+        object_idx_seq: List[torch.Tensor],
+        camera_pose_seq: Optional[List[torch.Tensor]] = None,
+        union_features_seq: Optional[List[torch.Tensor]] = None,
+        bboxes_2d_seq: Optional[List[torch.Tensor]] = None,
+        class_indices_seq: Optional[List[torch.Tensor]] = None,
+    ) -> Dict[str, List]:
+        """
+        Process a full video with per-pair temporal self-attention.
+
+        Phase A: per-frame upstream + collect rel_tokens
+        Phase B: temporal self-attention across all frames
+        Phase C: predict from enriched tokens
+
+        Returns:
+            dict with per-frame lists: node_logits, att/spa/con distributions.
+        """
+        T = len(corners_seq)
+
+        outputs = {
+            "node_logits": [],
+            "attention_distribution": [],
+            "spatial_distribution": [],
+            "contacting_distribution": [],
+        }
+
+        # ========== Phase A: Sequential per-frame processing ==========
+        collected_rel = []
+        collected_pidx = []
+        collected_oidx = []
+
+        for t in range(T):
+            camera_pose_t = camera_pose_seq[t] if camera_pose_seq is not None else None
+            union_feat_t = union_features_seq[t] if union_features_seq is not None else None
+            bboxes_2d_t = bboxes_2d_seq[t] if bboxes_2d_seq is not None else None
+            class_idx_t = class_indices_seq[t] if class_indices_seq is not None else None
+
+            frame_out = self.forward_frame(
+                visual_features=visual_features_seq[t],
+                corners=corners_seq[t],
+                valid_mask=valid_mask_seq[t],
+                visibility_mask=visibility_mask_seq[t],
+                person_idx=person_idx_seq[t],
+                object_idx=object_idx_seq[t],
+                camera_pose=camera_pose_t,
+                union_features=union_feat_t,
+                bboxes_2d=bboxes_2d_t,
+                class_indices=class_idx_t,
+            )
+
+            outputs["node_logits"].append(frame_out["node_logits"])
+            collected_rel.append(frame_out["rel_tokens"])
+            collected_pidx.append(frame_out["person_idx"])
+            collected_oidx.append(frame_out["object_idx"])
+
+        # ========== Phase B: Per-pair temporal self-attention ==========
+        enriched_rel = self.temporal_edge_attn(collected_rel, collected_pidx, collected_oidx)
+
+        # ========== Phase C: Predict from enriched tokens ==========
+        for t in range(T):
+            edge_out = self.rel_predictor.predict_from_tokens(enriched_rel[t])
+            outputs["attention_distribution"].append(edge_out["attention_distribution"])
+            outputs["spatial_distribution"].append(edge_out["spatial_distribution"])
+            outputs["contacting_distribution"].append(edge_out["contacting_distribution"])
+
+        return outputs
 
