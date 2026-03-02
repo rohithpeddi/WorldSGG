@@ -7,6 +7,11 @@ No per-frame loops or _build_multi_label_gt needed.
 
   Vis-Vis: full loss on clean manual labels
   Vis-Unseen / Unseen-Unseen: λ_vlm weighted, smoothed
+
+All edge losses use reduction='sum' with a shared global denominator
+(N_total = total valid pairs across all buckets) so that each pair
+contributes equally to the gradient regardless of bucket size.
+λ_vlm is the sole down-weight for noisy unseen labels.
 """
 
 import logging
@@ -36,9 +41,10 @@ class LKSLoss(nn.Module):
         self.bce_loss = bce_loss
         self.mode = mode
 
-        self._ce_loss = nn.CrossEntropyLoss()
-        self._bce_loss = nn.BCEWithLogitsLoss()
-        self._kl_loss = nn.KLDivLoss(reduction='batchmean')
+        # reduction='sum' — we normalize by N_total manually for uniform per-pair gradients
+        self._ce_loss = nn.CrossEntropyLoss(reduction='sum')
+        self._bce_loss = nn.BCEWithLogitsLoss(reduction='sum')
+        self._kl_loss = nn.KLDivLoss(reduction='sum')
 
         self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
 
@@ -89,6 +95,9 @@ class LKSLoss(nn.Module):
         spa_gt = gt_spatial[valid].to(device)          # (K_total, 6)
         con_gt = gt_contacting[valid].to(device)       # (K_total, 17)
 
+        # Global denominator: every pair contributes 1/N_total to the gradient
+        N = valid.sum().float().clamp(min=1)
+
         # Classify pairs into 3 buckets using visibility
         p_vis = visibility_mask.gather(1, person_idx)[valid]  # (K_total,)
         o_vis = visibility_mask.gather(1, object_idx)[valid]  # (K_total,)
@@ -96,17 +105,18 @@ class LKSLoss(nn.Module):
         vis_unseen = p_vis ^ o_vis
         unseen_unseen = ~p_vis & ~o_vis
 
-        # Vis-Vis: standard loss
+        # Vis-Vis: full-weight, clean GT — each pair contributes 1/N
         if vis_vis.any():
-            losses["vis_vis_att"] = self._ce_loss(att_pred[vis_vis], att_gt[vis_vis])
-            losses["vis_vis_spa"] = self._bce_loss(spa_pred[vis_vis], spa_gt[vis_vis])
-            losses["vis_vis_con"] = self._bce_loss(con_pred[vis_vis], con_gt[vis_vis])
+            losses["vis_vis_att"] = self._ce_loss(att_pred[vis_vis], att_gt[vis_vis]) / N
+            losses["vis_vis_spa"] = self._bce_loss(spa_pred[vis_vis], spa_gt[vis_vis]) / N
+            losses["vis_vis_con"] = self._bce_loss(con_pred[vis_vis], con_gt[vis_vis]) / N
         else:
             losses["vis_vis_att"] = zero
             losses["vis_vis_spa"] = zero
             losses["vis_vis_con"] = zero
 
         # Vis-Unseen / Unseen-Unseen: VLM noise handling
+        # Each unseen pair contributes λ_vlm/N — same denominator, λ_vlm is the sole down-weight
         for bucket_name, mask in [("vis_unseen", vis_unseen), ("unseen_unseen", unseen_unseen)]:
             if mask.any():
                 b_att_pred = att_pred[mask]
@@ -123,12 +133,12 @@ class LKSLoss(nn.Module):
                     smoothed = self._label_smoother.smooth_ce_target(b_att_gt, 3)
                     losses[f"{bucket_name}_att"] = self._kl_loss(
                         F.log_softmax(b_att_pred, dim=-1), smoothed
-                    ) * self.lambda_vlm
+                    ) * self.lambda_vlm / N
                 else:
-                    losses[f"{bucket_name}_att"] = self._ce_loss(b_att_pred, b_att_gt) * self.lambda_vlm
+                    losses[f"{bucket_name}_att"] = self._ce_loss(b_att_pred, b_att_gt) * self.lambda_vlm / N
 
-                losses[f"{bucket_name}_spa"] = self._bce_loss(b_spa_pred, b_spa_gt) * self.lambda_vlm
-                losses[f"{bucket_name}_con"] = self._bce_loss(b_con_pred, b_con_gt) * self.lambda_vlm
+                losses[f"{bucket_name}_spa"] = self._bce_loss(b_spa_pred, b_spa_gt) * self.lambda_vlm / N
+                losses[f"{bucket_name}_con"] = self._bce_loss(b_con_pred, b_con_gt) * self.lambda_vlm / N
             else:
                 losses[f"{bucket_name}_att"] = zero
                 losses[f"{bucket_name}_spa"] = zero
@@ -145,15 +155,20 @@ class LKSLoss(nn.Module):
             losses["vis_vis_con"] + losses["vis_unseen_con"] + losses["unseen_unseen_con"]
         )
 
-        # Node classification
+        # Node classification (separate normalization — not affected by pair buckets)
         if gt_node_labels is not None and self.mode in [const.SGCLS, const.SGDET]:
             node_pred = predictions["node_logits"]
             node_gt = gt_node_labels.to(device)
             if valid_mask is not None:
                 node_pred = node_pred[valid_mask]
                 node_gt = node_gt[valid_mask]
+            else:
+                # Flatten (T, N, C) → (T*N, C) so CE gets classes on dim=1
+                node_pred = node_pred.reshape(-1, node_pred.shape[-1])
+                node_gt = node_gt.reshape(-1)
             if len(node_gt) > 0:
-                losses[const.OBJECT_LOSS] = self._ce_loss(node_pred, node_gt)
+                N_nodes = max(len(node_gt), 1)
+                losses[const.OBJECT_LOSS] = self._ce_loss(node_pred, node_gt) / N_nodes
 
         total_keys = [const.ATTENTION_RELATION_LOSS, const.SPATIAL_RELATION_LOSS, const.CONTACTING_RELATION_LOSS]
         if const.OBJECT_LOSS in losses:

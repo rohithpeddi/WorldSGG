@@ -6,6 +6,11 @@ Accepts pre-padded (T, K_max, C) tensors with pair_valid mask from dataset.
 No per-frame loops or _build_multi_label_gt needed.
 
 L_total = L_manual(Visible) + λ_vlm * L_pseudo(Unseen) + λ_smooth * L_smooth
+
+All edge losses use reduction='sum' with a shared global denominator
+(N_total = total valid pairs across all buckets) so that each pair
+contributes equally to the gradient regardless of bucket size.
+λ_vlm is the sole down-weight for noisy unseen labels.
 """
 
 import logging
@@ -43,9 +48,10 @@ class GLSTGNLoss(nn.Module):
         self.bce_loss = bce_loss
         self.mode = mode
 
-        self._ce_loss = nn.CrossEntropyLoss()
-        self._bce_loss = nn.BCEWithLogitsLoss()
-        self._kl_loss = nn.KLDivLoss(reduction='batchmean')
+        # reduction='sum' — we normalize by N_total manually for uniform per-pair gradients
+        self._ce_loss = nn.CrossEntropyLoss(reduction='sum')
+        self._bce_loss = nn.BCEWithLogitsLoss(reduction='sum')
+        self._kl_loss = nn.KLDivLoss(reduction='sum')
 
         self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
 
@@ -96,23 +102,26 @@ class GLSTGNLoss(nn.Module):
         spa_gt = gt_spatial[valid].to(device)
         con_gt = gt_contacting[valid].to(device)
 
+        # Global denominator: every pair contributes 1/N_total to the gradient
+        N = valid.sum().float().clamp(min=1)
+
         # Classify pairs by visibility
         p_vis = visibility_mask.gather(1, person_idx)[valid]
         o_vis = visibility_mask.gather(1, object_idx)[valid]
         pair_visible = p_vis & o_vis
         pair_unseen = ~pair_visible
 
-        # --- Visible pairs: manual GT (pristine) ---
+        # --- Visible pairs: manual GT (pristine) — each pair contributes 1/N ---
         if pair_visible.any():
-            vis_att_loss = self._ce_loss(att_pred[pair_visible], att_gt[pair_visible])
-            vis_spa_loss = self._bce_loss(spa_pred[pair_visible], spa_gt[pair_visible])
-            vis_con_loss = self._bce_loss(con_pred[pair_visible], con_gt[pair_visible])
+            vis_att_loss = self._ce_loss(att_pred[pair_visible], att_gt[pair_visible]) / N
+            vis_spa_loss = self._bce_loss(spa_pred[pair_visible], spa_gt[pair_visible]) / N
+            vis_con_loss = self._bce_loss(con_pred[pair_visible], con_gt[pair_visible]) / N
         else:
             vis_att_loss = zero
             vis_spa_loss = zero
             vis_con_loss = zero
 
-        # --- Unseen pairs: VLM pseudo-labels (noisy) ---
+        # --- Unseen pairs: VLM pseudo-labels (noisy) — each pair contributes λ_vlm/N ---
         if pair_unseen.any():
             u_att_pred = att_pred[pair_unseen]
             u_att_gt = att_gt[pair_unseen]
@@ -127,12 +136,12 @@ class GLSTGNLoss(nn.Module):
                 smoothed = self._label_smoother.smooth_ce_target(u_att_gt, 3)
                 unseen_att_loss = self._kl_loss(
                     F.log_softmax(u_att_pred, dim=-1), smoothed
-                ) * self.lambda_vlm
+                ) * self.lambda_vlm / N
             else:
-                unseen_att_loss = self._ce_loss(u_att_pred, u_att_gt) * self.lambda_vlm
+                unseen_att_loss = self._ce_loss(u_att_pred, u_att_gt) * self.lambda_vlm / N
 
-            unseen_spa_loss = self._bce_loss(u_spa_pred, u_spa_gt) * self.lambda_vlm
-            unseen_con_loss = self._bce_loss(u_con_pred, u_con_gt) * self.lambda_vlm
+            unseen_spa_loss = self._bce_loss(u_spa_pred, u_spa_gt) * self.lambda_vlm / N
+            unseen_con_loss = self._bce_loss(u_con_pred, u_con_gt) * self.lambda_vlm / N
         else:
             unseen_att_loss = zero
             unseen_spa_loss = zero
@@ -142,17 +151,22 @@ class GLSTGNLoss(nn.Module):
         losses[const.SPATIAL_RELATION_LOSS] = vis_spa_loss + unseen_spa_loss
         losses[const.CONTACTING_RELATION_LOSS] = vis_con_loss + unseen_con_loss
 
-        # Node classification
+        # Node classification (separate normalization — not affected by pair buckets)
         if gt_node_labels is not None and self.mode in [const.SGCLS, const.SGDET]:
             node_pred = predictions["node_logits"]
             node_gt = gt_node_labels.to(device)
             if valid_mask is not None:
                 node_pred = node_pred[valid_mask]
                 node_gt = node_gt[valid_mask]
+            else:
+                # Flatten (T, N, C) → (T*N, C) so CE gets classes on dim=1
+                node_pred = node_pred.reshape(-1, node_pred.shape[-1])
+                node_gt = node_gt.reshape(-1)
             if len(node_gt) > 0:
-                losses[const.OBJECT_LOSS] = self._ce_loss(node_pred, node_gt)
+                N_nodes = max(len(node_gt), 1)
+                losses[const.OBJECT_LOSS] = self._ce_loss(node_pred, node_gt) / N_nodes
 
-        # Smoothness loss (temporal inertia)
+        # Smoothness loss (temporal inertia) — uses its own reduction='none' normalization
         if self.lambda_smooth > 0:
             smooth = self._compute_smoothness_loss(predictions, pair_valid, corners)
             losses["smooth_loss"] = smooth * self.lambda_smooth

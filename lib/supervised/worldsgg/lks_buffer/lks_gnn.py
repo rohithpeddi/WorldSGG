@@ -168,7 +168,7 @@ class LKSGNN(nn.Module):
 
         # ==================== Step 1: Vectorized LKS buffer (raw features) ====================
         buffer_all, staleness_all = vectorized_lks_buffer(
-            projected_visual=visual_all,
+            raw_visual=visual_all,
             visibility_mask=visibility_all,
             valid_mask=valid_all,
         )  # (T, N, d_detector_roi), (T, N)

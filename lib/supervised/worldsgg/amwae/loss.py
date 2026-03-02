@@ -7,6 +7,11 @@ No per-frame loops or _build_multi_label_gt needed.
 
 L_total = L_vis + λ_vlm * L_masked + λ_recon * λ_recon_dominance * L_recon
         + λ_contra * L_contrastive + L_simulated_unseen
+
+All edge losses use reduction='sum' with a shared global denominator
+(N_total = total valid pairs across all buckets) so that each pair
+contributes equally to the gradient regardless of bucket size.
+λ_vlm is the sole down-weight for noisy unseen labels.
 """
 
 import logging
@@ -55,9 +60,10 @@ class AMWAELoss(nn.Module):
         self.mode = mode
         self.lambda_stability = lambda_stability
 
-        self._ce_loss = nn.CrossEntropyLoss()
-        self._bce_loss = nn.BCEWithLogitsLoss()
-        self._kl_loss = nn.KLDivLoss(reduction='batchmean')
+        # reduction='sum' — we normalize by N_total manually for uniform per-pair gradients
+        self._ce_loss = nn.CrossEntropyLoss(reduction='sum')
+        self._bce_loss = nn.BCEWithLogitsLoss(reduction='sum')
+        self._kl_loss = nn.KLDivLoss(reduction='sum')
 
         self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
 
@@ -148,6 +154,9 @@ class AMWAELoss(nn.Module):
         spa_gt = gt_spatial[valid].to(device)
         con_gt = gt_contacting[valid].to(device)
 
+        # Global denominator: every pair contributes 1/N_total to the gradient
+        N = valid.sum().float().clamp(min=1)
+
         # Split by visibility
         p_vis = visibility_mask.gather(1, person_idx)[valid]
         o_vis = visibility_mask.gather(1, object_idx)[valid]
@@ -156,17 +165,17 @@ class AMWAELoss(nn.Module):
 
         losses = {}
 
-        # Visible losses (full weight, clean GT)
+        # Visible losses (full weight, clean GT) — each pair contributes 1/N
         if pair_visible.any():
-            losses["vis_att"] = self._ce_loss(att_pred[pair_visible], att_gt[pair_visible])
-            losses["vis_spa"] = self._bce_loss(spa_pred[pair_visible], spa_gt[pair_visible])
-            losses["vis_con"] = self._bce_loss(con_pred[pair_visible], con_gt[pair_visible])
+            losses["vis_att"] = self._ce_loss(att_pred[pair_visible], att_gt[pair_visible]) / N
+            losses["vis_spa"] = self._bce_loss(spa_pred[pair_visible], spa_gt[pair_visible]) / N
+            losses["vis_con"] = self._bce_loss(con_pred[pair_visible], con_gt[pair_visible]) / N
         else:
             losses["vis_att"] = zero
             losses["vis_spa"] = zero
             losses["vis_con"] = zero
 
-        # Masked losses (λ_vlm weighted, smoothed)
+        # Masked losses (λ_vlm weighted, smoothed) — each pair contributes λ_vlm/N
         if pair_masked.any():
             m_att_pred = att_pred[pair_masked]
             m_att_gt = att_gt[pair_masked]
@@ -181,12 +190,12 @@ class AMWAELoss(nn.Module):
                 smoothed = self._label_smoother.smooth_ce_target(m_att_gt, 3)
                 losses["masked_att"] = self._kl_loss(
                     F.log_softmax(m_att_pred, dim=-1), smoothed
-                ) * self.lambda_vlm
+                ) * self.lambda_vlm / N
             else:
-                losses["masked_att"] = self._ce_loss(m_att_pred, m_att_gt) * self.lambda_vlm
+                losses["masked_att"] = self._ce_loss(m_att_pred, m_att_gt) * self.lambda_vlm / N
 
-            losses["masked_spa"] = self._bce_loss(m_spa_pred, m_spa_gt) * self.lambda_vlm
-            losses["masked_con"] = self._bce_loss(m_con_pred, m_con_gt) * self.lambda_vlm
+            losses["masked_spa"] = self._bce_loss(m_spa_pred, m_spa_gt) * self.lambda_vlm / N
+            losses["masked_con"] = self._bce_loss(m_con_pred, m_con_gt) * self.lambda_vlm / N
         else:
             losses["masked_att"] = zero
             losses["masked_spa"] = zero
@@ -196,15 +205,20 @@ class AMWAELoss(nn.Module):
         losses[const.SPATIAL_RELATION_LOSS] = losses["vis_spa"] + losses["masked_spa"]
         losses[const.CONTACTING_RELATION_LOSS] = losses["vis_con"] + losses["masked_con"]
 
-        # Node loss
+        # Node loss (separate normalization — not affected by pair buckets)
         if gt_node_labels is not None and self.mode in [const.SGCLS, const.SGDET]:
             node_pred = predictions["node_logits"]
             node_gt = gt_node_labels.to(device)
             if valid_mask is not None:
                 node_pred = node_pred[valid_mask]
                 node_gt = node_gt[valid_mask]
+            else:
+                # Flatten (T, N, C) → (T*N, C) so CE gets classes on dim=1
+                node_pred = node_pred.reshape(-1, node_pred.shape[-1])
+                node_gt = node_gt.reshape(-1)
             if len(node_gt) > 0:
-                losses[const.OBJECT_LOSS] = self._ce_loss(node_pred, node_gt)
+                N_nodes = max(len(node_gt), 1)
+                losses[const.OBJECT_LOSS] = self._ce_loss(node_pred, node_gt) / N_nodes
 
         return losses
 
@@ -292,7 +306,11 @@ class AMWAELoss(nn.Module):
         return torch.stack(losses).mean()
 
     def _compute_simulated_unseen_loss(self, predictions, device):
-        """Loss for artificially masked visible objects — uses clean GT."""
+        """Loss for artificially masked visible objects — uses clean GT.
+
+        Each per-frame loss is normalized by its own pair count since these
+        are independent simulation batches (not part of the main pair buckets).
+        """
         zero = torch.tensor(0.0, device=device, requires_grad=True)
 
         sim_preds = predictions.get("simulated_unseen_predictions", None)
@@ -310,18 +328,21 @@ class AMWAELoss(nn.Module):
             gt = sim_gt[t]
 
             if "attention" in pred and "attention" in gt:
-                att_loss = self._ce_loss(pred["attention"], gt["attention"].to(device))
+                att_target = gt["attention"].to(device)
+                n_pairs = max(att_target.shape[0], 1)
+                att_loss = self._ce_loss(pred["attention"], att_target) / n_pairs
                 losses.append(att_loss)
             if "spatial" in pred and "spatial" in gt:
-                # Simulated GT should already be multi-hot tensors from the model
                 spa_gt = gt["spatial"].to(device) if isinstance(gt["spatial"], torch.Tensor) else gt["spatial"]
                 if isinstance(spa_gt, torch.Tensor):
-                    spa_loss = self._bce_loss(pred["spatial"], spa_gt)
+                    n_pairs = max(spa_gt.shape[0], 1)
+                    spa_loss = self._bce_loss(pred["spatial"], spa_gt) / n_pairs
                     losses.append(spa_loss)
             if "contacting" in pred and "contacting" in gt:
                 con_gt = gt["contacting"].to(device) if isinstance(gt["contacting"], torch.Tensor) else gt["contacting"]
                 if isinstance(con_gt, torch.Tensor):
-                    con_loss = self._bce_loss(pred["contacting"], con_gt)
+                    n_pairs = max(con_gt.shape[0], 1)
+                    con_loss = self._bce_loss(pred["contacting"], con_gt) / n_pairs
                     losses.append(con_loss)
 
         if not losses:

@@ -7,8 +7,8 @@ For each unseen object, picks features from the **nearest** visible frame
 in either temporal direction (past or future).
 
 Update rule per object n at frame t:
-  - If visible at t:  buffer[t,n] = projected_visual[t,n]  (fresh)
-  - If not visible:   buffer[t,n] = projected_visual[nearest_seen, n]
+  - If visible at t:  buffer[t,n] = raw_visual[t,n]  (fresh)
+  - If not visible:   buffer[t,n] = raw_visual[nearest_seen, n]
   - If never seen:    buffer[t,n] = zeros                  (fog of war)
 
 Implementation uses forward cummax + reverse cummax to find the closest
@@ -21,10 +21,15 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+# Fixed sentinel for objects never seen in any direction.
+# Using a constant decouples the log-staleness feature from video length T,
+# preventing train/inference distribution shift (e.g., log(T+2) varying with clip size).
+UNSEEN_STALENESS = 1000
+
 
 @torch.no_grad()
 def vectorized_lks_buffer(
-    projected_visual: torch.Tensor,
+    raw_visual: torch.Tensor,
     visibility_mask: torch.Tensor,
     valid_mask: torch.Tensor,
 ) -> tuple:
@@ -35,7 +40,7 @@ def vectorized_lks_buffer(
     temporal direction and copies features from that frame.
 
     Args:
-        projected_visual: (T, N, d_visual) — projected DINO features per frame.
+        raw_visual: (T, N, d_visual) — raw DINO ROI features per frame.
         visibility_mask:  (T, N) bool — True if object detected this frame.
         valid_mask:       (T, N) bool — True for real (non-padding) objects.
 
@@ -43,8 +48,8 @@ def vectorized_lks_buffer(
         buffer_features: (T, N, d_visual) — detached buffered features.
         staleness:       (T, N) long — frames to nearest visible (0 = just seen).
     """
-    T, N, D = projected_visual.shape
-    device = projected_visual.device
+    T, N, D = raw_visual.shape
+    device = raw_visual.device
 
     # Overwrite mask: visible AND valid
     overwrite = visibility_mask & valid_mask  # (T, N)
@@ -62,7 +67,7 @@ def vectorized_lks_buffer(
     # ==================== Backward pass (future) ====================
     # For each (t, n): earliest frame ≥ t where object is visible
     # Use negative trick: flip, cummax on negated values, flip back
-    future_raw = torch.where(overwrite, -frame_ids, torch.full_like(frame_ids, -(T + 1)))
+    future_raw = torch.where(overwrite, -frame_ids, torch.full_like(frame_ids, -(T + UNSEEN_STALENESS)))
     next_seen_neg, _ = future_raw.flip(0).cummax(dim=0)
     next_seen_at = -next_seen_neg.flip(0)  # (T, N) — frame index of next visible
     future_staleness = next_seen_at - frame_ids  # ≥ 0 where next_seen_at ≤ T-1
@@ -71,10 +76,10 @@ def vectorized_lks_buffer(
     # ==================== Pick nearest direction ====================
     # Prefer future when closer; fall back to past; handle never-seen
     past_staleness_safe = past_staleness.clone()
-    past_staleness_safe[never_seen_past] = T + 1  # sentinel: very stale
+    past_staleness_safe[never_seen_past] = UNSEEN_STALENESS  # fixed sentinel: never seen
 
     future_staleness_safe = future_staleness.clone()
-    future_staleness_safe[never_seen_future] = T + 1  # sentinel: very stale
+    future_staleness_safe[never_seen_future] = UNSEEN_STALENESS  # fixed sentinel: never seen
 
     use_future = future_staleness_safe < past_staleness_safe
     gather_idx = torch.where(use_future, next_seen_at, last_seen_at).clamp(min=0, max=T - 1)
@@ -86,7 +91,7 @@ def vectorized_lks_buffer(
 
     # ==================== Gather features ====================
     n_idx = torch.arange(N, device=device).unsqueeze(0).expand(T, N)
-    buffer_features = projected_visual[gather_idx, n_idx]  # (T, N, D)
+    buffer_features = raw_visual[gather_idx, n_idx]  # (T, N, D)
 
     # Zero out never-seen objects (fog of war)
     buffer_features = buffer_features.masked_fill(never_seen.unsqueeze(-1), 0.0)
