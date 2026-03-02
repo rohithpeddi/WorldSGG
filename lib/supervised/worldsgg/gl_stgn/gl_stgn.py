@@ -214,52 +214,22 @@ class GLSTGN(nn.Module):
         # ==================== Step 7: Node prediction (B=T) ====================
         node_logits_all = self.node_predictor(enriched_all)  # (T, N, num_classes)
 
-        # ==================== Step 8: Rel tokens (per-frame, K varies) ====================
-        collected_rel = []
-        collected_pidx = []
-        collected_oidx = []
-
-        for t in range(T):
-            enriched_t = enriched_all[t]
-            node_logits_t = node_logits_all[t]
-            person_idx = person_idx_seq[t]
-            object_idx = object_idx_seq[t]
-
-            person_class_idx = node_logits_t[person_idx].argmax(dim=-1)
-            object_class_idx = node_logits_t[object_idx].argmax(dim=-1)
-
-            union_feat_t = union_features_seq[t] if union_features_seq is not None else None
-
-            rel_tokens = self.rel_predictor.form_rel_tokens(
-                enriched_states=enriched_t,
-                person_idx=person_idx,
-                object_idx=object_idx,
-                person_class_idx=person_class_idx,
-                object_class_idx=object_class_idx,
-                union_features=union_feat_t,
-            )
-            rel_tokens = self.rel_predictor.self_attend(rel_tokens)
-
-            collected_rel.append(rel_tokens)
-            collected_pidx.append(person_idx)
-            collected_oidx.append(object_idx)
+        # ==================== Step 8: Batched edge prediction ====================
+        rel_tokens, pair_valid, padded_pidx, padded_oidx = self.rel_predictor.batched_form_and_attend(
+            enriched_all, node_logits_all, person_idx_seq, object_idx_seq, union_features_seq,
+        )  # (T, K_max, d_rel), (T, K_max), (T, K_max), (T, K_max)
 
         # ==================== Step 9: Temporal edge attention ====================
-        enriched_rel = self.temporal_edge_attn(collected_rel, collected_pidx, collected_oidx)
+        enriched_rel = self.temporal_edge_attn(rel_tokens, pair_valid, padded_pidx, padded_oidx)
 
         # ==================== Step 10: Predict distributions ====================
-        outputs: Dict[str, List] = {
-            "node_logits": [],
-            "attention_distribution": [],
-            "spatial_distribution": [],
-            "contacting_distribution": [],
-        }
+        edge_out = self.rel_predictor.batched_predict(enriched_rel, pair_valid)
 
-        for t in range(T):
-            outputs["node_logits"].append(node_logits_all[t])
-            edge_out = self.rel_predictor.predict_from_tokens(enriched_rel[t])
-            outputs["attention_distribution"].append(edge_out["attention_distribution"])
-            outputs["spatial_distribution"].append(edge_out["spatial_distribution"])
-            outputs["contacting_distribution"].append(edge_out["contacting_distribution"])
+        outputs: Dict[str, List] = {
+            "node_logits": [node_logits_all[t] for t in range(T)],
+            "attention_distribution": edge_out["attention_distribution"],
+            "spatial_distribution": edge_out["spatial_distribution"],
+            "contacting_distribution": edge_out["contacting_distribution"],
+        }
 
         return outputs

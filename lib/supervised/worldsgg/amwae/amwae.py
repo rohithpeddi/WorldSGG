@@ -11,7 +11,7 @@ Single-pass pipeline with B=T batching:
   5. ScaffoldTokenizer(struct, vis, cam, motion, ego) → (T, N, d_model)
   6. AssociativeRetriever(tokens, vis, valid, cam)    → (T, N, d_model)
   7. + visibility_embedding                           → (T, N, d_model)
-  8. ContextualDiffusion(tokens, corners, valid)      → (T, N, d_model)
+  8. SpatialGNN(tokens, corners, valid)               → (T, N, d_model)
   9. NodePredictor + RelationshipPredictor            → scene graph
  10. TemporalEdgeAttention                           → final distributions
 
@@ -27,12 +27,11 @@ from typing import Dict, List, Optional
 
 from .scaffold_tokenizer import ScaffoldTokenizer
 from .associative_retriever import AssociativeRetriever
-from .contextual_diffusion import ContextualDiffusion
 
 from lib.supervised.worldsgg.worldsgg_base import (
     GlobalStructuralEncoder, NodePredictor, RelationshipPredictor,
-    CameraPoseEncoder, CameraTemporalEncoder, MotionFeatureEncoder,
-    TemporalEdgeAttention,
+    SpatialGNN, CameraPoseEncoder, CameraTemporalEncoder,
+    MotionFeatureEncoder, TemporalEdgeAttention,
 )
 
 
@@ -109,8 +108,8 @@ class AMWAE(nn.Module):
         # Informs downstream modules: 0 = retrieved/inferred, 1 = directly observed
         self.visibility_emb = nn.Embedding(2, config.d_model)
 
-        # Module 8: Contextual Diffusion — spatial context propagation (B=T)
-        self.diffusion = ContextualDiffusion(
+        # Module 8: Spatial GNN — inter-object context propagation (B=T)
+        self.spatial_gnn = SpatialGNN(
             d_model=config.d_model,
             n_layers=config.n_self_attn_layers,
             n_heads=config.n_heads,
@@ -244,16 +243,12 @@ class AMWAE(nn.Module):
         vis_ids = visibility_all.long()  # (T, N)
         completed_tokens = completed_tokens + self.visibility_emb(vis_ids)
 
-        # ==================== Step 8: Contextual diffusion (B=T) ====================
-        diffusion_out = self.diffusion(
+        # ==================== Step 8: Spatial GNN (B=T) ====================
+        enriched_all = self.spatial_gnn(
             tokens=completed_tokens,
             corners=corners_all,
             valid_mask=valid_all,
-        )
-        if isinstance(diffusion_out, tuple):
-            enriched_all = diffusion_out[0]  # (T, N, d_model)
-        else:
-            enriched_all = diffusion_out     # (T, N, d_model)
+        )  # (T, N, d_model)
 
         # ==================== Step 9: Node prediction (B=T) ====================
         node_logits_all = self.node_predictor(enriched_all)  # (T, N, C)
@@ -261,61 +256,28 @@ class AMWAE(nn.Module):
         # ==================== Step 10: Cross-view reconstruction ====================
         recon_pred_all = self.reconstruction_proj(completed_tokens)  # (T, N, d_visual)
 
-        # ==================== Step 11: Edge prediction ====================
-        collected_rel = []
-        collected_pidx = []
-        collected_oidx = []
-
-        for t in range(T):
-            enriched_t = enriched_all[t]
-            node_logits_t = node_logits_all[t]
-            person_idx = person_idx_seq[t]
-            object_idx = object_idx_seq[t]
-
-            person_class_idx = node_logits_t[person_idx].argmax(dim=-1)
-            object_class_idx = node_logits_t[object_idx].argmax(dim=-1)
-
-            union_feat_t = union_features_seq[t] if union_features_seq is not None else None
-
-            rel_tokens = self.rel_predictor.form_rel_tokens(
-                enriched_states=enriched_t,
-                person_idx=person_idx,
-                object_idx=object_idx,
-                person_class_idx=person_class_idx,
-                object_class_idx=object_class_idx,
-                union_features=union_feat_t,
-            )
-            rel_tokens = self.rel_predictor.self_attend(rel_tokens)
-
-            collected_rel.append(rel_tokens)
-            collected_pidx.append(person_idx)
-            collected_oidx.append(object_idx)
+        # ==================== Step 11: Batched edge prediction ====================
+        rel_tokens, pair_valid, padded_pidx, padded_oidx = self.rel_predictor.batched_form_and_attend(
+            enriched_all, node_logits_all, person_idx_seq, object_idx_seq, union_features_seq,
+        )  # (T, K_max, d_rel), (T, K_max), (T, K_max), (T, K_max)
 
         # ==================== Step 12: Temporal edge attention ====================
-        enriched_rel = self.temporal_edge_attn(collected_rel, collected_pidx, collected_oidx)
+        enriched_rel = self.temporal_edge_attn(rel_tokens, pair_valid, padded_pidx, padded_oidx)
 
-        # ==================== Build output lists ====================
+        # ==================== Step 13: Predict distributions ====================
+        edge_out = self.rel_predictor.batched_predict(enriched_rel, pair_valid)
+
+        # ==================== Build output ====================
+        T = enriched_all.shape[0]
         outputs: Dict[str, List] = {
-            "node_logits": [],
-            "attention_distribution": [],
-            "spatial_distribution": [],
-            "contacting_distribution": [],
-            "is_masked": [],
-            "original_visual": [],
-            "reconstruction_predictions": [],
-            "reconstruction_targets": [],
+            "node_logits": [node_logits_all[t] for t in range(T)],
+            "attention_distribution": edge_out["attention_distribution"],
+            "spatial_distribution": edge_out["spatial_distribution"],
+            "contacting_distribution": edge_out["contacting_distribution"],
+            "is_masked": [is_masked_all[t] for t in range(T)],
+            "original_visual": [original_visual_all[t] for t in range(T)],
+            "reconstruction_predictions": [recon_pred_all[t] for t in range(T)],
+            "reconstruction_targets": [original_visual_all[t] for t in range(T)],
         }
-
-        for t in range(T):
-            outputs["node_logits"].append(node_logits_all[t])
-            outputs["is_masked"].append(is_masked_all[t])
-            outputs["original_visual"].append(original_visual_all[t])
-            outputs["reconstruction_predictions"].append(recon_pred_all[t])
-            outputs["reconstruction_targets"].append(original_visual_all[t])
-
-            edge_out = self.rel_predictor.predict_from_tokens(enriched_rel[t])
-            outputs["attention_distribution"].append(edge_out["attention_distribution"])
-            outputs["spatial_distribution"].append(edge_out["spatial_distribution"])
-            outputs["contacting_distribution"].append(edge_out["contacting_distribution"])
 
         return outputs

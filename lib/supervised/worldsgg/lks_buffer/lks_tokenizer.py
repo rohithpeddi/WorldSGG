@@ -3,7 +3,7 @@ LKS Tokenizer (Batched)
 =========================
 
 Fuses CURRENT wireframe geometry (live from the global wireframe)
-with BUFFERED visual features (potentially stale from the LKS buffer)
+with BUFFERED visual features (raw DINO, potentially stale from the LKS buffer)
 and CAMERA-RELATIVE features.
 
 X[b,k] = Proj([G[b,k] ⊕ M[b,k] ⊕ cam[b,k] ⊕ log_staleness[b,k]])
@@ -21,9 +21,12 @@ class LKSTokenizer(nn.Module):
     Fuses live geometry with buffered visual features, camera features,
     and staleness metadata. Supports batched input (B, N, ...).
 
+    The visual projection (DINO → d_visual) is done INSIDE the fusion MLP,
+    so gradients from the downstream loss flow back through it.
+
     Args:
         d_struct: Structural token dim.
-        d_visual: Projected visual feature dim (buffer dim).
+        d_detector_roi: Raw DINO ROI feature dim (buffer stores raw features).
         d_model: Output token dim.
         d_camera: Camera-relative feature dim (from CameraPoseEncoder).
     """
@@ -31,15 +34,15 @@ class LKSTokenizer(nn.Module):
     def __init__(
         self,
         d_struct: int = 256,
-        d_visual: int = 256,
+        d_detector_roi: int = 1024,
         d_model: int = 256,
         d_camera: int = 128,
     ):
         super().__init__()
         self.d_camera = d_camera
 
-        # Fuse: geometry + buffered visual + camera + log_staleness
-        fusion_input_dim = d_struct + d_visual + d_camera + 1
+        # Fuse: geometry + raw buffered visual + camera + log_staleness
+        fusion_input_dim = d_struct + d_detector_roi + d_camera + 1
         self.fusion_proj = nn.Sequential(
             nn.Linear(fusion_input_dim, d_model),
             nn.ReLU(inplace=True),
@@ -57,10 +60,10 @@ class LKSTokenizer(nn.Module):
         """
         Args:
             geometry_tokens: (B, N, d_struct) — LIVE per-object structural tokens.
-            buffer_features: (B, N, d_visual) — from LKS buffer (detached, possibly stale).
+            buffer_features: (B, N, d_detector_roi) — raw DINO from LKS buffer (detached).
             valid_mask: (B, N) bool — True for real objects.
             cam_feats: (B, N, d_camera) or None — per-object camera-relative features.
-            staleness: (B, N) long or None — frames since last visible.
+            staleness: (B, N) long or None — frames to nearest visible.
 
         Returns:
             tokens: (B, N, d_model) — hybrid tokens.
@@ -77,7 +80,7 @@ class LKSTokenizer(nn.Module):
             staleness = torch.zeros(B, N, dtype=torch.long, device=device)
         log_staleness = torch.log(staleness.float() + 1.0).unsqueeze(-1)  # (B, N, 1)
 
-        # Concatenate all inputs
+        # Concatenate all inputs (visual projection happens inside fusion_proj)
         fused = torch.cat([
             geometry_tokens, buffer_features, cam_feats,
             log_staleness,

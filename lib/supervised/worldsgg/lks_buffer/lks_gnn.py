@@ -8,17 +8,18 @@ in a single forward pass with B=T batching — no per-frame loops
 except for relationship token formation (variable K per frame).
 
 Single-pass pipeline:
-  1. visual_projector(visual_all)                  → (T, N, d_visual)
-  2. vectorized_lks_buffer(projected, vis, valid)  → (T, N, d_visual), (T, N)
-  3. GlobalStructuralEncoder(corners_all)           → (T, N, d_struct)
-  4. CameraPoseEncoder(pose_all, corners_all)       → (T, N, d_camera)
-  5. LKSTokenizer(struct, buffer, cam, staleness)   → (T, N, d_model)
-  6. SpatialGNN(tokens, corners, valid)             → (T, N, d_model)
-  7. RelationshipPredictor per frame (K varies)     → T × (K_t, d_rel)
-  8. TemporalEdgeAttention across frames            → T × (K_t, d_rel)
-  9. Predict from enriched tokens                   → distributions
+  1. vectorized_lks_buffer(visual_all, vis, valid)   → (T, N, d_roi), (T, N)
+  2. GlobalStructuralEncoder(corners_all)              → (T, N, d_struct)
+  3. CameraPoseEncoder(pose_all, corners_all)          → (T, N, d_camera)
+  4. LKSTokenizer(struct, buffer, cam, staleness)      → (T, N, d_model)
+  5. SpatialGNN(tokens, corners, valid)                → (T, N, d_model)
+  6. NodePredictor(enriched)                           → (T, N, C)
+  7. batched_form_and_attend(enriched, logits, ...)    → (T, K_max, d_rel)
+  8. TemporalEdgeAttention(rel, valid, pidx, oidx)     → (T, K_max, d_rel)
+  9. batched_predict(enriched_rel, valid)              → distributions
 
-Gradients only flow through steps 1-9 at the current forward pass.
+All differentiable except the LKS buffer (step 1).
+No per-frame loops — fully batched.
 """
 
 import torch
@@ -67,22 +68,16 @@ class LKSGNN(nn.Module):
             d_hidden=config.d_struct // 2,
         )
 
-        # Visual projector: raw DINO ROI → d_visual
-        self.visual_projector = nn.Sequential(
-            nn.Linear(config.d_detector_roi, config.d_visual),
-            nn.ReLU(inplace=True),
-            nn.LayerNorm(config.d_visual),
-        )
-
         # Module 2: Camera pose encoder
         self.camera_encoder = CameraPoseEncoder(
             d_camera=config.d_camera,
         )
 
-        # Module 3: LKS Tokenizer (geometry + buffer + camera fusion)
+        # Module 3: LKS Tokenizer (geometry + raw buffer + camera fusion)
+        # Visual projection (1024→d_model) happens inside tokenizer's fusion MLP
         self.tokenizer = LKSTokenizer(
             d_struct=config.d_struct,
-            d_visual=config.d_visual,
+            d_detector_roi=config.d_detector_roi,
             d_model=config.d_model,
             d_camera=config.d_camera,
         )
@@ -161,15 +156,12 @@ class LKSGNN(nn.Module):
         valid_all = torch.stack(valid_mask_seq)              # (T, N)
         visibility_all = torch.stack(visibility_mask_seq)    # (T, N)
 
-        # ==================== Step 1: Batch visual projection ====================
-        projected_all = self.visual_projector(visual_all)    # (T, N, d_visual)
-
-        # ==================== Step 2: Vectorized LKS buffer ====================
+        # ==================== Step 1: Vectorized LKS buffer (raw features) ====================
         buffer_all, staleness_all = vectorized_lks_buffer(
-            projected_visual=projected_all,
+            projected_visual=visual_all,
             visibility_mask=visibility_all,
             valid_mask=valid_all,
-        )  # (T, N, d_visual), (T, N)
+        )  # (T, N, d_detector_roi), (T, N)
 
         # ==================== Step 3: Batch structural encoding ====================
         struct_all, _ = self.structural_encoder(
@@ -205,52 +197,22 @@ class LKSGNN(nn.Module):
         # ==================== Step 7: Node prediction (batched) ====================
         node_logits_all = self.node_predictor(enriched_all)  # (T, N, num_classes)
 
-        # ==================== Step 8: Rel tokens (per-frame, K varies) ====================
-        collected_rel = []
-        collected_pidx = []
-        collected_oidx = []
+        # ==================== Step 7: Batched edge prediction ====================
+        rel_tokens, pair_valid, padded_pidx, padded_oidx = self.rel_predictor.batched_form_and_attend(
+            enriched_all, node_logits_all, person_idx_seq, object_idx_seq, union_features_seq,
+        )  # (T, K_max, d_rel), (T, K_max), (T, K_max), (T, K_max)
 
-        for t in range(T):
-            enriched_t = enriched_all[t]       # (N, d_model)
-            node_logits_t = node_logits_all[t]  # (N, num_classes)
-            person_idx = person_idx_seq[t]
-            object_idx = object_idx_seq[t]
+        # ==================== Step 8: Temporal edge attention ====================
+        enriched_rel = self.temporal_edge_attn(rel_tokens, pair_valid, padded_pidx, padded_oidx)
 
-            person_class_idx = node_logits_t[person_idx].argmax(dim=-1)
-            object_class_idx = node_logits_t[object_idx].argmax(dim=-1)
+        # ==================== Step 9: Predict distributions ====================
+        edge_out = self.rel_predictor.batched_predict(enriched_rel, pair_valid)
 
-            union_feat_t = union_features_seq[t] if union_features_seq is not None else None
-
-            rel_tokens = self.rel_predictor.form_rel_tokens(
-                enriched_states=enriched_t,
-                person_idx=person_idx,
-                object_idx=object_idx,
-                person_class_idx=person_class_idx,
-                object_class_idx=object_class_idx,
-                union_features=union_feat_t,
-            )
-            rel_tokens = self.rel_predictor.self_attend(rel_tokens)
-
-            collected_rel.append(rel_tokens)
-            collected_pidx.append(person_idx)
-            collected_oidx.append(object_idx)
-
-        # ==================== Step 9: Temporal edge attention ====================
-        enriched_rel = self.temporal_edge_attn(collected_rel, collected_pidx, collected_oidx)
-
-        # ==================== Step 10: Predict distributions ====================
         outputs = {
-            "node_logits": [],
-            "attention_distribution": [],
-            "spatial_distribution": [],
-            "contacting_distribution": [],
+            "node_logits": [node_logits_all[t] for t in range(T)],
+            "attention_distribution": edge_out["attention_distribution"],
+            "spatial_distribution": edge_out["spatial_distribution"],
+            "contacting_distribution": edge_out["contacting_distribution"],
         }
-
-        for t in range(T):
-            outputs["node_logits"].append(node_logits_all[t])
-            edge_out = self.rel_predictor.predict_from_tokens(enriched_rel[t])
-            outputs["attention_distribution"].append(edge_out["attention_distribution"])
-            outputs["spatial_distribution"].append(edge_out["spatial_distribution"])
-            outputs["contacting_distribution"].append(edge_out["contacting_distribution"])
 
         return outputs
