@@ -10,7 +10,6 @@ Main model that wires together:
   5. AssociativeRetriever — view-aware cross-attention retrieval to auto-complete masked tokens
   6. ContextualDiffusion — self-attention for context propagation
   7. NodePredictor + RelationshipPredictor(+TemporalEdgeAttention) — scene graph
-  8. ObservabilityClassifier — structured masking for simulated-unseen training
 
 The model initializes the graph TOP-DOWN from the complete wireframe scaffold,
 then auto-completes missing visual evidence via associative memory retrieval.
@@ -27,7 +26,7 @@ from .contextual_diffusion import ContextualDiffusion
 
 from lib.supervised.worldsgg.worldsgg_base import (
     GlobalStructuralEncoder, NodePredictor, RelationshipPredictor,
-    CameraPoseEncoder, ObservabilityClassifier, TemporalEdgeAttention,
+    CameraPoseEncoder, TemporalEdgeAttention,
 )
 
 
@@ -137,12 +136,8 @@ class AMWAE(nn.Module):
             dropout=config.dropout,
         )
 
-        # Module 8: Observability Classifier (for structured masking, 4C)
-        self.obs_classifier = ObservabilityClassifier(
-            frustum_thresh=getattr(config, 'frustum_thresh', -0.1),
-        )
 
-        # Cross-view reconstruction projection (4D)
+        # Cross-view reconstruction projection
         self.reconstruction_proj = nn.Linear(config.d_model, config.d_visual)
 
     def forward(
@@ -230,10 +225,11 @@ class AMWAE(nn.Module):
             cam_feats = None
             if camera_pose_t is not None:
                 _, cam_feats = self.camera_encoder(
-                    camera_pose=camera_pose_t,
-                    corners=corners_t,
-                    valid_mask=valid_t,
-                )  # cam_feats: (N_t, d_camera)
+                    camera_pose=camera_pose_t.unsqueeze(0),
+                    corners=corners_t.unsqueeze(0),
+                    valid_mask=valid_t.unsqueeze(0),
+                )  # cam_feats: (1, N_t, d_camera)
+                cam_feats = cam_feats.squeeze(0)  # (N_t, d_camera)
 
             # --- Step 3: Scaffold tokenization (bind evidence / apply mask + camera) ---
             hybrid_tokens, is_masked_t, original_visual_t = self.scaffold_tokenizer(
@@ -365,29 +361,8 @@ class AMWAE(nn.Module):
 
                 if n_visible > 1:
                     visible_indices = torch.where(vis_t & valid_t)[0]
-
-                    if camera_pose_t is not None:
-                        obs_type_t = self.obs_classifier(
-                            camera_pose=camera_pose_t,
-                            corners=corners_t,
-                            visibility_mask=vis_t,
-                            valid_mask=valid_t,
-                        )
-                        R = camera_pose_t[:3, :3]
-                        cam_pos = camera_pose_t[:3, 3]
-                        view_dir = -R[:, 2]
-                        view_dir = view_dir / (view_dir.norm() + 1e-8)
-                        centers = corners_t.mean(dim=1)
-                        cam_to_obj = centers - cam_pos.unsqueeze(0)
-                        cam_to_obj_norm = cam_to_obj / (cam_to_obj.norm(dim=-1, keepdim=True) + 1e-8)
-                        view_align = (cam_to_obj_norm * view_dir.unsqueeze(0)).sum(dim=-1)
-
-                        vis_alignment = view_align[visible_indices]
-                        _, sort_order = vis_alignment.sort()
-                        sim_mask_indices = visible_indices[sort_order[:n_to_mask]]
-                    else:
-                        perm = torch.randperm(len(visible_indices), device=device)
-                        sim_mask_indices = visible_indices[perm[:n_to_mask]]
+                    perm = torch.randperm(len(visible_indices), device=device)
+                    sim_mask_indices = visible_indices[perm[:n_to_mask]]
 
                     sim_vis_t = vis_t.clone()
                     sim_vis_t[sim_mask_indices] = False

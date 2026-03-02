@@ -5,7 +5,7 @@ GL-STGN: Global-Local Spatio-Temporal Graph Network
 Main model that wires together:
   1. GlobalStructuralEncoder — encodes 3D bbox layout ("wireframe")
   2. CameraPoseEncoder — camera viewpoint + per-object cam features
-  3. CameraTemporalEncoder — ego-motion between consecutive frames
+  3. CameraTemporalEncoder — full-temporal ego-motion self-attention
   4. MotionFeatureEncoder — velocity/acceleration from 4D trajectories
   5. PersistentWorldMemoryBank — GRU-based temporal memory for all objects
   6. RelationalGraphTransformer — spatial-aware context propagation
@@ -24,7 +24,7 @@ from .graph_transformer import RelationalGraphTransformer
 from lib.supervised.worldsgg.worldsgg_base import (
     GlobalStructuralEncoder, NodePredictor, RelationshipPredictor,
     CameraPoseEncoder, CameraTemporalEncoder, MotionFeatureEncoder,
-    ObservabilityClassifier, TemporalEdgeAttention,
+    TemporalEdgeAttention,
 )
 
 
@@ -88,11 +88,6 @@ class GLSTGN(nn.Module):
         d_motion = getattr(config, 'd_motion', 64)
         self.motion_encoder = MotionFeatureEncoder(
             d_motion=d_motion,
-        )
-
-        # Module 5b: Observability Classifier (non-differentiable, for graded shielding)
-        self.obs_classifier = ObservabilityClassifier(
-            frustum_thresh=getattr(config, 'frustum_thresh', -0.1),
         )
 
         # Module 6: Relational Graph Transformer
@@ -175,19 +170,22 @@ class GLSTGN(nn.Module):
             "spatial_distribution": [],
             "contacting_distribution": [],
             "memory_states": [],
-            "obs_type": [],
         }
 
         memory = None
-        prev_pose = None
         prev_corners = None
         prev_velocity = None
 
         # Collection lists for Phase B temporal attention
         collected_rel = []
-        collected_rel_sh = []
         collected_pidx = []
         collected_oidx = []
+
+        # --- Pre-compute full-temporal ego-motion tokens ---
+        ego_tokens_all = None
+        if camera_pose_seq is not None:
+            pose_stack = torch.stack(camera_pose_seq, dim=0)  # (T, 4, 4)
+            ego_tokens_all = self.camera_temporal_encoder(pose_stack)  # (T, d_camera)
 
         for t in range(T):
             corners_t = corners_seq[t]          # (N_t, 8, 3)
@@ -217,17 +215,13 @@ class GLSTGN(nn.Module):
             ego_motion_token = None
             if camera_pose_t is not None:
                 _, cam_feats = self.camera_encoder(
-                    camera_pose=camera_pose_t,
-                    corners=corners_t,
-                    valid_mask=valid_t,
-                )  # cam_feats: (N_t, d_camera)
+                    camera_pose=camera_pose_t.unsqueeze(0),
+                    corners=corners_t.unsqueeze(0),
+                    valid_mask=valid_t.unsqueeze(0),
+                )  # cam_feats: (1, N_t, d_camera)
+                cam_feats = cam_feats.squeeze(0)  # (N_t, d_camera)
 
-                ego_motion_token = self.camera_temporal_encoder(
-                    prev_pose=prev_pose,
-                    curr_pose=camera_pose_t,
-                )  # (d_camera,)
-
-                prev_pose = camera_pose_t
+                ego_motion_token = ego_tokens_all[t]  # (d_camera,)
 
             # --- Step 3: Compute motion features from 4D trajectories ---
             velocity = None
@@ -237,13 +231,13 @@ class GLSTGN(nn.Module):
                 if prev_velocity is not None:
                     acceleration = velocity - prev_velocity
 
-            camera_R = camera_pose_t[:3, :3] if camera_pose_t is not None else None
+            camera_R = camera_pose_t[:3, :3].unsqueeze(0) if camera_pose_t is not None else None
             motion_feats = self.motion_encoder(
-                velocity=velocity,
-                acceleration=acceleration,
+                velocity=velocity.unsqueeze(0) if velocity is not None else None,
+                acceleration=acceleration.unsqueeze(0) if acceleration is not None else None,
                 camera_R=camera_R,
-                valid_mask=valid_t,
-            )  # (N_t, d_motion)
+                valid_mask=valid_t.unsqueeze(0),
+            ).squeeze(0)  # (N_t, d_motion)
 
             # Track for next frame
             prev_corners = corners_t.detach()
@@ -292,37 +286,12 @@ class GLSTGN(nn.Module):
                 valid_mask=valid_t.unsqueeze(0),
             ).squeeze(0)  # (N_t, d_memory)
 
-            # --- Step 6: Observability-Graded Memory Shielding ---
-            # Classify each object's observability state
-            obs_type_t = self.obs_classifier(
-                camera_pose=camera_pose_t if camera_pose_t is not None else torch.eye(4, device=device),
-                corners=corners_t,
-                visibility_mask=vis_t,
-                valid_mask=valid_t,
-            )  # (N_t,) long — 0=NEVER_SEEN, 1=OUT_OF_FRUSTUM, 2=OCCLUDED, 3=VISIBLE
-
-            # 3-tier gradient scaling:
-            #   VISIBLE (3)        → 1.0 (full gradient)
-            #   OCCLUDED (2)       → 0.5 (partial gradient — contextual cues exist)
-            #   OUT_OF_FRUSTUM (1) → 0.0 (full detach — no visual evidence)
-            #   NEVER_SEEN (0)     → 0.0 (full detach — no prior info)
-            grad_scale = torch.zeros(N_t, 1, device=device)  # (N_t, 1)
-            grad_scale[obs_type_t == ObservabilityClassifier.VISIBLE] = 1.0
-            grad_scale[obs_type_t == ObservabilityClassifier.OCCLUDED] = 0.5
-            # OUT_OF_FRUSTUM and NEVER_SEEN remain 0.0
-
-            # Apply graded shielding: enriched_shielded = detached + grad_scale * (enriched - detached)
-            # This allows partial gradients for occluded objects
-            enriched_detached = enriched.detach()
-            enriched_shielded = enriched_detached + grad_scale * (enriched - enriched_detached)
-
-            # --- Step 7a: Node prediction + form/self-attend rel tokens (COLLECT) ---
+            # --- Step 6: Node prediction + form/self-attend rel tokens (COLLECT) ---
             node_logits = self.node_predictor(enriched)  # (N_t, num_classes)
 
             person_class_idx = node_logits[person_idx_t].argmax(dim=-1)
             object_class_idx = node_logits[object_idx_t].argmax(dim=-1)
 
-            # Full-gradient rel tokens
             rel_tokens = self.rel_predictor.form_rel_tokens(
                 enriched_states=enriched,
                 person_idx=person_idx_t,
@@ -333,57 +302,24 @@ class GLSTGN(nn.Module):
             )
             rel_tokens = self.rel_predictor.self_attend(rel_tokens)
 
-            # Graded-shielded rel tokens
-            rel_tokens_sh = self.rel_predictor.form_rel_tokens(
-                enriched_states=enriched_shielded,
-                person_idx=person_idx_t,
-                object_idx=object_idx_t,
-                person_class_idx=person_class_idx,
-                object_class_idx=object_class_idx,
-                union_features=union_feat_t,
-            )
-            rel_tokens_sh = self.rel_predictor.self_attend(rel_tokens_sh)
-
             # Collect for temporal attention
             collected_rel.append(rel_tokens)
-            collected_rel_sh.append(rel_tokens_sh)
             collected_pidx.append(person_idx_t)
             collected_oidx.append(object_idx_t)
 
             # Collect non-edge outputs
             outputs["node_logits"].append(node_logits)
             outputs["memory_states"].append(memory.detach().clone())
-            outputs["obs_type"].append(obs_type_t)
 
         # ========== Phase B: Per-pair temporal self-attention (single pass) ==========
         enriched_rel = self.temporal_edge_attn(collected_rel, collected_pidx, collected_oidx)
-        enriched_rel_sh = self.temporal_edge_attn(collected_rel_sh, collected_pidx, collected_oidx)
 
         # ========== Phase C: Predict from temporally-enriched tokens ==========
-        outputs["attention_distribution_shielded"] = []
-        outputs["spatial_distribution_shielded"] = []
-        outputs["contacting_distribution_shielded"] = []
-
         for t in range(T):
-            # Full-gradient predictions
             edge_out = self.rel_predictor.predict_from_tokens(enriched_rel[t])
             outputs["attention_distribution"].append(edge_out["attention_distribution"])
             outputs["spatial_distribution"].append(edge_out["spatial_distribution"])
             outputs["contacting_distribution"].append(edge_out["contacting_distribution"])
 
-            # Shielded predictions
-            edge_out_sh = self.rel_predictor.predict_from_tokens(enriched_rel_sh[t])
-            outputs["attention_distribution_shielded"].append(edge_out_sh["attention_distribution"])
-            outputs["spatial_distribution_shielded"].append(edge_out_sh["spatial_distribution"])
-            outputs["contacting_distribution_shielded"].append(edge_out_sh["contacting_distribution"])
-
         return outputs
-
-    def reset_memory(self):
-        """Reset memory bank state (call between videos)."""
-        pass
-
-    def detach_memory(self):
-        """Detach memory for BPTT truncation (called between chunks)."""
-        pass
 

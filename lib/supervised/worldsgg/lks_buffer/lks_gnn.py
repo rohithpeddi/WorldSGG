@@ -7,12 +7,12 @@ LKS memory buffer with a stateless feed-forward GNN predictor.
 Camera-aware tokenization and union feature edge prediction.
 
 Sequential processing:
-  1. LKSMemoryBuffer.update(DINO, visibility, pose) → detached update + obs classification
-  2. GlobalStructuralEncoder(corners)               → geometry tokens
-  3. CameraPoseEncoder(pose, corners)               → camera features
-  4. LKSTokenizer(geometry, buffer, cam, obs, stale) → hybrid tokens
-  5. SpatialGNN(hybrid_tokens, corners)             → enriched tokens
-  6. NodePredictor + EdgePredictor(+union, +2D)     → scene graph
+  1. LKSMemoryBuffer.update(DINO, visibility) → detached update
+  2. GlobalStructuralEncoder(corners)          → geometry tokens
+  3. CameraPoseEncoder(pose, corners)          → camera features
+  4. LKSTokenizer(geometry, buffer, cam, stale) → hybrid tokens
+  5. SpatialGNN(hybrid_tokens, corners)        → enriched tokens
+  6. NodePredictor + EdgePredictor(+union)     → scene graph
 
 Gradients only flow through steps 2-6 at the current frame.
 """
@@ -27,7 +27,7 @@ from .lks_tokenizer import LKSTokenizer
 # Shared components from worldsgg_base
 from lib.supervised.worldsgg.worldsgg_base import (
     GlobalStructuralEncoder, NodePredictor, RelationshipPredictor, SpatialGNN,
-    CameraPoseEncoder, FeatureAging, TemporalEdgeAttention,
+    CameraPoseEncoder, TemporalEdgeAttention,
 )
 
 
@@ -117,17 +117,8 @@ class LKSGNN(nn.Module):
             dropout=config.dropout,
         )
 
-        # Edge buffer for temporal cross-attention (set in reset_memory)
-        # (no longer needed — temporal attention is stateless)
-
         # Non-differentiable memory buffer (not an nn.Module)
         self.memory_buffer = None  # Initialized in reset_memory()
-
-        # Module 6: Feature Aging (learned staleness + pose-delta blending)
-        self.feature_aging = FeatureAging(
-            d_visual=config.d_visual,
-            n_classes=num_object_classes,
-        )
 
     def reset_memory(self, device: torch.device = None):
         """Reset the LKS buffer (call at start of each video)."""
@@ -165,7 +156,7 @@ class LKSGNN(nn.Module):
             camera_pose: (4, 4) or None — camera extrinsic matrix.
             union_features: (K, 1024) or None — union ROI features per pair.
             bboxes_2d: (N, 4) or None — 2D bounding boxes xyxy.
-            class_indices: (N,) long or None — object class indices (for FeatureAging).
+            class_indices: (N,) long or None — object class indices.
 
         Returns:
             dict with node_logits, attention/spatial/contacting distributions.
@@ -184,29 +175,15 @@ class LKSGNN(nn.Module):
         if N > self.memory_buffer.max_objects:
             self.memory_buffer.reset(N)
 
-        # Zero-order hold update + observability classification
+        # Zero-order hold update
         self.memory_buffer.update(
             projected_visual, visibility_mask, valid_mask,
             camera_pose=camera_pose, corners=corners,
         )
 
-        # Get buffered features + observability metadata (all detached)
+        # Get buffered features (all detached)
         buffer_features = self.memory_buffer.get_features(N)  # (N, d_visual)
-        obs_state = self.memory_buffer.get_obs_state(N)        # (N,) long
         staleness = self.memory_buffer.get_staleness(N)        # (N,) long
-
-        # --- Step 2: Apply feature aging ---
-        # Blend stale features toward class prototypes based on staleness + pose delta
-        if camera_pose is not None and class_indices is not None:
-            capture_poses = self.memory_buffer.get_capture_poses(N)  # (N, 4, 4)
-            pose_delta = FeatureAging.compute_pose_delta(camera_pose, capture_poses)  # (N,)
-            buffer_features = self.feature_aging(
-                stale_features=buffer_features,
-                staleness=staleness,
-                pose_delta=pose_delta,
-                class_indices=class_indices,
-                valid_mask=valid_mask,
-            )  # (N, d_visual)
 
         # --- Step 3: Encode wireframe geometry ---
         struct_tokens, _ = self.structural_encoder(
@@ -219,18 +196,18 @@ class LKSGNN(nn.Module):
         cam_feats = None
         if camera_pose is not None:
             _, cam_feats = self.camera_encoder(
-                camera_pose=camera_pose,
-                corners=corners,
-                valid_mask=valid_mask,
-            )  # cam_feats: (N, d_camera)
+                camera_pose=camera_pose.unsqueeze(0),
+                corners=corners.unsqueeze(0),
+                valid_mask=valid_mask.unsqueeze(0),
+            )  # cam_feats: (1, N, d_camera)
+            cam_feats = cam_feats.squeeze(0)  # (N, d_camera)
 
-        # --- Step 4: Fuse geometry + buffered visual + camera + observability ---
+        # --- Step 4: Fuse geometry + buffered visual + camera ---
         tokens = self.tokenizer(
             geometry_tokens=struct_tokens,
             buffer_features=buffer_features,
             valid_mask=valid_mask,
             cam_feats=cam_feats,
-            obs_state=obs_state,
             staleness=staleness,
         )  # (N, d_model)
 

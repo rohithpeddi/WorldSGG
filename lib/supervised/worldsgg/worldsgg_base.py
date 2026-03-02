@@ -14,11 +14,9 @@ Components:
   5. RelationshipPredictor — Unified edge prediction (visual+union+CLIP→self-attn→3 heads)
   5b. TemporalEdgeAttention — Cross-temporal edge reasoning
   6. CameraPoseEncoder — Camera extrinsic → viewpoint tokens
-  7. CameraTemporalEncoder — Ego-motion between consecutive frames
+  7. CameraTemporalEncoder — Full-temporal ego-motion self-attention
   8. LabelSmoother — Soft targets for VLM pseudo-labels
-  9. ObservabilityClassifier — Per-object observability state from pose
-  10. MotionFeatureEncoder — 3D velocity/acceleration → d_motion tokens
-  11. FeatureAging — Staleness + pose-delta aware feature blending
+  9. MotionFeatureEncoder — 3D velocity/acceleration → d_motion tokens
 """
 
 import math
@@ -712,20 +710,11 @@ def _rotation_matrix_to_6d(R: torch.Tensor) -> torch.Tensor:
 class CameraPoseEncoder(nn.Module):
     """
     Encodes camera extrinsic (4×4 pose matrix) into:
-      1. A global camera token (d_camera) — summarizes current viewpoint
-      2. Per-object camera-relative features (N, d_camera) — how each
+      1. A global camera token (B, d_camera) — summarizes current viewpoint
+      2. Per-object camera-relative features (B, N, d_camera) — how each
          object relates to the current camera position and viewing direction
 
-    The camera pose [R|t] is decomposed as:
-      - 6D rotation representation (continuous, from first 2 cols of R)
-      - 3D translation (camera position in world)
-      → 9-dim input → MLP → d_camera global token
-
-    Per-object features encode:
-      - Distance from camera to object center
-      - Dot product of viewing direction with camera→object direction
-      - Azimuth angle of object relative to camera optical axis
-      → 3-dim per-object → MLP → d_camera per-object features
+    Accepts batched (B, ...) inputs natively.
 
     Args:
         d_camera: Output dimension for camera tokens.
@@ -747,7 +736,7 @@ class CameraPoseEncoder(nn.Module):
         )
 
         # Per-object camera-relative features:
-        #   distance(1) + view_alignment(1) + azimuth_sin(1) + azimuth_cos(1) = 4
+        #   log_distance(1) + view_alignment(1) + azimuth_sin(1) + azimuth_cos(1) = 4
         self.per_object_mlp = nn.Sequential(
             nn.Linear(4, d_hidden),
             nn.ReLU(inplace=True),
@@ -762,59 +751,53 @@ class CameraPoseEncoder(nn.Module):
     ) -> tuple:
         """
         Args:
-            camera_pose: (4, 4) — camera-to-world extrinsic matrix.
-            corners: (N, 8, 3) — 3D bbox corners for all objects.
-            valid_mask: (N,) bool — True for real objects.
+            camera_pose: (B, 4, 4) — camera-to-world extrinsic matrix.
+            corners: (B, N, 8, 3) — 3D bbox corners for all objects.
+            valid_mask: (B, N) bool — True for real objects.
 
         Returns:
-            camera_token: (d_camera,) — global viewpoint summary.
-            per_object_cam_feats: (N, d_camera) — camera-relative per-object features.
+            camera_token: (B, d_camera) — global viewpoint summary.
+            per_object_cam_feats: (B, N, d_camera) — camera-relative per-object features.
         """
-        N = corners.shape[0]
-        device = corners.device
+        B, N = corners.shape[0], corners.shape[1]
 
         # --- Extract rotation and translation from pose ---
-        R = camera_pose[:3, :3]  # (3, 3)
-        t = camera_pose[:3, 3]   # (3,) — camera position in world
+        R = camera_pose[:, :3, :3]  # (B, 3, 3)
+        t = camera_pose[:, :3, 3]   # (B, 3) — camera position in world
 
         # --- Global camera token ---
-        rot_6d = _rotation_matrix_to_6d(R)  # (6,)
-        global_input = torch.cat([rot_6d, t], dim=-1)  # (9,)
-        camera_token = self.global_mlp(global_input)  # (d_camera,)
+        rot_6d = _rotation_matrix_to_6d(R)  # (B, 6)
+        global_input = torch.cat([rot_6d, t], dim=-1)  # (B, 9)
+        camera_token = self.global_mlp(global_input)  # (B, d_camera)
 
         # --- Per-object camera-relative features ---
-        # Object centers
-        centers = corners.mean(dim=1)  # (N, 3)
+        centers = corners.mean(dim=2)  # (B, N, 3)
 
-        # Camera viewing direction (negative Z axis of camera in world frame)
-        # R columns are world-frame axes of the camera
-        view_dir = -R[:, 2]  # (3,) — optical axis direction in world
-        view_dir = view_dir / (view_dir.norm() + 1e-8)
+        # Camera viewing direction (negative Z axis)
+        view_dir = -R[:, :, 2]  # (B, 3)
+        view_dir = view_dir / (view_dir.norm(dim=-1, keepdim=True) + 1e-8)
 
         # Vector from camera to each object
-        cam_to_obj = centers - t.unsqueeze(0)  # (N, 3)
-        dist = cam_to_obj.norm(dim=-1, keepdim=True)  # (N, 1)
-        cam_to_obj_norm = cam_to_obj / (dist + 1e-8)  # (N, 3)
+        cam_to_obj = centers - t.unsqueeze(1)  # (B, N, 3)
+        dist = cam_to_obj.norm(dim=-1, keepdim=True)  # (B, N, 1)
+        cam_to_obj_norm = cam_to_obj / (dist + 1e-8)  # (B, N, 3)
 
         # View alignment: dot product with viewing direction
-        # +1 = directly in front, -1 = directly behind
-        view_alignment = (cam_to_obj_norm * view_dir.unsqueeze(0)).sum(dim=-1, keepdim=True)  # (N, 1)
+        view_alignment = (cam_to_obj_norm * view_dir.unsqueeze(1)).sum(dim=-1, keepdim=True)  # (B, N, 1)
 
-        # Azimuth angle (sin, cos) for rotational equivariance
-        # Project cam_to_obj onto the camera's XZ plane
-        right_dir = R[:, 0]  # camera right axis in world
-        right_component = (cam_to_obj_norm * right_dir.unsqueeze(0)).sum(dim=-1, keepdim=True)  # (N, 1)
+        # Azimuth (sin, cos) for rotational equivariance
+        right_dir = R[:, :, 0]  # (B, 3)
+        right_component = (cam_to_obj_norm * right_dir.unsqueeze(1)).sum(dim=-1, keepdim=True)  # (B, N, 1)
         azimuth_sin = right_component
         azimuth_cos = view_alignment
 
-        # Normalize distance with log for better gradient behavior
-        log_dist = torch.log(dist + 1e-6)  # (N, 1)
+        log_dist = torch.log(dist + 1e-6)  # (B, N, 1)
 
         per_obj_input = torch.cat([
             log_dist, view_alignment, azimuth_sin, azimuth_cos,
-        ], dim=-1)  # (N, 4)
+        ], dim=-1)  # (B, N, 4)
 
-        per_object_cam_feats = self.per_object_mlp(per_obj_input)  # (N, d_camera)
+        per_object_cam_feats = self.per_object_mlp(per_obj_input)  # (B, N, d_camera)
 
         # Zero out padding
         per_object_cam_feats = per_object_cam_feats * valid_mask.unsqueeze(-1).float()
@@ -828,26 +811,34 @@ class CameraPoseEncoder(nn.Module):
 
 class CameraTemporalEncoder(nn.Module):
     """
-    Encodes the CHANGE between consecutive camera poses (ego-motion).
+    Encodes the full sequence of camera poses into ego-motion tokens
+    with full temporal context via self-attention.
 
-    Captures: camera panned left, tilted up, moved forward, etc.
-    Critical for temporal methods — tells the memory update how much
-    the viewpoint changed since the last frame, informing which objects
-    transitioned visible→unseen or unseen→visible.
+    Each timestamp's raw ego-motion (relative pose change from previous frame)
+    is encoded via MLP, then all T tokens self-attend to capture long-range
+    camera motion patterns (e.g., panning back and forth, orbiting around).
 
-    Input:  prev_pose (4,4), curr_pose (4,4)
-    Output: ego_motion_token (d_camera)
+    Input:  pose_seq (T, 4, 4)
+    Output: ego_motion_tokens (T, d_camera)
 
     Args:
-        d_camera: Output dimension for ego-motion token.
+        d_camera: Output dimension for ego-motion tokens.
         d_hidden: Hidden dimension in the encoder MLP.
+        n_attn_layers: Number of self-attention layers.
+        n_heads: Number of attention heads.
     """
 
-    def __init__(self, d_camera: int = 128, d_hidden: int = 64):
+    def __init__(
+        self,
+        d_camera: int = 128,
+        d_hidden: int = 64,
+        n_attn_layers: int = 2,
+        n_heads: int = 4,
+    ):
         super().__init__()
         self.d_camera = d_camera
 
-        # Relative pose: 6D rotation + 3D translation = 9
+        # Per-step relative pose encoder: 6D rotation + 3D translation = 9
         self.ego_mlp = nn.Sequential(
             nn.Linear(9, d_hidden),
             nn.ReLU(inplace=True),
@@ -860,34 +851,62 @@ class CameraTemporalEncoder(nn.Module):
         # Learnable "no previous frame" embedding (for t=0)
         self.no_prev_embedding = nn.Parameter(torch.randn(d_camera) * 0.02)
 
+        # Learnable temporal positional encoding
+        self.max_time = 300
+        self.temporal_pe = nn.Embedding(self.max_time, d_camera)
+
+        # Self-attention over full temporal context
+        attn_layer = nn.TransformerEncoderLayer(
+            d_model=d_camera,
+            nhead=n_heads,
+            dim_feedforward=d_camera * 2,
+            dropout=0.1,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.temporal_attn = nn.TransformerEncoder(
+            attn_layer,
+            num_layers=n_attn_layers,
+        )
+
     def forward(
         self,
-        prev_pose: torch.Tensor,
-        curr_pose: torch.Tensor,
+        pose_seq: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
-            prev_pose: (4, 4) or None — previous frame's camera pose.
-                       If None, returns the learnable no_prev_embedding.
-            curr_pose: (4, 4) — current frame's camera pose.
+            pose_seq: (T, 4, 4) — full sequence of camera poses.
 
         Returns:
-            ego_motion_token: (d_camera,) — encodes how the camera moved.
+            ego_motion_tokens: (T, d_camera) — temporally-contextualized
+                               ego-motion tokens for each timestep.
         """
-        if prev_pose is None:
-            return self.no_prev_embedding
+        T = pose_seq.shape[0]
+        device = pose_seq.device
 
-        # Compute relative pose: T_rel = T_curr @ T_prev^{-1}
-        # This gives the transformation FROM prev camera TO current camera
-        T_rel = curr_pose @ torch.inverse(prev_pose)  # (4, 4)
+        # 1. Compute per-step relative poses → MLP → raw ego tokens
+        ego_tokens = []
+        for t in range(T):
+            if t == 0:
+                ego_tokens.append(self.no_prev_embedding.unsqueeze(0))
+            else:
+                T_rel = pose_seq[t] @ torch.inverse(pose_seq[t - 1])  # (4, 4)
+                R_rel = T_rel[:3, :3]
+                t_rel = T_rel[:3, 3]
+                rot_6d = _rotation_matrix_to_6d(R_rel)  # (6,)
+                ego_input = torch.cat([rot_6d, t_rel], dim=-1)  # (9,)
+                ego_tokens.append(self.ego_mlp(ego_input).unsqueeze(0))
 
-        R_rel = T_rel[:3, :3]  # (3, 3)
-        t_rel = T_rel[:3, 3]   # (3,)
+        ego_seq = torch.cat(ego_tokens, dim=0)  # (T, d_camera)
 
-        rot_6d = _rotation_matrix_to_6d(R_rel)  # (6,)
-        ego_input = torch.cat([rot_6d, t_rel], dim=-1)  # (9,)
+        # 2. Add temporal positional encoding
+        positions = torch.arange(T, device=device).clamp(max=self.max_time - 1)
+        ego_seq = ego_seq + self.temporal_pe(positions)
 
-        return self.ego_mlp(ego_input)  # (d_camera,)
+        # 3. Self-attend over full temporal context (batch dim = 1)
+        ego_seq = self.temporal_attn(ego_seq.unsqueeze(0)).squeeze(0)  # (T, d_camera)
+
+        return ego_seq
 
 
 
@@ -956,129 +975,11 @@ class LabelSmoother:
         inactive_val = self.epsilon / (C - k)  # (K, 1) broadcast
         inactive_mask = (target_multihot == 0.0)
         smoothed[inactive_mask] = inactive_val.expand_as(target_multihot)[inactive_mask]
-
         return smoothed
 
 
 # ============================================================================
-# 11. Observability Classifier
-# ============================================================================
-
-class ObservabilityClassifier(nn.Module):
-    """
-    Non-differentiable classifier that categorizes each object's observability
-    state based on camera pose, visibility mask, and history.
-
-    States:
-        0 = NEVER_SEEN:      Object has never had a GT/GDino bbox
-        1 = OUT_OF_FRUSTUM:  Object's center is behind/beside camera
-        2 = OCCLUDED:        Object is in camera frustum but not visible
-                             (blocked by another object)
-        3 = VISIBLE:         Object has a detection this frame
-
-    This classification is critical because:
-        - OUT_OF_FRUSTUM: no visual evidence at all → rely on geometry+dynamics
-        - OCCLUDED: contextual cues exist (nearby objects) → intermediate reliability
-        - NEVER_SEEN: the model has zero prior appearance info → geometry only
-
-    Args:
-        frustum_thresh: View-alignment threshold below which an object
-                        is considered out-of-frustum. Default -0.1 means
-                        objects slightly behind the camera still count as
-                        "in frustum" (generous margin).
-    """
-
-    # Class constants for readability
-    NEVER_SEEN = 0
-    OUT_OF_FRUSTUM = 1
-    OCCLUDED = 2
-    VISIBLE = 3
-
-    def __init__(self, frustum_thresh: float = -0.1):
-        super().__init__()
-        self.frustum_thresh = frustum_thresh
-
-    @torch.no_grad()
-    def forward(
-        self,
-        camera_pose: torch.Tensor,
-        corners: torch.Tensor,
-        visibility_mask: torch.Tensor,
-        valid_mask: torch.Tensor,
-        ever_seen_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Classify each object's observability state.
-
-        Args:
-            camera_pose: (4, 4) — camera extrinsic matrix.
-            corners: (N, 8, 3) — 3D bbox corners.
-            visibility_mask: (N,) bool — True if object is detected this frame.
-            valid_mask: (N,) bool — True for real objects.
-            ever_seen_mask: (N,) bool or None — True if object was ever visible.
-                           If None, all valid objects are treated as "ever seen."
-
-        Returns:
-            obs_type: (N,) long — per-object observability state (0-3).
-        """
-        N = corners.shape[0]
-        device = corners.device
-
-        # Extract camera position and viewing direction
-        R = camera_pose[:3, :3]  # (3, 3)
-        cam_pos = camera_pose[:3, 3]  # (3,)
-        view_dir = -R[:, 2]  # optical axis in world frame
-        view_dir = view_dir / (view_dir.norm() + 1e-8)
-
-        # Object centers
-        centers = corners.mean(dim=1)  # (N, 3)
-
-        # View alignment: dot(cam→object, view_dir)
-        cam_to_obj = centers - cam_pos.unsqueeze(0)  # (N, 3)
-        cam_to_obj_norm = cam_to_obj / (cam_to_obj.norm(dim=-1, keepdim=True) + 1e-8)
-        view_alignment = (cam_to_obj_norm * view_dir.unsqueeze(0)).sum(dim=-1)  # (N,)
-
-        # In-frustum: view_alignment > threshold
-        in_frustum = view_alignment > self.frustum_thresh  # (N,)
-
-        # Ever-seen mask
-        if ever_seen_mask is None:
-            ever_seen_mask = valid_mask  # assume all valid objects were seen before
-
-        # Classify
-        obs_type = torch.zeros(N, dtype=torch.long, device=device)
-        # Default: NEVER_SEEN (0) — for objects that were never detected
-
-        # Objects that have been seen before but are currently not visible
-        seen_but_invisible = ever_seen_mask & (~visibility_mask) & valid_mask
-        obs_type[seen_but_invisible & (~in_frustum)] = ObservabilityClassifier.OUT_OF_FRUSTUM
-        obs_type[seen_but_invisible & in_frustum] = ObservabilityClassifier.OCCLUDED
-
-        # Currently visible
-        obs_type[visibility_mask & valid_mask] = ObservabilityClassifier.VISIBLE
-
-        # Zero out invalid objects
-        obs_type[~valid_mask] = 0
-
-        return obs_type
-
-    @staticmethod
-    def to_onehot(obs_type: torch.Tensor, num_states: int = 4) -> torch.Tensor:
-        """
-        Convert obs_type indices to one-hot encoding.
-
-        Args:
-            obs_type: (N,) long — observability states.
-            num_states: Number of states (4).
-
-        Returns:
-            (N, num_states) float — one-hot encoding.
-        """
-        return F.one_hot(obs_type, num_classes=num_states).float()
-
-
-# ============================================================================
-# 12. Motion Feature Encoder
+# 9. Motion Feature Encoder
 # ============================================================================
 
 class MotionFeatureEncoder(nn.Module):
@@ -1088,8 +989,7 @@ class MotionFeatureEncoder(nn.Module):
     Uses finite-difference on 3D bbox centers from consecutive frames.
     Optionally computes camera-relative velocity for parallax-aware motion.
 
-    Input:  velocity (N, 3), acceleration (N, 3), camera_R (3, 3) [optional]
-    Output: motion_features (N, d_motion)
+    Accepts batched (B, ...) inputs natively.
 
     Args:
         d_motion: Output motion feature dimension.
@@ -1134,53 +1034,49 @@ class MotionFeatureEncoder(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            velocity: (N, 3) — world-frame velocity (center_t - center_{t-1}).
-                      None for the first frame.
-            acceleration: (N, 3) — world-frame acceleration (vel_t - vel_{t-1}).
-                          None for the first two frames.
-            camera_R: (3, 3) — camera rotation matrix. Used to compute
-                      camera-relative velocity if use_cam_relative=True.
-            valid_mask: (N,) bool — valid objects.
+            velocity: (B, N, 3) — world-frame velocity. None for first frame.
+            acceleration: (B, N, 3) — world-frame acceleration. None for first two frames.
+            camera_R: (B, 3, 3) — camera rotation matrix.
+            valid_mask: (B, N) bool — valid objects.
 
         Returns:
-            motion_features: (N, d_motion) — per-object motion tokens.
+            motion_features: (B, N, d_motion) — per-object motion tokens.
         """
         if velocity is None:
             # First frame: return learnable "no motion" for all objects
             if valid_mask is not None:
-                N = valid_mask.shape[0]
+                B, N = valid_mask.shape
             else:
-                return self.no_motion_embedding.unsqueeze(0)  # (1, d_motion)
-            return self.no_motion_embedding.unsqueeze(0).expand(N, -1)  # (N, d_motion)
+                return self.no_motion_embedding.unsqueeze(0).unsqueeze(0)  # (1, 1, d_motion)
+            return self.no_motion_embedding.unsqueeze(0).unsqueeze(0).expand(B, N, -1)  # (B, N, d_motion)
 
-        N = velocity.shape[0]
+        B, N = velocity.shape[0], velocity.shape[1]
         device = velocity.device
 
         # Speed scalar (magnitude of velocity)
-        speed = velocity.norm(dim=-1, keepdim=True)  # (N, 1)
+        speed = velocity.norm(dim=-1, keepdim=True)  # (B, N, 1)
 
-        # Acceleration (zeros if not available, e.g., second frame)
+        # Acceleration (zeros if not available)
         if acceleration is None:
-            acceleration = torch.zeros_like(velocity)  # (N, 3)
+            acceleration = torch.zeros_like(velocity)  # (B, N, 3)
 
         # Base features
         feats = [velocity, acceleration, speed]  # 3 + 3 + 1 = 7
 
         # Camera-relative velocity
         if self.use_cam_relative and camera_R is not None:
-            # Transform velocity to camera coordinates: v_cam = R^T @ v_world
-            cam_vel = (camera_R.T @ velocity.T).T  # (N, 3)
-            cam_speed = cam_vel.norm(dim=-1, keepdim=True)  # (N, 1)
-            feats.extend([cam_vel, cam_speed])  # +3 +1 = 4
+            # Transform: v_cam = R^T @ v_world → batched einsum
+            cam_vel = torch.einsum('bij,bnj->bni', camera_R.transpose(-1, -2), velocity)  # (B, N, 3)
+            cam_speed = cam_vel.norm(dim=-1, keepdim=True)  # (B, N, 1)
+            feats.extend([cam_vel, cam_speed])
         elif self.use_cam_relative:
-            # No camera rotation available — pad with zeros
             feats.extend([
-                torch.zeros(N, 3, device=device),
-                torch.zeros(N, 1, device=device),
+                torch.zeros(B, N, 3, device=device),
+                torch.zeros(B, N, 1, device=device),
             ])
 
-        motion_input = torch.cat(feats, dim=-1)  # (N, 7 or 11)
-        motion_features = self.mlp(motion_input)  # (N, d_motion)
+        motion_input = torch.cat(feats, dim=-1)  # (B, N, 7 or 11)
+        motion_features = self.mlp(motion_input)  # (B, N, d_motion)
 
         # Zero out invalid objects
         if valid_mask is not None:
@@ -1197,129 +1093,12 @@ class MotionFeatureEncoder(nn.Module):
         Compute per-object velocity from consecutive corner sets.
 
         Args:
-            curr_corners: (N, 8, 3) — current frame corners.
-            prev_corners: (N, 8, 3) — previous frame corners.
+            curr_corners: (B, N, 8, 3) or (N, 8, 3) — current frame corners.
+            prev_corners: (B, N, 8, 3) or (N, 8, 3) — previous frame corners.
 
         Returns:
-            velocity: (N, 3) — displacement of center between frames.
+            velocity: (..., N, 3) — displacement of center between frames.
         """
-        curr_centers = curr_corners.mean(dim=1)  # (N, 3)
-        prev_centers = prev_corners.mean(dim=1)  # (N, 3)
+        curr_centers = curr_corners.mean(dim=-2)  # (..., N, 3)
+        prev_centers = prev_corners.mean(dim=-2)  # (..., N, 3)
         return curr_centers - prev_centers
-
-
-# ============================================================================
-# 13. Feature Aging
-# ============================================================================
-
-class FeatureAging(nn.Module):
-    """
-    Learned feature aging that blends stale visual features toward
-    class prototypes based on staleness and camera pose delta.
-
-    Key insight: DINO features are robust but NOT viewpoint-invariant.
-    A feature captured from the front may be misleading when the camera
-    is now behind the object. As staleness increases or the camera moves
-    far from the capture pose, appearance should relax toward a
-    view-independent class prototype.
-
-    confidence = sigmoid( aging_mlp([log_staleness, pose_delta]) )
-    aged_feat = confidence * stale_feat + (1-confidence) * prototype
-
-    Args:
-        d_visual: Visual feature dimension.
-        n_classes: Number of object classes (for class prototypes).
-    """
-
-    def __init__(self, d_visual: int = 256, n_classes: int = 37):
-        super().__init__()
-        self.d_visual = d_visual
-
-        # Learnable class prototype embeddings
-        self.class_prototypes = nn.Embedding(n_classes, d_visual)
-
-        # Aging function: [log_staleness(1), pose_delta(1)] → confidence scalar
-        self.aging_mlp = nn.Sequential(
-            nn.Linear(2, 16),
-            nn.ReLU(inplace=True),
-            nn.Linear(16, 1),
-            nn.Sigmoid(),
-        )
-
-    def forward(
-        self,
-        stale_features: torch.Tensor,
-        staleness: torch.Tensor,
-        pose_delta: torch.Tensor,
-        class_indices: torch.Tensor,
-        valid_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Apply aging to stale features.
-
-        Args:
-            stale_features: (N, d_visual) — buffered visual features.
-            staleness: (N,) long — frames since last capture.
-            pose_delta: (N,) float — magnitude of camera pose change since capture.
-            class_indices: (N,) long — object class indices (for prototype lookup).
-            valid_mask: (N,) bool — valid objects.
-
-        Returns:
-            aged_features: (N, d_visual) — blended features.
-        """
-        N = stale_features.shape[0]
-
-        # Log-scale staleness for better gradient behavior
-        log_staleness = torch.log(staleness.float() + 1.0).unsqueeze(-1)  # (N, 1)
-        pose_delta_input = pose_delta.unsqueeze(-1)  # (N, 1)
-
-        aging_input = torch.cat([log_staleness, pose_delta_input], dim=-1)  # (N, 2)
-        confidence = self.aging_mlp(aging_input)  # (N, 1)
-
-        # Class prototypes
-        prototypes = self.class_prototypes(class_indices)  # (N, d_visual)
-
-        # Blend: high confidence → keep stale; low confidence → use prototype
-        aged = confidence * stale_features + (1.0 - confidence) * prototypes
-
-        if valid_mask is not None:
-            aged = aged * valid_mask.unsqueeze(-1).float()
-
-        return aged
-
-    @staticmethod
-    def compute_pose_delta(
-        current_pose: torch.Tensor,
-        capture_pose: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Compute scalar pose delta between current and capture poses.
-
-        Combines rotation difference (Frobenius norm of R_diff - I)
-        and translation distance.
-
-        Args:
-            current_pose: (4, 4) — current camera pose.
-            capture_pose: (N, 4, 4) — per-object capture poses.
-
-        Returns:
-            pose_delta: (N,) — scalar pose delta per object.
-        """
-        N = capture_pose.shape[0]
-
-        R_curr = current_pose[:3, :3]  # (3, 3)
-        t_curr = current_pose[:3, 3]  # (3,)
-
-        R_cap = capture_pose[:, :3, :3]  # (N, 3, 3)
-        t_cap = capture_pose[:, :3, 3]  # (N, 3)
-
-        # Rotation delta: Frobenius norm of (R_curr @ R_cap^T - I)
-        R_diff = R_curr.unsqueeze(0) @ R_cap.transpose(-1, -2)  # (N, 3, 3)
-        eye = torch.eye(3, device=R_diff.device).unsqueeze(0)  # (1, 3, 3)
-        rot_delta = (R_diff - eye).flatten(start_dim=1).norm(dim=-1)  # (N,)
-
-        # Translation delta
-        trans_delta = (t_curr.unsqueeze(0) - t_cap).norm(dim=-1)  # (N,)
-
-        # Combined (both contribute)
-        return rot_delta + trans_delta
