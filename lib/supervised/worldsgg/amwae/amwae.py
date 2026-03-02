@@ -275,6 +275,8 @@ class AMWAE(nn.Module):
             "attention_distribution": edge_out["attention_distribution"],  # (T, K_max, 3)
             "spatial_distribution": edge_out["spatial_distribution"],      # (T, K_max, 6)
             "contacting_distribution": edge_out["contacting_distribution"],# (T, K_max, 17)
+            "spatial_logits": edge_out["spatial_logits"],                  # (T, K_max, 6)
+            "contacting_logits": edge_out["contacting_logits"],            # (T, K_max, 17)
             "is_masked": is_masked_all,                                    # (T, N)
             "original_visual": original_visual_all,                        # (T, N, d_visual)
             "reconstruction_predictions": recon_pred_all,                  # (T, N, d_visual)

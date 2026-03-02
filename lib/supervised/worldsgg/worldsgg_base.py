@@ -522,19 +522,27 @@ class RelationshipPredictor(nn.Module):
         """
         # Batched heads: (T, K_max, C)
         att_all = self.att_head(rel_tokens)
-        spa_all = torch.sigmoid(self.spa_head(rel_tokens))
-        con_all = torch.sigmoid(self.con_head(rel_tokens))
+        spa_logits_all = self.spa_head(rel_tokens)
+        con_logits_all = self.con_head(rel_tokens)
+
+        # Sigmoid for eval-compatible distributions
+        spa_all = torch.sigmoid(spa_logits_all)
+        con_all = torch.sigmoid(con_logits_all)
 
         # Zero out padded positions
         mask = pair_valid.unsqueeze(-1).float()  # (T, K_max, 1)
         att_all = att_all * mask
         spa_all = spa_all * mask
         con_all = con_all * mask
+        spa_logits_all = spa_logits_all * mask
+        con_logits_all = con_logits_all * mask
 
         return {
-            "attention_distribution": att_all,   # (T, K_max, 3)
-            "spatial_distribution": spa_all,      # (T, K_max, 6)
-            "contacting_distribution": con_all,   # (T, K_max, 17)
+            "attention_distribution": att_all,   # (T, K_max, 3) — logits
+            "spatial_distribution": spa_all,      # (T, K_max, 6) — probabilities
+            "contacting_distribution": con_all,   # (T, K_max, 17) — probabilities
+            "spatial_logits": spa_logits_all,      # (T, K_max, 6) — raw logits
+            "contacting_logits": con_logits_all,   # (T, K_max, 17) — raw logits
         }
 
     def form_rel_tokens(
@@ -606,10 +614,14 @@ class RelationshipPredictor(nn.Module):
         Returns:
             dict with attention/spatial/contacting distributions.
         """
+        spa_logits = self.spa_head(rel_tokens)
+        con_logits = self.con_head(rel_tokens)
         return {
             "attention_distribution": self.att_head(rel_tokens),
-            "spatial_distribution": torch.sigmoid(self.spa_head(rel_tokens)),
-            "contacting_distribution": torch.sigmoid(self.con_head(rel_tokens)),
+            "spatial_distribution": torch.sigmoid(spa_logits),
+            "contacting_distribution": torch.sigmoid(con_logits),
+            "spatial_logits": spa_logits,
+            "contacting_logits": con_logits,
         }
 
     def forward(
@@ -1021,10 +1033,17 @@ class CameraTemporalEncoder(nn.Module):
         if T == 1:
             ego_seq = self.no_prev_embedding.unsqueeze(0)  # (1, d_camera)
         else:
-            # Batched relative pose: T_rel[i] = pose_seq[i+1] @ inv(pose_seq[i])
-            T_rel = pose_seq[1:] @ torch.linalg.inv(pose_seq[:-1])  # (T-1, 4, 4)
-            R_rel = T_rel[:, :3, :3]   # (T-1, 3, 3)
-            t_rel = T_rel[:, :3, 3]    # (T-1, 3)
+            # Rigid-body relative pose WITHOUT torch.linalg.inv
+            # For rigid transform [R|t], inv is [R^T | -R^T @ t]
+            # So T_rel = T_{curr} @ T_{prev}^{-1} decomposes as:
+            #   R_rel = R_curr @ R_prev^T
+            #   t_rel = t_curr - R_rel @ t_prev
+            R_curr = pose_seq[1:, :3, :3]   # (T-1, 3, 3)
+            t_curr = pose_seq[1:, :3, 3]    # (T-1, 3)
+            R_prev = pose_seq[:-1, :3, :3]  # (T-1, 3, 3)
+            t_prev = pose_seq[:-1, :3, 3]   # (T-1, 3)
+            R_rel = R_curr @ R_prev.transpose(-1, -2)  # (T-1, 3, 3)
+            t_rel = t_curr - torch.bmm(R_rel, t_prev.unsqueeze(-1)).squeeze(-1)  # (T-1, 3)
             rot_6d = _rotation_matrix_to_6d(R_rel)  # (T-1, 6)
             ego_input = torch.cat([rot_6d, t_rel], dim=-1)  # (T-1, 9)
             ego_from_mlp = self.ego_mlp(ego_input)  # (T-1, d_camera)
@@ -1105,8 +1124,9 @@ class LabelSmoother:
         smoothed = target_multihot.clone()
         # Active labels: reduce confidence
         smoothed[target_multihot == 1.0] = 1.0 - self.epsilon
-        # Inactive labels: small positive
-        inactive_val = self.epsilon / (C - k)  # (K, 1) broadcast
+        # Inactive labels: small positive (clamp denominator to prevent div-by-zero
+        # when all labels are active, i.e., k == C)
+        inactive_val = self.epsilon / (C - k).clamp(min=1)  # (K, 1) broadcast
         inactive_mask = (target_multihot == 0.0)
         smoothed[inactive_mask] = inactive_val.expand_as(target_multihot)[inactive_mask]
         return smoothed

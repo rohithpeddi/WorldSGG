@@ -40,7 +40,7 @@ class GLSTGNLoss(nn.Module):
         self.mode = mode
 
         self._ce_loss = nn.CrossEntropyLoss()
-        self._bce_loss = nn.BCELoss()
+        self._bce_loss = nn.BCEWithLogitsLoss()
         self._kl_loss = nn.KLDivLoss(reduction='batchmean')
 
         self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
@@ -85,8 +85,8 @@ class GLSTGNLoss(nn.Module):
 
         # Flatten all valid pairs across T
         att_pred = predictions["attention_distribution"][valid]  # (K_total, 3)
-        spa_pred = predictions["spatial_distribution"][valid]    # (K_total, 6)
-        con_pred = predictions["contacting_distribution"][valid]  # (K_total, 17)
+        spa_pred = predictions["spatial_logits"][valid]           # (K_total, 6) raw logits
+        con_pred = predictions["contacting_logits"][valid]        # (K_total, 17) raw logits
 
         att_gt = gt_attention[valid].to(device)
         spa_gt = gt_spatial[valid].to(device)
@@ -182,15 +182,19 @@ class GLSTGNLoss(nn.Module):
         if not both_valid.any():
             return torch.tensor(0.0, device=device, requires_grad=True)
 
-        # Spatial predictions for consecutive frames
-        spa_curr = torch.sigmoid(predictions["spatial_distribution"][1:])  # (T-1, K_max, 6)
-        spa_prev = torch.sigmoid(predictions["spatial_distribution"][:-1]).detach()
-        con_curr = torch.sigmoid(predictions["contacting_distribution"][1:])  # (T-1, K_max, 17)
-        con_prev = torch.sigmoid(predictions["contacting_distribution"][:-1]).detach()
+        # Use raw logits for numerically stable temporal consistency
+        spa_logits_curr = predictions["spatial_logits"][1:]       # (T-1, K_max, 6)
+        spa_prev_probs = torch.sigmoid(predictions["spatial_logits"][:-1]).detach()
+        con_logits_curr = predictions["contacting_logits"][1:]   # (T-1, K_max, 17)
+        con_prev_probs = torch.sigmoid(predictions["contacting_logits"][:-1]).detach()
 
-        # Masked BCE as temporal consistency penalty
-        spa_loss = F.binary_cross_entropy(spa_curr, spa_prev, reduction='none')  # (T-1, K_max, 6)
-        con_loss = F.binary_cross_entropy(con_curr, con_prev, reduction='none')  # (T-1, K_max, 17)
+        # Numerically stable BCE between current logits and previous probs
+        spa_loss = F.binary_cross_entropy_with_logits(
+            spa_logits_curr, spa_prev_probs, reduction='none',
+        )  # (T-1, K_max, 6)
+        con_loss = F.binary_cross_entropy_with_logits(
+            con_logits_curr, con_prev_probs, reduction='none',
+        )  # (T-1, K_max, 17)
 
         # Apply validity mask and average
         mask = both_valid.unsqueeze(-1).float()

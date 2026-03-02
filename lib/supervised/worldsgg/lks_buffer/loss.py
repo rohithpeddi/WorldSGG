@@ -33,7 +33,7 @@ class LKSLoss(nn.Module):
         self.mode = mode
 
         self._ce_loss = nn.CrossEntropyLoss()
-        self._bce_loss = nn.BCELoss()
+        self._bce_loss = nn.BCEWithLogitsLoss()
         self._kl_loss = nn.KLDivLoss(reduction='batchmean')
 
         self._label_smoother = LabelSmoother(epsilon=label_smoothing) if label_smoothing > 0 else None
@@ -78,8 +78,8 @@ class LKSLoss(nn.Module):
             return losses
 
         att_pred = predictions["attention_distribution"][valid]  # (K_total, 3)
-        spa_pred = predictions["spatial_distribution"][valid]    # (K_total, 6)
-        con_pred = predictions["contacting_distribution"][valid]  # (K_total, 17)
+        spa_pred = predictions["spatial_logits"][valid]           # (K_total, 6) raw logits
+        con_pred = predictions["contacting_logits"][valid]        # (K_total, 17) raw logits
 
         att_gt = gt_attention[valid].to(device)       # (K_total,)
         spa_gt = gt_spatial[valid].to(device)          # (K_total, 6)
