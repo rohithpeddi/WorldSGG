@@ -113,7 +113,7 @@ class TrainWSGGBase(WSGGBase):
         """Main training loop over epochs."""
         use_amp = self._conf.use_amp and torch.cuda.is_available()
         if use_amp:
-            self._scaler = torch.amp.GradScaler()
+            self._scaler = torch.amp.GradScaler(device="cuda")
 
         log_every = self._conf.log_every
 
