@@ -145,6 +145,11 @@ class TemporalObjectTransformer(nn.Module):
         T, N = visual_features.shape[:2]
         device = visual_features.device
 
+        assert T <= self.temporal_pe.shape[0], (
+            f"Video length T={T} exceeds max_T={self.temporal_pe.shape[0]}. "
+            f"Increase max_T in TemporalObjectTransformer."
+        )
+
         # --- Project visual features ---
         vis = self.visual_projector(visual_features)  # (T, N, d_visual)
 
@@ -188,7 +193,9 @@ class TemporalObjectTransformer(nn.Module):
         memory = self.transformer(tokens, src_key_padding_mask=padding_mask)  # (N, T, d_memory)
 
         # --- Strict zero-masking for padding ---
-        memory = memory * (~padding_mask).unsqueeze(-1).float()
+        # Use pristine valid_mask, NOT the failsafe-modified padding_mask,
+        # to avoid leaking transformer garbage at t=0 for fully invalid objects.
+        memory = memory * valid_mask.permute(1, 0).unsqueeze(-1).float()
 
         # --- Reshape back to (T, N, d_memory) ---
         memory = memory.permute(1, 0, 2)  # (T, N, d_memory)

@@ -78,7 +78,8 @@ class LKSLoss(nn.Module):
             object_idx: (T, K_max) long
         """
         device = predictions["attention_logits"].device
-        zero = torch.tensor(0.0, device=device, requires_grad=True)
+        # DDP-safe zero: stays connected to the computation graph
+        zero = predictions["attention_logits"].sum() * 0.0
         losses = {}
 
         # Flatten: select only valid pairs across all T frames

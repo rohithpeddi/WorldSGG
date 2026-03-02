@@ -62,8 +62,6 @@ class TrainGLSTGN(TrainWSGGBase):
         self._loss_fn = GLSTGNLoss(
             lambda_vlm=self._conf.lambda_vlm,
             label_smoothing=self._conf.label_smoothing_vlm,
-            lambda_smooth=self._conf.lambda_smooth,
-            movement_thresh=self._conf.movement_thresh,
         )
 
     def is_temporal(self) -> bool:

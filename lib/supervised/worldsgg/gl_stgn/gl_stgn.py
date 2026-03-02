@@ -191,8 +191,23 @@ class GLSTGN(nn.Module):
         centers_all = corners_all.mean(dim=2)  # (T, N, 3)
         velocity_all = torch.zeros_like(centers_all)
         accel_all = torch.zeros_like(centers_all)
-        velocity_all[1:] = centers_all[1:] - centers_all[:-1]
-        accel_all[2:] = velocity_all[2:] - velocity_all[1:-1]
+
+        # Only compute velocity where BOTH frames have valid objects
+        # (avoids [0,0,0] → [X,Y,Z] spike when padded objects enter the scene)
+        valid_vel = valid_all[1:] & valid_all[:-1]  # (T-1, N)
+        velocity_all[1:] = torch.where(
+            valid_vel.unsqueeze(-1),
+            centers_all[1:] - centers_all[:-1],
+            torch.zeros_like(centers_all[1:]),
+        )
+
+        # Only compute acceleration where 3 consecutive frames are valid
+        valid_acc = valid_all[2:] & valid_all[1:-1] & valid_all[:-2]  # (T-2, N)
+        accel_all[2:] = torch.where(
+            valid_acc.unsqueeze(-1),
+            velocity_all[2:] - velocity_all[1:-1],
+            torch.zeros_like(velocity_all[2:]),
+        )
 
         camera_R_all = None
         if camera_pose_seq is not None:

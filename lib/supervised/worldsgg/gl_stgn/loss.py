@@ -36,15 +36,11 @@ class GLSTGNLoss(nn.Module):
         self,
         lambda_vlm: float = 0.2,
         label_smoothing: float = 0.2,
-        lambda_smooth: float = 0.1,
-        movement_thresh: float = 0.3,
         bce_loss: bool = True,
         mode: str = "predcls",
     ):
         super().__init__()
         self.lambda_vlm = lambda_vlm
-        self.lambda_smooth = lambda_smooth
-        self.movement_thresh = movement_thresh
         self.bce_loss = bce_loss
         self.mode = mode
 
@@ -66,7 +62,6 @@ class GLSTGNLoss(nn.Module):
         person_idx: torch.Tensor,
         object_idx: torch.Tensor,
         valid_mask: Optional[torch.Tensor] = None,
-        corners: Optional[torch.Tensor] = None,
         gt_node_labels: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
@@ -85,7 +80,8 @@ class GLSTGNLoss(nn.Module):
             gt_node_labels: (T, N_max) optional — node class labels
         """
         device = predictions["attention_logits"].device
-        zero = torch.tensor(0.0, device=device, requires_grad=True)
+        # DDP-safe zero: stays connected to the computation graph
+        zero = predictions["attention_logits"].sum() * 0.0
         losses = {}
 
         valid = pair_valid.bool()
@@ -166,57 +162,10 @@ class GLSTGNLoss(nn.Module):
                 N_nodes = max(len(node_gt), 1)
                 losses[const.OBJECT_LOSS] = self._ce_loss(node_pred, node_gt) / N_nodes
 
-        # Smoothness loss (temporal inertia) — uses its own reduction='none' normalization
-        if self.lambda_smooth > 0:
-            smooth = self._compute_smoothness_loss(predictions, pair_valid, corners)
-            losses["smooth_loss"] = smooth * self.lambda_smooth
-
         total_keys = [const.ATTENTION_RELATION_LOSS, const.SPATIAL_RELATION_LOSS,
                       const.CONTACTING_RELATION_LOSS]
         if const.OBJECT_LOSS in losses:
             total_keys.append(const.OBJECT_LOSS)
-        if "smooth_loss" in losses:
-            total_keys.append("smooth_loss")
         losses["total"] = sum(losses[k] for k in total_keys)
 
         return losses
-
-    def _compute_smoothness_loss(self, predictions, pair_valid, corners):
-        """
-        Temporal inertia: penalizes prediction changes between consecutive frames.
-
-        Operates on padded (T, K_max, C) tensors. Computes KL between t and t-1
-        only for positions valid in BOTH frames.
-        """
-        device = predictions["attention_logits"].device
-        T = predictions["attention_logits"].shape[0]
-
-        if T < 2:
-            return torch.tensor(0.0, device=device, requires_grad=True)
-
-        # Get consecutive-frame valid masks: both frames must have valid pairs
-        both_valid = pair_valid[1:] & pair_valid[:-1]  # (T-1, K_max)
-
-        if not both_valid.any():
-            return torch.tensor(0.0, device=device, requires_grad=True)
-
-        # Use raw logits for numerically stable temporal consistency
-        spa_logits_curr = predictions["spatial_logits"][1:]       # (T-1, K_max, 6)
-        spa_prev_probs = torch.sigmoid(predictions["spatial_logits"][:-1]).detach()
-        con_logits_curr = predictions["contacting_logits"][1:]   # (T-1, K_max, 17)
-        con_prev_probs = torch.sigmoid(predictions["contacting_logits"][:-1]).detach()
-
-        # Numerically stable BCE between current logits and previous probs
-        spa_loss = F.binary_cross_entropy_with_logits(
-            spa_logits_curr, spa_prev_probs, reduction='none',
-        )  # (T-1, K_max, 6)
-        con_loss = F.binary_cross_entropy_with_logits(
-            con_logits_curr, con_prev_probs, reduction='none',
-        )  # (T-1, K_max, 17)
-
-        # Apply validity mask and average
-        mask = both_valid.unsqueeze(-1).float()
-        spa_smooth = (spa_loss * mask).sum() / mask.sum().clamp(min=1)
-        con_smooth = (con_loss * mask).sum() / mask.sum().clamp(min=1)
-
-        return spa_smooth + con_smooth

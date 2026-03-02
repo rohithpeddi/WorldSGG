@@ -97,24 +97,27 @@ class AMWAELoss(nn.Module):
         device = predictions["attention_logits"].device
         losses = {}
 
+        # DDP-safe zero: stays connected to the computation graph
+        zero = predictions["attention_logits"].sum() * 0.0
+
         # 1. Scene graph loss (split visible/masked)
         sg_losses = self._compute_scene_graph_loss(
             predictions, gt_attention, gt_spatial, gt_contacting,
             pair_valid, visibility_mask, person_idx, object_idx,
-            valid_mask, gt_node_labels, device,
+            valid_mask, gt_node_labels, device, zero,
         )
         losses.update(sg_losses)
 
         # 2. Feature reconstruction loss
-        recon_loss = self._compute_reconstruction_loss(predictions, device)
+        recon_loss = self._compute_reconstruction_loss(predictions, device, zero)
         losses["recon_loss"] = recon_loss * self.lambda_recon * self.lambda_recon_dominance
 
         # 3. Contrastive loss
-        contra_loss = self._compute_contrastive_loss(predictions, device)
+        contra_loss = self._compute_contrastive_loss(predictions, device, zero)
         losses["contrastive_loss"] = contra_loss * self.lambda_contrastive
 
         # 4. Simulated-unseen fine-tuning
-        sim_loss = self._compute_simulated_unseen_loss(predictions, device)
+        sim_loss = self._compute_simulated_unseen_loss(predictions, device, zero)
         losses["simulated_unseen_loss"] = sim_loss
 
         # 5. Attractor stability loss (AMWAE++ only)
@@ -132,10 +135,9 @@ class AMWAELoss(nn.Module):
     def _compute_scene_graph_loss(
         self, predictions, gt_attention, gt_spatial, gt_contacting,
         pair_valid, visibility_mask, person_idx, object_idx,
-        valid_mask, gt_node_labels, device,
+        valid_mask, gt_node_labels, device, zero,
     ) -> Dict[str, torch.Tensor]:
         """Split visible/masked SG loss on pre-padded tensors."""
-        zero = torch.tensor(0.0, device=device, requires_grad=True)
 
         valid = pair_valid.bool()
         if not valid.any():
@@ -222,12 +224,11 @@ class AMWAELoss(nn.Module):
 
         return losses
 
-    def _compute_reconstruction_loss(self, predictions, device):
+    def _compute_reconstruction_loss(self, predictions, device, zero):
         """MSE between retrieved tokens and original DINO features for masked tokens.
 
         Vectorized: stacks all T frames and computes masked MSE in one shot.
         """
-        zero = torch.tensor(0.0, device=device, requires_grad=True)
 
         recon_pred = predictions.get("reconstruction_predictions", None)
         recon_target = predictions.get("reconstruction_targets", None)
@@ -253,12 +254,11 @@ class AMWAELoss(nn.Module):
 
         return F.mse_loss(pred_masked, target_masked)
 
-    def _compute_contrastive_loss(self, predictions, device):
+    def _compute_contrastive_loss(self, predictions, device, zero):
         """InfoNCE on cross-attention weights for masked tokens.
 
         For each masked token, attention to SAME object (positive) should be higher.
         """
-        zero = torch.tensor(0.0, device=device, requires_grad=True)
 
         attn_weights_list = predictions.get("attn_weights", None)
         is_masked_list = predictions.get("is_masked", None)
@@ -305,13 +305,12 @@ class AMWAELoss(nn.Module):
 
         return torch.stack(losses).mean()
 
-    def _compute_simulated_unseen_loss(self, predictions, device):
+    def _compute_simulated_unseen_loss(self, predictions, device, zero):
         """Loss for artificially masked visible objects — uses clean GT.
 
         Each per-frame loss is normalized by its own pair count since these
         are independent simulation batches (not part of the main pair buckets).
         """
-        zero = torch.tensor(0.0, device=device, requires_grad=True)
 
         sim_preds = predictions.get("simulated_unseen_predictions", None)
         sim_gt = predictions.get("simulated_unseen_gt", None)
