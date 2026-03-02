@@ -89,6 +89,32 @@ def load_wsgg_config(yaml_path: str = None) -> SimpleNamespace:
     # Merge: YAML first, CLI overrides
     merged = dict(yaml_cfg)
     merged.update(cli_args)
+
+    # Coerce known numeric fields to correct types (YAML may parse 1e-4 as str)
+    _FLOAT_KEYS = {
+        "lr", "weight_decay", "grad_clip", "dropout",
+        "lambda_vlm", "lambda_smooth", "label_smoothing_vlm",
+        "lambda_reconstruction", "lambda_recon_dominance",
+        "lambda_contrastive", "lambda_stability",
+        "p_simulate_unseen", "p_mask_visible",
+        "warmup_fraction", "movement_thresh",
+    }
+    _INT_KEYS = {
+        "nepoch", "d_model", "d_struct", "d_visual", "d_memory",
+        "d_camera", "d_motion", "d_feedforward", "d_rel", "d_text",
+        "d_detector_roi", "d_union_roi",
+        "n_heads", "n_rel_layers", "n_rel_heads",
+        "n_graph_layers", "n_gnn_layers", "n_temporal_layers",
+        "n_temporal_edge_layers",
+        "batch_size", "max_objects", "max_T", "log_every",
+    }
+    for k in _FLOAT_KEYS:
+        if k in merged and merged[k] is not None:
+            merged[k] = float(merged[k])
+    for k in _INT_KEYS:
+        if k in merged and merged[k] is not None:
+            merged[k] = int(merged[k])
+
     merged["args"] = merged.copy()  # for WandB logging
 
     return SimpleNamespace(**merged)
