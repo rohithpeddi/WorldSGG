@@ -11,9 +11,13 @@ X[b,k] = Proj([G[b,k] ⊕ M[b,k] ⊕ cam[b,k] ⊕ log_staleness[b,k]])
 All ops broadcast over arbitrary leading batch dimensions (B, N, ...).
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class LKSTokenizer(nn.Module):

@@ -18,9 +18,13 @@ are added to Q (current viewpoint) and K (capture viewpoint) so the
 attention naturally favours memory entries from similar viewpoints.
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 class AssociativeRetriever(nn.Module):

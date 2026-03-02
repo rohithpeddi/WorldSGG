@@ -16,10 +16,14 @@ Usage:
   python train_wsgg_methods.py --config configs/methods/predcls/gl_stgn_predcls_dinov2b.yaml
 """
 
+import logging
+
 import torch
 
 from wsgg_base import WSGGBase, load_wsgg_config
 from train_wsgg_base import TrainWSGGBase
+
+logger = logging.getLogger(__name__)
 
 
 def _to_device(batch, device):
@@ -328,6 +332,7 @@ class TrainAMWAEPP(TrainWSGGBase):
         return True
 
     def process_train_video(self, batch) -> dict:
+        from tqdm import tqdm
         b = _to_device(batch, self._device)
         self._model.reset_memory()
         T = b["visual_features"].shape[0]
@@ -335,7 +340,7 @@ class TrainAMWAEPP(TrainWSGGBase):
         # AMWAE++ processes frame-by-frame (recurrent memory)
         # but we still pass the full batch for loss after all frames
         all_preds = []
-        for t in range(T):
+        for t in tqdm(range(T), desc="AMWAE++ frames", leave=False):
             frame_pred = self._model.forward_frame(
                 visual_features=b["visual_features"][t],
                 corners=b["corners"][t],
@@ -374,12 +379,13 @@ class TrainAMWAEPP(TrainWSGGBase):
         return losses
 
     def process_test_video(self, batch) -> dict:
+        from tqdm import tqdm
         b = _to_device(batch, self._device)
         self._model.reset_memory()
         T = b["visual_features"].shape[0]
 
         last_pred = None
-        for t in range(T):
+        for t in tqdm(range(T), desc="AMWAE++ eval", leave=False):
             last_pred = self._model.forward_frame(
                 visual_features=b["visual_features"][t],
                 corners=b["corners"][t],

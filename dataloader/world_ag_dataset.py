@@ -40,14 +40,19 @@ Usage::
         print(batch["gt_spatial"].shape)        # (T, K_max, 6)
 """
 
+import logging
 import os
 import pickle
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +200,7 @@ class WorldAG(Dataset):
         self.video_list: List[str] = []
         self._build_video_list()
 
-        print(
+        logger.info(
             f"[WorldAG][{phase}] mode={mode}, features={feature_model}, "
             f"{len(self.video_list)} videos"
         )
@@ -233,32 +238,51 @@ class WorldAG(Dataset):
                 candidates.add(vid)
 
         if not candidates:
-            print(
-                f"[WorldAG] WARNING: No common videos found!\n"
+            logger.warning(
+                f"No common videos found!\n"
                 f"  Features ({len(feat_videos)}): {list(feat_videos)[:5]}...\n"
                 f"  Annotations ({len(annot_videos)}): {list(annot_videos)[:5]}..."
             )
             self.video_list = []
             return
 
-        # Filter: keep only videos with >= 2 common frames
+        # Filter: keep only videos with >= 2 common frames (parallelized)
+        def _check_video(vid):
+            """Load both PKLs and count common frames. Returns (vid, n_common)."""
+            try:
+                feat_data = self._load_feature_pkl(vid)
+                annot_data = self._load_annotation_pkl(vid)
+                common_frames, _ = self._align_frames(feat_data, annot_data)
+                return vid, len(common_frames)
+            except Exception as e:
+                logger.warning(f"Error checking video {vid}: {e}")
+                return vid, 0
+
         valid = []
         skipped = 0
-        for vid in sorted(candidates):
-            feat_data = self._load_feature_pkl(vid)
-            annot_data = self._load_annotation_pkl(vid)
-            common_frames, _ = self._align_frames(feat_data, annot_data)
-            if len(common_frames) >= 2:
-                valid.append(vid)
-            else:
-                skipped += 1
+        num_workers = min(8, len(candidates))  # I/O-bound: threads are fine
+
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = {
+                pool.submit(_check_video, vid): vid
+                for vid in sorted(candidates)
+            }
+            for future in tqdm(
+                as_completed(futures), total=len(futures),
+                desc=f"Validating {self._phase} videos",
+            ):
+                vid, n_common = future.result()
+                if n_common >= 2:
+                    valid.append(vid)
+                else:
+                    skipped += 1
 
         if skipped > 0:
-            print(
-                f"[WorldAG] Skipped {skipped} videos with < 2 common frames"
+            logger.info(
+                f"Skipped {skipped} videos with < 2 common frames"
             )
 
-        self.video_list = valid
+        self.video_list = sorted(valid)
 
     # ------------------------------------------------------------------
     # PKL loading helpers

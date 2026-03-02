@@ -15,8 +15,12 @@ Key properties:
 Returns both the final state and the penultimate state (for stability loss).
 """
 
+import logging
+
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 from lib.supervised.worldsgg.worldsgg_base import SpatialPositionalEncoding
 

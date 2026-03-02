@@ -19,12 +19,15 @@ Components:
   9. MotionFeatureEncoder — 3D velocity/acceleration → d_motion tokens
 """
 
+import logging
 import math
 from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================

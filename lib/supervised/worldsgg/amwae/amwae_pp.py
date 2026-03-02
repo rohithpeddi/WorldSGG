@@ -10,8 +10,12 @@ All other modules (scaffold tokenizer, memory, retriever, predictor,
 temporal edge attention) are inherited unchanged from AMWAE.
 """
 
+import logging
+
 from .amwae import AMWAE
 from .energy_diffusion import EnergyDiffusion
+
+logger = logging.getLogger(__name__)
 
 
 class AMWAEPP(AMWAE):

@@ -18,9 +18,13 @@ Single-pass pipeline:
 All batched with B=T except edge token formation (variable K per frame).
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from .memory_bank import TemporalObjectTransformer
 from lib.supervised.worldsgg.worldsgg_base import (

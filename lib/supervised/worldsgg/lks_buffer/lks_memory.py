@@ -15,7 +15,11 @@ Implementation uses forward cummax + reverse cummax to find the closest
 visible frame in either direction, then picks the nearest.
 """
 
+import logging
+
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 @torch.no_grad()

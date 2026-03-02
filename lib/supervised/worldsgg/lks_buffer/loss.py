@@ -9,10 +9,14 @@ No per-frame loops or _build_multi_label_gt needed.
   Vis-Unseen / Unseen-Unseen: λ_vlm weighted, smoothed
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from constants import Constants as const
 from lib.supervised.worldsgg.worldsgg_base import LabelSmoother

@@ -22,9 +22,13 @@ All differentiable except the LKS buffer (step 1).
 No per-frame loops — fully batched.
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from .lks_memory import vectorized_lks_buffer
 from .lks_tokenizer import LKSTokenizer

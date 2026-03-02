@@ -16,6 +16,7 @@ Handles:
 
 import copy
 import gc
+import logging
 import time
 from abc import abstractmethod
 
@@ -28,6 +29,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from wsgg_base import WSGGBase
+
+logger = logging.getLogger(__name__)
 
 
 class TrainWSGGBase(WSGGBase):
@@ -58,7 +61,7 @@ class TrainWSGGBase(WSGGBase):
         from dataloader.world_ag_dataset import WorldAG, world_collate_fn
 
         skip_test = getattr(self._conf, 'skip_test', False)
-        print("Initializing WorldAG datasets...")
+        logger.info("Initializing WorldAG datasets...")
 
         self._train_dataset = WorldAG(
             phase="train",
@@ -89,9 +92,9 @@ class TrainWSGGBase(WSGGBase):
                 self._test_dataset, batch_size=1, shuffle=False, num_workers=0,
                 collate_fn=world_collate_fn,
             )
-            print(f"  Train: {len(self._train_dataset)} items | Test: {len(self._test_dataset)} items")
+            logger.info(f"  Train: {len(self._train_dataset)} items | Test: {len(self._test_dataset)} items")
         else:
-            print(f"  Train: {len(self._train_dataset)} items | Test: SKIPPED")
+            logger.info(f"  Train: {len(self._train_dataset)} items | Test: SKIPPED")
 
     # ------------------------------------------------------------------
     # Loss Functions
@@ -136,7 +139,7 @@ class TrainWSGGBase(WSGGBase):
                 # Skip NaN/Inf
                 if not torch.isfinite(loss):
                     self._optimizer.zero_grad(set_to_none=True)
-                    print(f"  Warning: NaN/Inf loss at batch {batch_idx}, skipping")
+                    logger.warning(f"  NaN/Inf loss at batch {batch_idx}, skipping")
                     continue
 
                 # Backward
@@ -172,7 +175,7 @@ class TrainWSGGBase(WSGGBase):
                     print(f"\n  e{epoch:2d} b{batch_idx:5d}/{len(self._dataloader_train):5d}"
                           f"  {elapsed / batch_idx:.3f}s/batch")
                     mn = pd.concat(tr[-log_every:], axis=1).mean(1)
-                    print(mn)
+                    logger.info(f"\n{mn}")
 
             # Save full-state checkpoint
             self._save_checkpoint(epoch)
@@ -200,7 +203,7 @@ class TrainWSGGBase(WSGGBase):
         else:
             score = 0.0
 
-        print('-------------------------------------------------------------------')
+        logger.info('─' * 60)
         return score
 
     # ------------------------------------------------------------------
@@ -232,13 +235,13 @@ class TrainWSGGBase(WSGGBase):
         self._maybe_resume()
 
         # 6. Train
-        print("━" * 60)
-        print(f"  Method   : {self._conf.method_name}")
-        print(f"  Temporal : {self.is_temporal()}")
-        print(f"  Mode     : {self._conf.mode}")
-        print(f"  Features : {getattr(self._conf, 'feature_model', 'unknown')}")
-        print(f"  Epochs   : {self._starting_epoch} → {self._conf.nepoch}")
-        print("━" * 60)
+        logger.info("━" * 60)
+        logger.info(f"  Method   : {self._conf.method_name}")
+        logger.info(f"  Temporal : {self.is_temporal()}")
+        logger.info(f"  Mode     : {self._conf.mode}")
+        logger.info(f"  Features : {getattr(self._conf, 'feature_model', 'unknown')}")
+        logger.info(f"  Epochs   : {self._starting_epoch} → {self._conf.nepoch}")
+        logger.info("━" * 60)
         self._train_model()
 
     # ------------------------------------------------------------------

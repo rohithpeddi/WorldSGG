@@ -19,10 +19,13 @@ Pipeline:
   reshape → (T, N, d_memory)
 """
 
+import logging
 import math
 import torch
 import torch.nn as nn
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class TemporalObjectTransformer(nn.Module):

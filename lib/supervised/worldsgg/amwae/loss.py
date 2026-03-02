@@ -9,10 +9,14 @@ L_total = L_vis + λ_vlm * L_masked + λ_recon * λ_recon_dominance * L_recon
         + λ_contra * L_contrastive + L_simulated_unseen
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from constants import Constants as const
 from lib.supervised.worldsgg.worldsgg_base import LabelSmoother

@@ -15,6 +15,7 @@ Provides:
 """
 
 import gc
+import logging
 import os
 from abc import abstractmethod
 from argparse import ArgumentParser
@@ -27,6 +28,8 @@ from torch import optim
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
 from lib.supervised.evaluation_recall import BasicSceneGraphEvaluator
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -128,7 +131,7 @@ class WSGGBase:
     # Config
     # ------------------------------------------------------------------
     def _init_config(self, is_train=True):
-        """Initialize device, experiment directory, and WandB."""
+        """Initialize device, experiment directory, logging, and WandB."""
         self._device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         # Experiment directory: save_path / experiment_name
@@ -139,29 +142,69 @@ class WSGGBase:
         self._experiment_dir = os.path.join(self._conf.save_path, self._experiment_name)
         os.makedirs(self._experiment_dir, exist_ok=True)
 
+        # --- Logging setup: file + console ---
+        self._setup_logging()
+
         ckpt = getattr(self._conf, 'ckpt', None)
         if ckpt is not None and ckpt != "null" and ckpt != "":
-            print("━" * 60)
-            print(f"  Experiment : {self._experiment_name}")
-            print(f"  Resume from: {ckpt}")
-            print(f"  Mode       : {self._conf.mode}")
-            print("━" * 60)
+            logger.info("━" * 60)
+            logger.info(f"  Experiment : {self._experiment_name}")
+            logger.info(f"  Resume from: {ckpt}")
+            logger.info(f"  Mode       : {self._conf.mode}")
+            logger.info("━" * 60)
         else:
             action = "Training" if is_train else "Testing"
-            print("━" * 60)
-            print(f"  Experiment: {self._experiment_name}")
-            print(f"  {action} from scratch")
-            print(f"  Mode      : {self._conf.mode}")
-            print("━" * 60)
+            logger.info("━" * 60)
+            logger.info(f"  Experiment: {self._experiment_name}")
+            logger.info(f"  {action} from scratch")
+            logger.info(f"  Mode      : {self._conf.mode}")
+            logger.info("━" * 60)
 
         # WandB
         if self._enable_wandb:
             wandb.init(project=self._experiment_name, config=self._conf.args)
 
-        print("─── Configuration ───")
+        logger.info("─── Configuration ───")
         for k, v in sorted(self._conf.args.items()):
-            print(f"  {k}: {v}")
-        print("─" * 40)
+            logger.info(f"  {k}: {v}")
+        logger.info("─" * 40)
+
+    def _setup_logging(self):
+        """Configure root logger with file and console handlers.
+
+        Log file: <project_root>/logs/<experiment_name>.log
+        """
+        # Determine project root (directory containing wsgg_base.py)
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        log_dir = os.path.join(project_root, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        log_file = os.path.join(log_dir, f"{self._experiment_name}.log")
+
+        # Configure root logger
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)
+
+        # Avoid duplicate handlers on re-init
+        if not root_logger.handlers:
+            formatter = logging.Formatter(
+                "%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+
+            # File handler
+            fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+            fh.setLevel(logging.INFO)
+            fh.setFormatter(formatter)
+            root_logger.addHandler(fh)
+
+            # Console handler
+            ch = logging.StreamHandler()
+            ch.setLevel(logging.INFO)
+            ch.setFormatter(formatter)
+            root_logger.addHandler(ch)
+
+        logger.info(f"Logging to: {log_file}")
 
     # ------------------------------------------------------------------
     # Optimizer / Scheduler
@@ -206,7 +249,7 @@ class WSGGBase:
             schedulers=[warmup, cosine],
             milestones=[warmup_steps],
         )
-        print(f"  Scheduler: warmup({warmup_steps}) → cosine({total_steps - warmup_steps}) | eta_min={lr * 0.01:.2e}")
+        logger.info(f"  Scheduler: warmup({warmup_steps}) → cosine({total_steps - warmup_steps}) | eta_min={lr * 0.01:.2e}")
 
     # ------------------------------------------------------------------
     # Checkpoint — Full-State Save (train)
@@ -234,7 +277,7 @@ class WSGGBase:
             "scaler_state_dict": self._scaler.state_dict() if self._scaler else None,
         }
         torch.save(checkpoint_dict, ckpt_file)
-        print(f"✓ Checkpoint saved: epoch {epoch + 1} → {ckpt_file}")
+        logger.info(f"✓ Checkpoint saved: epoch {epoch + 1} → {ckpt_file}")
 
     # ------------------------------------------------------------------
     # Checkpoint — Full-State Resume (train)
@@ -254,16 +297,16 @@ class WSGGBase:
 
         ckpt_path = os.path.join(self._experiment_dir, ckpt, "checkpoint_state.pth")
         if not os.path.exists(ckpt_path):
-            print(f"⚠️  Checkpoint not found: {ckpt_path}")
+            logger.warning(f"Checkpoint not found: {ckpt_path}")
             # Try to infer epoch from directory name (e.g., checkpoint_5 → epoch 5)
             try:
                 self._starting_epoch = int(ckpt.split("_")[-1]) + 1
             except (ValueError, IndexError):
                 self._starting_epoch = 0
-            print(f"  Starting from epoch {self._starting_epoch}")
+            logger.info(f"  Starting from epoch {self._starting_epoch}")
             return
 
-        print(f"Resuming from: {ckpt_path}")
+        logger.info(f"Resuming from: {ckpt_path}")
 
         # Load to CPU to avoid GPU memory spike
         checkpoint_state = torch.load(ckpt_path, map_location="cpu")
@@ -272,13 +315,13 @@ class WSGGBase:
         self._model.load_state_dict(checkpoint_state["model_state_dict"])
         del checkpoint_state["model_state_dict"]
         gc.collect()
-        print("  ✓ Model state restored")
+        logger.info("  ✓ Model state restored")
 
         # 2. Restore scheduler (small — just scalar state)
         if "scheduler_state_dict" in checkpoint_state and self._scheduler is not None:
             self._scheduler.load_state_dict(checkpoint_state["scheduler_state_dict"])
         del checkpoint_state["scheduler_state_dict"]
-        print("  ✓ Scheduler state restored")
+        logger.info("  ✓ Scheduler state restored")
 
         # 3. Restore optimizer (largest: 2× param memory for Adam momentum buffers)
         optimizer_state = checkpoint_state.pop("optimizer_state_dict")
@@ -287,7 +330,7 @@ class WSGGBase:
         # 4. Restore scaler if present
         if checkpoint_state.get("scaler_state_dict") is not None and self._scaler is not None:
             self._scaler.load_state_dict(checkpoint_state["scaler_state_dict"])
-            print("  ✓ AMP scaler state restored")
+            logger.info("  ✓ AMP scaler state restored")
 
         del checkpoint_state
         gc.collect()
@@ -296,9 +339,9 @@ class WSGGBase:
         del optimizer_state
         gc.collect()
         torch.cuda.empty_cache()
-        print("  ✓ Optimizer state restored")
+        logger.info("  ✓ Optimizer state restored")
 
-        print(f"✓ Resumed from epoch {self._starting_epoch} (GPU cache cleared)")
+        logger.info(f"✓ Resumed from epoch {self._starting_epoch} (GPU cache cleared)")
 
     # ------------------------------------------------------------------
     # Checkpoint — Model-Only Load (test)
@@ -321,13 +364,13 @@ class WSGGBase:
         if not os.path.exists(ckpt_path):
             raise ValueError(f"Checkpoint not found: {ckpt_path}")
 
-        print(f"Loading model weights from: {ckpt_path}")
+        logger.info(f"Loading model weights from: {ckpt_path}")
         checkpoint_state = torch.load(ckpt_path, map_location=self._device)
         self._model.load_state_dict(checkpoint_state["model_state_dict"], strict=False)
         epoch = checkpoint_state.get("epoch", "?")
         del checkpoint_state
         gc.collect()
-        print(f"  ✓ Model loaded (epoch {epoch})")
+        logger.info(f"  ✓ Model loaded (epoch {epoch})")
 
     # ------------------------------------------------------------------
     # Evaluators

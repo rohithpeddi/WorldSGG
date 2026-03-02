@@ -9,9 +9,13 @@ to unseen nodes. Fuses camera, motion, and ego-motion features.
 Accepts batched (B, N, ...) inputs natively (B=T for full video processing).
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class ScaffoldTokenizer(nn.Module):

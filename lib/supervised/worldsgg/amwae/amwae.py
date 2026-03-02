@@ -21,8 +21,12 @@ ALL T frames. Visibility embedding after retrieval informs downstream
 modules about observation provenance (direct vs retrieved).
 """
 
+import logging
+
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 from typing import Dict, List, Optional
 
 from .scaffold_tokenizer import ScaffoldTokenizer
