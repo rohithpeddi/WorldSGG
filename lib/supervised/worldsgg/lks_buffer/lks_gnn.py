@@ -97,7 +97,7 @@ class LKSGNN(nn.Module):
 
         # Module 5: Node predictor
         self.node_predictor = NodePredictor(
-            d_model=config.d_model,
+            d_memory=config.d_model,
             num_classes=num_object_classes,
         )
 
