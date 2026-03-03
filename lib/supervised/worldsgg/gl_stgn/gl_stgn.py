@@ -114,6 +114,7 @@ class GLSTGN(nn.Module):
 
         # Module 8: Relationship Predictor
         clip_path = getattr(config, 'clip_embeddings_path', '')
+        clip_path = Path(config.data_path) / clip_path if clip_path else None
         self.rel_predictor = RelationshipPredictor(
             d_model=config.d_memory,
             d_text=config.d_text,
