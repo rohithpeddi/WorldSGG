@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
 """
-combine_world4d_relationships.py
-=================================
-Merge augmented relationship annotations (GT + RAG) with world4D 3D bounding
-box annotations into a unified per-video PKL file.
+combine_world4d_relationships_test.py
+======================================
+Merge **human-corrected** relationship annotations (GT + corrections) with
+world4D 3D bounding box annotations into a unified per-video PKL file for
+the **test** split.
+
+Unlike the train version (which reads RAG-augmented PKLs with ``object_bbox``
+/ ``person_bbox`` dicts, source ``"gt"|"rag"``, and ``*_scores`` fields),
+this script reads the test augmentation PKLs produced by
+``augment_relationships_test.py``, which store per-frame data under a
+``frames`` dict with simpler relationship keys (``attention``, ``contacting``,
+``spatial``) and ``source`` values ``"gt"`` or ``"correction"``.
 
 Inputs:
-  - ``<ag_root>/world_rel_annotations/<phase>/<video>.pkl``
-    (from ``augment_relationships.py``)
+  - ``<ag_root>/wsg_2d_augmentations/<video>.pkl``
+    (from ``augment_relationships_test.py``)
   - ``<ag_root>/world_annotations/bbox_annotations_4d/<video>.pkl``
     (from ``frame_to_world4D_annotations.py``)
 
 Output:
-  - ``<ag_root>/world4d_rel_annotations/<phase>/<video>.pkl``
+  - ``<ag_root>/world4d_rel_annotations/test/<video>.pkl``
 
 Pipeline:
-  1) Load augmented_rel PKL (GT + RAG relationships, 2D bboxes, filtered frames).
+  1) Load augmented_rel PKL (GT + correction relationships, 2D bboxes).
   2) Load world4D PKL (3D OBBs, camera poses, floor mesh, object permanence).
   3) Per-frame: verify object label sets match, extract person 3D data,
      merge each object's relationship labels with its 3D bbox data.
@@ -44,18 +52,15 @@ OUTPUT PKL STRUCTURE
             },
             "object_info_list": [
                 {
-                    # From augmented_rel
-                    "class":                    str,        # full AG name
+                    # From augmented_rel (test format)
+                    "class":                    str,        # normalised object name
                     "label":                    str,        # short-form
                     "bbox_2d":                  np.ndarray | None,  # xyxy
                     "visible":                  bool,
                     "attention_relationship":   list[str],
                     "contacting_relationship":  list[str],
                     "spatial_relationship":     list[str],
-                    "source":                   "gt"|"rag",
-                    "attention_scores":         dict | None,
-                    "contacting_scores":        dict | None,
-                    "spatial_scores":           dict | None,
+                    "source":                   "gt"|"correction",
                     # From world4D (matched by short-form label)
                     "corners_world":            np.ndarray (8,3),
                     "corners_final":            np.ndarray (8,3),
@@ -89,12 +94,6 @@ OUTPUT PKL STRUCTURE
         "A_world_to_final":   ndarray (3, 3), # rotation+mirror matrix
     } | None,
     "floor_final":     dict | None,           # floor mesh already in FINAL coords
-
-    # Pass-through from augmented_rel
-    "rag_model":          str,
-    "rag_mode":           str,
-    "filter_stats":       dict,
-    "augmentation_stats": dict,
 }
 
 COORDINATE SYSTEMS
@@ -105,9 +104,8 @@ COORDINATE SYSTEMS
 - floor_final:    Already in FINAL coords.
 
 Usage:
-    python datasets/preprocess/annotations/combine_world4d_relationships.py \\
-        --ag_root_directory /data/rohith/ag \\
-        --phase train --rag_mode predcls --rag_model qwen3vl
+    python datasets/preprocess/annotations/combine_world4d_relationships_test.py \\
+        --ag_root_directory /data/rohith/ag
 """
 
 import argparse
@@ -158,7 +156,7 @@ _CODE_ROOT = Path(__file__).resolve().parents[3]  # WorldSGG/
 _LOG_DIR = _CODE_ROOT / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-logger = logging.getLogger("combine_w4d_rel")
+logger = logging.getLogger("combine_w4d_rel_test")
 logger.setLevel(logging.DEBUG)
 
 _ch = logging.StreamHandler()
@@ -167,7 +165,7 @@ _ch.setFormatter(logging.Formatter("%(message)s"))
 logger.addHandler(_ch)
 
 _fh = logging.FileHandler(
-    _LOG_DIR / "combine_world4d_relationships.log", mode="a",
+    _LOG_DIR / "combine_world4d_relationships_test.log", mode="a",
 )
 _fh.setLevel(logging.DEBUG)
 _fh.setFormatter(logging.Formatter(
@@ -206,13 +204,20 @@ def process_video(
     output_path: Path,
     overwrite: bool = False,
 ) -> Tuple[bool, List[str], Optional[Dict[str, Any]]]:
-    """Merge augmented_rel + world4D for a single video.
+    """Merge test augmented_rel + world4D for a single video.
+
+    The test augmented_rel PKL (from ``augment_relationships_test.py``) has
+    a ``frames`` dict keyed by ``"<video_id>/<frame>.jpg"`` (or ``.png``),
+    where each frame contains ``person_bbox`` and ``objects`` — a list of
+    dicts with keys ``class``, ``source``, ``attention``, ``contacting``,
+    ``spatial``, and ``bbox``.
 
     Returns
     -------
     success : bool
     mismatch_lines : list[str]
         Verification lines for label mismatches (empty if clean).
+    output_record : dict or None
     """
     if output_path.exists() and not overwrite:
         logger.debug(f"[{video_id}] Skipping: output exists at {output_path}")
@@ -258,12 +263,13 @@ def process_video(
     # ------------------------------------------------------------------
     # 3) Per-frame merge
     # ------------------------------------------------------------------
-    rel_object_bbox = rel_data.get("object_bbox", {})
-    rel_person_bbox = rel_data.get("person_bbox", {})
+    # Test augmented PKL stores data under "frames" dict keyed by
+    # "<video_id>/<frame>.jpg" with each value having "person_bbox"
+    # and "objects" list.
+    rel_frames = rel_data.get("frames", {})
 
     logger.debug(
-        f"[{video_id}] Augmented rel: {len(rel_object_bbox)} object_bbox frames, "
-        f"{len(rel_person_bbox)} person_bbox frames"
+        f"[{video_id}] Augmented rel (test): {len(rel_frames)} frames"
     )
 
     combined_frames: Dict[str, Dict[str, Any]] = {}
@@ -280,16 +286,21 @@ def process_video(
     n_cam_matched = 0
     n_cam_missing = 0
 
-    for frame_key in sorted(rel_object_bbox.keys()):
-        frame_name = frame_key.split("/")[-1]  # "000042.png"
-        frame_stem = frame_name.replace(".png", "")
+    for frame_key in sorted(rel_frames.keys()):
+        frame_data = rel_frames[frame_key]
+
+        # Extract frame filename — handle both .jpg and .png suffixes
+        frame_file = frame_key.split("/")[-1]  # e.g. "000042.jpg"
+        frame_stem = frame_file.replace(".png", "").replace(".jpg", "")
+        # World4D uses .png keys
+        frame_name_png = f"{frame_stem}.png"
 
         # ---- World4D lookup ----
-        w4d_frame_rec = w4d_frames.get(frame_name, None)
+        w4d_frame_rec = w4d_frames.get(frame_name_png, None)
 
         if w4d_frame_rec is None:
             logger.warning(
-                f"[{video_id}] Frame {frame_name}: NOT FOUND in world4D frames — "
+                f"[{video_id}] Frame {frame_file}: NOT FOUND in world4D frames — "
                 f"skipping 3D data for this frame"
             )
             w4d_objects = []
@@ -310,18 +321,18 @@ def process_video(
                     w4d_label_map[lbl] = obj
 
         logger.debug(
-            f"[{video_id}] Frame {frame_name}: "
+            f"[{video_id}] Frame {frame_file}: "
             f"w4d_objects={len(w4d_objects)} (person={'YES' if w4d_person_obj else 'NO'}, "
             f"objects={sorted(w4d_label_map.keys())})"
         )
 
         # ---- Verify object label sets ----
-        rel_objs = rel_object_bbox.get(frame_key, [])
+        rel_objs = frame_data.get("objects", [])
         rel_labels = {_to_short(o["class"]) for o in rel_objs}
         w4d_labels = set(w4d_label_map.keys())
 
         logger.debug(
-            f"[{video_id}] Frame {frame_name}: "
+            f"[{video_id}] Frame {frame_file}: "
             f"rel_labels={sorted(rel_labels)}, w4d_labels={sorted(w4d_labels)}"
         )
 
@@ -337,18 +348,18 @@ def process_video(
             logger.warning(line)
 
         # ---- Person info ----
-        person_rel = rel_person_bbox.get(frame_key, {})
+        person_bbox_raw = frame_data.get("person_bbox", None)
         person_info: Dict[str, Any] = {
             # 2D from augmented_rel
-            "bbox_2d": person_rel.get("bbox", None),
-            "bbox_size": person_rel.get("bbox_size", (0, 0)),
+            "bbox_2d": person_bbox_raw,
+            "bbox_size": (0, 0),  # not available in test augmented PKL
         }
         if w4d_person_obj is not None:
             person_3d = _extract_3d_fields(w4d_person_obj)
             person_info.update(person_3d)
             n_person_matched += 1
             logger.debug(
-                f"[{video_id}] Frame {frame_name}: person 3D MATCHED "
+                f"[{video_id}] Frame {frame_file}: person 3D MATCHED "
                 f"(filled={person_3d['world4d_filled']}, "
                 f"method={person_3d['world4d_fill_method']})"
             )
@@ -364,7 +375,7 @@ def process_video(
             })
             n_person_missing += 1
             logger.warning(
-                f"[{video_id}] Frame {frame_name}: person NOT FOUND in world4D — "
+                f"[{video_id}] Frame {frame_file}: person NOT FOUND in world4D — "
                 f"3D fields set to None"
             )
 
@@ -372,24 +383,23 @@ def process_video(
         object_info_list: List[Dict[str, Any]] = []
 
         for rel_obj in rel_objs:
-            cls_full = rel_obj["class"]          # full AG name
-            cls_short = _to_short(cls_full)      # short-form for matching
+            cls_name = rel_obj["class"]           # normalised object name
+            cls_short = _to_short(cls_name)       # short-form for matching
             rel_source = rel_obj.get("source", "gt")
+            visible = rel_source == "gt"          # GT objects are visible, corrections are not
             all_labels.add(cls_short)
 
-            # Base from augmented_rel
+            # Test augmented PKL uses "attention", "contacting", "spatial"
+            # keys (list of str). Map them to the unified output keys.
             merged: Dict[str, Any] = {
-                "class": cls_full,
+                "class": cls_name,
                 "label": cls_short,
                 "bbox_2d": rel_obj.get("bbox", None),
-                "visible": rel_obj.get("visible", True),
-                "attention_relationship": rel_obj.get("attention_relationship", []),
-                "contacting_relationship": rel_obj.get("contacting_relationship", []),
-                "spatial_relationship": rel_obj.get("spatial_relationship", []),
+                "visible": visible,
+                "attention_relationship": rel_obj.get("attention", []),
+                "contacting_relationship": rel_obj.get("contacting", []),
+                "spatial_relationship": rel_obj.get("spatial", []),
                 "source": rel_source,
-                "attention_scores": rel_obj.get("attention_scores", None),
-                "contacting_scores": rel_obj.get("contacting_scores", None),
-                "spatial_scores": rel_obj.get("spatial_scores", None),
             }
 
             # Merge 3D from world4D
@@ -398,7 +408,7 @@ def process_video(
                 merged.update(_extract_3d_fields(w4d_match))
                 n_obj_matched += 1
                 logger.debug(
-                    f"[{video_id}] Frame {frame_name}: obj '{cls_short}' "
+                    f"[{video_id}] Frame {frame_file}: obj '{cls_short}' "
                     f"(src={rel_source}) 3D MATCHED "
                     f"(filled={merged['world4d_filled']}, "
                     f"method={merged['world4d_fill_method']}, "
@@ -416,7 +426,7 @@ def process_video(
                 })
                 n_obj_missing_3d += 1
                 logger.warning(
-                    f"[{video_id}] Frame {frame_name}: obj '{cls_short}' "
+                    f"[{video_id}] Frame {frame_file}: obj '{cls_short}' "
                     f"(src={rel_source}) NO world4D match — 3D fields set to None"
                 )
 
@@ -435,7 +445,7 @@ def process_video(
         else:
             n_cam_missing += 1
             logger.warning(
-                f"[{video_id}] Frame {frame_name}: stem '{frame_stem}' "
+                f"[{video_id}] Frame {frame_file}: stem '{frame_stem}' "
                 f"NOT FOUND in world4D frame_stems — no camera pose for this frame"
             )
 
@@ -457,7 +467,7 @@ def process_video(
     else:
         logger.warning(
             f"[{video_id}] No valid camera pose indices found "
-            f"(0/{len(rel_object_bbox)} frames matched)"
+            f"(0/{len(rel_frames)} frames matched)"
         )
 
     # ------------------------------------------------------------------
@@ -479,12 +489,6 @@ def process_video(
         "global_floor_sim": w4d_data.get("global_floor_sim", None),
         "world_to_final": w4d_data.get("world_to_final", None),
         "floor_final": w4d_data.get("floor_final", None),
-
-        # Pass-through from augmented_rel
-        "rag_model": rel_data.get("rag_model", ""),
-        "rag_mode": rel_data.get("rag_mode", ""),
-        "filter_stats": rel_data.get("filter_stats", {}),
-        "augmentation_stats": rel_data.get("augmentation_stats", {}),
     }
 
     with open(output_path, "wb") as f:
@@ -520,24 +524,12 @@ def process_video(
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Combine augmented relationship annotations with world4D "
-            "3D bounding box annotations into a unified per-video PKL."
+            "Combine human-corrected test relationship annotations with "
+            "world4D 3D bounding box annotations into a unified per-video PKL."
         ),
     )
     parser.add_argument(
         "--ag_root_directory", type=str, default="/data/rohith/ag",
-    )
-    parser.add_argument(
-        "--phase", type=str, default="train", choices=["train", "test"],
-        help="Dataset split (default: train)",
-    )
-    parser.add_argument(
-        "--rag_mode", type=str, default="predcls",
-        help="RAG mode (pass-through metadata)",
-    )
-    parser.add_argument(
-        "--rag_model", type=str, default="qwen3vl",
-        help="RAG model name (pass-through metadata)",
     )
     parser.add_argument(
         "--overwrite", action="store_true", default=False,
@@ -545,7 +537,7 @@ def parse_args():
     )
     parser.add_argument(
         "--video", type=str, default=None,
-        help="Process a single video (e.g. '001YG.mp4')",
+        help="Process a single video (e.g. '00607.mp4')",
     )
     return parser.parse_args()
 
@@ -556,33 +548,27 @@ def main():
     args = parse_args()
     ag_root = Path(args.ag_root_directory)
 
-    rel_dir = ag_root / "world_rel_annotations" / args.phase
+    # Test augmented PKLs from augment_relationships_test.py
+    rel_dir = ag_root / "wsg_2d_augmentations"
     w4d_dir = ag_root / "world_annotations" / "bbox_annotations_4d"
-    output_dir = ag_root / "world4d_rel_annotations" / args.phase
+    output_dir = ag_root / "world4d_rel_annotations" / "test"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"Augmented rel dir:  {rel_dir}")
     logger.info(f"World4D dir:        {w4d_dir}")
     logger.info(f"Output dir:         {output_dir}")
-    logger.info(f"Phase: {args.phase}, Mode: {args.rag_mode}, Model: {args.rag_model}")
 
     # ------------------------------------------------------------------
     # Discover videos
     # ------------------------------------------------------------------
     if args.video:
         vid = args.video
-        if not vid.endswith(".mp4"):
-            vid = f"{vid}.mp4"
         video_ids = [vid]
     else:
         if not rel_dir.exists():
             logger.error(f"Augmented rel directory not found: {rel_dir}")
             sys.exit(1)
-        video_ids = sorted([
-            p.stem for p in rel_dir.glob("*.pkl")
-        ])
-        # video_ids are like "001YG.mp4" (stem of "001YG.mp4.pkl")
-        # Actually check — the pkl is named <video_id>.pkl where video_id = "001YG.mp4"
+        # PKL files are named <video_id>.pkl (e.g. "00607.mp4.pkl")
         video_ids = sorted([
             p.name.replace(".pkl", "") for p in rel_dir.glob("*.pkl")
         ])
@@ -601,7 +587,7 @@ def main():
     error_count = 0
     all_mismatches: List[str] = []
 
-    for video_id in tqdm(video_ids, desc=f"Combining ({args.phase})"):
+    for video_id in tqdm(video_ids, desc="Combining (test)"):
         # Derive video stem for world4D PKL (world4D uses stem without .mp4)
         video_stem = video_id.replace(".mp4", "")
 
@@ -648,7 +634,7 @@ def main():
     )
     logger.info(f"Output:     {output_dir}")
     logger.info(f"Verify:     {verify_path} ({len(all_mismatches)} mismatches)")
-    logger.info(f"Log:        {_LOG_DIR / 'combine_world4d_relationships.log'}")
+    logger.info(f"Log:        {_LOG_DIR / 'combine_world4d_relationships_test.log'}")
     logger.info(f"{'='*60}")
 
 
