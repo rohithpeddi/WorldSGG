@@ -241,7 +241,7 @@ class AMWAE(nn.Module):
         )  # (T, N, d_motion)
 
         # ==================== Step 5: Scaffold tokenization (B=T) ====================
-        hybrid_tokens, is_masked_all, original_visual_all = self.scaffold_tokenizer(
+        hybrid_tokens, is_masked_all, original_visual_all, artificially_masked_all = self.scaffold_tokenizer(
             geometry_tokens=struct_all,
             visual_features=visual_all,
             visibility_mask=visibility_all,
@@ -250,7 +250,7 @@ class AMWAE(nn.Module):
             cam_feats=cam_all,
             motion_feats=motion_all,
             ego_tokens=ego_tokens_all,
-        )  # (T, N, d_model), (T, N), (T, N, d_visual)
+        )  # (T, N, d_model), (T, N), (T, N, d_visual), (T, N)
 
         # ==================== Step 6: Associative retrieval (bidirectional) ====================
         completed_tokens = self.retriever(
@@ -267,6 +267,7 @@ class AMWAE(nn.Module):
         effective_visible = visibility_all & (~is_masked_all)  # (T, N)
         vis_ids = effective_visible.long()  # 0 = unseen/masked, 1 = directly observed
         completed_tokens = completed_tokens + self.visibility_emb(vis_ids)
+        completed_tokens = completed_tokens * valid_all.unsqueeze(-1).float()  # re-zero padding
 
         # ==================== Step 8: Spatial GNN (B=T) ====================
         enriched_all = self.spatial_gnn(
@@ -303,6 +304,7 @@ class AMWAE(nn.Module):
             "spatial_logits": edge_out["spatial_logits"],                  # (T, K_max, 6)
             "contacting_logits": edge_out["contacting_logits"],            # (T, K_max, 17)
             "is_masked": is_masked_all,                                    # (T, N)
+            "artificially_masked": artificially_masked_all,                  # (T, N) — for reconstruction loss
             "original_visual": original_visual_all,                        # (T, N, d_visual)
             "reconstruction_predictions": recon_pred_all,                  # (T, N, d_visual)
             "reconstruction_targets": original_visual_all,                 # (T, N, d_visual)

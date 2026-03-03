@@ -51,6 +51,10 @@ class AMWAEPP(AMWAE):
             contact_class_num=contact_class_num,
         )
 
+        # Remove inherited SpatialGNN — AMWAE++ uses EnergyDiffusion instead.
+        # Prevents DDP disconnected-graph crash and frees VRAM.
+        del self.spatial_gnn
+
         # Override Module 8: Replace SpatialGNN with EnergyDiffusion
         self.diffusion = EnergyDiffusion(
             d_model=config.d_model,
@@ -133,7 +137,7 @@ class AMWAEPP(AMWAE):
         )
 
         # ==================== Step 5: Scaffold tokenization (B=T) ====================
-        hybrid_tokens, is_masked_all, original_visual_all = self.scaffold_tokenizer(
+        hybrid_tokens, is_masked_all, original_visual_all, artificially_masked_all = self.scaffold_tokenizer(
             geometry_tokens=struct_all,
             visual_features=visual_all,
             visibility_mask=visibility_all,
@@ -157,6 +161,7 @@ class AMWAEPP(AMWAE):
         effective_visible = visibility_all & (~is_masked_all)  # (T, N)
         vis_ids = effective_visible.long()  # 0 = unseen/masked, 1 = directly observed
         completed_tokens = completed_tokens + self.visibility_emb(vis_ids)
+        completed_tokens = completed_tokens * valid_all.unsqueeze(-1).float()  # re-zero padding
 
         # ==================== Step 8: EnergyDiffusion (iterative, weight-tied) ====================
         # This is the ONLY difference from AMWAE: SpatialGNN → EnergyDiffusion
@@ -194,6 +199,7 @@ class AMWAEPP(AMWAE):
             "spatial_logits": edge_out["spatial_logits"],
             "contacting_logits": edge_out["contacting_logits"],
             "is_masked": is_masked_all,
+            "artificially_masked": artificially_masked_all,                  # (T, N) — for reconstruction loss
             "original_visual": original_visual_all,
             "reconstruction_predictions": recon_pred_all,
             "reconstruction_targets": original_visual_all,

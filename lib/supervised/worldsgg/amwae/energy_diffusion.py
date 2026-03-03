@@ -145,4 +145,9 @@ class EnergyDiffusion(nn.Module):
         h_t = self.post_norm(h_t)
         h_t = h_t.masked_fill(~valid_mask.unsqueeze(-1), 0.0)
 
+        # Apply same processing to h_prev so stability loss compares
+        # two comparably-normalized tensors (not post-norm vs pre-norm)
+        h_prev = self.post_norm(h_prev)
+        h_prev = h_prev.masked_fill(~valid_mask.unsqueeze(-1), 0.0)
+
         return h_t, h_prev.detach()

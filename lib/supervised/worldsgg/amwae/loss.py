@@ -119,8 +119,19 @@ class AMWAELoss(nn.Module):
             L_stability = F.mse_loss(h_final_all, h_prev_all.detach())
             losses["stability_loss"] = self.lambda_stability * L_stability
 
-        # Total
-        losses["total"] = sum(v for v in losses.values() if isinstance(v, torch.Tensor) and v.requires_grad)
+        # Total: sum only the aggregate loss keys (not the sub-losses like vis_att, masked_att)
+        total_keys = [
+            const.ATTENTION_RELATION_LOSS,
+            const.SPATIAL_RELATION_LOSS,
+            const.CONTACTING_RELATION_LOSS,
+        ]
+        if const.OBJECT_LOSS in losses:
+            total_keys.append(const.OBJECT_LOSS)
+        if "recon_loss" in losses:
+            total_keys.append("recon_loss")
+        if "stability_loss" in losses:
+            total_keys.append("stability_loss")
+        losses["total"] = sum(losses[k] for k in total_keys)
 
         return losses
 
@@ -132,12 +143,29 @@ class AMWAELoss(nn.Module):
         """Split visible/masked SG loss on pre-padded tensors."""
 
         valid = pair_valid.bool()
+
+        losses = {}
+
+        # Node classification: compute BEFORE edge early-return
+        # (valid objects may exist even when no interacting pairs do)
+        if gt_node_labels is not None and self.mode in [const.SGCLS, const.SGDET]:
+            node_pred = predictions["node_logits"]
+            node_gt = gt_node_labels.to(device)
+            if valid_mask is not None:
+                node_pred = node_pred[valid_mask]
+                node_gt = node_gt[valid_mask]
+            else:
+                node_pred = node_pred.reshape(-1, node_pred.shape[-1])
+                node_gt = node_gt.reshape(-1)
+            if len(node_gt) > 0:
+                N_nodes = max((node_gt >= 0).sum().item(), 1)
+                losses[const.OBJECT_LOSS] = self._ce_loss(node_pred, node_gt) / N_nodes
+
         if not valid.any():
-            return {
-                const.ATTENTION_RELATION_LOSS: zero,
-                const.SPATIAL_RELATION_LOSS: zero,
-                const.CONTACTING_RELATION_LOSS: zero,
-            }
+            losses[const.ATTENTION_RELATION_LOSS] = zero
+            losses[const.SPATIAL_RELATION_LOSS] = zero
+            losses[const.CONTACTING_RELATION_LOSS] = zero
+            return losses
 
         # Flatten all valid pairs across T
         att_pred = predictions["attention_logits"][valid]
@@ -199,34 +227,25 @@ class AMWAELoss(nn.Module):
         losses[const.SPATIAL_RELATION_LOSS] = losses["vis_spa"] + losses["masked_spa"]
         losses[const.CONTACTING_RELATION_LOSS] = losses["vis_con"] + losses["masked_con"]
 
-        # Node loss (separate normalization — not affected by pair buckets)
-        if gt_node_labels is not None and self.mode in [const.SGCLS, const.SGDET]:
-            node_pred = predictions["node_logits"]
-            node_gt = gt_node_labels.to(device)
-            if valid_mask is not None:
-                node_pred = node_pred[valid_mask]
-                node_gt = node_gt[valid_mask]
-            else:
-                # Flatten (T, N, C) → (T*N, C) so CE gets classes on dim=1
-                node_pred = node_pred.reshape(-1, node_pred.shape[-1])
-                node_gt = node_gt.reshape(-1)
-            if len(node_gt) > 0:
-                N_nodes = max((node_gt >= 0).sum().item(), 1)  # count real objects, not padding (-100)
-                losses[const.OBJECT_LOSS] = self._ce_loss(node_pred, node_gt) / N_nodes
-
         return losses
 
     def _compute_reconstruction_loss(self, predictions, device, zero):
-        """MSE between retrieved tokens and original DINO features for masked tokens.
+        """MSE between retrieved tokens and original DINO features for
+        ARTIFICIALLY masked tokens only.
 
-        Vectorized: stacks all T frames and computes masked MSE in one shot.
+        Only penalizes reconstruction of objects that were visible but
+        randomly masked during training — NOT padding tokens or genuinely
+        unseen objects (which have no meaningful reconstruction target).
         """
 
         recon_pred = predictions.get("reconstruction_predictions", None)
         recon_target = predictions.get("reconstruction_targets", None)
-        is_masked = predictions.get("is_masked", None)
+        # Use artificially_masked (training-masked visible objects only)
+        # Falls back to is_masked for backward compatibility
+        recon_mask = predictions.get("artificially_masked",
+                                     predictions.get("is_masked", None))
 
-        if recon_pred is None or recon_target is None or is_masked is None:
+        if recon_pred is None or recon_target is None or recon_mask is None:
             return zero
 
         # These should already be (T, N, D) tensors from the model
@@ -235,14 +254,14 @@ class AMWAELoss(nn.Module):
                 return zero
             recon_pred = torch.stack(recon_pred)
             recon_target = torch.stack(recon_target)
-            is_masked = torch.stack(is_masked)
+            recon_mask = torch.stack(recon_mask)
 
-        # is_masked: (T, N) bool
-        if not is_masked.any():
+        # recon_mask: (T, N) bool
+        if not recon_mask.any():
             return zero
 
-        pred_masked = recon_pred[is_masked]
-        target_masked = recon_target[is_masked]
+        pred_masked = recon_pred[recon_mask]
+        target_masked = recon_target[recon_mask]
 
         return F.mse_loss(pred_masked, target_masked)
 

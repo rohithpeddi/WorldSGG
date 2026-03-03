@@ -153,6 +153,12 @@ class AssociativeRetriever(nn.Module):
             ffn_out = self.cross_ffns[i](query)
             query = self.cross_norms2[i](query + ffn_out)
 
+            # Iteratively refine K/V: visible positions get the evolved query
+            # so subsequent layers attend to progressively richer representations
+            vis_mask = kv_active.unsqueeze(-1).float()  # (N, T, 1)
+            key = torch.where(kv_active.unsqueeze(-1), query + k_bias, key)
+            value = torch.where(kv_active.unsqueeze(-1), query, value)
+
         # --- Zero out invalid ---
         query = query * val.unsqueeze(-1).float()
 

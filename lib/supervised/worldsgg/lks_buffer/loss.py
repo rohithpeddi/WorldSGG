@@ -84,8 +84,31 @@ class LKSLoss(nn.Module):
 
         # Flatten: select only valid pairs across all T frames
         valid = pair_valid.bool()  # (T, K_max)
+
+        # Node classification: compute BEFORE edge early-return
+        # (valid objects may exist even when no interacting pairs do)
+        if gt_node_labels is not None and self.mode in [const.SGCLS, const.SGDET]:
+            node_pred = predictions["node_logits"]
+            node_gt = gt_node_labels.to(device)
+            if valid_mask is not None:
+                node_pred = node_pred[valid_mask]
+                node_gt = node_gt[valid_mask]
+            else:
+                node_pred = node_pred.reshape(-1, node_pred.shape[-1])
+                node_gt = node_gt.reshape(-1)
+            if len(node_gt) > 0:
+                N_nodes = max((node_gt >= 0).sum().item(), 1)
+                losses[const.OBJECT_LOSS] = self._ce_loss(node_pred, node_gt) / N_nodes
+
         if not valid.any():
-            losses["total"] = zero
+            losses[const.ATTENTION_RELATION_LOSS] = zero
+            losses[const.SPATIAL_RELATION_LOSS] = zero
+            losses[const.CONTACTING_RELATION_LOSS] = zero
+            total_keys = [const.ATTENTION_RELATION_LOSS, const.SPATIAL_RELATION_LOSS,
+                          const.CONTACTING_RELATION_LOSS]
+            if const.OBJECT_LOSS in losses:
+                total_keys.append(const.OBJECT_LOSS)
+            losses["total"] = sum(losses[k] for k in total_keys)
             return losses
 
         att_pred = predictions["attention_logits"][valid]  # (K_total, 3)
@@ -155,21 +178,6 @@ class LKSLoss(nn.Module):
         losses[const.CONTACTING_RELATION_LOSS] = (
             losses["vis_vis_con"] + losses["vis_unseen_con"] + losses["unseen_unseen_con"]
         )
-
-        # Node classification (separate normalization — not affected by pair buckets)
-        if gt_node_labels is not None and self.mode in [const.SGCLS, const.SGDET]:
-            node_pred = predictions["node_logits"]
-            node_gt = gt_node_labels.to(device)
-            if valid_mask is not None:
-                node_pred = node_pred[valid_mask]
-                node_gt = node_gt[valid_mask]
-            else:
-                # Flatten (T, N, C) → (T*N, C) so CE gets classes on dim=1
-                node_pred = node_pred.reshape(-1, node_pred.shape[-1])
-                node_gt = node_gt.reshape(-1)
-            if len(node_gt) > 0:
-                N_nodes = max((node_gt >= 0).sum().item(), 1)  # count real objects, not padding (-100)
-                losses[const.OBJECT_LOSS] = self._ce_loss(node_pred, node_gt) / N_nodes
 
         total_keys = [const.ATTENTION_RELATION_LOSS, const.SPATIAL_RELATION_LOSS, const.CONTACTING_RELATION_LOSS]
         if const.OBJECT_LOSS in losses:

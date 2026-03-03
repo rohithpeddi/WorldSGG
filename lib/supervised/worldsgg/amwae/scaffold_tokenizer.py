@@ -98,6 +98,9 @@ class ScaffoldTokenizer(nn.Module):
             tokens: (B, N, d_model) — hybrid tokens.
             is_masked: (B, N) bool — True for tokens that received [MASK].
             original_visual: (B, N, d_visual) — projected DINO features BEFORE masking.
+            artificially_masked: (B, N) bool — True only for visible objects that were
+                randomly masked during training. This is the correct mask for
+                reconstruction loss (excludes padding and genuinely unseen objects).
         """
         B, N = geometry_tokens.shape[:2]
         device = geometry_tokens.device
@@ -112,6 +115,7 @@ class ScaffoldTokenizer(nn.Module):
         is_masked = ~visibility_mask  # (B, N)
 
         # Simulated masking during training
+        artificially_masked = torch.zeros_like(is_masked)  # (B, N) all False
         if self.training and p_mask_visible > 0.0:
             rand = torch.rand(B, N, device=device)
             artificially_masked = (rand < p_mask_visible) & visibility_mask & valid_mask
@@ -145,4 +149,4 @@ class ScaffoldTokenizer(nn.Module):
         # Zero out padding
         tokens = tokens * valid_mask.unsqueeze(-1).float()
 
-        return tokens, is_masked, original_visual
+        return tokens, is_masked, original_visual, artificially_masked
