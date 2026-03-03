@@ -211,7 +211,7 @@ class AMWAELoss(nn.Module):
                 node_pred = node_pred.reshape(-1, node_pred.shape[-1])
                 node_gt = node_gt.reshape(-1)
             if len(node_gt) > 0:
-                N_nodes = max(len(node_gt), 1)
+                N_nodes = max((node_gt >= 0).sum().item(), 1)  # count real objects, not padding (-100)
                 losses[const.OBJECT_LOSS] = self._ce_loss(node_pred, node_gt) / N_nodes
 
         return losses

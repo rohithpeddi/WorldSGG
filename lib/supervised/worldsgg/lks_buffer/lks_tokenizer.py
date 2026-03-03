@@ -74,15 +74,16 @@ class LKSTokenizer(nn.Module):
         """
         T, N = geometry_tokens.shape[:2]
         device = geometry_tokens.device
+        dtype = geometry_tokens.dtype  # AMP-safe: match ambient dtype (float16/float32)
 
         # Camera-relative features (zeros if not provided)
         if cam_feats is None:
-            cam_feats = torch.zeros(T, N, self.d_camera, device=device)
+            cam_feats = torch.zeros(T, N, self.d_camera, device=device, dtype=dtype)
 
         # Log-scaled staleness (default: 0)
         if staleness is None:
             staleness = torch.zeros(T, N, dtype=torch.long, device=device)
-        log_staleness = torch.log(staleness.float() + 1.0).unsqueeze(-1)  # (T, N, 1)
+        log_staleness = torch.log(staleness.to(dtype) + 1.0).unsqueeze(-1)  # (T, N, 1)
 
         # Concatenate all inputs (visual projection happens inside fusion_proj)
         fused = torch.cat([
@@ -92,6 +93,6 @@ class LKSTokenizer(nn.Module):
         tokens = self.fusion_proj(fused)  # (B, N, d_model)
 
         # Zero out padding
-        tokens = tokens * valid_mask.unsqueeze(-1).float()
+        tokens = tokens * valid_mask.unsqueeze(-1).to(dtype)
 
         return tokens

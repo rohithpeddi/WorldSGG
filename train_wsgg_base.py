@@ -52,6 +52,8 @@ class TrainWSGGBase(WSGGBase):
         self._dataloader_test = None
         self._object_classes = None
         self._scaler = None
+        self._best_score = 0.0
+        self._best_epoch = -1
 
     # ------------------------------------------------------------------
     # Dataset
@@ -183,9 +185,29 @@ class TrainWSGGBase(WSGGBase):
 
             # End-of-epoch evaluation (skip if no test dataset)
             if self._dataloader_test is not None:
-                self._evaluate_after_epoch()
+                score = self._evaluate_after_epoch(epoch)
+            else:
+                score = 0.0
 
-    def _evaluate_after_epoch(self) -> float:
+            # Epoch-level WandB logging
+            epoch_losses = pd.concat(tr, axis=1).mean(1) if tr else pd.Series()
+            if self._enable_wandb:
+                wandb_epoch = {"epoch": epoch + 1}
+                for k, v in epoch_losses.items():
+                    wandb_epoch[f"epoch/{k}"] = v
+                wandb_epoch["epoch/recall@20"] = score
+                wandb_epoch["epoch/best_score"] = self._best_score
+                wandb.log(wandb_epoch)
+
+            # Epoch summary
+            logger.info(f"\n{'═' * 60}")
+            logger.info(f"  EPOCH {epoch + 1}/{self._conf.nepoch} SUMMARY")
+            logger.info(f"  Recall@20: {score:.4f}  |  Best: {self._best_score:.4f} (epoch {self._best_epoch + 1})")
+            if len(epoch_losses) > 0:
+                logger.info(f"  Avg losses: {dict(epoch_losses.round(4))}")
+            logger.info(f"{'═' * 60}")
+
+    def _evaluate_after_epoch(self, epoch: int) -> float:
         """Run test evaluation after each epoch. Returns score for scheduler."""
         test_iter = iter(self._dataloader_test)
         self._model.eval()
@@ -204,8 +226,26 @@ class TrainWSGGBase(WSGGBase):
         else:
             score = 0.0
 
+        # Best model tracking
+        if score > self._best_score:
+            self._best_score = score
+            self._best_epoch = epoch
+            self._save_best_model(epoch, score)
+            logger.info(f"🏆 New best model! Recall@20={score:.4f} at epoch {epoch + 1}")
+
         logger.info('─' * 60)
         return score
+
+    def _save_best_model(self, epoch: int, score: float) -> None:
+        """Save model weights as best_model.pth when recall improves."""
+        import os
+        best_path = os.path.join(self._experiment_dir, "best_model.pth")
+        torch.save({
+            "epoch": epoch,
+            "score": score,
+            "model_state_dict": self._model.state_dict(),
+        }, best_path)
+        logger.info(f"✓ Best model saved → {best_path}")
 
     # ------------------------------------------------------------------
     # Orchestration
