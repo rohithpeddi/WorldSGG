@@ -91,6 +91,9 @@ class GlobalStructuralEncoder(nn.Module):
         # 4. Global pool over N objects (permutation-invariant set aggregation)
         global_pool = object_tokens.masked_fill(~valid_mask.unsqueeze(-1), float("-inf"))
         global_pool, _ = global_pool.max(dim=1)
+        # Belt-and-suspenders: if all objects are invalid, max over -inf → -inf.
+        # The all_invalid zeroing below handles it, but nan_to_num is a safety net.
+        global_pool = torch.nan_to_num(global_pool, nan=0.0, posinf=0.0, neginf=0.0)
         all_invalid = ~valid_mask.any(dim=1, keepdim=True)
         global_pool = global_pool.masked_fill(all_invalid, 0.0)
         global_token = self.global_mlp(global_pool)
@@ -537,14 +540,15 @@ class RelationshipPredictor(nn.Module):
         spa_all = torch.sigmoid(spa_logits_all)
         con_all = torch.sigmoid(con_logits_all)
 
-        # Zero out padded positions
+        # Zero out padded positions (prevent uniform distributions from softmax
+        # and 0.5 values from sigmoid leaking into padded slots)
         mask = pair_valid.unsqueeze(-1).float()  # (T, K_max, 1)
         att_logits_all = att_logits_all * mask
         att_all = att_all * mask
-        spa_all = spa_all * mask
-        con_all = con_all * mask
         spa_logits_all = spa_logits_all * mask
+        spa_all = spa_all * mask
         con_logits_all = con_logits_all * mask
+        con_all = con_all * mask
 
         return {
             "attention_logits": att_logits_all,    # (T, K_max, 3) — raw logits

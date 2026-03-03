@@ -62,6 +62,7 @@ class TrainGLSTGN(TrainWSGGBase):
         self._loss_fn = GLSTGNLoss(
             lambda_vlm=self._conf.lambda_vlm,
             label_smoothing=self._conf.label_smoothing_vlm,
+            mode=self._conf.mode,
         )
 
     def is_temporal(self) -> bool:
@@ -151,6 +152,7 @@ class TrainAMWAE(TrainWSGGBase):
             lambda_recon_dominance=self._conf.lambda_recon_dominance,
             p_simulate_unseen=self._conf.p_simulate_unseen,
             label_smoothing=self._conf.label_smoothing_vlm,
+            mode=self._conf.mode,
         )
 
     def is_temporal(self) -> bool:
@@ -236,6 +238,7 @@ class TrainLKSGNN(TrainWSGGBase):
         self._loss_fn = LKSLoss(
             lambda_vlm=self._conf.lambda_vlm,
             label_smoothing=self._conf.label_smoothing_vlm,
+            mode=self._conf.mode,
         )
 
     def is_temporal(self) -> bool:
@@ -322,6 +325,7 @@ class TrainAMWAEPP(TrainAMWAE):
             p_simulate_unseen=self._conf.p_simulate_unseen,
             label_smoothing=self._conf.label_smoothing_vlm,
             lambda_stability=self._conf.lambda_stability,
+            mode=self._conf.mode,
         )
 
 
