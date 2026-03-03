@@ -130,7 +130,7 @@ class GLSTGNLoss(nn.Module):
                 u_con_gt = self._label_smoother.smooth_bce_target(u_con_gt)
                 smoothed = self._label_smoother.smooth_ce_target(u_att_gt, 3)
                 unseen_att_loss = self._kl_loss(
-                    F.log_softmax(u_att_pred, dim=-1), smoothed
+                    F.log_softmax(u_att_pred, dim=-1).clamp(min=-100), smoothed
                 ) * self.lambda_vlm / N
             else:
                 unseen_att_loss = self._ce_loss(u_att_pred, u_att_gt) * self.lambda_vlm / N

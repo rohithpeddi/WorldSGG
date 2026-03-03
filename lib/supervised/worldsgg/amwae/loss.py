@@ -183,7 +183,7 @@ class AMWAELoss(nn.Module):
                 m_con_gt = self._label_smoother.smooth_bce_target(m_con_gt)
                 smoothed = self._label_smoother.smooth_ce_target(m_att_gt, 3)
                 losses["masked_att"] = self._kl_loss(
-                    F.log_softmax(m_att_pred, dim=-1), smoothed
+                    F.log_softmax(m_att_pred, dim=-1).clamp(min=-100), smoothed
                 ) * self.lambda_vlm / N
             else:
                 losses["masked_att"] = self._ce_loss(m_att_pred, m_att_gt) * self.lambda_vlm / N

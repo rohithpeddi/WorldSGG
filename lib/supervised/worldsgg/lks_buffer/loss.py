@@ -133,7 +133,7 @@ class LKSLoss(nn.Module):
                     b_con_gt = self._label_smoother.smooth_bce_target(b_con_gt)
                     smoothed = self._label_smoother.smooth_ce_target(b_att_gt, 3)
                     losses[f"{bucket_name}_att"] = self._kl_loss(
-                        F.log_softmax(b_att_pred, dim=-1), smoothed
+                        F.log_softmax(b_att_pred, dim=-1).clamp(min=-100), smoothed
                     ) * self.lambda_vlm / N
                 else:
                     losses[f"{bucket_name}_att"] = self._ce_loss(b_att_pred, b_att_gt) * self.lambda_vlm / N

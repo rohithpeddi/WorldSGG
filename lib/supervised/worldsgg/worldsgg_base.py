@@ -457,19 +457,23 @@ class RelationshipPredictor(nn.Module):
             )
 
         # Batched gather person/object representations: (T, K_max, d_model)
-        pidx_exp = person_idx.unsqueeze(-1).expand(T, K_max, enriched_all.shape[-1])
-        oidx_exp = object_idx.unsqueeze(-1).expand(T, K_max, enriched_all.shape[-1])
+        # Clamp indices to prevent OOB from padding (reads garbage → NaN)
+        N_max = enriched_all.shape[1]
+        person_idx_safe = person_idx.clamp(0, N_max - 1)
+        object_idx_safe = object_idx.clamp(0, N_max - 1)
+        pidx_exp = person_idx_safe.unsqueeze(-1).expand(T, K_max, enriched_all.shape[-1])
+        oidx_exp = object_idx_safe.unsqueeze(-1).expand(T, K_max, enriched_all.shape[-1])
         person_repr = torch.gather(enriched_all, 1, pidx_exp)  # (T, K_max, d_model)
         object_repr = torch.gather(enriched_all, 1, oidx_exp)  # (T, K_max, d_model)
 
         # Batched class predictions
         person_class_idx = torch.gather(
             node_logits_all, 1,
-            person_idx.unsqueeze(-1).expand(T, K_max, node_logits_all.shape[-1]),
+            person_idx_safe.unsqueeze(-1).expand(T, K_max, node_logits_all.shape[-1]),
         ).argmax(dim=-1)  # (T, K_max)
         object_class_idx = torch.gather(
             node_logits_all, 1,
-            object_idx.unsqueeze(-1).expand(T, K_max, node_logits_all.shape[-1]),
+            object_idx_safe.unsqueeze(-1).expand(T, K_max, node_logits_all.shape[-1]),
         ).argmax(dim=-1)  # (T, K_max)
 
         # Batched CLIP text features: (T, K_max, d_text)

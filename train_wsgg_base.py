@@ -115,7 +115,17 @@ class TrainWSGGBase(WSGGBase):
         """Main training loop over epochs."""
         use_amp = self._conf.use_amp and torch.cuda.is_available()
         if use_amp:
-            self._scaler = torch.amp.GradScaler('cuda')
+            # Prefer bfloat16 (same exponent range as fp32 — no overflow at 65504)
+            # Falls back to float16 + GradScaler on older GPUs
+            self._use_bf16 = torch.cuda.is_bf16_supported()
+            if self._use_bf16:
+                self._scaler = None  # bfloat16 doesn't need loss scaling
+                logger.info("  AMP: using bfloat16 (no GradScaler needed)")
+            else:
+                self._scaler = torch.amp.GradScaler('cuda')
+                logger.info("  AMP: using float16 + GradScaler")
+        else:
+            self._use_bf16 = False
 
         log_every = self._conf.log_every
 
@@ -132,7 +142,8 @@ class TrainWSGGBase(WSGGBase):
 
                 # Forward + loss
                 if use_amp:
-                    with torch.amp.autocast('cuda'):
+                    amp_dtype = torch.bfloat16 if self._use_bf16 else torch.float16
+                    with torch.amp.autocast('cuda', dtype=amp_dtype):
                         losses = self.process_train_video(batch)
                 else:
                     losses = self.process_train_video(batch)
