@@ -296,7 +296,8 @@ class TrainLKSGNN(TrainWSGGBase):
 # AMWAE++ (Energy Transformer variant)
 # ============================================================================
 
-class TrainAMWAEPP(TrainWSGGBase):
+class TrainAMWAEPP(TrainAMWAE):
+    """AMWAE++ trainer — same batched API as AMWAE, only model differs."""
 
     def __init__(self, conf):
         super().__init__(conf)
@@ -322,76 +323,6 @@ class TrainAMWAEPP(TrainWSGGBase):
             label_smoothing=self._conf.label_smoothing_vlm,
             lambda_stability=self._conf.lambda_stability,
         )
-
-    def is_temporal(self) -> bool:
-        return True
-
-    def process_train_video(self, batch) -> dict:
-        from tqdm import tqdm
-        b = _to_device(batch, self._device)
-        self._model.reset_memory()
-        T = b["visual_features"].shape[0]
-
-        # AMWAE++ processes frame-by-frame (recurrent memory)
-        # but we still pass the full batch for loss after all frames
-        all_preds = []
-        for t in tqdm(range(T), desc="AMWAE++ frames", leave=False):
-            frame_pred = self._model.forward_frame(
-                visual_features=b["visual_features"][t],
-                corners=b["corners"][t],
-                valid_mask=b["valid_mask"][t],
-                visibility_mask=b["visibility_mask"][t],
-                person_idx=b["person_idx"][t],
-                object_idx=b["object_idx"][t],
-                pair_valid=b["pair_valid"][t],
-            )
-            all_preds.append(frame_pred)
-
-        # Stack per-frame predictions into (T, ...) for batched loss
-        stacked_pred = {}
-        for key in ["attention_logits", "attention_distribution", "spatial_distribution", "contacting_distribution"]:
-            if key in all_preds[0]:
-                stacked_pred[key] = torch.stack([p[key] for p in all_preds])
-        # Pass through non-stackable items
-        for key in all_preds[0]:
-            if key not in stacked_pred:
-                stacked_pred[key] = [p.get(key) for p in all_preds]
-
-        losses = self._loss_fn(
-            predictions=stacked_pred,
-            gt_attention=b["gt_attention"],
-            gt_spatial=b["gt_spatial"],
-            gt_contacting=b["gt_contacting"],
-            pair_valid=b["pair_valid"],
-            visibility_mask=b["visibility_mask"],
-            person_idx=b["person_idx"],
-            object_idx=b["object_idx"],
-            valid_mask=b.get("valid_mask"),
-            corners=b.get("corners"),
-            gt_node_labels=b.get("object_classes"),
-        )
-
-        return losses
-
-    def process_test_video(self, batch) -> dict:
-        from tqdm import tqdm
-        b = _to_device(batch, self._device)
-        self._model.reset_memory()
-        T = b["visual_features"].shape[0]
-
-        last_pred = None
-        for t in tqdm(range(T), desc="AMWAE++ eval", leave=False):
-            last_pred = self._model.forward_frame(
-                visual_features=b["visual_features"][t],
-                corners=b["corners"][t],
-                valid_mask=b["valid_mask"][t],
-                visibility_mask=b["visibility_mask"][t],
-                person_idx=b["person_idx"][t],
-                object_idx=b["object_idx"][t],
-                pair_valid=b["pair_valid"][t],
-            )
-
-        return last_pred
 
 
 # ============================================================================
