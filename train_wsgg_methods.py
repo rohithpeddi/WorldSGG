@@ -92,7 +92,6 @@ class TrainGLSTGN(TrainWSGGBase):
             person_idx=b["person_idx"],
             object_idx=b["object_idx"],
             valid_mask=b.get("valid_mask"),
-            corners=b.get("corners"),
             gt_node_labels=b.get("object_classes"),
         )
 

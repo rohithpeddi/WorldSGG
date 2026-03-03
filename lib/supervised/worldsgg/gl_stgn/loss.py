@@ -76,7 +76,6 @@ class GLSTGNLoss(nn.Module):
             visibility_mask: (T, N_max) bool — per-object visibility
             person_idx: (T, K_max) long — person slot indices
             object_idx: (T, K_max) long — object slot indices
-            corners: (T, N_max, 8, 3) optional — 3D corners for smoothness
             gt_node_labels: (T, N_max) optional — node class labels
         """
         device = predictions["attention_logits"].device

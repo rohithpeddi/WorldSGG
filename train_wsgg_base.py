@@ -115,7 +115,7 @@ class TrainWSGGBase(WSGGBase):
         """Main training loop over epochs."""
         use_amp = self._conf.use_amp and torch.cuda.is_available()
         if use_amp:
-            self._scaler = torch.cuda.amp.GradScaler()
+            self._scaler = torch.amp.GradScaler('cuda')
 
         log_every = self._conf.log_every
 
@@ -132,7 +132,7 @@ class TrainWSGGBase(WSGGBase):
 
                 # Forward + loss
                 if use_amp:
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast('cuda'):
                         losses = self.process_train_video(batch)
                 else:
                     losses = self.process_train_video(batch)
