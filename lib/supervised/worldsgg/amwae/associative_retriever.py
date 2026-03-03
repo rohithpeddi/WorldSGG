@@ -140,12 +140,13 @@ class AssociativeRetriever(nn.Module):
 
         # --- Cross-attention layers ---
         query = x + q_bias  # Add view bias to queries
-        kv = x + k_bias     # Add view bias to keys
+        key = x + k_bias    # Add view bias to keys
+        value = x            # Clean semantic content — NO bias
 
         for i in range(len(self.cross_attn_layers)):
-            # Cross-attention: Q = all tokens, K/V = visible tokens
+            # Cross-attention: Q = all tokens, K = visible with view bias, V = visible (clean)
             attn_out, _ = self.cross_attn_layers[i](
-                query=query, key=kv, value=kv,
+                query=query, key=key, value=value,
                 key_padding_mask=kv_padding_mask,
             )
             query = self.cross_norms1[i](query + attn_out)

@@ -123,7 +123,10 @@ class EnergyDiffusion(nn.Module):
             h_in = h_t + spatial_pe
 
             # One step down the energy gradient
-            h_t = self.shared_energy_layer(h_in, src_key_padding_mask=padding_mask)
+            # Subtract spatial_pe back out so it influences attention routing
+            # (via LayerNorm inside the layer) but does NOT accumulate
+            # K times in the residual stream.
+            h_t = self.shared_energy_layer(h_in, src_key_padding_mask=padding_mask) - spatial_pe
 
             # Dynamic convergence check (inference only)
             if not self.training:

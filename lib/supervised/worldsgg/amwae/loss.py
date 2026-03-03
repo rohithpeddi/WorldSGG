@@ -39,11 +39,9 @@ class AMWAELoss(nn.Module):
         lambda_vlm: float = 0.2,
         lambda_recon: float = 1.0,
         lambda_recon_dominance: float = 5.0,
-        lambda_contrastive: float = 0.5,
         p_simulate_unseen: float = 0.25,
         label_smoothing: float = 0.2,
         physics_veto_thresh: float = 2.0,
-        temperature: float = 0.07,
         bce_loss: bool = True,
         mode: str = "predcls",
         lambda_stability: float = 0.0,
@@ -52,10 +50,8 @@ class AMWAELoss(nn.Module):
         self.lambda_vlm = lambda_vlm
         self.lambda_recon = lambda_recon
         self.lambda_recon_dominance = lambda_recon_dominance
-        self.lambda_contrastive = lambda_contrastive
         self.p_simulate_unseen = p_simulate_unseen
         self.physics_veto_thresh = physics_veto_thresh
-        self.temperature = temperature
         self.bce_loss = bce_loss
         self.mode = mode
         self.lambda_stability = lambda_stability
@@ -112,18 +108,14 @@ class AMWAELoss(nn.Module):
         recon_loss = self._compute_reconstruction_loss(predictions, device, zero)
         losses["recon_loss"] = recon_loss * self.lambda_recon * self.lambda_recon_dominance
 
-        # 3. Contrastive loss
-        contra_loss = self._compute_contrastive_loss(predictions, device, zero)
-        losses["contrastive_loss"] = contra_loss * self.lambda_contrastive
-
-        # 4. Simulated-unseen fine-tuning
+        # 3. Simulated-unseen fine-tuning
         sim_loss = self._compute_simulated_unseen_loss(predictions, device, zero)
         losses["simulated_unseen_loss"] = sim_loss
 
         # 5. Attractor stability loss (AMWAE++ only)
-        if self.lambda_stability > 0 and "h_prev_seq" in predictions and predictions["h_prev_seq"]:
-            h_final_all = torch.stack(predictions["enriched_seq"])
-            h_prev_all = torch.stack(predictions["h_prev_seq"])
+        if self.lambda_stability > 0 and "h_prev" in predictions:
+            h_final_all = predictions["enriched"]       # (T, N, d_model)
+            h_prev_all = predictions["h_prev"]           # (T, N, d_model), already detached
             L_stability = F.mse_loss(h_final_all, h_prev_all.detach())
             losses["stability_loss"] = self.lambda_stability * L_stability
 
@@ -254,56 +246,7 @@ class AMWAELoss(nn.Module):
 
         return F.mse_loss(pred_masked, target_masked)
 
-    def _compute_contrastive_loss(self, predictions, device, zero):
-        """InfoNCE on cross-attention weights for masked tokens.
 
-        For each masked token, attention to SAME object (positive) should be higher.
-        """
-
-        attn_weights_list = predictions.get("attn_weights", None)
-        is_masked_list = predictions.get("is_masked", None)
-        mem_ids_list = predictions.get("memory_object_ids", None)
-
-        if attn_weights_list is None or is_masked_list is None or mem_ids_list is None:
-            return zero
-
-        # These may be lists if model hasn't been updated yet
-        if not isinstance(attn_weights_list, list):
-            return zero
-
-        T = len(attn_weights_list)
-        if T == 0:
-            return zero
-
-        losses = []
-        for t in range(T):
-            is_masked = is_masked_list[t]
-            attn_weights = attn_weights_list[t]
-            mem_obj_ids = mem_ids_list[t]
-
-            if not is_masked.any() or attn_weights is None:
-                continue
-
-            masked_indices = torch.where(is_masked)[0]
-
-            for i in masked_indices:
-                obj_id = i
-                pos_mask = (mem_obj_ids == obj_id)
-                if not pos_mask.any():
-                    continue
-
-                attn_i = attn_weights[i]
-                pos_score = attn_i[pos_mask].sum()
-                total_score = attn_i.sum()
-
-                if total_score > 0:
-                    ratio = (pos_score / (total_score + 1e-8)).clamp(min=1e-8)
-                    losses.append(-torch.log(ratio))
-
-        if not losses:
-            return zero
-
-        return torch.stack(losses).mean()
 
     def _compute_simulated_unseen_loss(self, predictions, device, zero):
         """Loss for artificially masked visible objects — uses clean GT.

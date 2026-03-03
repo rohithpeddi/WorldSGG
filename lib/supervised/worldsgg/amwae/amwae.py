@@ -211,8 +211,23 @@ class AMWAE(nn.Module):
         centers_all = corners_all.mean(dim=2)  # (T, N, 3)
         velocity_all = torch.zeros_like(centers_all)
         accel_all = torch.zeros_like(centers_all)
-        velocity_all[1:] = centers_all[1:] - centers_all[:-1]
-        accel_all[2:] = velocity_all[2:] - velocity_all[1:-1]
+
+        # Only compute velocity where BOTH frames have valid objects
+        # (avoids [0,0,0] → [X,Y,Z] spike when padded objects enter the scene)
+        valid_vel = valid_all[1:] & valid_all[:-1]  # (T-1, N)
+        velocity_all[1:] = torch.where(
+            valid_vel.unsqueeze(-1),
+            centers_all[1:] - centers_all[:-1],
+            torch.zeros_like(centers_all[1:]),
+        )
+
+        # Only compute acceleration where 3 consecutive frames are valid
+        valid_acc = valid_all[2:] & valid_all[1:-1] & valid_all[:-2]  # (T-2, N)
+        accel_all[2:] = torch.where(
+            valid_acc.unsqueeze(-1),
+            velocity_all[2:] - velocity_all[1:-1],
+            torch.zeros_like(velocity_all[2:]),
+        )
 
         camera_R_all = None
         if camera_pose_seq is not None:
@@ -244,8 +259,11 @@ class AMWAE(nn.Module):
         )  # (T, N, d_model)
 
         # ==================== Step 7: Visibility embedding (after retrieval) ====================
-        # 0 = masked/retrieved, 1 = directly observed
-        vis_ids = visibility_all.long()  # (T, N)
+        # Use effective visibility: ground-truth visible AND not artificially masked.
+        # Using raw visibility_all would leak training-time masking info — an object
+        # with [MASK] features but vis_emb(1) is a shortcut the network can exploit.
+        effective_visible = visibility_all & (~is_masked_all)  # (T, N)
+        vis_ids = effective_visible.long()  # 0 = unseen/masked, 1 = directly observed
         completed_tokens = completed_tokens + self.visibility_emb(vis_ids)
 
         # ==================== Step 8: Spatial GNN (B=T) ====================
