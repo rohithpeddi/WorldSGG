@@ -243,6 +243,23 @@ def process_video(
     logger.info(f"[{video_id}] Loaded augmented_rel PKL: {rel_pkl_path.name}")
     logger.info(f"[{video_id}] Loaded world4D PKL: {w4d_pkl_path.name}")
 
+    # ---- Detailed PKL structure logging ----
+    logger.debug(
+        f"[{video_id}] augmented_rel top-level keys: {sorted(rel_data.keys())}"
+    )
+    logger.debug(
+        f"[{video_id}] augmented_rel video_id field: {rel_data.get('video_id', 'N/A')}"
+    )
+    logger.debug(
+        f"[{video_id}] world4D top-level keys: {sorted(w4d_data.keys())}"
+    )
+    logger.debug(
+        f"[{video_id}] world4D video_id field: {w4d_data.get('video_id', 'N/A')}"
+    )
+    logger.debug(
+        f"[{video_id}] world4D all_labels field: {w4d_data.get('all_labels', 'N/A')}"
+    )
+
     # ------------------------------------------------------------------
     # 2) Build stem→camera index from world4D
     # ------------------------------------------------------------------
@@ -259,6 +276,10 @@ def process_video(
         f"{len(w4d_frame_stems)} camera stems, "
         f"camera_poses={'None' if w4d_camera_poses is None else w4d_camera_poses.shape}"
     )
+    logger.debug(
+        f"[{video_id}] World4D frame names (first 5): "
+        f"{sorted(w4d_frames.keys())[:5]}"
+    )
 
     # ------------------------------------------------------------------
     # 3) Per-frame merge
@@ -270,6 +291,10 @@ def process_video(
 
     logger.debug(
         f"[{video_id}] Augmented rel (test): {len(rel_frames)} frames"
+    )
+    logger.debug(
+        f"[{video_id}] Augmented rel frame keys (first 5): "
+        f"{sorted(rel_frames.keys())[:5]}"
     )
 
     combined_frames: Dict[str, Dict[str, Any]] = {}
@@ -382,38 +407,57 @@ def process_video(
         # ---- Object info list ----
         object_info_list: List[Dict[str, Any]] = []
 
-        for rel_obj in rel_objs:
+        logger.debug(
+            f"[{video_id}] Frame {frame_file}: processing {len(rel_objs)} "
+            f"augmented_rel objects"
+        )
+
+        for obj_idx, rel_obj in enumerate(rel_objs):
             cls_name = rel_obj["class"]           # normalised object name
             cls_short = _to_short(cls_name)       # short-form for matching
             rel_source = rel_obj.get("source", "gt")
             visible = rel_source == "gt"          # GT objects are visible, corrections are not
             all_labels.add(cls_short)
 
+            # ---- Log initial values from augmented_rel ----
+            init_att = rel_obj.get("attention", [])
+            init_cont = rel_obj.get("contacting", [])
+            init_spa = rel_obj.get("spatial", [])
+            init_bbox = rel_obj.get("bbox", None)
+            logger.debug(
+                f"[{video_id}] Frame {frame_file}: OBJ[{obj_idx}] INITIAL | "
+                f"class={cls_name!r}, short={cls_short!r}, source={rel_source!r}, "
+                f"bbox={'present' if init_bbox is not None else 'None'}, "
+                f"attention={init_att}, contacting={init_cont}, spatial={init_spa}"
+            )
+
             # Test augmented PKL uses "attention", "contacting", "spatial"
             # keys (list of str). Map them to the unified output keys.
             merged: Dict[str, Any] = {
                 "class": cls_name,
                 "label": cls_short,
-                "bbox_2d": rel_obj.get("bbox", None),
+                "bbox_2d": init_bbox,
                 "visible": visible,
-                "attention_relationship": rel_obj.get("attention", []),
-                "contacting_relationship": rel_obj.get("contacting", []),
-                "spatial_relationship": rel_obj.get("spatial", []),
+                "attention_relationship": init_att,
+                "contacting_relationship": init_cont,
+                "spatial_relationship": init_spa,
                 "source": rel_source,
             }
 
             # Merge 3D from world4D
             w4d_match = w4d_label_map.get(cls_short)
             if w4d_match is not None:
-                merged.update(_extract_3d_fields(w4d_match))
-                n_obj_matched += 1
+                fields_3d = _extract_3d_fields(w4d_match)
                 logger.debug(
-                    f"[{video_id}] Frame {frame_file}: obj '{cls_short}' "
-                    f"(src={rel_source}) 3D MATCHED "
-                    f"(filled={merged['world4d_filled']}, "
-                    f"method={merged['world4d_fill_method']}, "
-                    f"w4d_src={merged['world4d_source']})"
+                    f"[{video_id}] Frame {frame_file}: OBJ[{obj_idx}] 3D AUGMENT | "
+                    f"label={cls_short!r}, w4d_source={fields_3d['world4d_source']!r}, "
+                    f"filled={fields_3d['world4d_filled']}, "
+                    f"fill_method={fields_3d['world4d_fill_method']!r}, "
+                    f"corners_world={'present' if fields_3d['corners_world'] is not None else 'None'}, "
+                    f"corners_final={'present' if fields_3d['corners_final'] is not None else 'None'}"
                 )
+                merged.update(fields_3d)
+                n_obj_matched += 1
             else:
                 # No world4D match — logged in verify
                 merged.update({
@@ -426,11 +470,34 @@ def process_video(
                 })
                 n_obj_missing_3d += 1
                 logger.warning(
-                    f"[{video_id}] Frame {frame_file}: obj '{cls_short}' "
-                    f"(src={rel_source}) NO world4D match — 3D fields set to None"
+                    f"[{video_id}] Frame {frame_file}: OBJ[{obj_idx}] "
+                    f"label={cls_short!r} (src={rel_source!r}) "
+                    f"NO world4D match — 3D fields set to None"
                 )
 
+            # ---- Log final merged values ----
+            logger.debug(
+                f"[{video_id}] Frame {frame_file}: OBJ[{obj_idx}] FINAL | "
+                f"class={merged['class']!r}, label={merged['label']!r}, "
+                f"source={merged['source']!r}, visible={merged['visible']}, "
+                f"bbox_2d={'present' if merged['bbox_2d'] is not None else 'None'}, "
+                f"att={merged['attention_relationship']}, "
+                f"cont={merged['contacting_relationship']}, "
+                f"spa={merged['spatial_relationship']}, "
+                f"w4d_filled={merged.get('world4d_filled')}, "
+                f"w4d_method={merged.get('world4d_fill_method')!r}, "
+                f"w4d_source={merged.get('world4d_source')!r}"
+            )
+
             object_info_list.append(merged)
+
+        # ---- Per-frame summary ----
+        frame_labels_here = sorted({obj["label"] for obj in object_info_list})
+        logger.debug(
+            f"[{video_id}] Frame {frame_file}: FRAME_DONE | "
+            f"n_objects={len(object_info_list)}, "
+            f"labels={frame_labels_here}"
+        )
 
         combined_frames[frame_key] = {
             "person_info": person_info,
@@ -450,7 +517,41 @@ def process_video(
             )
 
     # ------------------------------------------------------------------
-    # 4) Filter camera poses
+    # 4) Validate: every frame must have len(object_info_list) == len(all_labels)
+    # ------------------------------------------------------------------
+    sorted_all_labels = sorted(all_labels)
+    n_all_labels = len(sorted_all_labels)
+    logger.info(
+        f"[{video_id}] Validation: all_labels={sorted_all_labels} "
+        f"(n={n_all_labels})"
+    )
+
+    for frame_key, frame_rec in combined_frames.items():
+        n_objs_frame = len(frame_rec["object_info_list"])
+        frame_obj_labels = sorted({obj["label"] for obj in frame_rec["object_info_list"]})
+        if n_objs_frame != n_all_labels:
+            logger.error(
+                f"[{video_id}] Frame {frame_key}: VALIDATION FAILED | "
+                f"len(object_info_list)={n_objs_frame} != len(all_labels)={n_all_labels} | "
+                f"frame_labels={frame_obj_labels}, all_labels={sorted_all_labels} | "
+                f"missing_from_frame={sorted(set(sorted_all_labels) - set(frame_obj_labels))} | "
+                f"extra_in_frame={sorted(set(frame_obj_labels) - set(sorted_all_labels))}"
+            )
+            raise ValueError(
+                f"[{video_id}] Frame {frame_key}: object_info_list length "
+                f"({n_objs_frame}) does not match all_labels length "
+                f"({n_all_labels}). "
+                f"Missing: {sorted(set(sorted_all_labels) - set(frame_obj_labels))}, "
+                f"Extra: {sorted(set(frame_obj_labels) - set(sorted_all_labels))}"
+            )
+
+    logger.info(
+        f"[{video_id}] Validation PASSED: all {len(combined_frames)} frames "
+        f"have {n_all_labels} objects each"
+    )
+
+    # ------------------------------------------------------------------
+    # 5) Filter camera poses
     # ------------------------------------------------------------------
     camera_poses_filtered = None
     if w4d_camera_poses is not None and valid_cam_indices:
@@ -471,7 +572,7 @@ def process_video(
         )
 
     # ------------------------------------------------------------------
-    # 5) Build and save output
+    # 6) Build and save output
     # ------------------------------------------------------------------
     output_record = {
         "video_id": video_id,
