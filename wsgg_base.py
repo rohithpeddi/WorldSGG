@@ -270,11 +270,17 @@ class WSGGBase:
             T_max=max(total_steps - warmup_steps, 1),
             eta_min=lr * 0.01,
         )
-        self._scheduler = SequentialLR(
-            self._optimizer,
-            schedulers=[warmup, cosine],
-            milestones=[warmup_steps],
-        )
+        # SequentialLR's constructor internally calls step() on sub-schedulers,
+        # which triggers a spurious "step() before optimizer.step()" warning.
+        # The training loop itself has the correct order. Suppress the init warning.
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", ".*lr_scheduler.step.*optimizer.step.*")
+            self._scheduler = SequentialLR(
+                self._optimizer,
+                schedulers=[warmup, cosine],
+                milestones=[warmup_steps],
+            )
         logger.info(f"  Scheduler: warmup({warmup_steps}) → cosine({total_steps - warmup_steps}) | eta_min={lr * 0.01:.2e}")
 
     # ------------------------------------------------------------------
