@@ -11,7 +11,7 @@ method_name: amwae
 mode: sgdet
 feature_model: dinov2l
 task_name: worldsgg
-experiment_name: amwae_sgdet_dinov2l
+experiment_name: amwae_sgdet_dinov2l_v2
 
 # ---- Paths ----
 data_path: /data/rohith/ag
@@ -54,7 +54,7 @@ use_amp: true
 log_every: 100
 include_invisible: true
 datasize: large
-skip_test: true  # Set to false when test dataset is ready
+skip_test: false  # Set to false when test dataset is ready
 
 # ---- AMWAE Specific ----
 n_cross_attn_layers: 2

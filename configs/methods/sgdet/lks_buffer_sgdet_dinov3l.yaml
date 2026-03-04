@@ -11,7 +11,7 @@ method_name: lks_buffer
 mode: sgdet
 feature_model: dinov3l
 task_name: worldsgg
-experiment_name: lks_buffer_sgdet_dinov3l
+experiment_name: lks_buffer_sgdet_dinov3l_v2
 
 # ---- Paths ----
 data_path: /data/rohith/ag
@@ -53,7 +53,7 @@ use_amp: true
 log_every: 100
 include_invisible: true
 datasize: large
-skip_test: true  # Set to false when test dataset is ready
+skip_test: false  # Set to false when test dataset is ready
 
 # ---- LKS Buffer Specific ----
 n_gnn_layers: 3

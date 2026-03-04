@@ -11,7 +11,7 @@ method_name: gl_stgn
 mode: predcls
 feature_model: dinov3l
 task_name: worldsgg
-experiment_name: gl_stgn_predcls_dinov3l
+experiment_name: gl_stgn_predcls_dinov3l_v2
 
 # ---- Paths ----
 data_path: /data/rohith/ag
@@ -55,7 +55,7 @@ use_amp: true
 log_every: 100
 include_invisible: true
 datasize: large
-skip_test: true  # Set to false when test dataset is ready
+skip_test: false  # Set to false when test dataset is ready
 
 # ---- GL-STGN Specific ----
 n_graph_layers: 3
