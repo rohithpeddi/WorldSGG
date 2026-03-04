@@ -29,18 +29,19 @@
 \label{sec:overview}
 % ====================================================================================
 
-We present a family of four progressively sophisticated methods for \emph{World Scene Graph Generation} (WorldSGG), the task of predicting a dynamic scene graph over all objects in a video---including those that are temporarily \emph{occluded}, have \emph{left the camera field of view}, or have \emph{never been directly observed} in a given frame.  Unlike conventional video scene graph generation~\cite{cong2021spatial,chen2019action}, which only reasons about \emph{currently visible} object–object relationships, WorldSGG maintains a persistent world state and augments predictions for unseen entities using geometric scaffolds, memory mechanisms, and associative retrieval.
+We present a family of three methods for \emph{World Scene Graph Generation} (WorldSGG), the task of predicting a dynamic scene graph over all objects in a video---including those that are temporarily \emph{occluded}, have \emph{left the camera field of view}, or have \emph{never been directly observed} in a given frame.  Unlike conventional video scene graph generation (VidSGG)~\cite{cong2021spatial,chen2019action}, which only reasons about \emph{currently visible} object--object relationships, WorldSGG maintains a persistent world state and predicts relationships for all entities---seen and unseen---using 3D geometric scaffolds, temporal memory mechanisms, and associative retrieval.
 
-All four methods share a unified architectural backbone of reusable modules (Sec.~\ref{sec:shared}) but differ in how they \emph{maintain} and \emph{complete} representations for unseen objects:
+Our three methods represent a progression from classical object permanence reasoning toward learned world models, each drawing on and extending different threads of the SGG, video understanding, and representation learning literature:
 
 \begin{enumerate}
-    \item \textbf{LKS-GNN} (Last-Known-State GNN, Sec.~\ref{sec:lks}): A simple zero-order hold baseline that freezes each object's features at the last visible appearance.
-    \item \textbf{GL-STGN} (Global-Local Spatio-Temporal Graph Network, Sec.~\ref{sec:glstgn}): Replaces the static buffer with a differentiable per-object bidirectional temporal transformer.
-    \item \textbf{AMWAE} (Associative Masked World Auto-Encoder, Sec.~\ref{sec:amwae}): Introduces a masked auto-encoder paradigm with cross-attention-based associative retrieval for unseen objects.
-    \item \textbf{AMWAE++} (Sec.~\ref{sec:amwaepp}): Extends AMWAE by replacing the fixed-depth spatial GNN with an \emph{Energy Transformer}---a weight-tied recurrent module that iterates until representational convergence.
+    \item \textbf{PWG} (Persistent World Graph, Sec.~\ref{sec:pwg}): Extends tracking-based VidSGG by maintaining a \emph{persistent object memory buffer} that freezes each object's visual features at its last visible appearance, drawing on principles of object permanence from cognitive science~\cite{piloto2022intuitive} and multi-object tracking~\cite{bewley2016sort}.
+
+    \item \textbf{4DST} (4D Scene Transformer, Sec.~\ref{sec:4dst}): Replaces the non-differentiable buffer with a \emph{per-object bidirectional temporal transformer}, extending the factorized spatial-temporal attention paradigm of video transformers~\cite{arnab2021vivit,bertasius2021space} and VidSGG methods like STTran~\cite{cong2021spatial} from visible-only 2D reasoning to full 4D (3D + time) world-state estimation.
+
+    \item \textbf{MWAE} (Masked World Auto-Encoder, Sec.~\ref{sec:mwae}): Introduces a \emph{masked auto-encoder} framework for scene graph completion, applying the encoder--decoder factorization of MAE~\cite{he2022masked} and VideoMAE~\cite{tong2022videomae} to relational scene understanding---where occlusions and camera motion provide natural masking, and a 3D geometric scaffold provides the complete structural prior.
 \end{enumerate}
 
-All methods operate on the same input: pre-extracted per-object DINO~\cite{oquab2023dinov2} visual features, 3D oriented bounding box corners from a persistent global wireframe, and camera extrinsic matrices. Relationship predictions are made for three categories: \textit{attention} (3 classes), \textit{spatial} (6 classes), and \textit{contacting} (17 classes).
+All methods operate on the same input: pre-extracted per-object DINOv2~\cite{oquab2023dinov2} visual features, 3D oriented bounding box corners from a persistent global wireframe, and camera extrinsic matrices.  Relationship predictions are made for three categories: \textit{attention} (3 classes), \textit{spatial} (6 classes), and \textit{contacting} (17 classes).
 
 
 % ====================================================================================
@@ -54,7 +55,7 @@ All methods reuse the following modules, which are defined centrally and instant
 \subsection{Global Structural Encoder}
 \label{sec:gse}
 
-The \textit{Global Structural Encoder} converts world-frame 3D oriented bounding boxes (OBBs) into per-object structural tokens and a permutation-invariant global scene summary.
+The \textit{Global Structural Encoder} converts world-frame 3D oriented bounding boxes (OBBs) into per-object structural tokens and a permutation-invariant global scene summary.  This module grounds every method in the 3D world geometry, ensuring that even objects without visual evidence receive a rich spatial representation.
 
 \paragraph{Input.} An OBB is parameterized by its $8$ corner vertices $\mat{C}_n \in \mR^{8 \times 3}$ for each of $N$ objects.
 
@@ -82,6 +83,8 @@ This preserves the full rigid geometry (dimensions, orientation) that per-corner
     \label{eq:gse_global}
 \end{equation}
 where $\mathcal{V}$ is the set of valid (non-padding) objects.  Invalid objects are zeroed out before pooling to prevent bias leakage.
+
+\paragraph{Connection to Prior Work.}  The structural encoder plays an analogous role to the bounding-box encoders used in image-level SGG methods~\cite{xu2017scene,li2017scene}, but operates in 3D world coordinates rather than 2D image space.  Unlike the axis-aligned box parameterizations used in prior VidSGG work~\cite{cong2021spatial,chen2019action}, our encoder processes full OBB geometry, capturing object orientation and 3D extent---information critical for spatial relationship reasoning (e.g., distinguishing ``in front of'' from ``beside'').
 
 
 % ------------------------------------------------------------------------------------
@@ -117,7 +120,7 @@ Intra-frame object interactions are modeled by a Transformer encoder~\cite{vaswa
 \end{equation}
 where $\mat{X}^{(t)}$ are the input tokens, $\mat{S}^{(t)}$ are the spatial positional encodings (Eq.~\ref{eq:spe}), and $\overline{\mat{v}}^{(t)}$ is the validity-based padding mask.  Pre-LN~\cite{xiong2020layer} architecture is used with a final LayerNorm.
 
-This corresponds to a fully-connected GNN where every valid object attends to every other valid object in the same frame, with 3D geometry informing the attention via additive positional bias.  It can be viewed as implementing a single-frame ``spatial reasoning'' step akin to the graph convolution stage in prior scene graph methods~\cite{xu2017scene,yang2018graph}, but using self-attention in place of message passing.
+This corresponds to a fully-connected GNN where every valid object attends to every other valid object in the same frame, with 3D geometry informing the attention via additive positional bias.  It can be viewed as implementing a single-frame ``spatial reasoning'' step akin to the graph convolution stage in prior scene graph methods~\cite{xu2017scene,yang2018graph,li2018factorizable}, but using self-attention in place of message passing.  Compared to the edge-conditioned message passing used in~\cite{yang2018graph}, our additive positional encoding approach is more parameter-efficient while allowing the attention mechanism to implicitly learn geometry-dependent message weights.
 
 
 % ------------------------------------------------------------------------------------
@@ -138,7 +141,7 @@ where $C_{\text{obj}}=37$ is the number of object categories.  This is only used
 
 The \emph{Relationship Predictor} is responsible for the complete edge prediction pipeline.  It operates in three phases.
 
-\paragraph{Phase 2: Relationship Token Formation.}
+\paragraph{Phase 1: Relationship Token Formation.}
 For each human--object pair $(p, o)$, a relationship token is formed by concatenating:
 \begin{equation}
     \mat{r}_{po} = \op{Proj}\bigl([\mat{h}_p \;\|\; \mat{h}_o \;\|\; \mat{u}_{po} \;\|\; \mat{t}_p \;\|\; \mat{t}_o]\bigr) \in \mR^{d_{\text{rel}}},
@@ -146,17 +149,17 @@ For each human--object pair $(p, o)$, a relationship token is formed by concaten
 \end{equation}
 where $\mat{h}_p, \mat{h}_o \in \mR^{d_{\text{model}}}$ are the enriched node representations, $\mat{u}_{po} \in \mR^{d_{\text{union}}}$ are projected union ROI features (or a learnable ``no-union'' embedding), and $\mat{t}_p, \mat{t}_o \in \mR^{d_{\text{text}}}$ are projections of frozen CLIP~\cite{radford2021learning} text embeddings indexed by the predicted object class.
 
-The union features are obtained by projecting raw DINO union ROI features ($d_{\text{union\_roi}} \to d_{\text{union}} = d_{\text{rel}}/4$) through a linear layer with ReLU and LayerNorm.  The CLIP text embeddings provide semantic priors: the model can leverage the language grounding that ``a person \textit{standing next to} a chair'' implies spatial proximity.
+The union features are obtained by projecting raw DINO union ROI features ($d_{\text{union\_roi}} \to d_{\text{union}} = d_{\text{rel}}/4$) through a linear layer with ReLU and LayerNorm.  The CLIP text embeddings provide semantic priors: the model can leverage the language grounding that ``a person \textit{standing next to} a chair'' implies spatial proximity.  This integration of language priors with visual and geometric features echoes the multi-modal fusion strategies explored in recent SGG work~\cite{lu2016visual,chen2019knowledge}, but adapted for the 3D world setting.
 
-\paragraph{Phase 3: Relationship Self-Attention.}
+\paragraph{Phase 2: Relationship Self-Attention.}
 All $K$ relationship tokens within a frame self-attend to enable inter-edge reasoning:
 \begin{equation}
     \mat{R}^{(t)} = \op{RelTransformer}\bigl(\{\mat{r}_{po}\}_{(p,o) \in \mathcal{P}_t}\bigr) \in \mR^{K_t \times d_{\text{rel}}}.
     \label{eq:rel_attn}
 \end{equation}
-This can be viewed as a ``message passing over the edge graph''---each relationship can attend to other concurrent relationships to resolve ambiguities (e.g., if person $p$ is \emph{holding} object $o_1$, they are less likely to also be \emph{holding} $o_2$).
+This can be viewed as a ``message passing over the edge graph''---each relationship can attend to other concurrent relationships to resolve ambiguities (e.g., if person $p$ is \emph{holding} object $o_1$, they are less likely to also be \emph{holding} $o_2$).  This follows the principle of relational context modeling~\cite{li2018factorizable,zellers2018neural}, where jointly reasoning over all candidate relationships produces more coherent scene graphs than independent edge classification.
 
-\paragraph{Phase 5: Prediction Heads.}
+\paragraph{Phase 3: Prediction Heads.}
 Three independent MLP heads produce per-class predictions:
 \begin{align}
     \hat{\mat{y}}_{\text{att}} &= \op{MLP}_{\text{att}}(\mat{r}) \in \mR^{3}, & &\text{(attention: looking at, not looking at, unsure)} \label{eq:att_head} \\
@@ -179,6 +182,8 @@ Per-pair temporal self-attention enables cross-frame edge reasoning.  For each u
 where $\mathcal{T}_{po}$ is the set of frames in which pair $(p,o)$ is valid, and $\mat{e}_{\tau}$ is the learned temporal positional embedding for frame index $\tau$.
 
 Implementation uses vectorized pair grouping: unique pair keys are computed as $\text{key}_{po} = p \cdot N_{\max} + o$, pairs are grouped via \texttt{torch.unique}, and the resulting per-pair sequences are batched for a single \texttt{TransformerEncoder} call.  This avoids all Python-level loops.
+
+This temporal edge attention is closely related to the approach taken in STTran~\cite{cong2021spatial}, which similarly applies temporal self-attention to relationship features across frames.  Our key extension is that the set $\mathcal{T}_{po}$ now includes frames where one or both entities may be \emph{unseen}---their relationship tokens having been completed by the upstream world-state estimation module.  This enables temporal consistency enforcement even across occlusion boundaries, a capability absent from VidSGG methods that only process visible pairs.
 
 
 % ------------------------------------------------------------------------------------
@@ -205,6 +210,8 @@ These are combined and projected:
     \label{eq:cam_per_obj}
 \end{equation}
 
+\paragraph{Connection to Prior Work.}  Encoding camera-relative geometry for each object is inspired by the view-dependent appearance modeling in neural scene representations~\cite{sitzmann2019scene,mildenhall2021nerf}, adapted to operate at the bounding-box level.  This is a critical differentiator from prior VidSGG methods, which either assume a fixed camera or ignore ego-motion entirely.  In the WorldSGG setting, understanding \emph{why} an object disappeared (left the field of view vs.\ occluded by another object) requires explicit camera-relative reasoning.
+
 
 % ------------------------------------------------------------------------------------
 \subsection{Camera Temporal Encoder}
@@ -221,6 +228,8 @@ Each relative pose is encoded via MLP, augmented with learnable temporal positio
     \label{eq:ego_motion}
 \end{equation}
 
+Ego-motion encoding enables the model to distinguish between objects that leave view due to camera motion (recoverable by reversing the camera trajectory) vs.\ physical occlusion (requiring associative retrieval from memory).  This distinction is central to world modeling---a capability that prior VidSGG methods~\cite{cong2021spatial,ji2020action} lack entirely since they assume all object disappearances are equivalent.
+
 
 % ------------------------------------------------------------------------------------
 \subsection{Motion Feature Encoder}
@@ -233,6 +242,8 @@ Per-object 3D motion is encoded from finite differences of OBB centers:
 \end{align}
 Optionally, camera-relative velocity is computed by rotating into the camera frame:
 $\mat{v}_n^{\text{cam}} = \mat{R}^{\!\top}\mat{v}_n$, providing parallax-aware motion signals.  The full feature vector $[\mat{v}_n,\,\mat{a}_n,\,\|\mat{v}_n\|,\,\mat{v}_n^{\text{cam}},\,\|\mat{v}_n^{\text{cam}}\|] \in \mR^{11}$ is processed by a shared MLP.  The first frame receives a learnable ``no-motion'' embedding.  Velocity and acceleration are only computed where consecutive frames have valid objects, preventing spurious spikes from padding transitions.
+
+\paragraph{Connection to Prior Work.}  3D motion features extend the 2D optical-flow-based motion signals used in prior VidSGG methods like TRACE~\cite{teng2021target} and APT~\cite{li2022dynamic}, which encode pixel-level motion between frames.  By operating in 3D world coordinates, our motion features capture true physical displacement independent of camera motion---essential for distinguishing contact relationships (e.g., ``carrying'' implies co-moving) from spatial coincidence.
 
 
 % ------------------------------------------------------------------------------------
@@ -248,15 +259,19 @@ where $k$ is the number of active labels per sample and $C$ is the total number 
 
 
 % ====================================================================================
-\section{Method 1: LKS-GNN (Last-Known-State GNN)}
-\label{sec:lks}
+\section{Method 1: PWG --- Persistent World Graph}
+\label{sec:pwg}
 % ====================================================================================
 
 \subsection{High-Level Goal}
 
-LKS-GNN is the simplest baseline for WorldSGG.  It answers: \emph{``What if we simply freeze each object's visual appearance at the last time it was seen?''}  This is analogous to a human's ``zero-order'' assumption---when an object goes behind a door, we continue to reason about it using its last-known visual features.
+PWG is the foundational baseline for WorldSGG, answering the question: \emph{``What if we simply freeze each object's visual appearance at the last time it was seen, and reason about the full world graph using 3D geometry as scaffolding?''}
 
-This approach connects to classical tracking-by-detection paradigms~\cite{bewley2016sort} and object permanence reasoning~\cite{piloto2022intuitive}, but applied at the feature level rather than the bounding-box level.
+This design is rooted in the cognitive science concept of \textbf{object permanence}~\cite{piloto2022intuitive,spelke1990principles}---the understanding that objects continue to exist even when they are no longer directly perceived.  In developmental psychology, object permanence is considered a foundational prerequisite for physical reasoning.  PWG implements this principle at the feature level: when an object leaves the camera's field of view or becomes occluded, the model continues to reason about it using its last-known visual features, anchored by its persistent 3D world position.
+
+\paragraph{Relation to Tracking-Based Methods.}  From the multi-object tracking perspective, PWG can be understood as an extension of tracking-by-detection paradigms~\cite{bewley2016sort,wojke2017simple} from the \emph{localization} domain to the \emph{relational reasoning} domain.  SORT~\cite{bewley2016sort} maintains object states (position, velocity) through occlusions using Kalman filtering; PWG extends this to maintain \emph{visual appearance features} and \emph{relationship predictions} through occlusions using a zero-order hold.
+
+\paragraph{Relation to VidSGG Methods.}  Prior VidSGG approaches such as STTran~\cite{cong2021spatial}, VRD-STGC~\cite{shang2017video}, and action genome methods~\cite{ji2020action} construct scene graphs only from \emph{currently visible} detections.  When an object disappears, it simply drops out of the graph---a significant limitation for downstream tasks like activity understanding and navigation that require persistent world state.  PWG addresses this by maintaining a \emph{complete} world graph at every frame, regardless of visibility.
 
 \subsection{LKS Memory Buffer}
 \label{sec:lks_buffer}
@@ -280,26 +295,26 @@ Here, $\mat{f}_n^{(t)} \in \mR^{d_{\text{roi}}}$ denotes the raw DINO ROI featur
 \end{enumerate}
 All operations are $O(T \cdot N)$ and fully vectorized with no Python loops.
 
-\paragraph{Staleness.}  The buffer also outputs a per-object staleness value $\Delta_n^{(t)} = |t - \tau^*| \in \mathbb{N}_0$, capped at a fixed sentinel ($\Delta=1000$ for never-seen objects) to decouple from video length.
+\paragraph{Staleness.}  The buffer also outputs a per-object staleness value $\Delta_n^{(t)} = |t - \tau^*| \in \mathbb{N}_0$, capped at a fixed sentinel ($\Delta=1000$ for never-seen objects) to decouple from video length.  This staleness value serves as a learned confidence indicator: the model can learn to weight stale features differently from fresh observations, analogous to the age-based gating used in DeepSORT~\cite{wojke2017simple} for track management.
 
 
-\subsection{LKS Tokenizer}
+\subsection{Tokenizer}
 
 The tokenizer fuses geometry, buffered features, camera information, and staleness metadata:
 \begin{equation}
     \mat{x}_n^{(t)} = \op{Proj}\bigl([\mat{g}_n^{(t)} \;\|\; \mat{m}_n^{(t)} \;\|\; \mat{c}_n^{(t)} \;\|\; \log(\Delta_n^{(t)} + 1)]\bigr) \in \mR^{d_{\text{model}}},
-    \label{eq:lks_tokenizer}
+    \label{eq:pwg_tokenizer}
 \end{equation}
 where the log-staleness term provides a smooth, bounded indicator of feature freshness.  The visual projection from $d_{\text{roi}}$ to $d_{\text{model}}$ happens \emph{inside} the fusion MLP, allowing gradients from the downstream loss to flow through the alignment layer.
 
 \subsection{Full Pipeline}
 
-The LKS-GNN pipeline processes all $T$ frames in a single batched forward pass (with $B=T$):
+The PWG pipeline processes all $T$ frames in a single batched forward pass (with $B=T$):
 \begin{enumerate}
     \item \textbf{Vectorized LKS Buffer} (non-differentiable): $\mat{f}_{\text{all}} \to (\mat{m}_{\text{all}},\,\bm{\Delta}_{\text{all}})$
     \item \textbf{Structural Encoding}: $\mat{C}_{\text{all}} \to \mat{G}_{\text{all}} \in \mR^{T \times N \times d_{\text{struct}}}$
     \item \textbf{Camera Encoding}: $\mat{T}_{\text{all}} \to \mat{c}_{\text{all}} \in \mR^{T \times N \times d_{\text{camera}}}$
-    \item \textbf{LKS Tokenization}: $[\mat{G}, \mat{m}, \mat{c}, \log \bm{\Delta}] \to \mat{X} \in \mR^{T \times N \times d_{\text{model}}}$
+    \item \textbf{Tokenization}: $[\mat{G}, \mat{m}, \mat{c}, \log \bm{\Delta}] \to \mat{X} \in \mR^{T \times N \times d_{\text{model}}}$
     \item \textbf{Spatial GNN}: $\mat{X} \to \mat{H} \in \mR^{T \times N \times d_{\text{model}}}$
     \item \textbf{Node Prediction}: $\mat{H} \to \hat{\mat{Y}}^{\text{obj}} \in \mR^{T \times N \times C_{\text{obj}}}$
     \item \textbf{Batched Edge Formation + Self-Attention}: $(\mat{H}, \hat{\mat{Y}}^{\text{obj}}) \to \mat{R} \in \mR^{T \times K_{\max} \times d_{\text{rel}}}$
@@ -307,46 +322,50 @@ The LKS-GNN pipeline processes all $T$ frames in a single batched forward pass (
     \item \textbf{Prediction Heads}: $\tilde{\mat{R}} \to (\hat{\mat{y}}_{\text{att}},\,\hat{\mat{y}}_{\text{spa}},\,\hat{\mat{y}}_{\text{con}})$
 \end{enumerate}
 
-\subsection{LKS Loss Function}
-\label{sec:lks_loss}
+\subsection{PWG Loss Function}
+\label{sec:pwg_loss}
 
-The loss partitions human--object pairs into three buckets based on visibility of the constituent entities:
+The loss partitions human--object pairs into visibility buckets based on whether the constituent entities are directly observed:
 \begin{itemize}
-    \item \textbf{Vis-Vis}: Both person and object are visible $\to$ clean manual ground-truth labels.
-    \item \textbf{Vis-Unseen}: One entity is visible, the other is not $\to$ VLM pseudo-labels.
-    \item \textbf{Unseen-Unseen}: Neither entity is visible $\to$ VLM pseudo-labels.
+    \item \textbf{Visible}: Both person and object are visible $\to$ clean manual ground-truth labels.
+    \item \textbf{Partially/Fully Unseen}: At least one entity is not visible $\to$ VLM pseudo-labels.
 \end{itemize}
 
 All buckets share a \emph{single global denominator} $N_{\text{total}} = \sum_{t}\sum_k \mathbb{1}[\text{pair}_{t,k} \text{ is valid}]$, ensuring each pair contributes equally to the gradient:
 \begin{align}
-    \mathcal{L}_{\text{att}}^{\text{vis}} &= \frac{1}{N}\sum_{(p,o) \in \text{vis-vis}} \op{CE}\bigl(\hat{\mat{y}}_{\text{att}},\, y_{\text{att}}\bigr), \label{eq:lks_att_vis} \\
-    \mathcal{L}_{\text{spa}}^{\text{vis}} &= \frac{1}{N}\sum_{(p,o) \in \text{vis-vis}} \op{BCE}\bigl(\hat{\mat{y}}_{\text{spa}},\, y_{\text{spa}}\bigr), \label{eq:lks_spa_vis} \\
-    \mathcal{L}_{\text{con}}^{\text{vis}} &= \frac{1}{N}\sum_{(p,o) \in \text{vis-vis}} \op{BCE}\bigl(\hat{\mat{y}}_{\text{con}},\, y_{\text{con}}\bigr). \label{eq:lks_con_vis}
+    \mathcal{L}_{\text{att}}^{\text{vis}} &= \frac{1}{N}\sum_{(p,o) \in \text{visible}} \op{CE}\bigl(\hat{\mat{y}}_{\text{att}},\, y_{\text{att}}\bigr), \label{eq:pwg_att_vis} \\
+    \mathcal{L}_{\text{spa}}^{\text{vis}} &= \frac{1}{N}\sum_{(p,o) \in \text{visible}} \op{BCE}\bigl(\hat{\mat{y}}_{\text{spa}},\, y_{\text{spa}}\bigr), \label{eq:pwg_spa_vis} \\
+    \mathcal{L}_{\text{con}}^{\text{vis}} &= \frac{1}{N}\sum_{(p,o) \in \text{visible}} \op{BCE}\bigl(\hat{\mat{y}}_{\text{con}},\, y_{\text{con}}\bigr). \label{eq:pwg_con_vis}
 \end{align}
 For unseen buckets, the VLM pseudo-labels are down-weighted by $\lambda_{\text{vlm}}$ and optionally smoothed:
 \begin{align}
-    \mathcal{L}_{\text{att}}^{\text{unseen}} &= \frac{\lambda_{\text{vlm}}}{N}\sum_{(p,o) \in \text{unseen}} \op{KL}\bigl(\log\op{softmax}(\hat{\mat{y}}_{\text{att}}),\, \tilde{y}_{\text{att}}\bigr), \label{eq:lks_att_unseen} \\
-    \mathcal{L}_{\text{spa}}^{\text{unseen}} &= \frac{\lambda_{\text{vlm}}}{N}\sum_{(p,o) \in \text{unseen}} \op{BCE}\bigl(\hat{\mat{y}}_{\text{spa}},\, \tilde{y}_{\text{spa}}\bigr), \label{eq:lks_spa_unseen} \\
-    \mathcal{L}_{\text{con}}^{\text{unseen}} &= \frac{\lambda_{\text{vlm}}}{N}\sum_{(p,o) \in \text{unseen}} \op{BCE}\bigl(\hat{\mat{y}}_{\text{con}},\, \tilde{y}_{\text{con}}\bigr), \label{eq:lks_con_unseen}
+    \mathcal{L}_{\text{att}}^{\text{unseen}} &= \frac{\lambda_{\text{vlm}}}{N}\sum_{(p,o) \in \text{unseen}} \op{KL}\bigl(\log\op{softmax}(\hat{\mat{y}}_{\text{att}}),\, \tilde{y}_{\text{att}}\bigr), \label{eq:pwg_att_unseen} \\
+    \mathcal{L}_{\text{spa}}^{\text{unseen}} &= \frac{\lambda_{\text{vlm}}}{N}\sum_{(p,o) \in \text{unseen}} \op{BCE}\bigl(\hat{\mat{y}}_{\text{spa}},\, \tilde{y}_{\text{spa}}\bigr), \label{eq:pwg_spa_unseen} \\
+    \mathcal{L}_{\text{con}}^{\text{unseen}} &= \frac{\lambda_{\text{vlm}}}{N}\sum_{(p,o) \in \text{unseen}} \op{BCE}\bigl(\hat{\mat{y}}_{\text{con}},\, \tilde{y}_{\text{con}}\bigr), \label{eq:pwg_con_unseen}
 \end{align}
 where $\tilde{y}$ denotes the label-smoothed target (Sec.~\ref{sec:label_smoother}).  The full loss is:
 \begin{equation}
-    \mathcal{L}_{\text{LKS}} = \sum_{r \in \{\text{att, spa, con}\}} \bigl(\mathcal{L}_{r}^{\text{vis}} + \mathcal{L}_{r}^{\text{vis-unseen}} + \mathcal{L}_{r}^{\text{unseen-unseen}}\bigr) + \mathcal{L}_{\text{node}}.
-    \label{eq:lks_total}
+    \mathcal{L}_{\text{PWG}} = \sum_{r \in \{\text{att, spa, con}\}} \bigl(\mathcal{L}_{r}^{\text{vis}} + \mathcal{L}_{r}^{\text{unseen}}\bigr) + \mathcal{L}_{\text{node}}.
+    \label{eq:pwg_total}
 \end{equation}
 In SGCls/SGDet modes, the node classification loss $\mathcal{L}_{\text{node}} = \op{CE}(\hat{\mat{y}}^{\text{obj}}, y^{\text{obj}}) / N_{\text{nodes}}$ is added.
 
 
 % ====================================================================================
-\section{Method 2: GL-STGN (Global-Local Spatio-Temporal Graph Network)}
-\label{sec:glstgn}
+\section{Method 2: 4DST --- 4D Scene Transformer}
+\label{sec:4dst}
 % ====================================================================================
 
 \subsection{High-Level Goal}
 
-GL-STGN addresses a fundamental limitation of LKS-GNN: the memory buffer is non-differentiable and cannot be trained end-to-end.  GL-STGN replaces it with a \emph{Temporal Object Transformer} that performs per-object bidirectional self-attention over the entire video.
+4DST addresses a fundamental limitation of PWG: the memory buffer is non-differentiable and cannot be trained end-to-end.  4DST replaces it with a \emph{Temporal Object Transformer} that performs per-object bidirectional self-attention over the entire video, enabling the model to learn \emph{how} to interpolate, extrapolate, and contextualize object appearance across time.
 
-The key insight is that object state at any frame $t$ should be informed by \emph{all} observations of that object---past and future---not just the nearest one.  This is inspired by non-causal video models~\cite{tong2022videomae,arnab2021vivit} where bidirectional attention yields richer temporal representations.
+\paragraph{Relation to Video Transformers.}  The 4DST architecture draws direct inspiration from the factorized spatial-temporal attention paradigm that has proven highly effective in video understanding.  ViViT~\cite{arnab2021vivit} and TimeSformer~\cite{bertasius2021space} demonstrated that factorizing attention into spatial (within-frame) and temporal (across-frame) components yields better efficiency and performance than joint space-time attention.  4DST adopts this factorization at the scene graph level: the \emph{Spatial GNN} performs within-frame object-to-object attention, while the \emph{Temporal Object Transformer} performs per-object across-frame attention.  The critical extension is that both modules operate over the \emph{complete} set of objects (visible and unseen), enabling temporal reasoning to fill in representations at occluded time steps.
+
+\paragraph{Relation to VidSGG Methods.}  STTran~\cite{cong2021spatial} was the first to apply temporal transformers to video scene graph generation, using self-attention across frames for both node-level and edge-level features.  However, STTran operates exclusively on visible detections---when an object disappears, its temporal sequence simply ends.  4DST extends this approach in two key ways: (i) the temporal sequence includes \emph{all} frames, with a learned visibility embedding distinguishing observed from inferred tokens; and (ii) the temporal attention operates over 3D world-frame features enriched with camera pose and motion information, enabling view-invariant temporal reasoning.
+
+\paragraph{Relation to 4D Scene Understanding.}  Recent work on 4D scene graph generation~\cite{wald2020learning} has explored jointly reasoning over 3D space and time for scene understanding.  4DST can be viewed as extending this line of work by operating in an \emph{egocentric video} setting with dynamic camera motion, rather than static scene scans.  The camera temporal encoder (Sec.~\ref{sec:cam_temporal}) explicitly models ego-motion, enabling the model to disentangle object motion from camera-induced apparent motion.
+
 
 \subsection{Temporal Object Transformer}
 \label{sec:temporal_transformer}
@@ -356,67 +375,76 @@ For each object $n$, the Temporal Object Transformer builds a sequence of $T$ to
 \paragraph{Feature Fusion.}  Per-frame tokens are formed by concatenating projected visual features, structural tokens, camera features, motion features, and broadcast ego-motion tokens:
 \begin{equation}
     \mat{z}_n^{(t)} = \op{InputProj}\bigl([\op{VisProj}(\mat{f}_n^{(t)}) \;\|\; \mat{g}_n^{(t)} \;\|\; \mat{c}_n^{(t)} \;\|\; \mat{\mu}_n^{(t)} \;\|\; \mat{e}_t]\bigr) \in \mR^{d_{\text{memory}}},
-    \label{eq:glstgn_fusion}
+    \label{eq:4dst_fusion}
 \end{equation}
 where $\mat{\mu}_n^{(t)}$ is the motion feature and $\mat{e}_t$ is the ego-motion token.
 
 \paragraph{Temporal Positional Encoding.}  Sinusoidal positional encoding~\cite{vaswani2017attention} is added to each token:
 \begin{equation}
     \mat{z}_n^{(t)} \mathrel{+}= \op{PE}_{\text{sin}}(t) \in \mR^{d_{\text{memory}}}.
-    \label{eq:glstgn_pe}
+    \label{eq:4dst_pe}
 \end{equation}
 
 \paragraph{Visibility Embedding.}  A learned embedding distinguishes directly observed vs.\ unseen tokens:
 \begin{equation}
-    \mat{z}_n^{(t)} \mathrel{+}= \mat{e}_{\text{vis}}[\mathbb{1}[\text{vis}(n, t)]] \in \mR^{d_{\text{memory}}},
+    \mat{z}_n^{(t)} \mathrel{+}= \mat{e}_{\text{vis}}[\mathbb{1}[\text{vis}(n, t)]] \in \mR^{d_{\text{memory}}}.
     \label{eq:vis_emb}
 \end{equation}
-replacing the GRU's explicit seen/unseen branch.
+This binary indicator replaces explicit gating mechanisms (e.g., GRU-based seen/unseen branches), allowing the transformer to learn its own visibility-conditioned attention patterns.  Tokens marked as unseen still receive full geometric and camera features from the 3D scaffold, providing the transformer with a rich structural context from which to infer the missing visual representation.
 
 \paragraph{Bidirectional Self-Attention.}  Each object's $T$-length sequence is independently processed by a Transformer encoder \emph{without causal masking}:
 \begin{equation}
     \{\tilde{\mat{z}}_n^{(t)}\}_{t=1}^{T} = \op{TransformerEncoder}\bigl(\{\mat{z}_n^{(t)}\}_{t=1}^{T}\bigr).
-    \label{eq:glstgn_biattn}
+    \label{eq:4dst_biattn}
 \end{equation}
 The Transformer batches over $N$ objects (batch dim $=N$, sequence length $=T$).  Invalid (padding) frames are masked via \texttt{src\_key\_padding\_mask}.
 
-\paragraph{Connection to Prior Work.}  This can be viewed as a differentiable version of the video object memory in long-term tracking approaches~\cite{cheng2022xmem,oh2019video} but applied per-object in a scene graph context.
+\paragraph{Connection to Video Object Memory.}  This per-object temporal attention can be viewed as a differentiable analogue of the memory mechanisms used in long-term video object segmentation~\cite{cheng2022xmem,oh2019video}.  XMem~\cite{cheng2022xmem} maintains a multi-scale memory bank for each tracked object and uses attention-based retrieval to handle occlusions; 4DST achieves a similar effect through per-object bidirectional self-attention, but with the critical advantage that the entire pipeline is end-to-end differentiable and jointly optimized for relationship prediction.
 
 
-\subsection{Pipeline Additions over LKS-GNN}
+\subsection{Pipeline Additions over PWG}
 
-GL-STGN introduces three new modules compared to LKS-GNN:
+4DST introduces three new modules compared to PWG:
 \begin{enumerate}
     \item \textbf{Camera Temporal Encoder} (Sec.~\ref{sec:cam_temporal}): Encodes the full ego-motion sequence.
     \item \textbf{Motion Feature Encoder} (Sec.~\ref{sec:motion_encoder}): Encodes per-object 3D velocity and acceleration.
     \item \textbf{Temporal Object Transformer}: Replaces the LKS buffer with differentiable temporal attention.
 \end{enumerate}
-The remaining pipeline (Spatial GNN $\to$ Node Prediction $\to$ Relationship Prediction $\to$ Temporal Edge Attention) is identical.
+The remaining pipeline (Spatial GNN $\to$ Node Prediction $\to$ Relationship Prediction $\to$ Temporal Edge Attention) is identical to PWG.
 
-\subsection{GL-STGN Loss Function}
+\subsection{4DST Loss Function}
 
-The loss structure mirrors LKS (Sec.~\ref{sec:lks_loss}) with two visibility buckets (visible vs.\ partially/fully unseen):
+The loss structure mirrors PWG (Sec.~\ref{sec:pwg_loss}) with visible and unseen buckets:
 \begin{equation}
-    \mathcal{L}_{\text{GL-STGN}} = \sum_{r \in \{\text{att, spa, con}\}} \bigl(\mathcal{L}_{r}^{\text{visible}} + \lambda_{\text{vlm}} \cdot \mathcal{L}_{r}^{\text{unseen}}\bigr) + \mathcal{L}_{\text{node}}.
-    \label{eq:glstgn_total}
+    \mathcal{L}_{\text{4DST}} = \sum_{r \in \{\text{att, spa, con}\}} \bigl(\mathcal{L}_{r}^{\text{visible}} + \lambda_{\text{vlm}} \cdot \mathcal{L}_{r}^{\text{unseen}}\bigr) + \mathcal{L}_{\text{node}}.
+    \label{eq:4dst_total}
 \end{equation}
 Label smoothing is applied identically for unseen pairs.
 
 
 % ====================================================================================
-\section{Method 3: AMWAE (Associative Masked World Auto-Encoder)}
-\label{sec:amwae}
+\section{Method 3: MWAE --- Masked World Auto-Encoder}
+\label{sec:mwae}
 % ====================================================================================
 
 \subsection{High-Level Goal}
 
-AMWAE introduces a \emph{masked auto-encoder} paradigm to WorldSGG.  The key insight is that predicting relationships for unseen objects is fundamentally a \emph{completion} task: given partial observations and a complete geometric scaffold, the model must ``fill in'' what it cannot see.
+MWAE introduces a \emph{masked auto-encoder} paradigm to WorldSGG, reframing the prediction of relationships for unseen objects as a \emph{structured completion problem}.  Given partial observations (visible objects) and a complete geometric scaffold (the persistent 3D wireframe), the model must ``fill in'' the visual representations and relationship predictions for occluded objects.
 
-The design draws inspiration from masked image modeling (MAE)~\cite{he2022masked} and masked video modeling (VideoMAE)~\cite{tong2022videomae}, but with two critical differences:
-\begin{enumerate}
-    \item \textbf{The masking is natural, not synthetic:} Objects are masked by occlusion and camera motion, not by random patch removal.
-    \item \textbf{The scaffold is always complete:} The 3D wireframe provides full structural information for all objects at all times, even when visual evidence is missing.
-\end{enumerate}
+\paragraph{Relation to Masked Representation Learning.}  The MWAE architecture is directly inspired by the masked auto-encoder (MAE) framework~\cite{he2022masked}, which demonstrated that masking a large fraction of image patches and training an encoder-decoder architecture to reconstruct them produces powerful visual representations.  VideoMAE~\cite{tong2022videomae} extended this to the space-time domain, showing that the temporal redundancy in video allows even more aggressive masking ratios.
+
+MWAE transposes this paradigm from the \emph{pixel/patch} domain to the \emph{object/relationship} domain.  The key conceptual parallels are:
+
+\begin{itemize}
+    \item \textbf{Masking source:}  In MAE/VideoMAE, patches are randomly masked.  In MWAE, objects are naturally masked by \emph{occlusion}, \emph{camera motion}, and \emph{field-of-view limitations}---the masking arises from the physics of perception rather than synthetic augmentation.  During training, additional stochastic masking of visible objects supplements the natural masking to create a robust reconstruction signal.
+    \item \textbf{Structural scaffold:}  MAE's decoder receives positional embeddings for masked patches.  MWAE's scaffold tokenizer receives \emph{full 3D geometric information} for all objects at all times---even those never observed---providing a far richer structural prior than learned positional embeddings alone.
+    \item \textbf{Encoder-decoder factorization:}  MAE processes only visible patches through the encoder, then applies a lightweight decoder to the full set (visible + masked).  MWAE similarly uses its \emph{Associative Retriever} as a decoder that cross-attends from masked object positions to visible memory entries, retrieving view-consistent representations for occluded objects.
+\end{itemize}
+
+\paragraph{Relation to Scene Completion.}  MWAE also connects to the semantic scene completion literature~\cite{song2017semantic,li2020anisotropic}, which aims to predict the full 3D semantic layout of a scene from partial observations.  While those methods operate in voxel space, MWAE performs \emph{relational completion}---predicting the relationships that hold between all objects, including those not directly observed.  The scaffold tokenizer's use of complete 3D geometry for all objects (including unseen ones) mirrors the volumetric priors used in scene completion, but at the object-relational level rather than the voxel-semantic level.
+
+\paragraph{Relation to VidSGG.}  Compared to the temporal attention used in STTran~\cite{cong2021spatial} and our 4DST model, MWAE makes a critical architectural distinction: rather than having masked and visible tokens jointly participate in self-attention (where masked tokens might attend to each other and propagate noise), MWAE uses \emph{asymmetric cross-attention} where masked tokens can only attend to visible memory entries.  This parallels the evolution from BERT~\cite{devlin2019bert} (joint encoding of masked and visible tokens) to MAE~\cite{he2022masked} (separate encoder for visible, decoder for masked), which was shown to produce superior representations by preventing masked tokens from attending to each other's noise.
+
 
 \subsection{Scaffold Tokenizer}
 \label{sec:scaffold_tokenizer}
@@ -436,12 +464,12 @@ where the visual component is:
 \end{equation}
 with $\mat{e}_{\text{[MASK]}} \in \mR^{d_{\text{visual}}}$ being a learnable mask embedding.
 
-\paragraph{Training-Time Stochastic Masking.}  During training, a fraction $p_{\text{mask}}$ of \emph{visible} objects are artificially masked (visual features replaced with $\mat{e}_{\text{[MASK]}}$) to force the retriever to learn associative recovery.  This ensures the reconstruction loss has non-trivial targets even when few natural occlusions occur.
+\paragraph{Training-Time Stochastic Masking.}  During training, a fraction $p_{\text{mask}}$ of \emph{visible} objects are artificially masked (visual features replaced with $\mat{e}_{\text{[MASK]}}$) to force the retriever to learn associative recovery.  This ensures the reconstruction loss has non-trivial targets even when few natural occlusions occur.  This augmentation strategy mirrors the random masking in MAE~\cite{he2022masked}, but targets individual objects rather than image patches, and supplements rather than replaces the natural masking from occlusion.
 
 \subsection{Associative Retriever}
 \label{sec:associative_retriever}
 
-The Associative Retriever performs per-object bidirectional cross-attention to ``fill in'' masked tokens by consulting that object's visible appearances across all frames.
+The Associative Retriever performs per-object bidirectional cross-attention to ``fill in'' masked tokens by consulting that object's visible appearances across all frames.  This retrieval mechanism acts as the ``decoder'' in the MAE analogy: it takes incomplete representations (where some time steps have only geometric scaffolding) and completes them by attending to time steps where the object was actually observed.
 
 \paragraph{Architecture.}  Each object $n$'s temporal sequence (length $T$) is processed by stacked cross-attention layers where:
 \begin{itemize}
@@ -451,18 +479,18 @@ The Associative Retriever performs per-object bidirectional cross-attention to `
 \end{itemize}
 The key padding mask ensures unseen tokens are excluded from the key/value pool.
 
-\paragraph{View-Aware Bias.}  The camera pose projections ($\op{QProj}$, $\op{KProj}$) bias the attention so that retrieval naturally favors memory entries captured from \emph{similar viewpoints}.  This is consistent with the observation that visual features are more transferable between nearby camera positions.
+\paragraph{View-Aware Bias.}  The camera pose projections ($\op{QProj}$, $\op{KProj}$) bias the attention so that retrieval naturally favors memory entries captured from \emph{similar viewpoints}.  This is consistent with the observation that visual features are more transferable between nearby camera positions, and connects to the view-dependent attention mechanisms used in multi-view reconstruction~\cite{wang2021ibrnet,yu2021pixelnerf}.
 
-\paragraph{Iterative K/V Refinement.}  After each cross-attention layer, visible-position keys and values are updated with the evolved query values:
+\paragraph{Iterative Key/Value Refinement.}  After each cross-attention layer, visible-position keys and values are updated with the evolved query values:
 \begin{align}
     \mat{k}_n^{(t)} &\leftarrow \begin{cases} \mat{q}_n^{(t)} + \op{KProj}(\mat{c}_n^{(t)}) & \text{if visible}, \\ \mat{k}_n^{(t)} & \text{otherwise}. \end{cases} \label{eq:kv_update}
 \end{align}
-This allows subsequent layers to attend to progressively richer representations.
+This allows subsequent layers to attend to progressively richer representations, creating an iterative refinement loop analogous to the recurrent refinement used in RAFT~\cite{teed2020raft} for optical flow and in iterative attention mechanisms for point cloud processing~\cite{zhao2021point}.
 
 \paragraph{Visibility Embedding.}  After retrieval, a learned visibility embedding is added:
 \begin{equation}
     \hat{\mat{x}}_n^{(t)} = \mat{x}_n^{(t)} + \mat{e}_{\text{vis}}[\mathbb{1}[\text{vis}(n,t) \wedge \neg\text{masked}(n,t)]].
-    \label{eq:amwae_vis_emb}
+    \label{eq:mwae_vis_emb}
 \end{equation}
 The effective visibility excludes artificially masked objects, preventing a training shortcut where the model could bypass retrieval by relying on the visibility indicator.
 
@@ -474,26 +502,26 @@ A linear projection head predicts the original DINO visual features from the com
     \hat{\mat{f}}_n^{(t)} = \op{Linear}(\hat{\mat{x}}_n^{(t)}) \in \mR^{d_{\text{visual}}}.
     \label{eq:recon_pred}
 \end{equation}
-The reconstruction loss is only applied to \emph{artificially masked} objects (not padding or genuinely unseen objects, which lack meaningful targets).
+The reconstruction loss is only applied to \emph{artificially masked} objects (not padding or genuinely unseen objects, which lack meaningful targets).  This cross-view reconstruction objective forces the retriever to produce representations that faithfully capture the object's visual appearance, not just its category---ensuring that fine-grained visual cues relevant to relationship prediction (e.g., hand pose for ``holding'' vs.\ ``touching'') are preserved through the completion process.
 
-\subsection{AMWAE Loss Function}
-\label{sec:amwae_loss}
+\subsection{MWAE Loss Function}
+\label{sec:mwae_loss}
 
-AMWAE uses a triple-objective loss:
+MWAE uses a triple-objective loss:
 \begin{equation}
-    \mathcal{L}_{\text{AMWAE}} = \mathcal{L}_{\text{SG}} + \lambda_{\text{recon}} \cdot \lambda_{\text{dom}} \cdot \mathcal{L}_{\text{recon}} + \mathcal{L}_{\text{sim}},
-    \label{eq:amwae_total}
+    \mathcal{L}_{\text{MWAE}} = \mathcal{L}_{\text{SG}} + \lambda_{\text{recon}} \cdot \lambda_{\text{dom}} \cdot \mathcal{L}_{\text{recon}} + \mathcal{L}_{\text{sim}},
+    \label{eq:mwae_total}
 \end{equation}
 where:
 
-\paragraph{1. Scene Graph Loss ($\mathcal{L}_{\text{SG}}$).}  Same visible/masked split as GL-STGN (Eq.~\ref{eq:glstgn_total}).
+\paragraph{1. Scene Graph Loss ($\mathcal{L}_{\text{SG}}$).}  Same visible/unseen split as 4DST (Eq.~\ref{eq:4dst_total}).
 
 \paragraph{2. Reconstruction Loss ($\mathcal{L}_{\text{recon}}$).}
 \begin{equation}
     \mathcal{L}_{\text{recon}} = \frac{1}{|\mathcal{M}_{\text{art}}|}\sum_{(t,n) \in \mathcal{M}_{\text{art}}} \|\hat{\mat{f}}_n^{(t)} - \mat{f}_n^{(t)}\|^2,
     \label{eq:recon_loss}
 \end{equation}
-where $\mathcal{M}_{\text{art}}$ is the set of artificially masked (not genuinely unseen) object-frame pairs.  The dominance factor $\lambda_{\text{dom}}$ prevents the reconstruction gradient from being overwhelmed by the scene graph loss in early training.
+where $\mathcal{M}_{\text{art}}$ is the set of artificially masked (not genuinely unseen) object-frame pairs.  The dominance factor $\lambda_{\text{dom}}$ prevents the reconstruction gradient from being overwhelmed by the scene graph loss in early training.  This reconstruction objective plays the same role as the pixel reconstruction loss in MAE~\cite{he2022masked}, but operates in DINO feature space rather than pixel space.
 
 \paragraph{3. Simulated-Unseen Loss ($\mathcal{L}_{\text{sim}}$).}
 For artificially masked objects, the model re-predicts relationships using the completed representations and compares against the \emph{clean} manual ground truth (since these objects were actually visible):
@@ -501,63 +529,10 @@ For artificially masked objects, the model re-predicts relationships using the c
     \mathcal{L}_{\text{sim}} = \frac{1}{|\mathcal{S}|}\sum_{(p,o) \in \mathcal{S}} \bigl[\op{CE}(\hat{\mat{y}}_{\text{att}}, y_{\text{att}}) + \op{BCE}(\hat{\mat{y}}_{\text{spa}}, y_{\text{spa}}) + \op{BCE}(\hat{\mat{y}}_{\text{con}}, y_{\text{con}})\bigr].
     \label{eq:sim_loss}
 \end{equation}
-This creates a self-supervised signal: the model is trained to predict relationships for objects it \emph{can} see but has been told to pretend are unseen.
+This creates a powerful self-supervised signal: the model is trained to predict relationships for objects it \emph{can} see but has been told to pretend are unseen.  Since the ground truth is clean (not VLM pseudo-labels), this provides high-quality gradients for learning the completion-to-prediction pathway.  This ``simulated occlusion'' training strategy is conceptually related to the dropout-based regularization used in~\cite{chen2019counterfactual} for counterfactual reasoning in SGG, but applied at the object level rather than the feature level.
 
 \subsection{Full Pipeline}
-The AMWAE pipeline replaces the LKS buffer and tokenizer with the Scaffold Tokenizer and Associative Retriever, while adding the reconstruction head.  The remaining components (Spatial GNN, Node Predictor, Relationship Predictor, Temporal Edge Attention) are identical.
-
-
-% ====================================================================================
-\section{Method 4: AMWAE++ (AMWAE with Energy Transformer)}
-\label{sec:amwaepp}
-% ====================================================================================
-
-\subsection{High-Level Goal}
-
-AMWAE++ extends AMWAE by replacing the fixed-depth Spatial GNN (Sec.~\ref{sec:spatial_gnn}) with an \emph{Energy Transformer}---a weight-tied recurrent module that iterates until representational convergence.  This draws inspiration from Deep Equilibrium Models (DEQ)~\cite{bai2019deep} and the Energy Transformer~\cite{hoover2024energy}.
-
-The key insight is that the number of message-passing iterations required to propagate context across a scene graph varies with scene complexity.  A 4-layer GNN may over-smooth simple scenes while under-propagating in complex ones.  The Energy Transformer adaptively allocates compute by iterating until the representations stabilize.
-
-\subsection{Energy Diffusion Module}
-\label{sec:energy_diffusion}
-
-The Energy Diffusion module simulates gradient descent on an implicit energy landscape:
-
-\paragraph{Architecture.}  A \emph{single} shared TransformerEncoderLayer (pre-LN) is iterated with 3D spatial PE re-injected at every step:
-\begin{align}
-    \mat{h}_0 &= \hat{\mat{X}}, & &\text{(auto-completed tokens)} \label{eq:energy_init} \\
-    \mat{h}_{k+1} &= \op{SharedLayer}(\mat{h}_k + \mat{S}) - \mat{S}, & &k = 0, 1, \dots, K-1, \label{eq:energy_step}
-\end{align}
-where $\mat{S}$ is the spatial positional encoding (Sec.~\ref{sec:spe}), re-injected to maintain geometric grounding.  The subtraction of $\mat{S}$ after the layer prevents positional encoding from accumulating $K$ times in the residual stream.
-
-\paragraph{Pre-LN Requirement.}  The pre-LN architecture is mathematically critical: it ensures the transformation is a contraction mapping under mild conditions, guaranteeing convergence of the fixed-point iteration~\cite{bai2019deep}.
-
-\paragraph{Training vs.\ Inference.}
-\begin{itemize}
-    \item \textbf{Training}: Fixed unrolling for $K_{\text{train}} = 4$ iterations (constant computation graph for DDP).
-    \item \textbf{Inference}: Dynamic stopping when $\max_{n \in \mathcal{V}} \|\mat{h}_k^{(n)} - \mat{h}_{k-1}^{(n)}\| < \epsilon$, up to $K_{\text{eval}} = 15$ iterations.
-\end{itemize}
-
-\paragraph{Parameter Efficiency.}  Weight tying means one shared layer vs.\ $L$ independent layers in SpatialGNN, achieving approximately $75\%$ parameter reduction in the context propagation module.
-
-
-\subsection{Attractor Stability Loss}
-\label{sec:stability_loss}
-
-To encourage the dynamics to produce a stable fixed point, we add an attractor stability loss:
-\begin{equation}
-    \mathcal{L}_{\text{stability}} = \lambda_{\text{stab}} \cdot \op{MSE}\bigl(\mat{h}_{K}, \op{sg}(\mat{h}_{K-1})\bigr),
-    \label{eq:stability_loss}
-\end{equation}
-where $\op{sg}(\cdot)$ denotes stop-gradient.  This penalizes the distance between the final and penultimate iterations, encouraging the network to converge within the training budget.  Both $\mat{h}_K$ and $\mat{h}_{K-1}$ are post-normalized for fair comparison.
-
-\subsection{AMWAE++ Loss Function}
-
-The total loss extends AMWAE with the stability term:
-\begin{equation}
-    \mathcal{L}_{\text{AMWAE++}} = \mathcal{L}_{\text{AMWAE}} + \lambda_{\text{stab}} \cdot \mathcal{L}_{\text{stability}}.
-    \label{eq:amwaepp_total}
-\end{equation}
+The MWAE pipeline replaces the LKS buffer and tokenizer with the Scaffold Tokenizer and Associative Retriever, while adding the reconstruction head.  The remaining components (Spatial GNN, Node Predictor, Relationship Predictor, Temporal Edge Attention) are identical to PWG and 4DST.
 
 
 % ====================================================================================
@@ -572,19 +547,18 @@ Table~\ref{tab:loss_summary} summarizes the loss terms used by each method.
 \caption{Loss terms used by each WorldSGG method. \checkmark = present, $-$ = not applicable.}
 \label{tab:loss_summary}
 \small
-\begin{tabular}{@{}lcccc@{}}
+\begin{tabular}{@{}lccc@{}}
 \toprule
-\textbf{Loss Term} & \textbf{LKS} & \textbf{GL-STGN} & \textbf{AMWAE} & \textbf{AMWAE++} \\
+\textbf{Loss Term} & \textbf{PWG} & \textbf{4DST} & \textbf{MWAE} \\
 \midrule
-$\mathcal{L}_{\text{att/spa/con}}^{\text{vis}}$ (Clean GT) & \checkmark & \checkmark & \checkmark & \checkmark \\
-$\mathcal{L}_{\text{att/spa/con}}^{\text{unseen}}$ ($\lambda_{\text{vlm}}$-weighted) & \checkmark & \checkmark & \checkmark & \checkmark \\
-$\mathcal{L}_{\text{node}}$ (Node classification) & \checkmark$^*$ & \checkmark$^*$ & \checkmark$^*$ & \checkmark$^*$ \\
-Label Smoothing (unseen) & \checkmark & \checkmark & \checkmark & \checkmark \\
-$\mathcal{L}_{\text{recon}}$ (Reconstruction) & $-$ & $-$ & \checkmark & \checkmark \\
-$\mathcal{L}_{\text{sim}}$ (Simulated-unseen) & $-$ & $-$ & \checkmark & \checkmark \\
-$\mathcal{L}_{\text{stability}}$ (Attractor) & $-$ & $-$ & $-$ & \checkmark \\
+$\mathcal{L}_{\text{att/spa/con}}^{\text{vis}}$ (Clean GT) & \checkmark & \checkmark & \checkmark \\
+$\mathcal{L}_{\text{att/spa/con}}^{\text{unseen}}$ ($\lambda_{\text{vlm}}$-weighted) & \checkmark & \checkmark & \checkmark \\
+$\mathcal{L}_{\text{node}}$ (Node classification) & \checkmark$^*$ & \checkmark$^*$ & \checkmark$^*$ \\
+Label Smoothing (unseen) & \checkmark & \checkmark & \checkmark \\
+$\mathcal{L}_{\text{recon}}$ (Reconstruction) & $-$ & $-$ & \checkmark \\
+$\mathcal{L}_{\text{sim}}$ (Simulated-unseen) & $-$ & $-$ & \checkmark \\
 \bottomrule
-\multicolumn{5}{l}{\footnotesize $^*$Only in SGCls/SGDet modes.}
+\multicolumn{4}{l}{\footnotesize $^*$Only in SGCls/SGDet modes.}
 \end{tabular}
 \end{table}
 
@@ -608,18 +582,16 @@ Several numerical stability measures are employed across all methods:
 
 
 % ====================================================================================
-\section{Architectural Relationships}
+\section{Architectural Relationships and Method Progression}
 \label{sec:relationships}
 % ====================================================================================
 
-The four methods form a progression of increasing sophistication:
+The three methods form a principled progression of increasing sophistication in how they handle the core challenge of WorldSGG---reasoning about objects that are not currently visible:
 
 \begin{enumerate}
-    \item \textbf{LKS-GNN $\to$ GL-STGN}: Non-differentiable buffer $\to$ differentiable temporal attention; adds ego-motion and motion encoding. The LKS buffer can be viewed as a zero-th order approximation of what temporal attention learns, similar to how nearest-neighbor interpolation relates to learned interpolation kernels.
+    \item \textbf{PWG $\to$ 4DST}: Non-differentiable buffer $\to$ differentiable temporal attention; adds ego-motion and motion encoding.  The PWG buffer implements a zero-order hold approximation of object state during occlusion---the simplest possible ``world model.''  4DST replaces this with a learned temporal transformer that can interpolate and extrapolate object state using the full temporal context.  This parallels the evolution from rule-based tracking (Kalman filter in SORT~\cite{bewley2016sort}) to attention-based tracking (TransTrack~\cite{sun2020transtrack}), but applied to relational reasoning rather than localization.
 
-    \item \textbf{GL-STGN $\to$ AMWAE}: Temporal self-attention (where masked tokens attend alongside visible ones) $\to$ explicit masked-visible cross-attention with separate retrieval stage.  This is analogous to the evolution from BERT~\cite{devlin2019bert} (joint encoding of masked/visible tokens) to MAE~\cite{he2022masked} (separate encoder for visible, decoder for masked).  The scaffold tokenizer explicitly disentangles geometry (always available) from evidence (only when visible).
-
-    \item \textbf{AMWAE $\to$ AMWAE++}: Fixed-depth GNN $\to$ adaptive-depth energy-based propagation. This brings the benefits of Deep Equilibrium Models~\cite{bai2019deep} to scene graph generation: better parameter efficiency, adaptive inference compute, and implicit regularization toward stable representations.
+    \item \textbf{4DST $\to$ MWAE}: Joint self-attention (where masked object tokens attend alongside visible ones) $\to$ explicit encoder-decoder factorization with asymmetric cross-attention.  This is directly analogous to the evolution from BERT~\cite{devlin2019bert} (joint encoding of masked and visible tokens) to MAE~\cite{he2022masked} (separate visible encoder, masked decoder).  The scaffold tokenizer explicitly disentangles geometry (always available from the 3D wireframe) from visual evidence (only available when the object is visible), enabling more principled handling of the information asymmetry inherent in the WorldSGG problem.  The addition of cross-view reconstruction and simulated-unseen losses provides a self-supervised training signal that does not depend on noisy VLM pseudo-labels, addressing a fundamental limitation of the previous two methods for unseen object reasoning.
 \end{enumerate}
 
 

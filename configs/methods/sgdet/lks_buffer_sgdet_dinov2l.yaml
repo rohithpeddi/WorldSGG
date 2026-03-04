@@ -17,7 +17,7 @@ experiment_name: lks_buffer_sgdet_dinov2l_v2
 data_path: /data/rohith/ag
 save_path: /data/rohith/ag/checkpoints
 results_path: results
-ckpt: null  # Set to "checkpoint_5" to resume from epoch 5
+ckpt: checkpoint_0  # Set to "checkpoint_5" to resume from epoch 5
 world_sg_dir: ""
 
 # ---- Shared Architecture ----
