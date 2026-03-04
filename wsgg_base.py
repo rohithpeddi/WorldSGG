@@ -98,6 +98,7 @@ def load_wsgg_config(yaml_path: str = None) -> SimpleNamespace:
         "lambda_contrastive", "lambda_stability",
         "p_simulate_unseen", "p_mask_visible",
         "warmup_fraction", "movement_thresh",
+        "energy_epsilon",
     }
     _INT_KEYS = {
         "nepoch", "d_model", "d_struct", "d_visual", "d_memory",
