@@ -3,9 +3,11 @@
 Evaluate WSGG Predictions
 ==========================
 
-Load saved prediction PKLs (from ``dump_predictions.py``) and GT annotations
-(from ``combine_world4d_relationships_test.py``), compute Recall@K and
-Mean Recall@K, log to WandB, and export Excel summaries.
+Load saved prediction PKLs (from ``dump_predictions.py``), compute Recall@K
+and Mean Recall@K, log to WandB, and export Excel summaries.
+
+The new format stores GT labels from the batch directly inside the PKL,
+so no separate annotation directory is needed.
 
 Output structure::
 
@@ -17,14 +19,12 @@ Usage::
     # Evaluate all epochs for one method:
     python evaluate_predictions.py \\
         --logit_root /data/rohith/ag/wsgg_logits/predcls/gl_stgn_predcls_dinov2b/ \\
-        --annot_dir /data/rohith/ag/world4d_rel_annotations/test/ \\
         --mode predcls \\
         --experiment_name gl_stgn_predcls_dinov2b
 
     # Evaluate a single epoch:
     python evaluate_predictions.py \\
         --logit_dir /data/rohith/ag/wsgg_logits/predcls/gl_stgn_predcls_dinov2b/epoch_5/ \\
-        --annot_dir /data/rohith/ag/world4d_rel_annotations/test/ \\
         --mode predcls
 """
 
@@ -49,7 +49,6 @@ def load_pkl(path):
 
 def evaluate_one_epoch(
     logit_dir: str,
-    annot_dir: str,
     mode: str,
     epoch: int,
 ):
@@ -97,103 +96,28 @@ def evaluate_one_epoch(
     n_skipped = 0
 
     for pred_path in pred_paths:
-        video_id = pred_path.stem  # e.g. "001YG"
+        video_id = pred_path.stem
 
-        # Load prediction
+        # Load prediction + embedded GT
         pred_pkl = load_pkl(pred_path)
 
-        # Find corresponding GT annotation
-        # Prediction PKLs use feature-stem names (e.g. "001YG.pkl")
-        # but GT annotation PKLs may use ".mp4" suffix (e.g. "001YG.mp4.pkl")
-        annot_path = os.path.join(annot_dir, f"{video_id}.pkl")
-        if not os.path.exists(annot_path):
-            annot_path = os.path.join(annot_dir, f"{video_id}.mp4.pkl")
-        if not os.path.exists(annot_path):
-            logger.debug(f"  GT annotation not found for {video_id}, skipping")
+        # Check that this PKL has the required GT labels
+        if "gt_attention" not in pred_pkl:
+            logger.debug(f"  {video_id}: missing gt_attention, skipping")
             n_skipped += 1
             continue
 
-        gt_data = load_pkl(annot_path)
-        gt_frames = gt_data.get("frames", {})
-
-        if not gt_frames:
+        try:
+            evaluate_wsgg_video(
+                pred_pkl=pred_pkl,
+                evaluator=evaluator,
+                mode=mode,
+                verbose=(n_evaluated < 3),
+            )
+            n_evaluated += 1
+        except Exception as e:
+            logger.warning(f"  Error evaluating {video_id}: {e}", exc_info=(n_evaluated < 3))
             n_skipped += 1
-            continue
-
-        # Check if this is the new per-frame format or old flat format
-        pred_frames = pred_pkl.get("frames", None)
-
-        if pred_frames is not None:
-            # ---- New per-frame format ----
-            # Match GT frames with prediction frames
-            gt_frame_keys = sorted(gt_frames.keys())
-            pred_frame_keys = set(pred_frames.keys())
-
-            n_matched = 0
-            for gt_key in gt_frame_keys:
-                # GT keys may be like "video_id/frame.png" — try matching
-                # the frame basename
-                frame_basename = gt_key.split("/")[-1] if "/" in gt_key else gt_key
-
-                # Try multiple match strategies
-                pred_frame = None
-                for candidate in [gt_key, frame_basename]:
-                    if candidate in pred_frames:
-                        pred_frame = pred_frames[candidate]
-                        break
-
-                if pred_frame is None:
-                    continue
-
-                # Check that prediction frame has distributions
-                if "attention_distribution" not in pred_frame:
-                    continue
-
-                gt_frame = gt_frames[gt_key]
-
-                try:
-                    # Add video_id for logging
-                    pred_frame_with_id = dict(pred_frame)
-                    pred_frame_with_id["video_id"] = f"{video_id}/{frame_basename}"
-
-                    evaluate_wsgg_video(
-                        gt_annot=gt_frame,
-                        pred_pkl=pred_frame_with_id,
-                        evaluator=evaluator,
-                        mode=mode,
-                        verbose=(n_evaluated < 3),
-                    )
-                    n_matched += 1
-                except Exception as e:
-                    logger.warning(f"  Error evaluating {video_id}/{gt_key}: {e}", exc_info=(n_evaluated < 3))
-
-            if n_matched > 0:
-                n_evaluated += 1
-            else:
-                n_skipped += 1
-        else:
-            # ---- Old flat format (backward compat) ----
-            # Use last GT frame
-            frame_keys = sorted(gt_frames.keys())
-            if not frame_keys:
-                n_skipped += 1
-                continue
-
-            last_frame_key = frame_keys[-1]
-            gt_frame = gt_frames[last_frame_key]
-
-            try:
-                evaluate_wsgg_video(
-                    gt_annot=gt_frame,
-                    pred_pkl=pred_pkl,
-                    evaluator=evaluator,
-                    mode=mode,
-                    verbose=(n_evaluated < 3),
-                )
-                n_evaluated += 1
-            except Exception as e:
-                logger.warning(f"  Error evaluating {video_id}: {e}", exc_info=True)
-                n_skipped += 1
 
     logger.info(
         f"  Epoch {epoch}: evaluated {n_evaluated} videos, skipped {n_skipped}"
@@ -216,8 +140,6 @@ def main():
                        help="Root dir containing epoch_N/ subdirs (evaluates all)")
     group.add_argument("--logit_dir", type=str, default=None,
                        help="Single epoch directory to evaluate")
-    parser.add_argument("--annot_dir", required=True, type=str,
-                        help="GT annotation dir (world4d_rel_annotations/test/)")
     parser.add_argument("--mode", required=True, type=str, choices=["predcls", "sgdet"],
                         help="Evaluation mode")
     parser.add_argument("--experiment_name", type=str, default=None,
@@ -257,7 +179,6 @@ def main():
 
     epoch_dirs.sort()
     logger.info(f"Mode:            {args.mode}")
-    logger.info(f"Annotation dir:  {args.annot_dir}")
     logger.info(f"Epochs to eval:  {[e for e, _ in epoch_dirs]}")
 
     # WandB init
@@ -280,7 +201,6 @@ def main():
         logger.info(f"Evaluating epoch {epoch_num}...")
         results = evaluate_one_epoch(
             logit_dir=epoch_dir,
-            annot_dir=args.annot_dir,
             mode=args.mode,
             epoch=epoch_num,
         )
@@ -311,7 +231,6 @@ def main():
 
     # ---- Save JSON summary ----
     json_path = os.path.join(output_root, "eval_results.json")
-    # Convert numpy types for JSON serialization
     serializable = {}
     for epoch, res in all_results.items():
         serializable[str(epoch)] = {
@@ -338,12 +257,10 @@ def main():
                     "hR@10", "hR@20", "hR@50", "hR@100"]
         ws.append(headers)
 
-        # Bold header
         from openpyxl.styles import Font
         for col in range(1, len(headers) + 1):
             ws.cell(row=1, column=col).font = Font(bold=True)
 
-        # Data rows (sorted by epoch)
         for epoch in sorted(all_results.keys()):
             res = all_results[epoch]
             row = [epoch]
@@ -355,7 +272,6 @@ def main():
                 row.append(res.get("harmonic_mean_recall", {}).get(k, 0.0))
             ws.append(row)
 
-        # Auto-width columns
         for col in ws.columns:
             max_len = max(len(str(cell.value or "")) for cell in col)
             ws.column_dimensions[col[0].column_letter].width = max_len + 2
@@ -363,7 +279,7 @@ def main():
         wb.save(xlsx_path)
         logger.info(f"Excel results saved: {xlsx_path}")
     except ImportError:
-        logger.warning("openpyxl not installed — skipping Excel export. Install via: pip install openpyxl")
+        logger.warning("openpyxl not installed — skipping Excel export.")
 
     # Finish WandB
     if wandb_run is not None:

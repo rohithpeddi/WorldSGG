@@ -1,8 +1,11 @@
 #!/bin/bash
 # ===========================================================================
-# run_eval_all.sh — Evaluate predictions for all 24 method configs
+# run_eval_all.sh — Evaluate predictions for all method configs
 # ===========================================================================
 # Prerequisite: run run_dump_all.sh first to generate prediction PKLs.
+#
+# The new dump format embeds GT labels in the PKLs, so no --annot_dir
+# is needed.
 #
 # Usage:
 #   bash run_eval_all.sh
@@ -10,7 +13,6 @@
 # ===========================================================================
 
 LOGIT_ROOT="/data/rohith/ag/wsgg_logits"
-ANNOT_DIR="/data/rohith/ag/world4d_rel_annotations/test"
 USE_WANDB=""
 
 # Parse optional --use_wandb flag
@@ -21,7 +23,6 @@ fi
 echo "============================================================"
 echo "Evaluating all method predictions"
 echo "Logit root:  ${LOGIT_ROOT}"
-echo "Annot dir:   ${ANNOT_DIR}"
 echo "WandB:       ${USE_WANDB:-disabled}"
 echo "============================================================"
 
@@ -40,7 +41,6 @@ for mode in predcls sgdet; do
         echo "────────────────────────────────────────────────────────"
         python evaluate_predictions.py \
             --logit_root "${method_dir}" \
-            --annot_dir "${ANNOT_DIR}" \
             --mode "${mode}" \
             --experiment_name "${experiment_name}" \
             ${USE_WANDB}

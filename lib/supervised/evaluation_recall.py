@@ -1,4 +1,4 @@
-import csv
+﻿import csv
 import os
 from functools import reduce
 
@@ -464,7 +464,7 @@ def evaluate_recall(
     # pdb.set_trace()
     
     # Exclude self rels
-    # assert np.all(pred_rels[:,0] != pred_rels[:,ĺeftright])
+    # assert np.all(pred_rels[:,0] != pred_rels[:,Äºeftright])
     # assert np.all(pred_rels[:,2] > 0)
     
     pred_triplets, pred_triplet_boxes, relation_scores = \
@@ -511,13 +511,13 @@ def _triplet(
 ):
     """
     format predictions into triplets
-    :param predicates: A 1d numpy array of num_boxes*(num_boxes-ĺeftright) predicates, corresponding to
+    :param predicates: A 1d numpy array of num_boxes*(num_boxes-Äºeftright) predicates, corresponding to
                        each pair of possibilities
-    :param relations: A (num_boxes*(num_boxes-ĺeftright), 2.0) array, where each row represents the boxes
+    :param relations: A (num_boxes*(num_boxes-Äºeftright), 2.0) array, where each row represents the boxes
                       in that relation
     :param classes: A (num_boxes) array of the classes for each thing.
     :param boxes: A (num_boxes,4) array of the bounding boxes for everything.
-    :param predicate_scores: A (num_boxes*(num_boxes-ĺeftright)) array of the scores for each predicate
+    :param predicate_scores: A (num_boxes*(num_boxes-Äºeftright)) array of the scores for each predicate
     :param class_scores: A (num_boxes) array of the likelihood for each object.
     :return: Triplets: (num_relations, 3) array of class, relation, class
              Triplet boxes: (num_relation, 8) array of boxes for the parts
@@ -630,171 +630,98 @@ def bbox_overlaps_3d(corners1, corners2):
 
 
 # ============================================================================
-# WSGG Adapter: convert padded-tensor format → evaluate_from_dict format
+# WSGG Adapter: convert padded-tensor dump â†’ evaluate_from_dict format
 # ============================================================================
-
-# Short-form → full AG name mapping (for GT label denormalization)
-_LABEL_DENORMALIZE = {
-    "closet": "closet/cabinet",
-    "cup": "cup/glass/bottle",
-    "paper": "paper/notebook",
-    "sofa": "sofa/couch",
-    "phone": "phone/camera",
-}
-
-
-def _denormalize_label(label):
-    """Short-form label → full AG name. E.g. 'closet' → 'closet/cabinet'."""
-    return _LABEL_DENORMALIZE.get(label, label)
 
 
 def evaluate_wsgg_video(
-    gt_annot,
     pred_pkl,
     evaluator,
     mode="predcls",
     verbose=True,
 ):
     """
-    Evaluate a single video's WSGG predictions against GT annotations.
+    Evaluate a single video's last-frame WSGG predictions.
 
-    Converts the padded-tensor / PKL format into gt_entry / pred_entry dicts
-    and feeds them to the existing ``evaluate_from_dict``.
+    Uses the batch's own GT labels (gt_attention, gt_spatial, gt_contacting)
+    stored in the dump PKL, ensuring consistent N_max / K_max indexing
+    between GT and predictions.
 
     Args:
-        gt_annot: GT annotation dict for one frame (from combine_world4d_relationships
-                  output). Must contain ``person_info`` and ``object_info_list``.
-                  Uses unnormalized (full AG) class names for GT labels.
-        pred_pkl: Prediction dict for one video, as saved by ``dump_predictions.py``.
-        evaluator: A ``BasicSceneGraphEvaluator`` instance.
+        pred_pkl: Prediction dict from dump_predictions.py. Must contain:
+            - attention/spatial/contacting_distribution (K_max, C)
+            - gt_attention (K_max,), gt_spatial (K_max, 6), gt_contacting (K_max, 17)
+            - person_idx, object_idx, pair_valid (K_max,)
+            - object_classes (N_max,), bboxes_2d (N_max, 4), valid_mask (N_max,)
+        evaluator: BasicSceneGraphEvaluator instance.
         mode: "predcls" or "sgdet".
-        verbose: If True, log detailed diagnostics.
+        verbose: Log detailed diagnostics.
     """
     import logging
     _log = logging.getLogger("evaluate_wsgg_video")
 
     video_id = pred_pkl.get("video_id", "?")
 
-    person_info = gt_annot.get("person_info", {})
-    object_info_list = gt_annot.get("object_info_list", [])
+    # ---- Extract data ----
+    pair_valid = pred_pkl["pair_valid"].astype(bool)     # (K_max,)
+    person_idx = pred_pkl["person_idx"]                  # (K_max,)
+    object_idx = pred_pkl["object_idx"]                  # (K_max,)
+    object_classes = pred_pkl["object_classes"]           # (N_max,)
+    bboxes_2d = pred_pkl["bboxes_2d"]                    # (N_max, 4)
+    valid_mask = pred_pkl["valid_mask"].astype(bool)      # (N_max,)
 
-    if not object_info_list:
+    att_dist = pred_pkl["attention_distribution"]         # (K_max, 3)
+    spa_dist = pred_pkl["spatial_distribution"]           # (K_max, 6)
+    con_dist = pred_pkl["contacting_distribution"]        # (K_max, 17)
+
+    gt_attention = pred_pkl["gt_attention"]               # (K_max,) int
+    gt_spatial = pred_pkl["gt_spatial"]                   # (K_max, 6) multi-hot
+    gt_contacting = pred_pkl["gt_contacting"]             # (K_max, 17) multi-hot
+
+    K_valid = int(pair_valid.sum())
+    N_valid = int(valid_mask.sum())
+
+    if K_valid == 0:
         if verbose:
-            _log.info(f"[{video_id}] SKIP: empty object_info_list")
+            _log.info(f"[{video_id}] SKIP: K_valid=0")
         return
 
-    # ---- Build GT entry ----
-    n_objects = len(object_info_list) + 1  # +1 for person (index 0)
-    gt_boxes = np.zeros((n_objects, 4), dtype=np.float32)
-    gt_classes = np.zeros(n_objects, dtype=np.int64)
+    # ---- Build GT entry using N_max indexing ----
+    gt_boxes = bboxes_2d.astype(np.float32)      # (N_max, 4)
+    gt_classes = object_classes.astype(np.int64)  # (N_max,)
 
-    # Person is always index 0, class 1 ("person" in OBJECT_CLASSES)
-    person_bbox = person_info.get("bbox_2d", None)
-    if person_bbox is not None:
-        gt_boxes[0] = np.asarray(person_bbox, dtype=np.float32)[:4]
-    gt_classes[0] = 1  # person
+    # Predicate offsets in the combined all_predicates list
+    n_att_classes = len(evaluator.AG_attention_predicates)
+    n_spa_classes = len(evaluator.AG_spatial_predicates)
+    spa_offset = n_att_classes
+    con_offset = n_att_classes + n_spa_classes
 
+    # Build GT relations from valid pairs
     gt_relations = []
-    human_idx = 0
+    for k in range(len(pair_valid)):
+        if not pair_valid[k]:
+            continue
 
-    # Object class name → index lookup (use full/unnormalized AG names)
-    from dataloader.world_ag_dataset import NAME_TO_IDX
+        p_idx = int(person_idx[k])
+        o_idx = int(object_idx[k])
 
-    if verbose:
-        _log.info(f"[{video_id}] GT: {n_objects} objects (1 person + {len(object_info_list)} objs)")
-        _log.info(f"[{video_id}]   person bbox: {person_bbox}")
+        # Attention: single-label
+        att_label = int(gt_attention[k])
+        gt_relations.append([p_idx, o_idx, att_label])
 
-    for m, obj in enumerate(object_info_list):
-        obj_idx = m + 1
+        # Spatial: multi-hot â†’ multiple relations (obj â†’ person direction)
+        for s in range(gt_spatial.shape[1]):
+            if gt_spatial[k, s] > 0.5:
+                gt_relations.append([o_idx, p_idx, spa_offset + s])
 
-        # Bbox
-        bbox_2d = obj.get("bbox_2d", None)
-        if bbox_2d is not None:
-            gt_boxes[obj_idx] = np.asarray(bbox_2d, dtype=np.float32)[:4]
-
-        # Class — use full AG name (unnormalized)
-        cls_full = obj.get("class", _denormalize_label(obj.get("label", "")))
-        cls_short = obj.get("label", "")
-        cls_id = NAME_TO_IDX.get(cls_full, NAME_TO_IDX.get(cls_short, 0))
-        gt_classes[obj_idx] = cls_id
-
-        if verbose:
-            _log.info(
-                f"[{video_id}]   obj[{obj_idx}]: class='{cls_full}' "
-                f"(short='{cls_short}', id={cls_id}), "
-                f"bbox={bbox_2d is not None}, visible={obj.get('visible', '?')}"
-            )
-
-        # Attention relationship (single-label)
-        att_rels = obj.get("attention_relationship", [])
-        for att_str in att_rels:
-            if att_str in evaluator.AG_attention_predicates:
-                att_idx = evaluator.AG_attention_predicates.index(att_str)
-                global_idx = evaluator.AG_all_predicates.index(
-                    evaluator.AG_attention_predicates[att_idx]
-                )
-                gt_relations.append([human_idx, obj_idx, global_idx])
-                if verbose:
-                    _log.info(
-                        f"[{video_id}]     att: '{att_str}' → "
-                        f"local={att_idx}, global={global_idx}, "
-                        f"triple=[{human_idx}, {obj_idx}, {global_idx}]"
-                    )
-            else:
-                if verbose:
-                    _log.warning(
-                        f"[{video_id}]     att: '{att_str}' NOT IN predicates "
-                        f"{evaluator.AG_attention_predicates}"
-                    )
-            break  # attention is single-label
-
-        # Spatial relationships (multi-label)
-        spa_rels = obj.get("spatial_relationship", [])
-        for spa_str in spa_rels:
-            if spa_str in evaluator.AG_spatial_predicates:
-                spa_idx = evaluator.AG_spatial_predicates.index(spa_str)
-                global_idx = evaluator.AG_all_predicates.index(
-                    evaluator.AG_spatial_predicates[spa_idx]
-                )
-                gt_relations.append([obj_idx, human_idx, global_idx])
-                if verbose:
-                    _log.info(
-                        f"[{video_id}]     spa: '{spa_str}' → "
-                        f"local={spa_idx}, global={global_idx}, "
-                        f"triple=[{obj_idx}, {human_idx}, {global_idx}]"
-                    )
-            else:
-                if verbose:
-                    _log.warning(
-                        f"[{video_id}]     spa: '{spa_str}' NOT IN predicates "
-                        f"{evaluator.AG_spatial_predicates}"
-                    )
-
-        # Contacting relationships (multi-label)
-        con_rels = obj.get("contacting_relationship", [])
-        for con_str in con_rels:
-            if con_str in evaluator.AG_contacting_predicates:
-                con_idx = evaluator.AG_contacting_predicates.index(con_str)
-                global_idx = evaluator.AG_all_predicates.index(
-                    evaluator.AG_contacting_predicates[con_idx]
-                )
-                gt_relations.append([human_idx, obj_idx, global_idx])
-                if verbose:
-                    _log.info(
-                        f"[{video_id}]     con: '{con_str}' → "
-                        f"local={con_idx}, global={global_idx}, "
-                        f"triple=[{human_idx}, {obj_idx}, {global_idx}]"
-                    )
-            else:
-                if verbose:
-                    _log.warning(
-                        f"[{video_id}]     con: '{con_str}' NOT IN predicates "
-                        f"{evaluator.AG_contacting_predicates}"
-                    )
+        # Contacting: multi-hot â†’ multiple relations
+        for c in range(gt_contacting.shape[1]):
+            if gt_contacting[k, c] > 0.5:
+                gt_relations.append([p_idx, o_idx, con_offset + c])
 
     if not gt_relations:
         if verbose:
-            _log.info(f"[{video_id}] SKIP: no GT relations found")
+            _log.info(f"[{video_id}] SKIP: no GT relations")
         return
 
     gt_entry = {
@@ -803,172 +730,65 @@ def evaluate_wsgg_video(
         "gt_boxes": gt_boxes,
     }
 
-    if verbose:
-        _log.info(
-            f"[{video_id}] GT entry: {len(gt_relations)} relations, "
-            f"classes={gt_classes.tolist()}, "
-            f"boxes_nonzero={np.any(gt_boxes != 0, axis=1).sum()}"
-        )
-
     # ---- Build pred entry ----
-    att_dist = pred_pkl["attention_distribution"]   # (K_valid, 3)
-    spa_dist = pred_pkl["spatial_distribution"]     # (K_valid, 6)
-    con_dist = pred_pkl["contacting_distribution"]  # (K_valid, 17)
-    person_idx = pred_pkl["person_idx"]             # (K_valid,)
-    object_idx = pred_pkl["object_idx"]             # (K_valid,)
+    valid_pidx = person_idx[pair_valid]
+    valid_oidx = object_idx[pair_valid]
 
-    if isinstance(att_dist, np.ndarray):
-        pass  # already numpy
-    else:
-        att_dist = att_dist.cpu().numpy()
-        spa_dist = spa_dist.cpu().numpy()
-        con_dist = con_dist.cpu().numpy()
-        person_idx = person_idx.cpu().numpy()
-        object_idx = object_idx.cpu().numpy()
+    pair_idx_att = np.stack([valid_pidx, valid_oidx], axis=1)
+    pair_idx_spa = np.stack([valid_oidx, valid_pidx], axis=1)  # reversed for spatial
+    pair_idx_con = np.stack([valid_pidx, valid_oidx], axis=1)
+    rels_i = np.concatenate([pair_idx_att, pair_idx_spa, pair_idx_con], axis=0)
 
-    K = att_dist.shape[0]
-    if K == 0:
-        if verbose:
-            _log.info(f"[{video_id}] SKIP: K=0 valid pairs in predictions")
-        return
+    # Score matrix: block-diagonal
+    valid_att = att_dist[pair_valid]
+    valid_spa = spa_dist[pair_valid]
+    valid_con = con_dist[pair_valid]
+    K_v = K_valid
+    n_a, n_s, n_c = valid_att.shape[1], valid_spa.shape[1], valid_con.shape[1]
 
-    if verbose:
-        _log.info(
-            f"[{video_id}] Pred: K={K} valid pairs, "
-            f"person_idx={person_idx.tolist()}, "
-            f"object_idx={object_idx.tolist()}"
-        )
-        _log.info(
-            f"[{video_id}]   att_dist shape={att_dist.shape}, "
-            f"range=[{att_dist.min():.4f}, {att_dist.max():.4f}], "
-            f"argmax={att_dist.argmax(axis=1).tolist()}"
-        )
-        _log.info(
-            f"[{video_id}]   spa_dist shape={spa_dist.shape}, "
-            f"range=[{spa_dist.min():.4f}, {spa_dist.max():.4f}]"
-        )
-        _log.info(
-            f"[{video_id}]   con_dist shape={con_dist.shape}, "
-            f"range=[{con_dist.min():.4f}, {con_dist.max():.4f}]"
-        )
-
-    n_att = att_dist.shape[1]
-    n_spa = spa_dist.shape[1]
-    n_con = con_dist.shape[1]
-
-    # Build pair indices: attention (h→o), spatial (o→h), contacting (h→o)
-    pair_idx_att = np.stack([person_idx, object_idx], axis=1)          # (K, 2)
-    pair_idx_spa = np.stack([object_idx, person_idx], axis=1)          # (K, 2) reversed
-    pair_idx_con = np.stack([person_idx, object_idx], axis=1)          # (K, 2)
-    rels_i = np.concatenate([pair_idx_att, pair_idx_spa, pair_idx_con], axis=0)  # (3K, 2)
-
-    # Construct block-diagonal score matrix: (3K, n_att+n_spa+n_con)
-    total_preds = n_att + n_spa + n_con
-    zeros_spa_con = np.zeros((K, n_spa + n_con))
-    zeros_att_con = np.zeros((K, n_att + n_con))
-    zeros_att_spa = np.zeros((K, n_att + n_spa))
-
-    scores_att = np.concatenate([att_dist, zeros_spa_con], axis=1)   # (K, total)
-    scores_spa = np.concatenate([np.zeros((K, n_att)), spa_dist,
-                                  np.zeros((K, n_con))], axis=1)     # (K, total)
-    scores_con = np.concatenate([zeros_att_spa, con_dist], axis=1)   # (K, total)
-
-    rel_scores = np.concatenate([scores_att, scores_spa, scores_con], axis=0)  # (3K, total)
+    scores_att = np.concatenate([valid_att, np.zeros((K_v, n_s + n_c))], axis=1)
+    scores_spa = np.concatenate([np.zeros((K_v, n_a)), valid_spa, np.zeros((K_v, n_c))], axis=1)
+    scores_con = np.concatenate([np.zeros((K_v, n_a + n_s)), valid_con], axis=1)
+    rel_scores = np.concatenate([scores_att, scores_spa, scores_con], axis=0)
 
     # Boxes and classes
     if mode == "predcls":
         pred_boxes = gt_boxes.copy()
         pred_classes = gt_classes.copy()
-        obj_scores = np.ones(n_objects, dtype=np.float32)
+        obj_scores = np.ones(len(gt_classes), dtype=np.float32)
     else:
-        # SGDet: use predicted boxes, labels, scores
-        pred_bboxes_2d = pred_pkl.get("bboxes_2d", gt_boxes)
-        if not isinstance(pred_bboxes_2d, np.ndarray):
-            pred_bboxes_2d = pred_bboxes_2d.cpu().numpy()
-        pred_boxes = pred_bboxes_2d.astype(np.float32)
+        pred_boxes = pred_pkl.get("bboxes_2d", gt_boxes).astype(np.float32)
+        pred_classes = pred_pkl.get("pred_labels", gt_classes).astype(np.int64)
+        obj_scores = pred_pkl.get("pred_scores", np.ones(len(gt_classes))).astype(np.float32)
 
-        pred_labels = pred_pkl.get("pred_labels", gt_classes)
-        if not isinstance(pred_labels, np.ndarray):
-            pred_labels = pred_labels.cpu().numpy()
-        pred_classes = pred_labels
-
-        pred_det_scores = pred_pkl.get("pred_scores", np.ones(len(pred_classes)))
-        if not isinstance(pred_det_scores, np.ndarray):
-            pred_det_scores = pred_det_scores.cpu().numpy()
-        obj_scores = pred_det_scores
-
-        # Coupled 2D+3D IoU object scores (if 3D boxes available)
         pred_3d = pred_pkl.get("bboxes_3d", None)
-        gt_3d_list = []
-        for i, obj in enumerate(object_info_list):
-            c = obj.get("corners_final", None)
-            if c is not None:
-                gt_3d_list.append(np.asarray(c, dtype=np.float32))
-            else:
-                gt_3d_list.append(np.zeros((8, 3), dtype=np.float32))
-        # Add person 3D
-        person_3d = person_info.get("corners_final", None)
-        if person_3d is not None:
-            person_3d = np.asarray(person_3d, dtype=np.float32)
-        else:
-            person_3d = np.zeros((8, 3), dtype=np.float32)
-        gt_3d_all = np.stack([person_3d] + gt_3d_list)  # (N, 8, 3)
-
         if pred_3d is not None:
-            if not isinstance(pred_3d, np.ndarray):
-                pred_3d = pred_3d.cpu().numpy()
-            # Compute per-object coupled 2D*3D IoU
-            iou_2d_diag = np.array([
+            N = len(gt_classes)
+            iou_2d = np.array([
                 bbox_overlaps(gt_boxes[i:i+1], pred_boxes[i:i+1])[0, 0]
-                if i < pred_boxes.shape[0] else 0.0
-                for i in range(n_objects)
+                if i < pred_boxes.shape[0] else 0.0 for i in range(N)
             ])
-            iou_3d_diag = np.array([
-                bbox_overlaps_3d(gt_3d_all[i:i+1], pred_3d[i:i+1])[0, 0]
-                if i < pred_3d.shape[0] else 0.0
-                for i in range(n_objects)
+            gt_3d = pred_3d  # In batch, corners are used as both GT and pred
+            iou_3d = np.array([
+                bbox_overlaps_3d(gt_3d[i:i+1], pred_3d[i:i+1])[0, 0]
+                if i < pred_3d.shape[0] else 0.0 for i in range(N)
             ])
-            obj_scores = iou_2d_diag * iou_3d_diag
+            obj_scores = iou_2d * iou_3d
 
     if verbose:
         _log.info(
-            f"[{video_id}] Pred entry: "
-            f"pred_boxes shape={pred_boxes.shape}, "
-            f"pred_classes={pred_classes.tolist()}, "
-            f"obj_scores={obj_scores.tolist()[:10]}, "
-            f"rels_i shape={rels_i.shape}, "
-            f"rel_scores shape={rel_scores.shape}"
+            f"[{video_id}] K_valid={K_v}, N_valid={N_valid}, "
+            f"GT rels={len(gt_relations)}, "
+            f"att range=[{valid_att.min():.4f}, {valid_att.max():.4f}], "
+            f"classes[valid]={gt_classes[valid_mask].tolist()}"
         )
-        # Show which predicate the model predicts for each pair
-        for k_i in range(min(K, 5)):
-            att_pred = att_dist[k_i].argmax()
-            spa_preds = np.where(spa_dist[k_i] > 0.5)[0]
-            con_preds = np.where(con_dist[k_i] > 0.5)[0]
+        for ki in range(min(K_v, 3)):
+            att_pred = valid_att[ki].argmax()
             _log.info(
-                f"[{video_id}]   pair[{k_i}]: person={person_idx[k_i]}, "
-                f"obj={object_idx[k_i]} → "
-                f"att_pred={att_pred}({evaluator.AG_attention_predicates[att_pred] if att_pred < len(evaluator.AG_attention_predicates) else '?'}), "
-                f"spa_preds={[evaluator.AG_spatial_predicates[s] if s < len(evaluator.AG_spatial_predicates) else '?' for s in spa_preds]}, "
-                f"con_preds={[evaluator.AG_contacting_predicates[c] if c < len(evaluator.AG_contacting_predicates) else '?' for c in con_preds]}"
+                f"  pair[{ki}]: p={valid_pidx[ki]}â†’o={valid_oidx[ki]}, "
+                f"att_pred={att_pred}({evaluator.AG_attention_predicates[att_pred]}), "
+                f"gt_att={int(gt_attention[pair_valid][ki])}"
             )
-
-        # Show the GT relations as triplets for comparison
-        _log.info(f"[{video_id}] GT triplets (subj_cls, pred, obj_cls):")
-        for rel in gt_relations:
-            subj_cls = gt_classes[rel[0]]
-            obj_cls = gt_classes[rel[1]]
-            pred_name = evaluator.AG_all_predicates[rel[2]] if rel[2] < len(evaluator.AG_all_predicates) else "?"
-            _log.info(
-                f"[{video_id}]   [{rel[0]}]{subj_cls} --{pred_name}({rel[2]})--> [{rel[1]}]{obj_cls}"
-            )
-
-        # Check: are pred pair indices within bounds of pred_classes?
-        max_pair_idx = rels_i.max()
-        _log.info(
-            f"[{video_id}] Index check: max pair idx={max_pair_idx}, "
-            f"pred_classes len={len(pred_classes)}, "
-            f"in-bounds={'YES' if max_pair_idx < len(pred_classes) else '*** NO ***'}"
-        )
 
     pred_entry = {
         "pred_boxes": pred_boxes,
@@ -985,3 +805,4 @@ def evaluate_wsgg_video(
         threshold=evaluator.semi_threshold,
         num_rel=evaluator.num_rel,
     )
+
