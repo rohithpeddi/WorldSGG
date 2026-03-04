@@ -220,6 +220,8 @@ class TrainWSGGBase(WSGGBase):
 
     def _evaluate_after_epoch(self, epoch: int) -> float:
         """Run test evaluation after each epoch. Returns score for scheduler."""
+        from lib.supervised.evaluation_recall import evaluate_wsgg_video
+
         test_iter = iter(self._dataloader_test)
         self._model.eval()
         with torch.no_grad():
@@ -227,7 +229,42 @@ class TrainWSGGBase(WSGGBase):
                 batch = next(test_iter)
                 pred = self.process_test_video(batch)
                 if pred is not None and self._evaluator is not None:
-                    self._evaluator.evaluate_scene_graph(batch, pred)
+                    # Build pred_pkl dict for the last frame (what the model
+                    # predicted on) from batch metadata + model outputs.
+                    T = batch["T"]
+                    last = T - 1
+                    pred_pkl = {
+                        "video_id": batch["video_id"],
+                        # Model predictions (last frame)
+                        "attention_distribution": pred["attention_distribution"].cpu().numpy(),
+                        "spatial_distribution": pred["spatial_distribution"].cpu().numpy(),
+                        "contacting_distribution": pred["contacting_distribution"].cpu().numpy(),
+                        # GT labels (last frame)
+                        "gt_attention": batch["gt_attention"][last].numpy(),
+                        "gt_spatial": batch["gt_spatial"][last].numpy(),
+                        "gt_contacting": batch["gt_contacting"][last].numpy(),
+                        # Pair metadata (last frame)
+                        "pair_valid": batch["pair_valid"][last].numpy(),
+                        "person_idx": batch["person_idx"][last].numpy(),
+                        "object_idx": batch["object_idx"][last].numpy(),
+                        # Object metadata (last frame)
+                        "object_classes": batch["object_classes"][last].numpy(),
+                        "bboxes_2d": batch["bboxes_2d"][last].numpy(),
+                        "valid_mask": batch["valid_mask"][last].numpy(),
+                    }
+                    # SGDet: add detector-predicted labels and corners
+                    if self._conf.mode == "sgdet":
+                        pred_pkl["pred_labels"] = batch["object_classes"][last].numpy()
+                        pred_pkl["pred_scores"] = np.ones(batch["object_classes"][last].shape[0],
+                                                          dtype=np.float32)
+                        corners = batch.get("corners")
+                        if corners is not None:
+                            pred_pkl["bboxes_3d"] = corners[last].numpy()
+
+                    evaluate_wsgg_video(
+                        pred_pkl, self._evaluator,
+                        mode=self._conf.mode, verbose=False,
+                    )
 
         if self._evaluator is not None:
             score = np.mean(self._evaluator.result_dict.get(

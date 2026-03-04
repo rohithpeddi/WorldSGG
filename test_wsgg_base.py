@@ -16,6 +16,7 @@ import logging
 import time
 from abc import abstractmethod
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -76,6 +77,8 @@ class TestWSGGBase(WSGGBase):
     # ------------------------------------------------------------------
     def _test_model(self):
         """Main testing loop with stratified evaluation."""
+        from lib.supervised.evaluation_recall import evaluate_wsgg_video
+
         start_time = time.time()
         logger.info('-------------------------------------------------------------------')
         logger.info(f"Testing: {self._conf.method_name} | Mode: {self._conf.mode}")
@@ -91,9 +94,42 @@ class TestWSGGBase(WSGGBase):
                 # Method-specific inference
                 prediction = self.process_test_video(batch)
 
-                # Standard evaluation
+                # Standard evaluation via WSGG adapter
                 if prediction is not None and self._evaluator is not None:
-                    self._evaluator.evaluate_scene_graph(batch, prediction)
+                    T = batch["T"]
+                    last = T - 1
+                    pred_pkl = {
+                        "video_id": batch["video_id"],
+                        # Model predictions (last frame)
+                        "attention_distribution": prediction["attention_distribution"].cpu().numpy(),
+                        "spatial_distribution": prediction["spatial_distribution"].cpu().numpy(),
+                        "contacting_distribution": prediction["contacting_distribution"].cpu().numpy(),
+                        # GT labels (last frame)
+                        "gt_attention": batch["gt_attention"][last].numpy(),
+                        "gt_spatial": batch["gt_spatial"][last].numpy(),
+                        "gt_contacting": batch["gt_contacting"][last].numpy(),
+                        # Pair metadata (last frame)
+                        "pair_valid": batch["pair_valid"][last].numpy(),
+                        "person_idx": batch["person_idx"][last].numpy(),
+                        "object_idx": batch["object_idx"][last].numpy(),
+                        # Object metadata (last frame)
+                        "object_classes": batch["object_classes"][last].numpy(),
+                        "bboxes_2d": batch["bboxes_2d"][last].numpy(),
+                        "valid_mask": batch["valid_mask"][last].numpy(),
+                    }
+                    # SGDet: add detector-predicted labels and corners
+                    if self._conf.mode == "sgdet":
+                        pred_pkl["pred_labels"] = batch["object_classes"][last].numpy()
+                        pred_pkl["pred_scores"] = np.ones(
+                            batch["object_classes"][last].shape[0], dtype=np.float32)
+                        corners = batch.get("corners")
+                        if corners is not None:
+                            pred_pkl["bboxes_3d"] = corners[last].numpy()
+
+                    evaluate_wsgg_video(
+                        pred_pkl, self._evaluator,
+                        mode=self._conf.mode, verbose=False,
+                    )
 
                 # Stratified evaluation
                 if prediction is not None:
