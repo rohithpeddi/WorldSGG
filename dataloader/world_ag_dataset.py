@@ -502,8 +502,9 @@ class WorldAG(Dataset):
         spa_multi_hot = []
         con_multi_hot = []
         pair_sources = []
+        valid_raw_pair_indices = []  # track which raw pair index each valid pair came from
 
-        for p_label_id, o_label_id in feat_pair_indices:
+        for raw_k, (p_label_id, o_label_id) in enumerate(feat_pair_indices):
             # Convert class IDs to positional indices
             p_pos = label_id_to_pos.get(p_label_id, None)
             o_pos = label_id_to_pos.get(o_label_id, None)
@@ -517,6 +518,7 @@ class WorldAG(Dataset):
 
             person_indices.append(p_pos)
             object_indices.append(o_pos)
+            valid_raw_pair_indices.append(raw_k)
 
             # Relationship GT labels always from annotation PKL
             obj_label = feat_labels[o_pos] if o_pos < len(feat_labels) else ""
@@ -560,6 +562,7 @@ class WorldAG(Dataset):
             "spa_multi_hot": spa_multi_hot,
             "con_multi_hot": con_multi_hot,
             "pair_sources": pair_sources,
+            "valid_raw_pair_indices": valid_raw_pair_indices,
             "K_valid": K_valid,
         }
 
@@ -626,6 +629,7 @@ class WorldAG(Dataset):
         all_spa = []
         all_con = []
         all_psrc = []
+        all_valid_raw_pair_indices = []  # for union feature alignment
 
         # For evaluator compatibility
         gt_annotations = []
@@ -679,6 +683,7 @@ class WorldAG(Dataset):
             all_spa.append(spa)
             all_con.append(con)
             all_psrc.append(psrc)
+            all_valid_raw_pair_indices.append(frame_tensors["valid_raw_pair_indices"])
 
             # Raw annotation for evaluator
             gt_annotations.append(af)
@@ -738,22 +743,27 @@ class WorldAG(Dataset):
             result["camera_poses"] = None
 
         # Union features (from feature PKL, per-pair)
+        # Must be reordered to match the valid-pair subset from _build_frame_tensors.
         has_union = any(
             "union_features" in feat_frames[f] for f in common_frames
         )
         if has_union:
             union_all = []
-            for frame_file in common_frames:
+            for fi, frame_file in enumerate(common_frames):
                 ff = feat_frames[frame_file]
                 uf = ff.get("union_features", None)
-                K_v_union = len(ff.get("pair_indices", []))
                 union_padded = torch.zeros(K_max, D)
-                if uf is not None and K_v_union > 0:
+                if uf is not None:
                     uf_t = torch.from_numpy(
                         np.asarray(uf, dtype=np.float32)
                     )
-                    K_use = min(K_v_union, K_max, uf_t.shape[0])
-                    union_padded[:K_use] = uf_t[:K_use]
+                    # Use cached valid_raw_pair_indices to pick only the
+                    # union features for valid pairs, in the correct order.
+                    for k_new, raw_k in enumerate(all_valid_raw_pair_indices[fi]):
+                        if k_new >= K_max:
+                            break
+                        if raw_k < uf_t.shape[0]:
+                            union_padded[k_new] = uf_t[raw_k]
                 union_all.append(union_padded)
             result["union_features"] = torch.stack(union_all)  # (T, K_max, D)
         else:
