@@ -42,14 +42,21 @@ def verify_video_raw(feat_path, annot_path, video_id):
     annot_data = load_pkl(annot_path)
 
     feat_frames = feat_data.get("frames", {})
-    annot_frames = annot_data.get("frames", {})
+    annot_frames_raw = annot_data.get("frames", {})
 
-    annot_frames = [frame.split("/")[-1] for frame in annot_frames.keys()]
-    annot_frames = {af: annot_frames[af] for af in annot_frames}
-    # Find common frames
-    common = sorted(set(feat_frames.keys()) & set(annot_frames.keys()))
+    # Annotation frame keys may be "video_id/frame.png"; extract short name
+    # Same logic as WorldAG._align_frames
+    annot_short_to_key = {}
+    for key in annot_frames_raw:
+        short = key.split("/")[-1] if "/" in key else key
+        annot_short_to_key[short] = key
+
+    # Find common frames (feature keys are short names like "000001.png")
+    common = sorted(set(feat_frames.keys()) & set(annot_short_to_key.keys()))
     if not common:
         print(f"  WARNING: No common frames between features and annotations!")
+        print(f"    Feature keys sample: {list(feat_frames.keys())[:3]}")
+        print(f"    Annot keys sample:   {list(annot_frames_raw.keys())[:3]}")
         return 0, 0
 
     total_pairs = 0
@@ -57,7 +64,8 @@ def verify_video_raw(feat_path, annot_path, video_id):
 
     for frame_file in common[:5]:  # Show first 5 frames
         ff = feat_frames[frame_file]
-        af = annot_frames.get(frame_file, {})
+        annot_key = annot_short_to_key[frame_file]
+        af = annot_frames_raw.get(annot_key, {})
 
         labels = ff.get("labels", [])
         label_ids = ff.get("label_ids", [])
