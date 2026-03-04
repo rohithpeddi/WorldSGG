@@ -780,7 +780,7 @@ def evaluate_wsgg_video(
                 bbox_overlaps_3d(gt_3d[i:i+1], pred_3d[i:i+1])[0, 0]
                 if i < pred_3d.shape[0] else 0.0 for i in range(N)
             ])
-            obj_scores = iou_2d * iou_3d
+            obj_scores = 0.8 * iou_2d + 0.2 * iou_3d
 
     if verbose:
         _log.info(
