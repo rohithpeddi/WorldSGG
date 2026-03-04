@@ -6,17 +6,21 @@ Dump WSGG Predictions from Checkpoints
 Load each checkpoint (epoch >= min_epoch) for a given config, run inference
 on the test set, and save per-video prediction PKLs.
 
-Each PKL stores the **last-frame** prediction alongside the batch's GT labels
-(same N_max indexing), ensuring consistent evaluation.
+The model's forward() returns predictions for ALL T frames with shape
+(T, K_max, C). We dump every frame that has valid pairs, matching
+predictions with batch GT labels using consistent K_max indexing.
 
 Output structure::
 
     <output_root>/<mode>/<experiment_name>/epoch_<N>/<video_id>.pkl
 
+Each PKL stores:
+    - "video_id": str
+    - "frames": dict[frame_idx → per-frame dict with preds + GT]
+
 Usage::
 
     python dump_predictions.py --config configs/methods/predcls/gl_stgn_predcls_dinov2b.yaml
-    python dump_predictions.py --config configs/methods/sgdet/amwae_sgdet_dinov2b.yaml --min_epoch 5
 """
 
 import gc
@@ -35,14 +39,23 @@ logger = logging.getLogger(__name__)
 
 
 def _to_numpy(t):
-    """Convert tensor to numpy array (no-op if already numpy)."""
     if isinstance(t, torch.Tensor):
         return t.detach().cpu().numpy()
     return np.asarray(t)
 
 
+def _to_device(batch, device):
+    """Move batch tensors to device."""
+    out = {}
+    for k, v in batch.items():
+        if isinstance(v, torch.Tensor):
+            out[k] = v.to(device)
+        else:
+            out[k] = v
+    return out
+
+
 def discover_checkpoints(experiment_dir: str, min_epoch: int):
-    """Find checkpoint_N dirs with N >= min_epoch. Returns sorted (epoch, name)."""
     pattern = re.compile(r"^checkpoint_(\d+)$")
     hits = []
     if not os.path.isdir(experiment_dir):
@@ -58,7 +71,6 @@ def discover_checkpoints(experiment_dir: str, min_epoch: int):
 
 
 def dump_one_epoch(tester, epoch, ckpt_name, experiment_dir, output_dir, device, mode):
-    """Load one checkpoint and dump per-video predictions (last frame only)."""
     ckpt_path = os.path.join(experiment_dir, ckpt_name, "checkpoint_state.pth")
     logger.info(f"  Loading checkpoint: {ckpt_path}")
     checkpoint = torch.load(ckpt_path, map_location=device)
@@ -85,84 +97,96 @@ def dump_one_epoch(tester, epoch, ckpt_name, experiment_dir, output_dir, device,
                 n_skipped += 1
                 continue
 
-            # Run inference
-            prediction = tester.process_test_video(batch)
-            if prediction is None:
+            # Move batch to device
+            b = _to_device(batch, device)
+
+            # Call model.forward() directly to get ALL temporal predictions
+            # Shape: (T, K_max, C_att), (T, K_max, C_spa), (T, K_max, C_con)
+            pred = tester._model.forward(
+                visual_features_seq=b["visual_features"],
+                corners_seq=b["corners"],
+                valid_mask_seq=b["valid_mask"],
+                visibility_mask_seq=b["visibility_mask"],
+                person_idx_seq=b["person_idx"],
+                object_idx_seq=b["object_idx"],
+                pair_valid=b["pair_valid"],
+                camera_pose_seq=b.get("camera_poses"),
+            )
+
+            if pred is None:
                 continue
 
             T = batch["visual_features"].shape[0]
-            last = T - 1
 
-            # ---- Last-frame batch data (N_max indexing) ----
-            pair_valid = _to_numpy(batch["pair_valid"][last])         # (K_max,)
-            person_idx = _to_numpy(batch["person_idx"][last])         # (K_max,)
-            object_idx = _to_numpy(batch["object_idx"][last])         # (K_max,)
-            valid_mask = _to_numpy(batch["valid_mask"][last])          # (N_max,)
-            object_classes = _to_numpy(batch["object_classes"][last])  # (N_max,)
-            bboxes_2d = _to_numpy(batch["bboxes_2d"][last])            # (N_max, 4)
+            # Get full temporal predictions: (T, K_max, ...)
+            att_dist_all = _to_numpy(pred["attention_distribution"])   # (T, K_max, 3)
+            spa_dist_all = _to_numpy(pred["spatial_distribution"])     # (T, K_max, 6)
+            con_dist_all = _to_numpy(pred["contacting_distribution"]) # (T, K_max, 17)
 
-            # ---- Last-frame GT labels (same K_max pair indexing) ----
-            gt_attention = _to_numpy(batch["gt_attention"][last])      # (K_max,)
-            gt_spatial = _to_numpy(batch["gt_spatial"][last])          # (K_max, 6)
-            gt_contacting = _to_numpy(batch["gt_contacting"][last])    # (K_max, 17)
+            frames_data = {}
+            total_valid = 0
 
-            # ---- Prediction distributions (K_max from process_test_video) ----
-            att_dist = _to_numpy(prediction["attention_distribution"])   # (K_max, 3)
-            spa_dist = _to_numpy(prediction["spatial_distribution"])     # (K_max, 6)
-            con_dist = _to_numpy(prediction["contacting_distribution"])  # (K_max, 17)
+            for t in range(T):
+                pair_valid = _to_numpy(batch["pair_valid"][t]).astype(bool)
+                K_valid = pair_valid.sum()
 
-            valid_k = pair_valid.astype(bool)
-            K_valid = valid_k.sum()
+                if K_valid == 0:
+                    continue
 
-            # Debug logging for first 3 videos
+                total_valid += K_valid
+
+                frame_data = {
+                    # Predictions (K_max, ...)
+                    "attention_distribution": att_dist_all[t],
+                    "spatial_distribution": spa_dist_all[t],
+                    "contacting_distribution": con_dist_all[t],
+                    # Pair info (K_max)
+                    "person_idx": _to_numpy(batch["person_idx"][t]),
+                    "object_idx": _to_numpy(batch["object_idx"][t]),
+                    "pair_valid": _to_numpy(batch["pair_valid"][t]),
+                    # GT labels (K_max) — same indexing as predictions
+                    "gt_attention": _to_numpy(batch["gt_attention"][t]),
+                    "gt_spatial": _to_numpy(batch["gt_spatial"][t]),
+                    "gt_contacting": _to_numpy(batch["gt_contacting"][t]),
+                    # Object info (N_max)
+                    "object_classes": _to_numpy(batch["object_classes"][t]),
+                    "bboxes_2d": _to_numpy(batch["bboxes_2d"][t]),
+                    "valid_mask": _to_numpy(batch["valid_mask"][t]),
+                }
+
+                # SGDet-specific
+                if mode == "sgdet" and "corners" in batch:
+                    frame_data["bboxes_3d"] = _to_numpy(batch["corners"][t])
+
+                frames_data[t] = frame_data
+
+            if not frames_data:
+                if n_debug < 3:
+                    logger.warning(f"  [{video_id}] No frames with valid pairs (T={T})")
+                    n_debug += 1
+                continue
+
+            # Debug logging
             if n_debug < 3:
                 logger.info(
-                    f"  [{video_id}] T={T}, K_max={len(pair_valid)}, "
-                    f"K_valid={K_valid}, N_valid={int(valid_mask.sum())}"
+                    f"  [{video_id}] T={T}, frames_with_pairs={len(frames_data)}, "
+                    f"total_valid_pairs={total_valid}"
                 )
-                if K_valid > 0:
+                for t, fd in list(frames_data.items())[:2]:
+                    pv = fd["pair_valid"].astype(bool)
+                    kv = pv.sum()
+                    att_valid = fd["attention_distribution"][pv]
                     logger.info(
-                        f"    att_dist[valid] range: "
-                        f"[{att_dist[valid_k].min():.4f}, {att_dist[valid_k].max():.4f}]"
-                    )
-                    logger.info(
-                        f"    person_idx[valid]: {person_idx[valid_k].tolist()}, "
-                        f"object_idx[valid]: {object_idx[valid_k].tolist()}"
-                    )
-                    logger.info(
-                        f"    gt_attention[valid]: {gt_attention[valid_k].tolist()}"
+                        f"    frame[{t}]: K_valid={kv}, "
+                        f"att range=[{att_valid.min():.4f}, {att_valid.max():.4f}], "
+                        f"gt_att={fd['gt_attention'][pv].tolist()}"
                     )
                 n_debug += 1
 
-            # Store everything with consistent K_max / N_max indexing
-            # We do NOT filter by pair_valid here — the evaluator will do it
             result = {
                 "video_id": video_id,
-                # Prediction distributions (K_max, ...)
-                "attention_distribution": att_dist,
-                "spatial_distribution": spa_dist,
-                "contacting_distribution": con_dist,
-                # Pair info (K_max)
-                "person_idx": person_idx,
-                "object_idx": object_idx,
-                "pair_valid": pair_valid,
-                # GT labels (K_max) — same indexing as predictions
-                "gt_attention": gt_attention,
-                "gt_spatial": gt_spatial,
-                "gt_contacting": gt_contacting,
-                # Object info (N_max)
-                "object_classes": object_classes,
-                "bboxes_2d": bboxes_2d,
-                "valid_mask": valid_mask,
+                "frames": frames_data,
             }
-
-            # SGDet-specific
-            if mode == "sgdet":
-                if "corners" in batch:
-                    result["bboxes_3d"] = _to_numpy(batch["corners"][last])
-                for key in ("pred_labels", "pred_scores"):
-                    if key in prediction:
-                        result[key] = _to_numpy(prediction[key])
 
             with open(out_path, "wb") as f:
                 pickle.dump(result, f)

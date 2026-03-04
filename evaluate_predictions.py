@@ -98,25 +98,38 @@ def evaluate_one_epoch(
     for pred_path in pred_paths:
         video_id = pred_path.stem
 
-        # Load prediction + embedded GT
         pred_pkl = load_pkl(pred_path)
 
-        # Check that this PKL has the required GT labels
-        if "gt_attention" not in pred_pkl:
-            logger.debug(f"  {video_id}: missing gt_attention, skipping")
+        # New per-frame format: pred_pkl["frames"][t] = per-frame dict
+        frames = pred_pkl.get("frames", None)
+        if frames is None:
+            logger.debug(f"  {video_id}: no 'frames' key, skipping")
             n_skipped += 1
             continue
 
-        try:
-            evaluate_wsgg_video(
-                pred_pkl=pred_pkl,
-                evaluator=evaluator,
-                mode=mode,
-                verbose=(n_evaluated < 3),
-            )
+        n_frames_eval = 0
+        for t, frame_data in frames.items():
+            if "gt_attention" not in frame_data:
+                continue
+
+            try:
+                frame_data["video_id"] = f"{video_id}/f{t}"
+                evaluate_wsgg_video(
+                    pred_pkl=frame_data,
+                    evaluator=evaluator,
+                    mode=mode,
+                    verbose=(n_evaluated < 3),
+                )
+                n_frames_eval += 1
+            except Exception as e:
+                logger.warning(
+                    f"  Error evaluating {video_id}/f{t}: {e}",
+                    exc_info=(n_evaluated < 3)
+                )
+
+        if n_frames_eval > 0:
             n_evaluated += 1
-        except Exception as e:
-            logger.warning(f"  Error evaluating {video_id}: {e}", exc_info=(n_evaluated < 3))
+        else:
             n_skipped += 1
 
     logger.info(
@@ -126,7 +139,6 @@ def evaluate_one_epoch(
     if n_evaluated == 0:
         return None
 
-    # Fetch results
     results = evaluator.fetch_stats_json()
     return results
 
