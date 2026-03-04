@@ -379,12 +379,27 @@ class WorldAG(Dataset):
         person_info = annot_frame.get("person_info", {})
         object_info_list = annot_frame.get("object_info_list", [])
 
-        # Build label→annotation map for matching
+        # Build label→annotation map for matching (used by PredCls and
+        # as fallback for SGDet supply boxes)
         annot_by_short_label = {}
         for obj in object_info_list:
             short = obj.get("label", _to_short(obj.get("class", "")))
             if short not in annot_by_short_label:
                 annot_by_short_label[short] = obj
+
+        # SGDet: build detection-position → GT annotation mapping via
+        # detector_found_idx.  detector_found_idx[k] is the detection
+        # position that matched the k-th GT object (k=0 person, k>=1
+        # objects in annotation order).
+        det_pos_to_annot = {}  # detection position → annotation dict
+        if self._mode == "sgdet":
+            detector_found_idx = feat_frame.get("detector_found_idx", [])
+            for k, det_pos in enumerate(detector_found_idx):
+                if k == 0:
+                    # person match — store person_info
+                    det_pos_to_annot[det_pos] = person_info
+                elif (k - 1) < len(object_info_list):
+                    det_pos_to_annot[det_pos] = object_info_list[k - 1]
 
         # --- SGDet: load detector-predicted 3D boxes from features PKL ---
         feat_boxes_3d = None
@@ -431,9 +446,19 @@ class WorldAG(Dataset):
                 continue
 
             # --- 3D corners: mode-dependent source ---
-            label_str = feat_labels[i] if i < len(feat_labels) else ""
-            short_label = _to_short(label_str)
-            annot_obj = annot_by_short_label.get(short_label)
+            # Resolve annotation object for this position
+            if self._mode == "sgdet":
+                # SGDet: use detector_found_idx mapping first, then
+                # fall back to label string matching for supply boxes
+                annot_obj = det_pos_to_annot.get(i)
+                if annot_obj is None:
+                    label_str = feat_labels[i] if i < len(feat_labels) else ""
+                    short_label = _to_short(label_str)
+                    annot_obj = annot_by_short_label.get(short_label)
+            else:
+                label_str = feat_labels[i] if i < len(feat_labels) else ""
+                short_label = _to_short(label_str)
+                annot_obj = annot_by_short_label.get(short_label)
 
             if self._mode == "sgdet":
                 # SGDet: use detector-predicted 3D corners from features PKL
@@ -520,10 +545,20 @@ class WorldAG(Dataset):
             object_indices.append(o_pos)
             valid_raw_pair_indices.append(raw_k)
 
-            # Relationship GT labels always from annotation PKL
-            obj_label = feat_labels[o_pos] if o_pos < len(feat_labels) else ""
-            short_label = _to_short(obj_label)
-            annot_obj = annot_by_short_label.get(short_label)
+            # Relationship GT labels always from annotation PKL.
+            # For SGDet: use detector_found_idx mapping (IoU-based GT match)
+            # instead of label string matching (detector may mislabel).
+            if self._mode == "sgdet":
+                annot_obj = det_pos_to_annot.get(o_pos)
+                if annot_obj is None:
+                    # Fallback for supply boxes: label string matching
+                    obj_label = feat_labels[o_pos] if o_pos < len(feat_labels) else ""
+                    short_label = _to_short(obj_label)
+                    annot_obj = annot_by_short_label.get(short_label)
+            else:
+                obj_label = feat_labels[o_pos] if o_pos < len(feat_labels) else ""
+                short_label = _to_short(obj_label)
+                annot_obj = annot_by_short_label.get(short_label)
 
             if annot_obj is not None:
                 att_rel = annot_obj.get("attention_relationship", [])
