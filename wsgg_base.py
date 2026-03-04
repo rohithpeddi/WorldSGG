@@ -424,6 +424,7 @@ class WSGGBase:
 
         save_file = os.path.join(self._experiment_dir, "eval_stats.txt")
 
+        # With-constraint evaluator (standard)
         self._evaluator = BasicSceneGraphEvaluator(
             mode=self._conf.mode,
             AG_object_classes=self._test_dataset.object_classes
@@ -435,6 +436,20 @@ class WSGGBase:
             iou_threshold=0.5,
             save_file=save_file,
             constraint="with",
+        )
+
+        # No-constraint evaluator (unconstrained top-K ranking)
+        self._evaluator_nc = BasicSceneGraphEvaluator(
+            mode=self._conf.mode,
+            AG_object_classes=self._test_dataset.object_classes
+            if self._test_dataset else None,
+            AG_all_predicates=all_predicates,
+            AG_attention_predicates=list(ATTENTION_RELATIONSHIPS),
+            AG_spatial_predicates=list(SPATIAL_RELATIONSHIPS),
+            AG_contacting_predicates=list(CONTACTING_RELATIONSHIPS),
+            iou_threshold=0.5,
+            save_file=save_file.replace(".txt", "_nc.txt"),
+            constraint="no",
         )
 
 

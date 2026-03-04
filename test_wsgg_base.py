@@ -128,8 +128,13 @@ class TestWSGGBase(WSGGBase):
                         if corners is not None:
                             pred_pkl["bboxes_3d"] = corners[last].numpy()
 
+                    # Feed both evaluators with the same predictions
                     evaluate_wsgg_video(
                         pred_pkl, self._evaluator,
+                        mode=self._conf.mode, verbose=False,
+                    )
+                    evaluate_wsgg_video(
+                        pred_pkl, self._evaluator_nc,
                         mode=self._conf.mode, verbose=False,
                     )
 
@@ -169,7 +174,10 @@ class TestWSGGBase(WSGGBase):
     def _publish_evaluation_results(self):
         """Publish evaluation stats and stratified results."""
         if self._evaluator is not None:
+            logger.info("--- With-Constraint ---")
             self._evaluator.print_stats()
+            logger.info("--- No-Constraint ---")
+            self._evaluator_nc.print_stats()
 
         self._print_stratified_results()
 
