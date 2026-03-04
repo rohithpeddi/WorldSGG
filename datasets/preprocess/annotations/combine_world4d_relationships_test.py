@@ -353,7 +353,9 @@ def process_video(
 
         # ---- Verify object label sets ----
         rel_objs = frame_data.get("objects", [])
-        rel_labels = {_to_short(o["class"]) for o in rel_objs}
+        # augment_relationships_test.py now stores class names in normalized
+        # short form (e.g. "phone" not "phone/camera"), same as world4D.
+        rel_labels = {o["class"] for o in rel_objs}
         w4d_labels = set(w4d_label_map.keys())
 
         logger.debug(
@@ -413,11 +415,12 @@ def process_video(
         )
 
         for obj_idx, rel_obj in enumerate(rel_objs):
-            cls_name = rel_obj["class"]           # normalised object name
-            cls_short = _to_short(cls_name)       # short-form for matching
+            # augment_relationships_test.py now stores class in normalized
+            # short form (e.g. "phone", "closet") — same space as world4D.
+            cls_name = rel_obj["class"]           # already normalized short-form
             rel_source = rel_obj.get("source", "gt")
             visible = rel_source == "gt"          # GT objects are visible, corrections are not
-            all_labels.add(cls_short)
+            all_labels.add(cls_name)
 
             # ---- Log initial values from augmented_rel ----
             init_att = rel_obj.get("attention", [])
@@ -426,7 +429,7 @@ def process_video(
             init_bbox = rel_obj.get("bbox", None)
             logger.debug(
                 f"[{video_id}] Frame {frame_file}: OBJ[{obj_idx}] INITIAL | "
-                f"class={cls_name!r}, short={cls_short!r}, source={rel_source!r}, "
+                f"class={cls_name!r}, source={rel_source!r}, "
                 f"bbox={'present' if init_bbox is not None else 'None'}, "
                 f"attention={init_att}, contacting={init_cont}, spatial={init_spa}"
             )
@@ -434,8 +437,8 @@ def process_video(
             # Test augmented PKL uses "attention", "contacting", "spatial"
             # keys (list of str). Map them to the unified output keys.
             merged: Dict[str, Any] = {
-                "class": cls_name,
-                "label": cls_short,
+                "class": _to_full(cls_name),   # expand to full AG name for consistency
+                "label": cls_name,              # normalized short-form
                 "bbox_2d": init_bbox,
                 "visible": visible,
                 "attention_relationship": init_att,
@@ -444,13 +447,13 @@ def process_video(
                 "source": rel_source,
             }
 
-            # Merge 3D from world4D
-            w4d_match = w4d_label_map.get(cls_short)
+            # Merge 3D from world4D (both use normalized short-form labels)
+            w4d_match = w4d_label_map.get(cls_name)
             if w4d_match is not None:
                 fields_3d = _extract_3d_fields(w4d_match)
                 logger.debug(
                     f"[{video_id}] Frame {frame_file}: OBJ[{obj_idx}] 3D AUGMENT | "
-                    f"label={cls_short!r}, w4d_source={fields_3d['world4d_source']!r}, "
+                    f"label={cls_name!r}, w4d_source={fields_3d['world4d_source']!r}, "
                     f"filled={fields_3d['world4d_filled']}, "
                     f"fill_method={fields_3d['world4d_fill_method']!r}, "
                     f"corners_world={'present' if fields_3d['corners_world'] is not None else 'None'}, "
@@ -471,7 +474,7 @@ def process_video(
                 n_obj_missing_3d += 1
                 logger.warning(
                     f"[{video_id}] Frame {frame_file}: OBJ[{obj_idx}] "
-                    f"label={cls_short!r} (src={rel_source!r}) "
+                    f"label={cls_name!r} (src={rel_source!r}) "
                     f"NO world4D match — 3D fields set to None"
                 )
 

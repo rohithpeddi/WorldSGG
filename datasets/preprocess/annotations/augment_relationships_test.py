@@ -59,7 +59,7 @@ import pickle
 import logging
 import argparse
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Set, Any, Optional
 
 import numpy as np
 
@@ -71,6 +71,11 @@ sys.path.insert(0, os.path.join(_SCRIPT_DIR, '..'))
 
 
 from backend.gold.video_ag_loader import VideoAGLoader
+from backend.evaluation.label_constants import (
+    normalise_object_label,
+    normalise_relationship_label,
+    LABEL_NORMALIZE_MAP,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -112,8 +117,15 @@ log = _setup_logger()
 # ---------------------------------------------------------------------------
 
 def _normalise_label(label: str) -> str:
-    """Strip and lowercase a relationship / object label."""
-    return label.strip().lower().replace(" ", "_")
+    """Normalise an object label using the shared normaliser.
+
+    Maps compound AG names to short form:
+    ``"phone/camera"`` → ``"phone"``, ``"closet/cabinet"`` → ``"closet"``, etc.
+
+    All object class names stored in the augmented output are in this
+    **normalized** short form.
+    """
+    return normalise_object_label(label)
 
 
 def _index_to_label(index: int, label_list: List[str]) -> str:
@@ -139,6 +151,9 @@ def _normalise_video_id(raw_id: str) -> str:
 def _extract_rel_labels(value) -> List[str]:
     """Robustly extract relationship labels from various stored formats.
 
+    All returned labels are in **normalized** form via
+    ``normalise_relationship_label`` (e.g. ``"looking at"`` → ``"looking_at"``).
+
     Handles:
       - ``str``               → ``["label"]``
       - ``list[str]``         → ``["label", ...]``
@@ -149,18 +164,18 @@ def _extract_rel_labels(value) -> List[str]:
         return []
     if isinstance(value, str):
         s = value.strip()
-        return [_normalise_label(s)] if s else []
+        return [normalise_relationship_label(s)] if s else []
     if isinstance(value, dict):
-        return [_normalise_label(k) for k in value.keys() if k]
+        return [normalise_relationship_label(k) for k in value.keys() if k]
     if isinstance(value, list):
         out = []
         for v in value:
             if isinstance(v, str) and v.strip():
-                out.append(_normalise_label(v))
+                out.append(normalise_relationship_label(v))
             elif isinstance(v, dict):
                 lbl = v.get("label", "")
                 if lbl and lbl != "unknown":
-                    out.append(_normalise_label(lbl))
+                    out.append(normalise_relationship_label(lbl))
         return out
     return []
 
@@ -176,7 +191,41 @@ def augment_video(
 ) -> Optional[Dict[str, Any]]:
     """Merge GT annotations with correction annotations for one video.
 
-    Returns ``None`` if the video is not found in the AG dataset.
+    All output labels are in **normalized** form:
+
+    - **Object classes**: short form via ``normalise_object_label``
+      (e.g. ``"phone/camera"`` → ``"phone"``,
+      ``"cup/glass/bottle"`` → ``"cup"``).
+    - **Relationship labels**: underscore form via ``normalise_relationship_label``
+      (e.g. ``"looking at"`` → ``"looking_at"``).
+
+    If a frame-object pair exists in both GT and corrections, the GT value
+    is kept and the correction is skipped (GT-priority dedup).
+
+    Returns
+    -------
+    dict or None
+        ``None`` if the video is not in the AG dataset.  Otherwise::
+
+            {
+                "video_id": str,
+                "frames": {
+                    "<frame_key>": {
+                        "person_bbox": ...,
+                        "objects": [
+                            {
+                                "class": str,       # NORMALIZED short form
+                                "source": "gt" | "correction",
+                                "attention": [str],  # NORMALIZED rel labels
+                                "contacting": [str], # NORMALIZED rel labels
+                                "spatial": [str],    # NORMALIZED rel labels
+                                "bbox": list | None,
+                            }, ...
+                        ]
+                    }
+                },
+                "_stats": {"n_gt": int, "n_corr": int},
+            }
     """
     gt_entry = ag_loader.video_id_annotations_map.get(video_id)
     if gt_entry is None:
@@ -215,6 +264,7 @@ def augment_video(
         )
 
         # ---- GT objects (elements 1+) ------------------------------------
+        gt_obj_classes_in_frame: Set[str] = set()  # for dedup with corrections
         for obj_idx, obj in enumerate(frame_annots[1:]):
             obj_class_idx = obj.get("class", -1)
             obj_class_name = (
@@ -232,6 +282,7 @@ def augment_video(
             spatial = [_index_to_label(r, ag_loader.spatial_relationships) for r in raw_spat]
 
             normalised_class = _normalise_label(obj_class_name)
+            gt_obj_classes_in_frame.add(normalised_class)
 
             log.debug(
                 "    GT_OBJECT | idx=%d | Current: class_idx=%d, raw_att=%s, raw_cont=%s, raw_spat=%s | "
@@ -280,6 +331,14 @@ def augment_video(
                     )
                     continue
 
+                # GT-priority: skip correction if this object class is already in GT
+                if missing_obj in gt_obj_classes_in_frame:
+                    log.debug(
+                        "    CORRECTION_SKIPPED | pred_idx=%d | reason=already_in_gt | obj=%s",
+                        pred_idx, missing_obj,
+                    )
+                    continue
+
                 att_list = _extract_rel_labels(raw_att)
                 cont_list = _extract_rel_labels(raw_cont)
                 spat_list = _extract_rel_labels(raw_spat)
@@ -315,10 +374,33 @@ def augment_video(
         }
 
         n_gt_this = len(frame_annots) - 1 if frame_annots else 0
+        corr_obj_classes = sorted({
+            o["class"] for o in objects_out if o.get("source") == "correction"
+        })
+        final_obj_classes = sorted({o["class"] for o in objects_out})
         log.debug(
-            "  FRAME_DONE | frame_key=%s | Final: gt_objects=%d, correction_objects=%d, total_objects=%d",
+            "  FRAME_DONE | frame_key=%s | gt_objects=%d, correction_objects=%d, total_objects=%d | "
+            "gt_classes=%s | correction_classes=%s | final_classes=%s",
             frame_key, n_gt_this, n_corr_this_frame, len(objects_out),
+            sorted(gt_obj_classes_in_frame), corr_obj_classes, final_obj_classes,
         )
+
+    # ---- Object count consistency check -----------------------------------
+    obj_counts = [len(fd["objects"]) for fd in augmented_frames.values()]
+    if obj_counts:
+        all_equal = all(c == obj_counts[0] for c in obj_counts)
+        min_c, max_c = min(obj_counts), max(obj_counts)
+        if all_equal:
+            log.info(
+                "OBJECT_COUNT_CHECK | video_id=%s | PASS | all %d frames have %d objects",
+                video_id, len(obj_counts), obj_counts[0],
+            )
+        else:
+            log.warning(
+                "OBJECT_COUNT_CHECK | video_id=%s | FAIL | frames=%d | min_objects=%d, max_objects=%d "
+                "(object counts vary across frames)",
+                video_id, len(obj_counts), min_c, max_c,
+            )
 
     log.info(
         "VIDEO_DONE | video_id=%s | Final: total_frames=%d, gt_objects=%d, correction_objects=%d, "
