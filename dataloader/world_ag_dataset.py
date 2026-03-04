@@ -388,18 +388,32 @@ class WorldAG(Dataset):
                 annot_by_short_label[short] = obj
 
         # SGDet: build detection-position → GT annotation mapping via
-        # detector_found_idx.  detector_found_idx[k] is the detection
-        # position that matched the k-th GT object (k=0 person, k>=1
-        # objects in annotation order).
+        # assigned_labels.  assigned_labels[det_pos] is the GT class ID
+        # that the IoU matcher assigned to each detection during feature
+        # extraction.  We convert GT class ID → short label → annotation.
+        # This is robust to unmatched GT objects (which detector_found_idx
+        # skips, creating sparse ordering issues).
         det_pos_to_annot = {}  # detection position → annotation dict
         if self._mode == "sgdet":
-            detector_found_idx = feat_frame.get("detector_found_idx", [])
-            for k, det_pos in enumerate(detector_found_idx):
-                if k == 0:
-                    # person match — store person_info
+            assigned_labels = feat_frame.get("assigned_labels", [])
+            for det_pos, gt_class_id in enumerate(assigned_labels):
+                gt_class_id = int(gt_class_id)
+                if gt_class_id == 0:
+                    # No GT match for this detection (unmatched)
+                    continue
+                elif gt_class_id == 1:
+                    # Person class
                     det_pos_to_annot[det_pos] = person_info
-                elif (k - 1) < len(object_info_list):
-                    det_pos_to_annot[det_pos] = object_info_list[k - 1]
+                else:
+                    # Object class: convert GT class ID to short label
+                    if gt_class_id < len(OBJECT_CLASSES):
+                        gt_label = OBJECT_CLASSES[gt_class_id]
+                    else:
+                        gt_label = ""
+                    gt_short = _to_short(gt_label)
+                    annot_obj = annot_by_short_label.get(gt_short)
+                    if annot_obj is not None:
+                        det_pos_to_annot[det_pos] = annot_obj
 
         # --- SGDet: load detector-predicted 3D boxes from features PKL ---
         feat_boxes_3d = None
