@@ -485,9 +485,15 @@ class WorldAG(Dataset):
                     corners[0] = torch.from_numpy(person_corners)
 
         # --- Build per-edge arrays ---
-        # Pair indices come from the features PKL, which is mode-appropriate:
-        #   predcls → GT person-object pairs
-        #   sgdet   → detector-matched + GT-supply pairs
+        # pair_indices from the features PKL contains (person_label_id,
+        # object_label_id) tuples — i.e. class IDs, NOT positional indices.
+        # We must map them to positional indices in the feat arrays.
+        label_id_to_pos = {}
+        for i in range(N):
+            lid = feat_label_ids[i] if i < len(feat_label_ids) else 0
+            if lid not in label_id_to_pos:
+                label_id_to_pos[lid] = i
+
         K = len(feat_pair_indices)
 
         person_indices = []
@@ -497,17 +503,23 @@ class WorldAG(Dataset):
         con_multi_hot = []
         pair_sources = []
 
-        for pidx, oidx in feat_pair_indices:
-            if pidx >= max_N or oidx >= max_N:
+        for p_label_id, o_label_id in feat_pair_indices:
+            # Convert class IDs to positional indices
+            p_pos = label_id_to_pos.get(p_label_id, None)
+            o_pos = label_id_to_pos.get(o_label_id, None)
+
+            if p_pos is None or o_pos is None:
                 continue
-            if not valid_mask[pidx] or not valid_mask[oidx]:
+            if p_pos >= max_N or o_pos >= max_N:
+                continue
+            if not valid_mask[p_pos] or not valid_mask[o_pos]:
                 continue
 
-            person_indices.append(pidx)
-            object_indices.append(oidx)
+            person_indices.append(p_pos)
+            object_indices.append(o_pos)
 
             # Relationship GT labels always from annotation PKL
-            obj_label = feat_labels[oidx] if oidx < len(feat_labels) else ""
+            obj_label = feat_labels[o_pos] if o_pos < len(feat_labels) else ""
             short_label = _to_short(obj_label)
             annot_obj = annot_by_short_label.get(short_label)
 
