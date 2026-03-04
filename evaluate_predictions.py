@@ -97,13 +97,17 @@ def evaluate_one_epoch(
     n_skipped = 0
 
     for pred_path in pred_paths:
-        video_id = pred_path.stem  # e.g. "001YG.mp4"
+        video_id = pred_path.stem  # e.g. "001YG"
 
         # Load prediction
         pred_pkl = load_pkl(pred_path)
 
         # Find corresponding GT annotation
+        # Prediction PKLs use feature-stem names (e.g. "001YG.pkl")
+        # but GT annotation PKLs may use ".mp4" suffix (e.g. "001YG.mp4.pkl")
         annot_path = os.path.join(annot_dir, f"{video_id}.pkl")
+        if not os.path.exists(annot_path):
+            annot_path = os.path.join(annot_dir, f"{video_id}.mp4.pkl")
         if not os.path.exists(annot_path):
             logger.debug(f"  GT annotation not found for {video_id}, skipping")
             n_skipped += 1
