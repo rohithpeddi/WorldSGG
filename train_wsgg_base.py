@@ -16,7 +16,9 @@ Handles:
 
 import copy
 import gc
+import json
 import logging
+import os
 import time
 from abc import abstractmethod
 
@@ -269,9 +271,43 @@ class TrainWSGGBase(WSGGBase):
                     )
 
         if self._evaluator is not None:
-            score = np.mean(self._evaluator.result_dict.get(
-                self._conf.mode + "_recall", {}).get(20, [0.0]))
+            # Fetch all metrics
+            stats = self._evaluator.fetch_stats_json()
+            recall = stats["recall"]           # {10: v, 20: v, 50: v, 100: v}
+            mean_recall = stats["mean_recall"]
+            harmonic = stats["harmonic_mean_recall"]
+
+            score = recall.get(20, 0.0)
+
             self._evaluator.print_stats()
+
+            # Log all metrics to WandB
+            if self._enable_wandb:
+                wandb_metrics = {"epoch": epoch + 1}
+                for k in [10, 20, 50, 100]:
+                    wandb_metrics[f"metrics/R@{k}"] = recall.get(k, 0.0)
+                    wandb_metrics[f"metrics/mR@{k}"] = mean_recall.get(k, 0.0)
+                    wandb_metrics[f"metrics/hR@{k}"] = harmonic.get(k, 0.0)
+                wandb.log(wandb_metrics)
+
+            # Save metrics to results log file
+            import json
+            results_dir = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "results"
+            )
+            os.makedirs(results_dir, exist_ok=True)
+            log_path = os.path.join(
+                results_dir, f"{self._conf.experiment_name}_metrics.jsonl"
+            )
+            row = {"epoch": epoch + 1}
+            for k in [10, 20, 50, 100]:
+                row[f"R@{k}"] = round(recall.get(k, 0.0), 6)
+                row[f"mR@{k}"] = round(mean_recall.get(k, 0.0), 6)
+                row[f"hR@{k}"] = round(harmonic.get(k, 0.0), 6)
+            with open(log_path, "a") as f:
+                f.write(json.dumps(row) + "\n")
+            logger.info(f"📊 Metrics saved → {log_path}")
+
             self._evaluator.reset_result()
         else:
             score = 0.0
