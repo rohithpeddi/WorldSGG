@@ -757,6 +757,13 @@ def evaluate_wsgg_video(
         pred_classes = gt_classes.copy()
         obj_scores = np.ones(len(gt_classes), dtype=np.float32)
     else:
+        # SGDet: use real GT annotation boxes for gt_entry if available,
+        # and detector-predicted boxes for pred_entry.  This gives proper
+        # IoU evaluation of localization quality.
+        gt_bboxes = pred_pkl.get("gt_bboxes_2d", None)
+        if gt_bboxes is not None:
+            gt_boxes = gt_bboxes.astype(np.float32)
+
         pred_boxes = pred_pkl.get("bboxes_2d", gt_boxes).astype(np.float32)
         pred_classes = pred_pkl.get("pred_labels", gt_classes).astype(np.int64)
         obj_scores = pred_pkl.get("pred_scores", np.ones(len(gt_classes))).astype(np.float32)
@@ -768,7 +775,7 @@ def evaluate_wsgg_video(
                 bbox_overlaps(gt_boxes[i:i+1], pred_boxes[i:i+1])[0, 0]
                 if i < pred_boxes.shape[0] else 0.0 for i in range(N)
             ])
-            gt_3d = pred_3d  # In batch, corners are used as both GT and pred
+            gt_3d = pred_pkl.get("gt_corners", pred_3d)  # real GT 3D if available
             iou_3d = np.array([
                 bbox_overlaps_3d(gt_3d[i:i+1], pred_3d[i:i+1])[0, 0]
                 if i < pred_3d.shape[0] else 0.0 for i in range(N)

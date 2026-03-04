@@ -257,6 +257,8 @@ class TrainWSGGBase(WSGGBase):
                         pred_pkl["pred_labels"] = batch["object_classes"][last].numpy()
                         pred_pkl["pred_scores"] = np.ones(batch["object_classes"][last].shape[0],
                                                           dtype=np.float32)
+                        # Real GT annotation boxes for proper IoU evaluation
+                        pred_pkl["gt_bboxes_2d"] = batch["gt_bboxes_2d"][last].numpy()
                         corners = batch.get("corners")
                         if corners is not None:
                             pred_pkl["bboxes_3d"] = corners[last].numpy()

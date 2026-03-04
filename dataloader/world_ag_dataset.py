@@ -434,6 +434,7 @@ class WorldAG(Dataset):
         visual_features = torch.zeros(max_N, D)
         corners = torch.zeros(max_N, 8, 3)
         bboxes_2d = torch.zeros(max_N, 4)
+        gt_bboxes_2d = torch.zeros(max_N, 4)  # real GT annotation boxes
         valid_mask = torch.zeros(max_N, dtype=torch.bool)
         visibility_mask = torch.zeros(max_N, dtype=torch.bool)
         object_classes = torch.zeros(max_N, dtype=torch.long)
@@ -474,6 +475,14 @@ class WorldAG(Dataset):
                 short_label = _to_short(label_str)
                 annot_obj = annot_by_short_label.get(short_label)
 
+            # Store real GT annotation bbox (for SGDet localization eval)
+            if annot_obj is not None:
+                gt_box = annot_obj.get("bbox", None)
+                if gt_box is not None:
+                    gt_bboxes_2d[i] = torch.tensor(
+                        np.asarray(gt_box, dtype=np.float32)
+                    )
+
             if self._mode == "sgdet":
                 # SGDet: use detector-predicted 3D corners from features PKL
                 if feat_boxes_3d is not None and i < feat_boxes_3d.shape[0]:
@@ -501,6 +510,13 @@ class WorldAG(Dataset):
             # Update visibility from annotation if available (applies to both modes)
             if annot_obj is not None and not annot_obj.get("visible", True):
                 visibility_mask[i] = False
+
+        # --- Person GT bbox (slot 0) ---
+        person_bbox = person_info.get("person_bbox", None)
+        if person_bbox is not None:
+            gt_bboxes_2d[0] = torch.tensor(
+                np.asarray(person_bbox, dtype=np.float32)
+            )
 
         # --- Person 3D corners (slot 0): mode-dependent ---
         if self._mode == "sgdet":
@@ -601,6 +617,7 @@ class WorldAG(Dataset):
             "visual_features": visual_features,
             "corners": corners,
             "bboxes_2d": bboxes_2d,
+            "gt_bboxes_2d": gt_bboxes_2d,
             "valid_mask": valid_mask,
             "visibility_mask": visibility_mask,
             "object_classes": object_classes,
@@ -667,6 +684,7 @@ class WorldAG(Dataset):
         all_visual = []
         all_corners = []
         all_bboxes = []
+        all_gt_bboxes = []
         all_valid = []
         all_vis = []
         all_classes = []
@@ -694,6 +712,7 @@ class WorldAG(Dataset):
             all_visual.append(frame_tensors["visual_features"])
             all_corners.append(frame_tensors["corners"])
             all_bboxes.append(frame_tensors["bboxes_2d"])
+            all_gt_bboxes.append(frame_tensors["gt_bboxes_2d"])
             all_valid.append(frame_tensors["valid_mask"])
             all_vis.append(frame_tensors["visibility_mask"])
             all_classes.append(frame_tensors["object_classes"])
@@ -749,6 +768,7 @@ class WorldAG(Dataset):
             "visual_features": torch.stack(all_visual),         # (T, N_max, D)
             "corners": torch.stack(all_corners),                 # (T, N_max, 8, 3)
             "bboxes_2d": torch.stack(all_bboxes),               # (T, N_max, 4)
+            "gt_bboxes_2d": torch.stack(all_gt_bboxes),         # (T, N_max, 4)
             "valid_mask": torch.stack(all_valid),                 # (T, N_max)
             "visibility_mask": torch.stack(all_vis),             # (T, N_max)
             "object_classes": torch.stack(all_classes),           # (T, N_max)
