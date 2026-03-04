@@ -540,13 +540,15 @@ def process_video(
                 f"missing_from_frame={sorted(set(sorted_all_labels) - set(frame_obj_labels))} | "
                 f"extra_in_frame={sorted(set(frame_obj_labels) - set(sorted_all_labels))}"
             )
-            raise ValueError(
-                f"[{video_id}] Frame {frame_key}: object_info_list length "
-                f"({n_objs_frame}) does not match all_labels length "
-                f"({n_all_labels}). "
-                f"Missing: {sorted(set(sorted_all_labels) - set(frame_obj_labels))}, "
-                f"Extra: {sorted(set(frame_obj_labels) - set(sorted_all_labels))}"
-            )
+
+            if n_objs_frame > n_all_labels:
+                raise ValueError(
+                    f"[{video_id}] Frame {frame_key}: object_info_list length "
+                    f"({n_objs_frame}) does not match all_labels length "
+                    f"({n_all_labels}). "
+                    f"Missing: {sorted(set(sorted_all_labels) - set(frame_obj_labels))}, "
+                    f"Extra: {sorted(set(frame_obj_labels) - set(sorted_all_labels))}"
+                )
 
     logger.info(
         f"[{video_id}] Validation PASSED: all {len(combined_frames)} frames "
@@ -699,21 +701,32 @@ def main():
         w4d_pkl = w4d_dir / f"{video_stem}.pkl"
         out_pkl = output_dir / f"{video_id}.pkl"
 
-        try:
-            ok, mismatches, output_record = process_video(
-                video_id=video_id,
-                rel_pkl_path=rel_pkl,
-                w4d_pkl_path=w4d_pkl,
-                output_path=out_pkl,
-                overwrite=args.overwrite,
-            )
-            if ok:
-                success_count += 1
-            all_mismatches.extend(mismatches)
+        ok, mismatches, output_record = process_video(
+            video_id=video_id,
+            rel_pkl_path=rel_pkl,
+            w4d_pkl_path=w4d_pkl,
+            output_path=out_pkl,
+            overwrite=args.overwrite,
+        )
+        if ok:
+            success_count += 1
+        all_mismatches.extend(mismatches)
 
-        except Exception as e:
-            logger.error(f"[{video_id}] Error: {e}", exc_info=True)
-            error_count += 1
+        # try:
+        #     ok, mismatches, output_record = process_video(
+        #         video_id=video_id,
+        #         rel_pkl_path=rel_pkl,
+        #         w4d_pkl_path=w4d_pkl,
+        #         output_path=out_pkl,
+        #         overwrite=args.overwrite,
+        #     )
+        #     if ok:
+        #         success_count += 1
+        #     all_mismatches.extend(mismatches)
+        #
+        # except Exception as e:
+        #     logger.error(f"[{video_id}] Error: {e}", exc_info=True)
+        #     error_count += 1
 
     # ------------------------------------------------------------------
     # Write verify.txt

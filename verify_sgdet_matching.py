@@ -44,6 +44,8 @@ def verify_video_raw(feat_path, annot_path, video_id):
     feat_frames = feat_data.get("frames", {})
     annot_frames = annot_data.get("frames", {})
 
+    annot_frames = [frame.split("/")[-1] for frame in annot_frames.keys()]
+    annot_frames = {af: annot_frames[af] for af in annot_frames}
     # Find common frames
     common = sorted(set(feat_frames.keys()) & set(annot_frames.keys()))
     if not common:
@@ -163,7 +165,6 @@ def verify_dataloader(data_path, feature_model, n_videos):
         feature_model=feature_model,
         mode="sgdet",
         include_invisible=True,
-        datasize="large",
     )
 
     loader = DataLoader(ds, batch_size=1, collate_fn=world_collate_fn, num_workers=0)
@@ -234,7 +235,7 @@ def main():
     parser = argparse.ArgumentParser(description="Verify SGDet GT matching")
     parser.add_argument("--data_path", default="/data/rohith/ag")
     parser.add_argument("--feature_model", default="dinov3l")
-    parser.add_argument("--n_videos", type=int, default=3)
+    parser.add_argument("--n_videos", type=int, default=50)
     parser.add_argument("--phase", default="train",
                         help="Which split to check (train or test)")
     args = parser.parse_args()
@@ -260,7 +261,7 @@ def main():
 
     for fi, feat_path in enumerate(feat_files[:args.n_videos]):
         video_id = feat_path.stem
-        annot_path = annot_files.get(video_id)
+        annot_path = annot_files.get(f"{video_id}.mp4")
 
         if annot_path is None:
             print(f"\n{'=' * 70}")
