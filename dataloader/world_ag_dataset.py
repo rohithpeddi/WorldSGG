@@ -433,6 +433,7 @@ class WorldAG(Dataset):
 
         visual_features = torch.zeros(max_N, D)
         corners = torch.zeros(max_N, 8, 3)
+        gt_corners = torch.zeros(max_N, 8, 3)  # real GT 3D corners (FINAL space)
         bboxes_2d = torch.zeros(max_N, 4)
         gt_bboxes_2d = torch.zeros(max_N, 4)  # real GT annotation boxes
         valid_mask = torch.zeros(max_N, dtype=torch.bool)
@@ -482,6 +483,12 @@ class WorldAG(Dataset):
                     gt_bboxes_2d[i] = torch.tensor(
                         np.asarray(gt_box, dtype=np.float32)
                     )
+                # Store real GT 3D corners (FINAL space, for 3D IoU eval)
+                gt_c = annot_obj.get("corners_final", None)
+                if gt_c is not None:
+                    gt_c = np.asarray(gt_c, dtype=np.float32)
+                    if gt_c.shape == (8, 3):
+                        gt_corners[i] = torch.from_numpy(gt_c)
 
             if self._mode == "sgdet":
                 # SGDet: use detector-predicted 3D corners from features PKL
@@ -511,12 +518,17 @@ class WorldAG(Dataset):
             if annot_obj is not None and not annot_obj.get("visible", True):
                 visibility_mask[i] = False
 
-        # --- Person GT bbox (slot 0) ---
+        # --- Person GT bbox and GT 3D corners (slot 0) ---
         person_bbox = person_info.get("person_bbox", None)
         if person_bbox is not None:
             gt_bboxes_2d[0] = torch.tensor(
                 np.asarray(person_bbox, dtype=np.float32)
             )
+        person_gt_corners = person_info.get("corners_final", None)
+        if person_gt_corners is not None:
+            person_gt_corners = np.asarray(person_gt_corners, dtype=np.float32)
+            if person_gt_corners.shape == (8, 3):
+                gt_corners[0] = torch.from_numpy(person_gt_corners)
 
         # --- Person 3D corners (slot 0): mode-dependent ---
         if self._mode == "sgdet":
@@ -616,6 +628,7 @@ class WorldAG(Dataset):
             # Node tensors (max_N, ...)
             "visual_features": visual_features,
             "corners": corners,
+            "gt_corners": gt_corners,
             "bboxes_2d": bboxes_2d,
             "gt_bboxes_2d": gt_bboxes_2d,
             "valid_mask": valid_mask,
@@ -683,6 +696,7 @@ class WorldAG(Dataset):
         # Second pass: build per-frame tensors
         all_visual = []
         all_corners = []
+        all_gt_corners = []
         all_bboxes = []
         all_gt_bboxes = []
         all_valid = []
@@ -711,6 +725,7 @@ class WorldAG(Dataset):
             # Node tensors (already N_max padded)
             all_visual.append(frame_tensors["visual_features"])
             all_corners.append(frame_tensors["corners"])
+            all_gt_corners.append(frame_tensors["gt_corners"])
             all_bboxes.append(frame_tensors["bboxes_2d"])
             all_gt_bboxes.append(frame_tensors["gt_bboxes_2d"])
             all_valid.append(frame_tensors["valid_mask"])
@@ -767,6 +782,7 @@ class WorldAG(Dataset):
             # Per-node: (T, N_max, ...)
             "visual_features": torch.stack(all_visual),         # (T, N_max, D)
             "corners": torch.stack(all_corners),                 # (T, N_max, 8, 3)
+            "gt_corners": torch.stack(all_gt_corners),             # (T, N_max, 8, 3)
             "bboxes_2d": torch.stack(all_bboxes),               # (T, N_max, 4)
             "gt_bboxes_2d": torch.stack(all_gt_bboxes),         # (T, N_max, 4)
             "valid_mask": torch.stack(all_valid),                 # (T, N_max)

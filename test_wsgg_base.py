@@ -122,11 +122,20 @@ class TestWSGGBase(WSGGBase):
                         pred_pkl["pred_labels"] = batch["object_classes"][last].numpy()
                         pred_pkl["pred_scores"] = np.ones(
                             batch["object_classes"][last].shape[0], dtype=np.float32)
-                        # Real GT annotation boxes for proper IoU evaluation
+                        # Real GT annotation boxes/corners for proper IoU evaluation
                         pred_pkl["gt_bboxes_2d"] = batch["gt_bboxes_2d"][last].numpy()
-                        corners = batch.get("corners")
-                        if corners is not None:
-                            pred_pkl["bboxes_3d"] = corners[last].numpy()
+                        pred_pkl["gt_corners"] = batch["gt_corners"][last].numpy()
+
+                        # Transform detector 3D corners: camera space → FINAL space
+                        corners_raw = batch.get("corners")
+                        cam_pose = batch.get("camera_poses")
+                        if corners_raw is not None:
+                            corners_cam = corners_raw[last].numpy()  # (N_max, 8, 3)
+                            if cam_pose is not None:
+                                T = cam_pose[last].numpy()  # (4, 4) cam-to-FINAL
+                                R, t = T[:3, :3], T[:3, 3]
+                                corners_cam = np.einsum('ij,nkj->nki', R, corners_cam) + t
+                            pred_pkl["bboxes_3d"] = corners_cam
 
                     # Feed both evaluators with the same predictions
                     evaluate_wsgg_video(
