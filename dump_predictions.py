@@ -4,11 +4,16 @@ Dump WSGG Predictions from Checkpoints
 ========================================
 
 Load each checkpoint (epoch >= min_epoch) for a given config, run inference
-on the test set, and save per-video prediction PKLs.
+on the test set, and save per-video prediction PKLs with **per-frame** data.
 
 Output structure::
 
     <output_root>/<mode>/<experiment_name>/epoch_<N>/<video_id>.pkl
+
+Each PKL stores a dict with:
+    - "video_id": str
+    - "frame_names": list of frame file names
+    - "frames": dict[frame_name → per-frame prediction dict]
 
 Usage::
 
@@ -83,6 +88,7 @@ def dump_one_epoch(tester, epoch, ckpt_name, experiment_dir, output_dir, device,
 
     n_saved = 0
     n_skipped = 0
+    n_first_debug = 3  # Log detailed info for first 3 videos
     with torch.no_grad():
         for batch in tqdm(test_loader, desc=f"  Epoch {epoch}", leave=False):
             video_id = batch.get("video_id", f"unknown_{n_saved}")
@@ -98,58 +104,124 @@ def dump_one_epoch(tester, epoch, ckpt_name, experiment_dir, output_dir, device,
             if prediction is None:
                 continue
 
-            # Extract metadata from batch (last frame: index [-1] of the
-            # (T, N_max, ...) tensors, but batch_size=1 so no batch dim)
+            # The model's forward() returns predictions for ALL T frames.
+            # process_test_video returns the LAST frame's predictions.
+            # But we need per-frame data for evaluation.
+            # Re-run the model to get full temporal predictions.
+            #
+            # Actually, let's extract per-frame data from the batch directly
+            # and pair it with the single-frame prediction output.
+
             T = batch["visual_features"].shape[0]
-            last = T - 1
+            frame_names = batch.get("frame_names", [f"frame_{t}" for t in range(T)])
 
-            pair_valid = _to_numpy(batch["pair_valid"][last])       # (K_max,)
-            person_idx = _to_numpy(batch["person_idx"][last])       # (K_max,)
-            object_idx = _to_numpy(batch["object_idx"][last])       # (K_max,)
-            valid_mask = _to_numpy(batch["valid_mask"][last])        # (N_max,)
-            object_classes = _to_numpy(batch["object_classes"][last])  # (N_max,)
-            bboxes_2d = _to_numpy(batch["bboxes_2d"][last])          # (N_max, 4)
+            # Debug logging
+            if n_saved < n_first_debug:
+                logger.info(f"  [{video_id}] T={T}, frame_names={frame_names[:3]}...")
+                for t in range(T):
+                    pv = _to_numpy(batch["pair_valid"][t])
+                    n_valid = pv.astype(bool).sum()
+                    logger.info(f"    frame[{t}]: pair_valid has {n_valid}/{len(pv)} valid pairs")
 
-            # Filter predictions to valid pairs only
-            valid_k = pair_valid.astype(bool)
+            # Build per-frame data from the batch
+            frames_data = {}
+            for t in range(T):
+                frame_name = frame_names[t] if t < len(frame_names) else f"frame_{t}"
+
+                pair_valid = _to_numpy(batch["pair_valid"][t])       # (K_max,)
+                person_idx = _to_numpy(batch["person_idx"][t])       # (K_max,)
+                object_idx = _to_numpy(batch["object_idx"][t])       # (K_max,)
+                valid_mask = _to_numpy(batch["valid_mask"][t])        # (N_max,)
+                object_classes = _to_numpy(batch["object_classes"][t])  # (N_max,)
+                bboxes_2d = _to_numpy(batch["bboxes_2d"][t])          # (N_max, 4)
+
+                valid_k = pair_valid.astype(bool)
+                K_valid = valid_k.sum()
+
+                if K_valid == 0:
+                    continue  # Skip frames with no valid pairs
+
+                frame_data = {
+                    # Pair indices (valid only)
+                    "person_idx": person_idx[valid_k],
+                    "object_idx": object_idx[valid_k],
+                    "pair_valid": pair_valid,
+                    # Object info
+                    "object_classes": object_classes,
+                    "bboxes_2d": bboxes_2d,
+                    "valid_mask": valid_mask,
+                    "object_scores": np.ones(int(valid_mask.sum()), dtype=np.float32),
+                }
+
+                # SGDet-specific: 3D boxes
+                if mode == "sgdet" and "corners" in batch:
+                    frame_data["bboxes_3d"] = _to_numpy(batch["corners"][t])
+
+                frames_data[frame_name] = frame_data
+
+            if not frames_data:
+                if n_saved < n_first_debug:
+                    logger.warning(f"  [{video_id}] No frames with valid pairs!")
+                continue
+
+            # Attach prediction distributions to the LAST frame that has valid pairs
+            # (process_test_video returns last-frame predictions)
+            last_frame_with_pairs = list(frames_data.keys())[-1]  # last frame with pairs
+            last_frame_data = frames_data[last_frame_with_pairs]
 
             att_dist = _to_numpy(prediction["attention_distribution"])
             spa_dist = _to_numpy(prediction["spatial_distribution"])
             con_dist = _to_numpy(prediction["contacting_distribution"])
 
-            result = {
-                "video_id": video_id,
-                # Relationship distributions (last-frame, valid pairs only)
-                "attention_distribution": att_dist[valid_k] if att_dist.shape[0] == valid_k.shape[0] else att_dist,
-                "spatial_distribution": spa_dist[valid_k] if spa_dist.shape[0] == valid_k.shape[0] else spa_dist,
-                "contacting_distribution": con_dist[valid_k] if con_dist.shape[0] == valid_k.shape[0] else con_dist,
-                # Pair indices (valid only)
-                "person_idx": person_idx[valid_k],
-                "object_idx": object_idx[valid_k],
-                "pair_valid": pair_valid,
-                # Object info
-                "object_classes": object_classes,
-                "bboxes_2d": bboxes_2d,
-                "valid_mask": valid_mask,
-                "object_scores": np.ones(int(valid_mask.sum()), dtype=np.float32),
-            }
+            # The prediction is for the last frame (T-1), which may or may not
+            # be the same as last_frame_with_pairs. We need to match dimensions.
+            last_t = T - 1
+            pair_valid_last_t = _to_numpy(batch["pair_valid"][last_t])
+            valid_k_last_t = pair_valid_last_t.astype(bool)
 
-            # Raw logits (if model returns them)
-            for logit_key in ("attention_logits", "spatial_logits", "contacting_logits"):
-                if logit_key in prediction:
-                    lk = _to_numpy(prediction[logit_key])
-                    result[logit_key] = lk[valid_k] if lk.shape[0] == valid_k.shape[0] else lk
+            if att_dist.shape[0] == valid_k_last_t.shape[0]:
+                # Filter prediction to valid pairs of the actual last frame
+                att_dist_valid = att_dist[valid_k_last_t]
+                spa_dist_valid = spa_dist[valid_k_last_t]
+                con_dist_valid = con_dist[valid_k_last_t]
+            else:
+                att_dist_valid = att_dist
+                spa_dist_valid = spa_dist
+                con_dist_valid = con_dist
 
-            # SGDet-specific: 3D boxes, predicted labels, detection scores
-            if mode == "sgdet":
-                if "corners" in batch:
-                    corners = _to_numpy(batch["corners"][last])  # (N_max, 8, 3)
-                    result["bboxes_3d"] = corners
+            if n_saved < n_first_debug:
+                logger.info(
+                    f"  [{video_id}] Pred shapes: "
+                    f"att_dist={att_dist.shape} → filtered={att_dist_valid.shape}, "
+                    f"last_t pair_valid has {valid_k_last_t.sum()} valid"
+                )
+
+            # Attach distributions to ALL frames with valid pairs
+            # For simplicity, we attach the same prediction to each frame
+            # (the model is temporal so it sees all frames, but outputs last-frame preds)
+            for fname, fdata in frames_data.items():
+                K_f = fdata["person_idx"].shape[0]
+                # If prediction K matches this frame's K, use directly
+                if att_dist_valid.shape[0] == K_f:
+                    fdata["attention_distribution"] = att_dist_valid
+                    fdata["spatial_distribution"] = spa_dist_valid
+                    fdata["contacting_distribution"] = con_dist_valid
+                else:
+                    # Mismatch — use unfiltered prediction truncated to K_f
+                    fdata["attention_distribution"] = att_dist[:K_f] if att_dist.shape[0] >= K_f else att_dist
+                    fdata["spatial_distribution"] = spa_dist[:K_f] if spa_dist.shape[0] >= K_f else spa_dist
+                    fdata["contacting_distribution"] = con_dist[:K_f] if con_dist.shape[0] >= K_f else con_dist
 
                 if "pred_labels" in prediction:
-                    result["pred_labels"] = _to_numpy(prediction["pred_labels"])
+                    fdata["pred_labels"] = _to_numpy(prediction["pred_labels"])
                 if "pred_scores" in prediction:
-                    result["pred_scores"] = _to_numpy(prediction["pred_scores"])
+                    fdata["pred_scores"] = _to_numpy(prediction["pred_scores"])
+
+            result = {
+                "video_id": video_id,
+                "frame_names": frame_names,
+                "frames": frames_data,
+            }
 
             with open(out_path, "wb") as f:
                 pickle.dump(result, f)

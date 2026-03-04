@@ -120,31 +120,80 @@ def evaluate_one_epoch(
             n_skipped += 1
             continue
 
-        # Evaluate each frame's GT against the prediction
-        # (dump_predictions saves last-frame predictions)
-        # Use the last frame from GT matching the prediction
-        frame_keys = sorted(gt_frames.keys())
+        # Check if this is the new per-frame format or old flat format
+        pred_frames = pred_pkl.get("frames", None)
 
-        if not frame_keys:
-            n_skipped += 1
-            continue
+        if pred_frames is not None:
+            # ---- New per-frame format ----
+            # Match GT frames with prediction frames
+            gt_frame_keys = sorted(gt_frames.keys())
+            pred_frame_keys = set(pred_frames.keys())
 
-        # Use last frame for evaluation (matching dump_predictions behavior)
-        last_frame_key = frame_keys[-1]
-        gt_frame = gt_frames[last_frame_key]
+            n_matched = 0
+            for gt_key in gt_frame_keys:
+                # GT keys may be like "video_id/frame.png" — try matching
+                # the frame basename
+                frame_basename = gt_key.split("/")[-1] if "/" in gt_key else gt_key
 
-        try:
-            evaluate_wsgg_video(
-                gt_annot=gt_frame,
-                pred_pkl=pred_pkl,
-                evaluator=evaluator,
-                mode=mode,
-                verbose=(n_evaluated < 3),  # Log details for first 3 videos only
-            )
-            n_evaluated += 1
-        except Exception as e:
-            logger.warning(f"  Error evaluating {video_id}: {e}", exc_info=True)
-            n_skipped += 1
+                # Try multiple match strategies
+                pred_frame = None
+                for candidate in [gt_key, frame_basename]:
+                    if candidate in pred_frames:
+                        pred_frame = pred_frames[candidate]
+                        break
+
+                if pred_frame is None:
+                    continue
+
+                # Check that prediction frame has distributions
+                if "attention_distribution" not in pred_frame:
+                    continue
+
+                gt_frame = gt_frames[gt_key]
+
+                try:
+                    # Add video_id for logging
+                    pred_frame_with_id = dict(pred_frame)
+                    pred_frame_with_id["video_id"] = f"{video_id}/{frame_basename}"
+
+                    evaluate_wsgg_video(
+                        gt_annot=gt_frame,
+                        pred_pkl=pred_frame_with_id,
+                        evaluator=evaluator,
+                        mode=mode,
+                        verbose=(n_evaluated < 3),
+                    )
+                    n_matched += 1
+                except Exception as e:
+                    logger.warning(f"  Error evaluating {video_id}/{gt_key}: {e}", exc_info=(n_evaluated < 3))
+
+            if n_matched > 0:
+                n_evaluated += 1
+            else:
+                n_skipped += 1
+        else:
+            # ---- Old flat format (backward compat) ----
+            # Use last GT frame
+            frame_keys = sorted(gt_frames.keys())
+            if not frame_keys:
+                n_skipped += 1
+                continue
+
+            last_frame_key = frame_keys[-1]
+            gt_frame = gt_frames[last_frame_key]
+
+            try:
+                evaluate_wsgg_video(
+                    gt_annot=gt_frame,
+                    pred_pkl=pred_pkl,
+                    evaluator=evaluator,
+                    mode=mode,
+                    verbose=(n_evaluated < 3),
+                )
+                n_evaluated += 1
+            except Exception as e:
+                logger.warning(f"  Error evaluating {video_id}: {e}", exc_info=True)
+                n_skipped += 1
 
     logger.info(
         f"  Epoch {epoch}: evaluated {n_evaluated} videos, skipped {n_skipped}"
