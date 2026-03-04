@@ -139,10 +139,11 @@ def evaluate_one_epoch(
                 pred_pkl=pred_pkl,
                 evaluator=evaluator,
                 mode=mode,
+                verbose=(n_evaluated < 3),  # Log details for first 3 videos only
             )
             n_evaluated += 1
         except Exception as e:
-            logger.warning(f"  Error evaluating {video_id}: {e}")
+            logger.warning(f"  Error evaluating {video_id}: {e}", exc_info=True)
             n_skipped += 1
 
     logger.info(

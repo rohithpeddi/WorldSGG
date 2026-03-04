@@ -653,6 +653,7 @@ def evaluate_wsgg_video(
     pred_pkl,
     evaluator,
     mode="predcls",
+    verbose=True,
 ):
     """
     Evaluate a single video's WSGG predictions against GT annotations.
@@ -667,11 +668,19 @@ def evaluate_wsgg_video(
         pred_pkl: Prediction dict for one video, as saved by ``dump_predictions.py``.
         evaluator: A ``BasicSceneGraphEvaluator`` instance.
         mode: "predcls" or "sgdet".
+        verbose: If True, log detailed diagnostics.
     """
+    import logging
+    _log = logging.getLogger("evaluate_wsgg_video")
+
+    video_id = pred_pkl.get("video_id", "?")
+
     person_info = gt_annot.get("person_info", {})
     object_info_list = gt_annot.get("object_info_list", [])
 
     if not object_info_list:
+        if verbose:
+            _log.info(f"[{video_id}] SKIP: empty object_info_list")
         return
 
     # ---- Build GT entry ----
@@ -691,6 +700,10 @@ def evaluate_wsgg_video(
     # Object class name → index lookup (use full/unnormalized AG names)
     from dataloader.world_ag_dataset import NAME_TO_IDX
 
+    if verbose:
+        _log.info(f"[{video_id}] GT: {n_objects} objects (1 person + {len(object_info_list)} objs)")
+        _log.info(f"[{video_id}]   person bbox: {person_bbox}")
+
     for m, obj in enumerate(object_info_list):
         obj_idx = m + 1
 
@@ -701,44 +714,87 @@ def evaluate_wsgg_video(
 
         # Class — use full AG name (unnormalized)
         cls_full = obj.get("class", _denormalize_label(obj.get("label", "")))
-        cls_id = NAME_TO_IDX.get(cls_full, NAME_TO_IDX.get(obj.get("label", ""), 0))
+        cls_short = obj.get("label", "")
+        cls_id = NAME_TO_IDX.get(cls_full, NAME_TO_IDX.get(cls_short, 0))
         gt_classes[obj_idx] = cls_id
+
+        if verbose:
+            _log.info(
+                f"[{video_id}]   obj[{obj_idx}]: class='{cls_full}' "
+                f"(short='{cls_short}', id={cls_id}), "
+                f"bbox={bbox_2d is not None}, visible={obj.get('visible', '?')}"
+            )
 
         # Attention relationship (single-label)
         att_rels = obj.get("attention_relationship", [])
         for att_str in att_rels:
-            att_idx = evaluator.AG_attention_predicates.index(att_str) \
-                if att_str in evaluator.AG_attention_predicates else -1
-            if att_idx >= 0:
+            if att_str in evaluator.AG_attention_predicates:
+                att_idx = evaluator.AG_attention_predicates.index(att_str)
                 global_idx = evaluator.AG_all_predicates.index(
                     evaluator.AG_attention_predicates[att_idx]
                 )
                 gt_relations.append([human_idx, obj_idx, global_idx])
+                if verbose:
+                    _log.info(
+                        f"[{video_id}]     att: '{att_str}' → "
+                        f"local={att_idx}, global={global_idx}, "
+                        f"triple=[{human_idx}, {obj_idx}, {global_idx}]"
+                    )
+            else:
+                if verbose:
+                    _log.warning(
+                        f"[{video_id}]     att: '{att_str}' NOT IN predicates "
+                        f"{evaluator.AG_attention_predicates}"
+                    )
             break  # attention is single-label
 
         # Spatial relationships (multi-label)
         spa_rels = obj.get("spatial_relationship", [])
         for spa_str in spa_rels:
-            spa_idx = evaluator.AG_spatial_predicates.index(spa_str) \
-                if spa_str in evaluator.AG_spatial_predicates else -1
-            if spa_idx >= 0:
+            if spa_str in evaluator.AG_spatial_predicates:
+                spa_idx = evaluator.AG_spatial_predicates.index(spa_str)
                 global_idx = evaluator.AG_all_predicates.index(
                     evaluator.AG_spatial_predicates[spa_idx]
                 )
                 gt_relations.append([obj_idx, human_idx, global_idx])
+                if verbose:
+                    _log.info(
+                        f"[{video_id}]     spa: '{spa_str}' → "
+                        f"local={spa_idx}, global={global_idx}, "
+                        f"triple=[{obj_idx}, {human_idx}, {global_idx}]"
+                    )
+            else:
+                if verbose:
+                    _log.warning(
+                        f"[{video_id}]     spa: '{spa_str}' NOT IN predicates "
+                        f"{evaluator.AG_spatial_predicates}"
+                    )
 
         # Contacting relationships (multi-label)
         con_rels = obj.get("contacting_relationship", [])
         for con_str in con_rels:
-            con_idx = evaluator.AG_contacting_predicates.index(con_str) \
-                if con_str in evaluator.AG_contacting_predicates else -1
-            if con_idx >= 0:
+            if con_str in evaluator.AG_contacting_predicates:
+                con_idx = evaluator.AG_contacting_predicates.index(con_str)
                 global_idx = evaluator.AG_all_predicates.index(
                     evaluator.AG_contacting_predicates[con_idx]
                 )
                 gt_relations.append([human_idx, obj_idx, global_idx])
+                if verbose:
+                    _log.info(
+                        f"[{video_id}]     con: '{con_str}' → "
+                        f"local={con_idx}, global={global_idx}, "
+                        f"triple=[{human_idx}, {obj_idx}, {global_idx}]"
+                    )
+            else:
+                if verbose:
+                    _log.warning(
+                        f"[{video_id}]     con: '{con_str}' NOT IN predicates "
+                        f"{evaluator.AG_contacting_predicates}"
+                    )
 
     if not gt_relations:
+        if verbose:
+            _log.info(f"[{video_id}] SKIP: no GT relations found")
         return
 
     gt_entry = {
@@ -746,6 +802,13 @@ def evaluate_wsgg_video(
         "gt_relations": np.array(gt_relations, dtype=np.int64),
         "gt_boxes": gt_boxes,
     }
+
+    if verbose:
+        _log.info(
+            f"[{video_id}] GT entry: {len(gt_relations)} relations, "
+            f"classes={gt_classes.tolist()}, "
+            f"boxes_nonzero={np.any(gt_boxes != 0, axis=1).sum()}"
+        )
 
     # ---- Build pred entry ----
     att_dist = pred_pkl["attention_distribution"]   # (K_valid, 3)
@@ -765,7 +828,29 @@ def evaluate_wsgg_video(
 
     K = att_dist.shape[0]
     if K == 0:
+        if verbose:
+            _log.info(f"[{video_id}] SKIP: K=0 valid pairs in predictions")
         return
+
+    if verbose:
+        _log.info(
+            f"[{video_id}] Pred: K={K} valid pairs, "
+            f"person_idx={person_idx.tolist()}, "
+            f"object_idx={object_idx.tolist()}"
+        )
+        _log.info(
+            f"[{video_id}]   att_dist shape={att_dist.shape}, "
+            f"range=[{att_dist.min():.4f}, {att_dist.max():.4f}], "
+            f"argmax={att_dist.argmax(axis=1).tolist()}"
+        )
+        _log.info(
+            f"[{video_id}]   spa_dist shape={spa_dist.shape}, "
+            f"range=[{spa_dist.min():.4f}, {spa_dist.max():.4f}]"
+        )
+        _log.info(
+            f"[{video_id}]   con_dist shape={con_dist.shape}, "
+            f"range=[{con_dist.min():.4f}, {con_dist.max():.4f}]"
+        )
 
     n_att = att_dist.shape[1]
     n_spa = spa_dist.shape[1]
@@ -844,6 +929,46 @@ def evaluate_wsgg_video(
                 for i in range(n_objects)
             ])
             obj_scores = iou_2d_diag * iou_3d_diag
+
+    if verbose:
+        _log.info(
+            f"[{video_id}] Pred entry: "
+            f"pred_boxes shape={pred_boxes.shape}, "
+            f"pred_classes={pred_classes.tolist()}, "
+            f"obj_scores={obj_scores.tolist()[:10]}, "
+            f"rels_i shape={rels_i.shape}, "
+            f"rel_scores shape={rel_scores.shape}"
+        )
+        # Show which predicate the model predicts for each pair
+        for k_i in range(min(K, 5)):
+            att_pred = att_dist[k_i].argmax()
+            spa_preds = np.where(spa_dist[k_i] > 0.5)[0]
+            con_preds = np.where(con_dist[k_i] > 0.5)[0]
+            _log.info(
+                f"[{video_id}]   pair[{k_i}]: person={person_idx[k_i]}, "
+                f"obj={object_idx[k_i]} → "
+                f"att_pred={att_pred}({evaluator.AG_attention_predicates[att_pred] if att_pred < len(evaluator.AG_attention_predicates) else '?'}), "
+                f"spa_preds={[evaluator.AG_spatial_predicates[s] if s < len(evaluator.AG_spatial_predicates) else '?' for s in spa_preds]}, "
+                f"con_preds={[evaluator.AG_contacting_predicates[c] if c < len(evaluator.AG_contacting_predicates) else '?' for c in con_preds]}"
+            )
+
+        # Show the GT relations as triplets for comparison
+        _log.info(f"[{video_id}] GT triplets (subj_cls, pred, obj_cls):")
+        for rel in gt_relations:
+            subj_cls = gt_classes[rel[0]]
+            obj_cls = gt_classes[rel[1]]
+            pred_name = evaluator.AG_all_predicates[rel[2]] if rel[2] < len(evaluator.AG_all_predicates) else "?"
+            _log.info(
+                f"[{video_id}]   [{rel[0]}]{subj_cls} --{pred_name}({rel[2]})--> [{rel[1]}]{obj_cls}"
+            )
+
+        # Check: are pred pair indices within bounds of pred_classes?
+        max_pair_idx = rels_i.max()
+        _log.info(
+            f"[{video_id}] Index check: max pair idx={max_pair_idx}, "
+            f"pred_classes len={len(pred_classes)}, "
+            f"in-bounds={'YES' if max_pair_idx < len(pred_classes) else '*** NO ***'}"
+        )
 
     pred_entry = {
         "pred_boxes": pred_boxes,
