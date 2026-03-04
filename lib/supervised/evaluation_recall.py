@@ -587,3 +587,276 @@ def _compute_pred_matches(
         for i in np.where(keep_inds)[0][inds]:
             pred_to_gt[i].append(int(gt_ind))
     return pred_to_gt
+
+
+# ============================================================================
+# 3D IoU Utility
+# ============================================================================
+
+def bbox_overlaps_3d(corners1, corners2):
+    """
+    Approximate 3D IoU between two sets of oriented bounding boxes.
+
+    Uses axis-aligned bounding box (AABB) approximation of the 8-corner
+    OBBs for efficiency.
+
+    Args:
+        corners1: (M, 8, 3) numpy array of 3D OBB corners.
+        corners2: (N, 8, 3) numpy array of 3D OBB corners.
+
+    Returns:
+        overlaps: (M, N) numpy array of approximate IoU values.
+    """
+    # Convert OBB corners to AABB: min/max along each axis
+    min1 = corners1.min(axis=1)  # (M, 3)
+    max1 = corners1.max(axis=1)  # (M, 3)
+    min2 = corners2.min(axis=1)  # (N, 3)
+    max2 = corners2.max(axis=1)  # (N, 3)
+
+    # Intersection
+    inter_min = np.maximum(min1[:, None, :], min2[None, :, :])  # (M, N, 3)
+    inter_max = np.minimum(max1[:, None, :], max2[None, :, :])  # (M, N, 3)
+    inter_dims = np.maximum(inter_max - inter_min, 0)           # (M, N, 3)
+    inter_vol = inter_dims.prod(axis=2)                         # (M, N)
+
+    # Volumes
+    dims1 = max1 - min1  # (M, 3)
+    dims2 = max2 - min2  # (N, 3)
+    vol1 = dims1.prod(axis=1)[:, None]  # (M, 1)
+    vol2 = dims2.prod(axis=1)[None, :]  # (1, N)
+
+    union_vol = vol1 + vol2 - inter_vol
+    return inter_vol / np.maximum(union_vol, 1e-8)
+
+
+# ============================================================================
+# WSGG Adapter: convert padded-tensor format → evaluate_from_dict format
+# ============================================================================
+
+# Short-form → full AG name mapping (for GT label denormalization)
+_LABEL_DENORMALIZE = {
+    "closet": "closet/cabinet",
+    "cup": "cup/glass/bottle",
+    "paper": "paper/notebook",
+    "sofa": "sofa/couch",
+    "phone": "phone/camera",
+}
+
+
+def _denormalize_label(label):
+    """Short-form label → full AG name. E.g. 'closet' → 'closet/cabinet'."""
+    return _LABEL_DENORMALIZE.get(label, label)
+
+
+def evaluate_wsgg_video(
+    gt_annot,
+    pred_pkl,
+    evaluator,
+    mode="predcls",
+):
+    """
+    Evaluate a single video's WSGG predictions against GT annotations.
+
+    Converts the padded-tensor / PKL format into gt_entry / pred_entry dicts
+    and feeds them to the existing ``evaluate_from_dict``.
+
+    Args:
+        gt_annot: GT annotation dict for one frame (from combine_world4d_relationships
+                  output). Must contain ``person_info`` and ``object_info_list``.
+                  Uses unnormalized (full AG) class names for GT labels.
+        pred_pkl: Prediction dict for one video, as saved by ``dump_predictions.py``.
+        evaluator: A ``BasicSceneGraphEvaluator`` instance.
+        mode: "predcls" or "sgdet".
+    """
+    person_info = gt_annot.get("person_info", {})
+    object_info_list = gt_annot.get("object_info_list", [])
+
+    if not object_info_list:
+        return
+
+    # ---- Build GT entry ----
+    n_objects = len(object_info_list) + 1  # +1 for person (index 0)
+    gt_boxes = np.zeros((n_objects, 4), dtype=np.float32)
+    gt_classes = np.zeros(n_objects, dtype=np.int64)
+
+    # Person is always index 0, class 1 ("person" in OBJECT_CLASSES)
+    person_bbox = person_info.get("bbox_2d", None)
+    if person_bbox is not None:
+        gt_boxes[0] = np.asarray(person_bbox, dtype=np.float32)[:4]
+    gt_classes[0] = 1  # person
+
+    gt_relations = []
+    human_idx = 0
+
+    # Object class name → index lookup (use full/unnormalized AG names)
+    from dataloader.world_ag_dataset import NAME_TO_IDX
+
+    for m, obj in enumerate(object_info_list):
+        obj_idx = m + 1
+
+        # Bbox
+        bbox_2d = obj.get("bbox_2d", None)
+        if bbox_2d is not None:
+            gt_boxes[obj_idx] = np.asarray(bbox_2d, dtype=np.float32)[:4]
+
+        # Class — use full AG name (unnormalized)
+        cls_full = obj.get("class", _denormalize_label(obj.get("label", "")))
+        cls_id = NAME_TO_IDX.get(cls_full, NAME_TO_IDX.get(obj.get("label", ""), 0))
+        gt_classes[obj_idx] = cls_id
+
+        # Attention relationship (single-label)
+        att_rels = obj.get("attention_relationship", [])
+        for att_str in att_rels:
+            att_idx = evaluator.AG_attention_predicates.index(att_str) \
+                if att_str in evaluator.AG_attention_predicates else -1
+            if att_idx >= 0:
+                global_idx = evaluator.AG_all_predicates.index(
+                    evaluator.AG_attention_predicates[att_idx]
+                )
+                gt_relations.append([human_idx, obj_idx, global_idx])
+            break  # attention is single-label
+
+        # Spatial relationships (multi-label)
+        spa_rels = obj.get("spatial_relationship", [])
+        for spa_str in spa_rels:
+            spa_idx = evaluator.AG_spatial_predicates.index(spa_str) \
+                if spa_str in evaluator.AG_spatial_predicates else -1
+            if spa_idx >= 0:
+                global_idx = evaluator.AG_all_predicates.index(
+                    evaluator.AG_spatial_predicates[spa_idx]
+                )
+                gt_relations.append([obj_idx, human_idx, global_idx])
+
+        # Contacting relationships (multi-label)
+        con_rels = obj.get("contacting_relationship", [])
+        for con_str in con_rels:
+            con_idx = evaluator.AG_contacting_predicates.index(con_str) \
+                if con_str in evaluator.AG_contacting_predicates else -1
+            if con_idx >= 0:
+                global_idx = evaluator.AG_all_predicates.index(
+                    evaluator.AG_contacting_predicates[con_idx]
+                )
+                gt_relations.append([human_idx, obj_idx, global_idx])
+
+    if not gt_relations:
+        return
+
+    gt_entry = {
+        "gt_classes": gt_classes,
+        "gt_relations": np.array(gt_relations, dtype=np.int64),
+        "gt_boxes": gt_boxes,
+    }
+
+    # ---- Build pred entry ----
+    att_dist = pred_pkl["attention_distribution"]   # (K_valid, 3)
+    spa_dist = pred_pkl["spatial_distribution"]     # (K_valid, 6)
+    con_dist = pred_pkl["contacting_distribution"]  # (K_valid, 17)
+    person_idx = pred_pkl["person_idx"]             # (K_valid,)
+    object_idx = pred_pkl["object_idx"]             # (K_valid,)
+
+    if isinstance(att_dist, np.ndarray):
+        pass  # already numpy
+    else:
+        att_dist = att_dist.cpu().numpy()
+        spa_dist = spa_dist.cpu().numpy()
+        con_dist = con_dist.cpu().numpy()
+        person_idx = person_idx.cpu().numpy()
+        object_idx = object_idx.cpu().numpy()
+
+    K = att_dist.shape[0]
+    if K == 0:
+        return
+
+    n_att = att_dist.shape[1]
+    n_spa = spa_dist.shape[1]
+    n_con = con_dist.shape[1]
+
+    # Build pair indices: attention (h→o), spatial (o→h), contacting (h→o)
+    pair_idx_att = np.stack([person_idx, object_idx], axis=1)          # (K, 2)
+    pair_idx_spa = np.stack([object_idx, person_idx], axis=1)          # (K, 2) reversed
+    pair_idx_con = np.stack([person_idx, object_idx], axis=1)          # (K, 2)
+    rels_i = np.concatenate([pair_idx_att, pair_idx_spa, pair_idx_con], axis=0)  # (3K, 2)
+
+    # Construct block-diagonal score matrix: (3K, n_att+n_spa+n_con)
+    total_preds = n_att + n_spa + n_con
+    zeros_spa_con = np.zeros((K, n_spa + n_con))
+    zeros_att_con = np.zeros((K, n_att + n_con))
+    zeros_att_spa = np.zeros((K, n_att + n_spa))
+
+    scores_att = np.concatenate([att_dist, zeros_spa_con], axis=1)   # (K, total)
+    scores_spa = np.concatenate([np.zeros((K, n_att)), spa_dist,
+                                  np.zeros((K, n_con))], axis=1)     # (K, total)
+    scores_con = np.concatenate([zeros_att_spa, con_dist], axis=1)   # (K, total)
+
+    rel_scores = np.concatenate([scores_att, scores_spa, scores_con], axis=0)  # (3K, total)
+
+    # Boxes and classes
+    if mode == "predcls":
+        pred_boxes = gt_boxes.copy()
+        pred_classes = gt_classes.copy()
+        obj_scores = np.ones(n_objects, dtype=np.float32)
+    else:
+        # SGDet: use predicted boxes, labels, scores
+        pred_bboxes_2d = pred_pkl.get("bboxes_2d", gt_boxes)
+        if not isinstance(pred_bboxes_2d, np.ndarray):
+            pred_bboxes_2d = pred_bboxes_2d.cpu().numpy()
+        pred_boxes = pred_bboxes_2d.astype(np.float32)
+
+        pred_labels = pred_pkl.get("pred_labels", gt_classes)
+        if not isinstance(pred_labels, np.ndarray):
+            pred_labels = pred_labels.cpu().numpy()
+        pred_classes = pred_labels
+
+        pred_det_scores = pred_pkl.get("pred_scores", np.ones(len(pred_classes)))
+        if not isinstance(pred_det_scores, np.ndarray):
+            pred_det_scores = pred_det_scores.cpu().numpy()
+        obj_scores = pred_det_scores
+
+        # Coupled 2D+3D IoU object scores (if 3D boxes available)
+        pred_3d = pred_pkl.get("bboxes_3d", None)
+        gt_3d_list = []
+        for i, obj in enumerate(object_info_list):
+            c = obj.get("corners_final", None)
+            if c is not None:
+                gt_3d_list.append(np.asarray(c, dtype=np.float32))
+            else:
+                gt_3d_list.append(np.zeros((8, 3), dtype=np.float32))
+        # Add person 3D
+        person_3d = person_info.get("corners_final", None)
+        if person_3d is not None:
+            person_3d = np.asarray(person_3d, dtype=np.float32)
+        else:
+            person_3d = np.zeros((8, 3), dtype=np.float32)
+        gt_3d_all = np.stack([person_3d] + gt_3d_list)  # (N, 8, 3)
+
+        if pred_3d is not None:
+            if not isinstance(pred_3d, np.ndarray):
+                pred_3d = pred_3d.cpu().numpy()
+            # Compute per-object coupled 2D*3D IoU
+            iou_2d_diag = np.array([
+                bbox_overlaps(gt_boxes[i:i+1], pred_boxes[i:i+1])[0, 0]
+                if i < pred_boxes.shape[0] else 0.0
+                for i in range(n_objects)
+            ])
+            iou_3d_diag = np.array([
+                bbox_overlaps_3d(gt_3d_all[i:i+1], pred_3d[i:i+1])[0, 0]
+                if i < pred_3d.shape[0] else 0.0
+                for i in range(n_objects)
+            ])
+            obj_scores = iou_2d_diag * iou_3d_diag
+
+    pred_entry = {
+        "pred_boxes": pred_boxes,
+        "pred_classes": pred_classes,
+        "pred_rel_inds": rels_i,
+        "obj_scores": obj_scores,
+        "rel_scores": rel_scores,
+    }
+
+    evaluate_from_dict(
+        gt_entry, pred_entry, evaluator.mode, evaluator.result_dict,
+        iou_thresh=evaluator.iou_threshold,
+        method=evaluator.constraint,
+        threshold=evaluator.semi_threshold,
+        num_rel=evaluator.num_rel,
+    )

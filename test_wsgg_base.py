@@ -12,16 +12,17 @@ Handles:
   - init_method_evaluation() orchestration
 """
 
-import copy
+import logging
 import time
 from abc import abstractmethod
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from wsgg_base import WSGGBase
+
+logger = logging.getLogger(__name__)
 
 
 class TestWSGGBase(WSGGBase):
@@ -50,23 +51,25 @@ class TestWSGGBase(WSGGBase):
     # ------------------------------------------------------------------
     def _init_dataset(self):
         """Initialize WorldAG test dataset and dataloader."""
-        from dataloader.supervised.generation.world_ag.world_ag_dataset import WorldAG
+        from dataloader.world_ag_dataset import WorldAG, world_collate_fn
 
-        print("Initializing WorldAG test dataset...")
+        logger.info("Initializing WorldAG test dataset...")
 
         self._test_dataset = WorldAG(
             phase="test",
             data_path=self._conf.data_path,
-            datasize=getattr(self._conf, 'datasize', 'large'),
-            world_sg_dir=getattr(self._conf, 'world_sg_dir', ''),
+            mode=self._conf.mode,
+            feature_model=getattr(self._conf, 'feature_model', 'dinov2b'),
             include_invisible=getattr(self._conf, 'include_invisible', True),
+            max_objects=getattr(self._conf, 'max_objects', 64),
         )
 
         self._dataloader_test = DataLoader(
             self._test_dataset, batch_size=1, shuffle=False, num_workers=0,
+            collate_fn=world_collate_fn,
         )
 
-        print(f"  Test: {len(self._test_dataset)} items")
+        logger.info(f"  Test: {len(self._test_dataset)} items")
 
     # ------------------------------------------------------------------
     # Testing Loop
@@ -74,9 +77,9 @@ class TestWSGGBase(WSGGBase):
     def _test_model(self):
         """Main testing loop with stratified evaluation."""
         start_time = time.time()
-        print('-------------------------------------------------------------------')
-        print(f"Testing: {self._conf.method_name} | Mode: {self._conf.mode}")
-        print('-------------------------------------------------------------------')
+        logger.info('-------------------------------------------------------------------')
+        logger.info(f"Testing: {self._conf.method_name} | Mode: {self._conf.mode}")
+        logger.info('-------------------------------------------------------------------')
 
         test_iter = iter(self._dataloader_test)
         self._model.eval()
@@ -97,8 +100,8 @@ class TestWSGGBase(WSGGBase):
                     self._update_stratified_metrics(batch, prediction)
 
         elapsed = time.time() - start_time
-        print(f"\nTesting complete: {elapsed:.1f}s")
-        print('-------------------------------------------------------------------')
+        logger.info(f"\nTesting complete: {elapsed:.1f}s")
+        logger.info('-------------------------------------------------------------------')
 
     def _update_stratified_metrics(self, batch, prediction):
         """
@@ -114,13 +117,13 @@ class TestWSGGBase(WSGGBase):
 
     def _print_stratified_results(self):
         """Print stratified evaluation results."""
-        print("\n===== Stratified Evaluation Results =====")
+        logger.info("\n===== Stratified Evaluation Results =====")
         for bucket_name, stats in self._stratified_results.items():
             total = stats["total"]
             correct = stats["correct"]
             acc = correct / total if total > 0 else 0.0
-            print(f"  {bucket_name}: {correct}/{total} = {acc:.4f}")
-        print("=========================================\n")
+            logger.info(f"  {bucket_name}: {correct}/{total} = {acc:.4f}")
+        logger.info("=========================================\n")
 
     # ------------------------------------------------------------------
     # Evaluation Publishing

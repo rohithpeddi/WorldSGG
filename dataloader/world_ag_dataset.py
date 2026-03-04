@@ -422,7 +422,7 @@ class WorldAG(Dataset):
 
             # Source determines visibility
             src = feat_sources[i] if i < len(feat_sources) else "gt"
-            is_visible = src not in ("rag", "gdino")
+            is_visible = src not in ("rag", "gdino", "correction")
             visibility_mask[i] = is_visible
 
             # Skip invisible if requested

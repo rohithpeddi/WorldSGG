@@ -1,27 +1,42 @@
 """
-WSGG Testing Methods
-=====================
+WSGG Testing Methods (Padded Tensor API)
+==========================================
 
 Per-method testing classes. Each overrides:
   - init_model()                → create model
   - is_temporal()               → sequential or frame-shuffled
   - process_test_video(batch)   → inference
 
+The dataset returns a single dict with (T, N_max, ...) and (T, K_max, ...)
+pre-padded tensors per video. No per-frame loops needed.
+
 Usage:
-  python test_wsgg_methods.py --config configs/methods/predcls/gl_stgn_predcls.yaml --ckpt path/to/ckpt.tar
-  python test_wsgg_methods.py --config configs/methods/predcls/amwae_predcls.yaml --ckpt path/to/ckpt.tar
-  python test_wsgg_methods.py --config configs/methods/predcls/amwae_pp_predcls.yaml --ckpt path/to/ckpt.tar
-  python test_wsgg_methods.py --config configs/methods/predcls/lks_buffer_predcls.yaml --ckpt path/to/ckpt.tar
+  python test_wsgg_methods.py --config configs/methods/predcls/gl_stgn_predcls_dinov2b.yaml --ckpt path/to/ckpt.tar
 """
+
+import logging
 
 import torch
 
 from wsgg_base import load_wsgg_config
 from test_wsgg_base import TestWSGGBase
 
+logger = logging.getLogger(__name__)
+
+
+def _to_device(batch, device):
+    """Move all tensor values in batch dict to device."""
+    out = {}
+    for k, v in batch.items():
+        if isinstance(v, torch.Tensor):
+            out[k] = v.to(device)
+        else:
+            out[k] = v
+    return out
+
 
 # ============================================================================
-# GL-STGN
+# GL-STGN (Temporal Transformer)
 # ============================================================================
 
 class TestGLSTGN(TestWSGGBase):
@@ -44,28 +59,33 @@ class TestGLSTGN(TestWSGGBase):
         return True
 
     def process_test_video(self, batch) -> dict:
-        tensors = batch
-        self._model.reset_memory(self._device)
-        all_preds = []
+        b = _to_device(batch, self._device)
 
-        T = len(tensors) if isinstance(tensors, list) else 1
-        for t in range(T):
-            frame = tensors[t] if isinstance(tensors, list) else tensors
-            pred = self._model.forward_frame(
-                visual_features=frame["visual_features"].to(self._device),
-                corners=frame["corners"].to(self._device),
-                valid_mask=frame["valid_mask"].to(self._device),
-                visibility_mask=frame["visibility_mask"].to(self._device),
-                person_idx=frame["person_idx"].to(self._device),
-                object_idx=frame["object_idx"].to(self._device),
-            )
-            all_preds.append(pred)
+        pred = self._model.forward(
+            visual_features_seq=b["visual_features"],
+            corners_seq=b["corners"],
+            valid_mask_seq=b["valid_mask"],
+            visibility_mask_seq=b["visibility_mask"],
+            person_idx_seq=b["person_idx"],
+            object_idx_seq=b["object_idx"],
+            pair_valid=b["pair_valid"],
+            camera_pose_seq=b.get("camera_poses"),
+            union_features_seq=b.get("union_features"),
+        )
 
-        return all_preds[-1] if all_preds else None
+        # Return last-frame predictions for evaluation
+        T = b["visual_features"].shape[0]
+        if T > 0:
+            return {
+                "attention_distribution": pred["attention_distribution"][-1],
+                "spatial_distribution": pred["spatial_distribution"][-1],
+                "contacting_distribution": pred["contacting_distribution"][-1],
+            }
+        return None
 
 
 # ============================================================================
-# AMWAE
+# AMWAE (Associative Masked World Auto-Encoder)
 # ============================================================================
 
 class TestAMWAE(TestWSGGBase):
@@ -88,28 +108,31 @@ class TestAMWAE(TestWSGGBase):
         return True
 
     def process_test_video(self, batch) -> dict:
-        tensors = batch
-        self._model.reset_memory()
-        all_preds = []
+        b = _to_device(batch, self._device)
 
-        T = len(tensors) if isinstance(tensors, list) else 1
-        for t in range(T):
-            frame = tensors[t] if isinstance(tensors, list) else tensors
-            pred = self._model.forward_frame(
-                visual_features=frame["visual_features"].to(self._device),
-                corners=frame["corners"].to(self._device),
-                valid_mask=frame["valid_mask"].to(self._device),
-                visibility_mask=frame["visibility_mask"].to(self._device),
-                person_idx=frame["person_idx"].to(self._device),
-                object_idx=frame["object_idx"].to(self._device),
-            )
-            all_preds.append(pred)
+        pred = self._model.forward(
+            visual_features_seq=b["visual_features"],
+            corners_seq=b["corners"],
+            valid_mask_seq=b["valid_mask"],
+            visibility_mask_seq=b["visibility_mask"],
+            person_idx_seq=b["person_idx"],
+            object_idx_seq=b["object_idx"],
+            pair_valid=b["pair_valid"],
+            camera_pose_seq=b.get("camera_poses"),
+        )
 
-        return all_preds[-1] if all_preds else None
+        T = b["visual_features"].shape[0]
+        if T > 0:
+            return {
+                "attention_distribution": pred["attention_distribution"][-1],
+                "spatial_distribution": pred["spatial_distribution"][-1],
+                "contacting_distribution": pred["contacting_distribution"][-1],
+            }
+        return None
 
 
 # ============================================================================
-# LKS Buffer
+# LKS Buffer (Passive Memory Baseline)
 # ============================================================================
 
 class TestLKSGNN(TestWSGGBase):
@@ -132,31 +155,34 @@ class TestLKSGNN(TestWSGGBase):
         return True
 
     def process_test_video(self, batch) -> dict:
-        tensors = batch
-        self._model.reset_memory(self._device)
-        all_preds = []
+        b = _to_device(batch, self._device)
 
-        T = len(tensors) if isinstance(tensors, list) else 1
-        for t in range(T):
-            frame = tensors[t] if isinstance(tensors, list) else tensors
-            pred = self._model.forward_frame(
-                visual_features=frame["visual_features"].to(self._device),
-                corners=frame["corners"].to(self._device),
-                valid_mask=frame["valid_mask"].to(self._device),
-                visibility_mask=frame["visibility_mask"].to(self._device),
-                person_idx=frame["person_idx"].to(self._device),
-                object_idx=frame["object_idx"].to(self._device),
-            )
-            all_preds.append(pred)
+        pred = self._model.forward(
+            visual_features_seq=b["visual_features"],
+            corners_seq=b["corners"],
+            valid_mask_seq=b["valid_mask"],
+            visibility_mask_seq=b["visibility_mask"],
+            person_idx_seq=b["person_idx"],
+            object_idx_seq=b["object_idx"],
+            pair_valid=b["pair_valid"],
+        )
 
-        return all_preds[-1] if all_preds else None
+        T = b["visual_features"].shape[0]
+        if T > 0:
+            return {
+                "attention_distribution": pred["attention_distribution"][-1],
+                "spatial_distribution": pred["spatial_distribution"][-1],
+                "contacting_distribution": pred["contacting_distribution"][-1],
+            }
+        return None
 
 
 # ============================================================================
 # AMWAE++ (Energy Transformer variant)
 # ============================================================================
 
-class TestAMWAEPP(TestWSGGBase):
+class TestAMWAEPP(TestAMWAE):
+    """AMWAE++ tester — same batched API as AMWAE, only model differs."""
 
     def __init__(self, conf):
         super().__init__(conf)
@@ -171,29 +197,6 @@ class TestAMWAEPP(TestWSGGBase):
             spatial_class_num=len(self._test_dataset.spatial_relationships),
             contact_class_num=len(self._test_dataset.contacting_relationships),
         ).to(self._device)
-
-    def is_temporal(self) -> bool:
-        return True
-
-    def process_test_video(self, batch) -> dict:
-        tensors = batch
-        self._model.reset_memory()
-        all_preds = []
-
-        T = len(tensors) if isinstance(tensors, list) else 1
-        for t in range(T):
-            frame = tensors[t] if isinstance(tensors, list) else tensors
-            pred = self._model.forward_frame(
-                visual_features=frame["visual_features"].to(self._device),
-                corners=frame["corners"].to(self._device),
-                valid_mask=frame["valid_mask"].to(self._device),
-                visibility_mask=frame["visibility_mask"].to(self._device),
-                person_idx=frame["person_idx"].to(self._device),
-                object_idx=frame["object_idx"].to(self._device),
-            )
-            all_preds.append(pred)
-
-        return all_preds[-1] if all_preds else None
 
 
 # ============================================================================

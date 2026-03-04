@@ -409,11 +409,30 @@ class WSGGBase:
     # ------------------------------------------------------------------
     def _init_evaluators(self):
         """Initialize scene graph evaluators."""
+        from dataloader.world_ag_dataset import (
+            ATTENTION_RELATIONSHIPS,
+            SPATIAL_RELATIONSHIPS,
+            CONTACTING_RELATIONSHIPS,
+        )
+
+        all_predicates = (
+            list(ATTENTION_RELATIONSHIPS)
+            + list(SPATIAL_RELATIONSHIPS)
+            + list(CONTACTING_RELATIONSHIPS)
+        )
+
+        save_file = os.path.join(self._experiment_dir, "eval_stats.txt")
+
         self._evaluator = BasicSceneGraphEvaluator(
             mode=self._conf.mode,
             AG_object_classes=self._test_dataset.object_classes
             if self._test_dataset else None,
+            AG_all_predicates=all_predicates,
+            AG_attention_predicates=list(ATTENTION_RELATIONSHIPS),
+            AG_spatial_predicates=list(SPATIAL_RELATIONSHIPS),
+            AG_contacting_predicates=list(CONTACTING_RELATIONSHIPS),
             iou_threshold=0.5,
+            save_file=save_file,
             constraint="with",
         )
 
