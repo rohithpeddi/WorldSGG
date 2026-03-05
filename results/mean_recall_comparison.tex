@@ -1,0 +1,27 @@
+\begin{table*}[t]
+\centering
+\caption{Mean Recall (mR@K) comparison across methods and feature backbones for PredCls and SGDet tasks on ActionGenome4D.}
+\label{tab:mean_recall_comparison}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{ll|cccc|cccc|cccc|cccc}
+\toprule
+ & & \multicolumn{8}{c|}{\textbf{PredCls}} & \multicolumn{8}{c}{\textbf{SGDet}} \\
+\cmidrule(lr){3-10} \cmidrule(lr){11-18}
+ & & \multicolumn{4}{c|}{With Constraint} & \multicolumn{4}{c|}{No Constraint} & \multicolumn{4}{c|}{With Constraint} & \multicolumn{4}{c}{No Constraint} \\
+\cmidrule(lr){3-6} \cmidrule(lr){7-10} \cmidrule(lr){11-14} \cmidrule(lr){15-18}
+\textbf{Method} & \textbf{Feature} & mR@10 & mR@20 & mR@50 & mR@100 & mR@10 & mR@20 & mR@50 & mR@100 & mR@10 & mR@20 & mR@50 & mR@100 & mR@10 & mR@20 & mR@50 & mR@100 \\
+\midrule
+PWG & DINOv2-B & 35.15 & 39.31 & 39.32 & 39.32 & 50.75 & 70.89 & 94.07 & 99.97 & 12.25 & 24.68 & 37.94 & 38.76 & 23.26 & 36.94 & \textbf{56.68} & 71.97 \\
+ & DINOv2-L & 34.87 & 38.79 & 38.80 & 38.80 & 52.83 & 72.56 & 93.54 & 99.97 & 11.09 & 22.46 & 36.86 & 37.70 & 24.58 & 36.41 & 54.98 & 68.38 \\
+ & DINOv3-L & 36.90 & 41.28 & 41.29 & 41.29 & 54.27 & 74.73 & 94.27 & 99.37 & 9.56 & 22.61 & 39.61 & 40.50 & 23.25 & 35.60 & 55.51 & 69.17 \\
+\midrule
+MWAE & DINOv2-B & 35.26 & 39.48 & 39.48 & 39.48 & 52.27 & 71.92 & 95.24 & \textbf{100.00} & 11.32 & 24.33 & 37.06 & 37.76 & 23.23 & 36.10 & 56.62 & 70.52 \\
+ & DINOv2-L & 35.03 & 39.46 & 39.47 & 39.47 & 53.31 & 73.90 & 95.04 & 99.99 & 10.95 & 22.19 & 36.33 & 37.19 & 22.98 & 37.60 & 55.47 & 68.65 \\
+ & DINOv3-L & 36.41 & 40.98 & 40.99 & 40.99 & \textbf{55.09} & \textbf{75.15} & 95.02 & 99.43 & 9.75 & 22.97 & 39.74 & 40.44 & 23.16 & 35.74 & 54.08 & 67.23 \\
+\midrule
+4DST & DINOv2-B & 36.43 & 40.56 & 40.57 & 40.57 & 53.62 & 72.95 & 94.20 & 99.43 & \textbf{12.79} & \textbf{25.73} & 39.04 & 39.91 & 24.03 & 36.91 & 56.04 & \textbf{72.07} \\
+ & DINOv2-L & 35.39 & 39.50 & 39.50 & 39.50 & 51.99 & 72.18 & 94.05 & 99.94 & 11.31 & 24.39 & 38.23 & 39.08 & \textbf{25.70} & \textbf{38.02} & 55.40 & 69.12 \\
+ & DINOv3-L & \textbf{37.16} & \textbf{41.55} & \textbf{41.56} & \textbf{41.56} & 54.15 & 74.73 & \textbf{95.81} & 99.43 & 9.72 & 23.53 & \textbf{40.70} & \textbf{41.39} & 23.99 & 36.65 & 55.73 & 69.52 \\
+\bottomrule
+\end{tabular}}
+\end{table*}
