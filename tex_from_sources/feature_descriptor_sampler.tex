@@ -1,0 +1,240 @@
+% ==================================================================================
+% Feature Descriptor Frame Sampling — Detailed Technical Report (from Source Code)
+% Target Venue: ECCV
+% Source: datasets/preprocess/samplers/feature_descripter_sampler.py
+% ==================================================================================
+\documentclass[runningheads]{llncs}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{color}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{bm}
+\usepackage{multirow}
+\usepackage{xcolor}
+
+\newcommand{\mR}{\mathbb{R}}
+\newcommand{\op}[1]{\operatorname{#1}}
+\newcommand{\mat}[1]{\bm{#1}}
+
+\begin{document}
+
+\title{Adaptive Frame Sampling via Homography-Based Visual Overlap Estimation}
+
+\maketitle
+
+
+% ====================================================================================
+\section{Overview}
+\label{sec:fd_overview}
+% ====================================================================================
+
+Raw Action Genome~\cite{ji2020action} videos are captured at 24--30\,fps, producing substantial temporal redundancy where consecutive frames may share $>$\,95\% of their visual content.  Processing every frame for 3D scene construction is both computationally wasteful and detrimental to downstream reasoning: the resulting frame sequences are dominated by near-duplicate views that contribute little novel geometric or semantic information.
+
+We introduce a \emph{Feature Descriptor Sampler} that adaptively selects a compact, information-rich subset of frames from each video.  The core idea is to quantify visual overlap between consecutive frames using \textbf{SIFT feature matching}~\cite{lowe2004distinctive} and \textbf{RANSAC homography estimation}~\cite{fischler1981random}, then greedily retain only frames that introduce sufficient new visual content.  The sampler further ensures that all \emph{annotated frames} (those with ground-truth bounding box labels) are preserved, and enforces a minimum frame count to maintain temporal coverage.
+
+This sampling strategy can be viewed as an adaptive, \emph{content-aware} alternative to fixed-interval subsampling.  Whereas uniform subsampling (e.g., every $k$-th frame) is agnostic to camera motion---keeping redundant frames during static shots while potentially skipping informative frames during rapid motion---our approach adapts its sampling density to the optical flow magnitude, keeping more frames during camera/object motion and fewer during static periods.
+
+
+% ====================================================================================
+\section{Homography-Based Visual Overlap Estimation}
+\label{sec:homography_overlap}
+% ====================================================================================
+
+The overlap between two frames $I_A$ (the last retained reference frame) and $I_B$ (the candidate frame) is estimated via a four-stage pipeline.
+
+% ------------------------------------------------------------------------------------
+\subsection{Stage 1: SIFT Feature Detection and Description}
+\label{sec:sift}
+
+Both frames are converted to grayscale, and SIFT~\cite{lowe2004distinctive} keypoints and 128-dimensional descriptors are extracted:
+\begin{equation}
+    (\mathcal{K}_A, \mat{D}_A) = \op{SIFT}(I_A^{\text{gray}}), \quad
+    (\mathcal{K}_B, \mat{D}_B) = \op{SIFT}(I_B^{\text{gray}}),
+    \label{eq:sift}
+\end{equation}
+where $\mathcal{K} = \{(\mat{p}_i, \sigma_i, \theta_i)\}$ is the set of keypoint locations with scale and orientation, and $\mat{D} \in \mR^{|\mathcal{K}| \times 128}$ is the descriptor matrix.
+
+If either frame yields fewer than 4 keypoints (e.g., textureless walls, extreme blur), the overlap is set to 0, treating the candidate as maximally novel.
+
+% ------------------------------------------------------------------------------------
+\subsection{Stage 2: Feature Matching with Lowe's Ratio Test}
+\label{sec:matching}
+
+Keypoints in $I_A$ are matched to keypoints in $I_B$ using a brute-force matcher with L2 distance.  For each descriptor in $\mat{D}_A$, the two nearest neighbors in $\mat{D}_B$ are retrieved ($k$-NN with $k=2$), and Lowe's ratio test~\cite{lowe2004distinctive} filters ambiguous matches:
+\begin{equation}
+    \mathcal{G} = \bigl\{(i, j) \;:\; \frac{\|{\mat{d}}_i^A - \mat{d}_{j_1}^B\|_2}{\|\mat{d}_i^A - \mat{d}_{j_2}^B\|_2} < \rho\bigr\},
+    \label{eq:ratio_test}
+\end{equation}
+where $j_1, j_2$ are the first and second nearest neighbors and $\rho = 0.75$ is the ratio threshold.  The ratio test eliminates matches where the best candidate is not substantially better than the second-best, indicating that the descriptor lies in a region of feature space that is not sufficiently discriminative.
+
+If fewer than 4 good matches survive the ratio test, homography estimation cannot proceed and overlap defaults to 0.
+
+% ------------------------------------------------------------------------------------
+\subsection{Stage 3: Robust Homography Estimation (RANSAC)}
+\label{sec:ransac}
+
+A projective transformation (homography) $\mat{H} \in \mR^{3 \times 3}$ mapping points from $I_B$ into $I_A$'s coordinate frame is estimated from the good matches using RANSAC~\cite{fischler1981random}:
+\begin{equation}
+    \tilde{\mat{p}}_A = \mat{H}\,\tilde{\mat{p}}_B, \quad \mat{H} = \arg\min_{\mat{H}'} \sum_{(i,j) \in \mathcal{I}} \|\mat{p}_{i}^A - \pi(\mat{H}'\,\tilde{\mat{p}}_j^B)\|^2,
+    \label{eq:homography}
+\end{equation}
+where $\tilde{\mat{p}}$ denotes homogeneous coordinates, $\pi(\cdot)$ is the perspective division, and $\mathcal{I} \subseteq \mathcal{G}$ is the consensus set of inliers.
+
+RANSAC parameters are set for robust estimation:
+\begin{itemize}
+    \item Reprojection threshold: 4.0 pixels.
+    \item Maximum iterations: 2000.
+    \item Confidence: 0.995.
+\end{itemize}
+The homography is rejected if fewer than 4 inliers remain, defaulting to overlap~$=0$.
+
+\paragraph{Connection to Scene Geometry.}  The homography model assumes a planar scene or pure camera rotation.  While Action Genome scenes are not strictly planar, the homography provides a sufficiently accurate approximate alignment for overlap estimation, particularly in indoor environments where large planar surfaces (walls, floors, tables) dominate the background.  The RANSAC inlier ratio itself serves as an implicit quality measure---low inlier counts indicate strong parallax or dynamic content, both signals of significant visual change.
+
+% ------------------------------------------------------------------------------------
+\subsection{Stage 4: Polygon Intersection Overlap}
+\label{sec:overlap}
+
+The visual overlap is computed by warping the four corners of frame $I_B$ into $I_A$'s coordinate system via $\mat{H}$ and computing the intersection area using the Shapely~\cite{shapely} computational geometry library:
+\begin{align}
+    \mathcal{P}_A &= \op{Polygon}\bigl((0,0),\,(W_A\!-\!1,0),\,(W_A\!-\!1,H_A\!-\!1),\,(0,H_A\!-\!1)\bigr), \label{eq:polyA} \\
+    \mathcal{P}_B' &= \op{Polygon}\bigl(\pi(\mat{H}\,\tilde{\mat{q}}_1),\,\dots,\,\pi(\mat{H}\,\tilde{\mat{q}}_4)\bigr), \label{eq:polyB} \\
+    \alpha &= \frac{\op{Area}(\mathcal{P}_A \cap \mathcal{P}_B')}{\op{Area}(\mathcal{P}_A)} \in [0, 1], \label{eq:overlap}
+\end{align}
+where $\{\mat{q}_k\}_{k=1}^{4}$ are the four corners of $I_B$ and the overlap $\alpha$ is clamped to $[0, 1]$.  If the warped polygon is degenerate (self-intersecting due to a poor homography), Shapely's \texttt{buffer(0)} operation repairs it before intersection computation.
+
+The overlap is computed \emph{relative to frame $A$} (the reference), measuring what fraction of the retained reference view is also covered by the candidate frame.  An overlap of $\alpha = 1.0$ means the candidate covers the entire reference view (no new content); $\alpha = 0.0$ means completely disjoint views.
+
+
+% ====================================================================================
+\section{Greedy Adaptive Frame Selection}
+\label{sec:greedy}
+% ====================================================================================
+
+The sampler uses a greedy sequential strategy with an adaptive overlap threshold to select frames.
+
+\subsection{Core Algorithm}
+
+Given a video with frames $\{I_0, I_1, \ldots, I_{T-1}\}$ sorted in temporal order and an overlap threshold $\tau = 0.95$:
+
+\begin{algorithm}[h]
+\caption{Greedy Frame Selection by Visual Overlap}
+\label{alg:greedy}
+\begin{algorithmic}[1]
+\Require Frames $\{I_0, \ldots, I_{T-1}\}$, threshold $\tau$
+\Ensure Selected frame indices $\mathcal{S}$
+\State $\mathcal{S} \gets \{0\}$ \Comment{Always keep the first frame}
+\State $I_{\text{ref}} \gets I_0$ \Comment{Initialize reference}
+\For{$t = 1, \ldots, T-1$}
+    \State $(\_, \alpha, \_) \gets \op{HomographyOverlap}(I_{\text{ref}}, I_t)$ \Comment{Sec.~\ref{sec:homography_overlap}}
+    \If{$\alpha < \tau$} \Comment{Sufficient new content}
+        \State $\mathcal{S} \gets \mathcal{S} \cup \{t\}$
+        \State $I_{\text{ref}} \gets I_t$ \Comment{Update reference to most recently kept frame}
+    \EndIf
+\EndFor
+\State \Return $\mathcal{S}$
+\end{algorithmic}
+\end{algorithm}
+
+The key design choice is that the reference frame $I_{\text{ref}}$ is updated only when a frame is \emph{retained}.  This means the overlap is always measured against the \emph{most recently selected} frame, not the previous frame in the original sequence.  This provides temporal hysteresis: during static shots, the reference remains fixed and many frames are skipped; during rapid motion, the reference updates frequently and more frames are kept.
+
+\paragraph{Threshold Selection.}  The default threshold $\tau = 0.95$ was selected to aggressively remove near-duplicates while preserving frames with even modest camera motion or scene change.  At this threshold, a frame is retained if it shows at least $\sim$5\% new visual content relative to the last retained reference.
+
+\subsection{Annotated Frame Injection}
+\label{sec:annotated}
+
+After the overlap-based filtering, all frames with existing ground-truth bounding box annotations (from the \texttt{frames\_annotated/} directory) are injected into the selected set, ensuring that supervised training targets are never discarded:
+\begin{equation}
+    \mathcal{S} \gets \mathcal{S} \cup \mathcal{A}_{\text{annotated}}, \quad  \mathcal{S} = \op{sort}(\mathcal{S}).
+    \label{eq:inject}
+\end{equation}
+This is performed \emph{before} the minimum frame count check, so annotated frames contribute to satisfying the minimum constraint.
+
+\subsection{Minimum Frame Count Enforcement}
+\label{sec:minimum}
+
+To ensure sufficient temporal coverage for downstream 3D reconstruction and scene graph generation, a minimum of $K_{\min} = 17$ frames is enforced.  If the combined set (overlap-filtered $\cup$ annotated) contains fewer than $K_{\min}$ frames, the sampler falls back to uniform subsampling:
+\begin{equation}
+    \Delta = \max\!\left(1, \left\lfloor \frac{T}{K_{\min}} \right\rfloor\right), \quad
+    \mathcal{S}_{\text{uniform}} = \{0, \Delta, 2\Delta, \ldots\}_{|K_{\min}|},
+    \label{eq:uniform_fallback}
+\end{equation}
+and the annotated frames are re-injected to produce the final set $\mathcal{S}_{\text{final}} = \op{sort}(\mathcal{S}_{\text{uniform}} \cup \mathcal{A}_{\text{annotated}})$.
+
+\paragraph{Rationale for $K_{\min} = 17$.}  The choice of 17 frames provides a minimum temporal span sufficient for the downstream 3D scene construction pipeline, which requires multiple distinct viewpoints for robust structure-from-motion and object permanence reasoning across occlusion boundaries.
+
+
+% ====================================================================================
+\section{Output Artifacts}
+\label{sec:outputs}
+% ====================================================================================
+
+For each video, the sampler produces three artifacts:
+\begin{enumerate}
+    \item \textbf{Frame indices} (\texttt{sampled\_frames\_idx/<video\_id>.npy}): A sorted NumPy array of selected frame indices (int32), used by all downstream pipeline stages.
+    \item \textbf{Sampled frames} (\texttt{sampled\_frames/<video\_id>/}): Physical copies of the selected frames, enabling quick visual inspection and serving as input to feature extraction.
+    \item \textbf{Sampled video} (\texttt{sampled\_videos/<video\_id>.mp4}): An MP4 video at 10\,fps composed of the selected frames, for qualitative review.
+\end{enumerate}
+
+Results are cached: if a \texttt{.npy} file already exists for a video, the sampler skips recomputation and loads the existing indices.  Legacy directory-based markers are also supported for backward compatibility.
+
+
+% ====================================================================================
+\section{Parallelization via Dataset Sharding}
+\label{sec:sharding}
+% ====================================================================================
+
+Since frame sampling is embarrassingly parallel across videos but computationally expensive per video (SIFT extraction + homography estimation for every frame pair), the dataset is partitioned into 8 lexicographic shards based on the first character of the video identifier:
+
+\begin{table}[h]
+\centering
+\caption{Dataset shards for parallel processing.  Each shard processes videos whose ID begins with the specified character range.}
+\label{tab:shards}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Shard} & \textbf{Video ID prefix} \\
+\midrule
+\texttt{04} & Digits 0--4 \\
+\texttt{59} & Digits 5--9 \\
+\texttt{AD} & Letters A--D \\
+\texttt{EH} & Letters E--H \\
+\texttt{IL} & Letters I--L \\
+\texttt{MP} & Letters M--P \\
+\texttt{QT} & Letters Q--T \\
+\texttt{UZ} & Letters U--Z \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each shard can be processed independently on a separate machine or in a separate job:
+\begin{verbatim}
+python feature_descripter_sampler.py --data_dir /data/ag --split AD
+\end{verbatim}
+Since videos have uniformly distributed identifiers (Base64-like), this produces approximately balanced shard sizes.
+
+
+% ====================================================================================
+\section{Computational Complexity and Design Choices}
+\label{sec:complexity}
+% ====================================================================================
+
+\paragraph{Per-Frame Cost.}  Each frame comparison involves:
+\begin{itemize}
+    \item SIFT extraction: $O(W \cdot H \cdot \log(W \cdot H))$ per frame~\cite{lowe2004distinctive}.
+    \item Brute-force $k$-NN matching: $O(|\mathcal{K}_A| \cdot |\mathcal{K}_B|)$ using L2 distance.
+    \item RANSAC homography: $O(N_{\text{iter}} \cdot |\mathcal{G}|)$ with $N_{\text{iter}} = 2000$.
+    \item Polygon intersection: $O(1)$ (fixed 4-vertex polygons).
+\end{itemize}
+The total per-video cost is $O(T \cdot (W \!\cdot\! H \!\cdot\! \log(WH) + |\mathcal{K}|^2))$, dominated by SIFT extraction and descriptor matching.
+
+\paragraph{Greedy vs.\ Global Optimization.}  The greedy sequential strategy is locally optimal: it minimizes redundancy relative to the immediately preceding reference.  A globally optimal selection (e.g., maximizing total pairwise diversity across selected frames) would require $O(T^2)$ pairwise comparisons and is combinatorially expensive.  The greedy approach achieves a good practical trade-off: empirically, it reduces Action Genome videos from $\sim$900--9000 frames to $\sim$30--150 selected frames while preserving all major viewpoint changes.
+
+\paragraph{Connection to Keyframe Selection in SfM.}  The overlap-based frame selection is closely related to keyframe selection strategies used in structure-from-motion (SfM) pipelines~\cite{schonberger2016structure} and visual SLAM~\cite{mur2015orb}.  In ORB-SLAM~\cite{mur2015orb}, a new keyframe is inserted when the number of tracked feature points drops below a threshold relative to the reference keyframe—a criterion that is mathematically equivalent to detecting low feature-match overlap.  Our approach makes this connection explicit by computing the geometric overlap via homography warping, providing a more interpretable and tunable criterion than raw match counts.
+
+
+\bibliographystyle{splncs04}
+\bibliography{main}
+
+\end{document}

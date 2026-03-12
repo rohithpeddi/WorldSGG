@@ -71,7 +71,7 @@ The local corners are flattened to a 24-dimensional vector and concatenated with
 \end{equation}
 This preserves the full rigid geometry (dimensions, orientation) that per-corner max-pooling would discard.
 
-\paragraph{Per-Object Tokens.}  A shared MLP ($27 \!\to\! d_h \!\to\! 2d_h \!\to\! d_{\text{struct}}$) with ReLU activations and LayerNorm produces:
+\paragraph{Per-Object Tokens.}  A shared MLP ($27 \!\to\! d_h \xrightarrow{\text{ReLU}} 2d_h \xrightarrow{\text{ReLU+LN}} d_{\text{struct}}$) with ReLU activations and an intermediate LayerNorm produces:
 \begin{equation}
     \mat{g}_n = \op{MLP}_{\text{obj}}\bigl(\mat{x}_n\bigr) \in \mR^{d_{\text{struct}}}.
     \label{eq:gse_obj}
@@ -127,7 +127,7 @@ This corresponds to a fully-connected GNN where every valid object attends to ev
 \subsection{Node Predictor}
 \label{sec:node_predictor}
 
-Object class prediction is performed by a simple two-layer MLP head:
+Object class prediction is performed by a two-layer MLP head with ReLU activation and Dropout($0.1$) between the layers:
 \begin{equation}
     \hat{\mat{y}}_n^{\text{obj}} = \op{MLP}_{\text{node}}(\mat{h}_n) \in \mR^{C_{\text{obj}}},
     \label{eq:node_pred}
@@ -160,7 +160,7 @@ All $K$ relationship tokens within a frame self-attend to enable inter-edge reas
 This can be viewed as a ``message passing over the edge graph''---each relationship can attend to other concurrent relationships to resolve ambiguities (e.g., if person $p$ is \emph{holding} object $o_1$, they are less likely to also be \emph{holding} $o_2$).  This follows the principle of relational context modeling~\cite{li2018factorizable,zellers2018neural}, where jointly reasoning over all candidate relationships produces more coherent scene graphs than independent edge classification.
 
 \paragraph{Phase 3: Prediction Heads.}
-Three independent MLP heads produce per-class predictions:
+Three independent two-layer MLP heads ($d_{\text{rel}} \!\to\! d_{\text{rel}}/2 \xrightarrow{\text{ReLU+Dropout}} C$) produce per-class predictions:
 \begin{align}
     \hat{\mat{y}}_{\text{att}} &= \op{MLP}_{\text{att}}(\mat{r}) \in \mR^{3}, & &\text{(attention: looking at, not looking at, unsure)} \label{eq:att_head} \\
     \hat{\mat{y}}_{\text{spa}} &= \sigma\!\bigl(\op{MLP}_{\text{spa}}(\mat{r})\bigr) \in [0,1]^{6}, & &\text{(spatial: above, beneath, in front of, \dots)} \label{eq:spa_head} \\
@@ -302,10 +302,10 @@ All operations are $O(T \cdot N)$ and fully vectorized with no Python loops.
 
 The tokenizer fuses geometry, buffered features, camera information, and staleness metadata:
 \begin{equation}
-    \mat{x}_n^{(t)} = \op{Proj}\bigl([\mat{g}_n^{(t)} \;\|\; \mat{m}_n^{(t)} \;\|\; \mat{c}_n^{(t)} \;\|\; \log(\Delta_n^{(t)} + 1)]\bigr) \in \mR^{d_{\text{model}}},
+    \mat{x}_n^{(t)} = \op{FusionProj}\bigl([\mat{g}_n^{(t)} \;\|\; \mat{m}_n^{(t)} \;\|\; \mat{c}_n^{(t)} \;\|\; \log(\Delta_n^{(t)} + 1)]\bigr) \in \mR^{d_{\text{model}}},
     \label{eq:pwg_tokenizer}
 \end{equation}
-where the log-staleness term provides a smooth, bounded indicator of feature freshness.  The visual projection from $d_{\text{roi}}$ to $d_{\text{model}}$ happens \emph{inside} the fusion MLP, allowing gradients from the downstream loss to flow through the alignment layer.
+where $\op{FusionProj}$ is a single-layer linear projection followed by LayerNorm and GELU activation, and the log-staleness term provides a smooth, bounded indicator of feature freshness.  The visual projection from $d_{\text{roi}}$ to $d_{\text{model}}$ happens \emph{inside} the fusion MLP, allowing gradients from the downstream loss to flow through the alignment layer.
 
 \subsection{Full Pipeline}
 
@@ -325,11 +325,13 @@ The PWG pipeline processes all $T$ frames in a single batched forward pass (with
 \subsection{PWG Loss Function}
 \label{sec:pwg_loss}
 
-The loss partitions human--object pairs into visibility buckets based on whether the constituent entities are directly observed:
+The loss partitions human--object pairs into three visibility buckets based on whether the constituent entities are directly observed:
 \begin{itemize}
-    \item \textbf{Visible}: Both person and object are visible $\to$ clean manual ground-truth labels.
-    \item \textbf{Partially/Fully Unseen}: At least one entity is not visible $\to$ VLM pseudo-labels.
+    \item \textbf{Vis--Vis}: Both person and object are visible $\to$ clean manual ground-truth labels, full weight.
+    \item \textbf{Vis--Unseen}: Exactly one entity is visible $\to$ VLM pseudo-labels, $\lambda_{\text{vlm}}$-weighted.
+    \item \textbf{Unseen--Unseen}: Neither entity is visible $\to$ VLM pseudo-labels, $\lambda_{\text{vlm}}$-weighted.
 \end{itemize}
+The latter two buckets receive identical treatment (both use $\lambda_{\text{vlm}}$ scaling and optional label smoothing), but are tracked separately for diagnostic purposes.
 
 All buckets share a \emph{single global denominator} $N_{\text{total}} = \sum_{t}\sum_k \mathbb{1}[\text{pair}_{t,k} \text{ is valid}]$, ensuring each pair contributes equally to the gradient:
 \begin{align}
@@ -412,6 +414,22 @@ The Transformer batches over $N$ objects (batch dim $=N$, sequence length $=T$).
 \end{enumerate}
 The remaining pipeline (Spatial GNN $\to$ Node Prediction $\to$ Relationship Prediction $\to$ Temporal Edge Attention) is identical to PWG.
 
+\subsection{Full Pipeline}
+
+The 4DST pipeline processes all $T$ frames in a single batched forward pass:
+\begin{enumerate}
+    \item \textbf{Structural Encoding}: $\mat{C}_{\text{all}} \to \mat{G}_{\text{all}} \in \mR^{T \times N \times d_{\text{struct}}}$
+    \item \textbf{Camera Encoding}: $\mat{T}_{\text{all}} \to \mat{c}_{\text{all}} \in \mR^{T \times N \times d_{\text{camera}}}$
+    \item \textbf{Ego-Motion Encoding}: $\mat{T}_{\text{all}} \to \mat{e}_{\text{all}} \in \mR^{T \times d_{\text{camera}}}$
+    \item \textbf{Motion Feature Encoding}: $(\mat{v}_{\text{all}},\, \mat{a}_{\text{all}}) \to \mat{\mu}_{\text{all}} \in \mR^{T \times N \times d_{\text{motion}}}$
+    \item \textbf{Temporal Object Transformer}: $[\mat{f}, \mat{G}, \mat{c}, \mat{\mu}, \mat{e}] \to \mat{Z} \in \mR^{T \times N \times d_{\text{memory}}}$
+    \item \textbf{Spatial GNN}: $\mat{Z} \to \mat{H} \in \mR^{T \times N \times d_{\text{memory}}}$
+    \item \textbf{Node Prediction}: $\mat{H} \to \hat{\mat{Y}}^{\text{obj}} \in \mR^{T \times N \times C_{\text{obj}}}$
+    \item \textbf{Batched Edge Formation + Self-Attention}: $(\mat{H}, \hat{\mat{Y}}^{\text{obj}}) \to \mat{R} \in \mR^{T \times K_{\max} \times d_{\text{rel}}}$
+    \item \textbf{Temporal Edge Attention}: $\mat{R} \to \tilde{\mat{R}} \in \mR^{T \times K_{\max} \times d_{\text{rel}}}$
+    \item \textbf{Prediction Heads}: $\tilde{\mat{R}} \to (\hat{\mat{y}}_{\text{att}},\,\hat{\mat{y}}_{\text{spa}},\,\hat{\mat{y}}_{\text{con}})$
+\end{enumerate}
+
 \subsection{4DST Loss Function}
 
 The loss structure mirrors PWG (Sec.~\ref{sec:pwg_loss}) with visible and unseen buckets:
@@ -419,7 +437,7 @@ The loss structure mirrors PWG (Sec.~\ref{sec:pwg_loss}) with visible and unseen
     \mathcal{L}_{\text{4DST}} = \sum_{r \in \{\text{att, spa, con}\}} \bigl(\mathcal{L}_{r}^{\text{visible}} + \lambda_{\text{vlm}} \cdot \mathcal{L}_{r}^{\text{unseen}}\bigr) + \mathcal{L}_{\text{node}}.
     \label{eq:4dst_total}
 \end{equation}
-Label smoothing is applied identically for unseen pairs.
+Label smoothing is applied identically for unseen pairs.  Unlike MWAE (Sec.~\ref{sec:mwae_loss}), 4DST does not include reconstruction or simulated-unseen losses, as there is no masking or associative retrieval mechanism.
 
 
 % ====================================================================================
@@ -471,7 +489,7 @@ with $\mat{e}_{\text{[MASK]}} \in \mR^{d_{\text{visual}}}$ being a learnable mas
 
 The Associative Retriever performs per-object bidirectional cross-attention to ``fill in'' masked tokens by consulting that object's visible appearances across all frames.  This retrieval mechanism acts as the ``decoder'' in the MAE analogy: it takes incomplete representations (where some time steps have only geometric scaffolding) and completes them by attending to time steps where the object was actually observed.
 
-\paragraph{Architecture.}  Each object $n$'s temporal sequence (length $T$) is processed by stacked cross-attention layers where:
+\paragraph{Architecture.}  Each object $n$'s temporal sequence (length $T$) is processed by stacked cross-attention layers with pre-norm (LayerNorm before attention and FFN) and GELU activation in the feed-forward network.  The attention structure is:
 \begin{itemize}
     \item \textbf{Query}: All tokens (visible + masked) with additive camera pose bias $\mat{q}_n^{(t)} = \mat{x}_n^{(t)} + \op{QProj}(\mat{c}_n^{(t)})$.
     \item \textbf{Key}: Visible tokens with camera pose bias $\mat{k}_n^{(t)} = \mat{x}_n^{(t)} + \op{KProj}(\mat{c}_n^{(t)})$.
@@ -507,12 +525,12 @@ The reconstruction loss is only applied to \emph{artificially masked} objects (n
 \subsection{MWAE Loss Function}
 \label{sec:mwae_loss}
 
-MWAE uses a triple-objective loss:
+MWAE uses a multi-objective loss:
 \begin{equation}
-    \mathcal{L}_{\text{MWAE}} = \mathcal{L}_{\text{SG}} + \lambda_{\text{recon}} \cdot \lambda_{\text{dom}} \cdot \mathcal{L}_{\text{recon}} + \mathcal{L}_{\text{sim}},
+    \mathcal{L}_{\text{MWAE}} = \mathcal{L}_{\text{SG}} + \lambda_{\text{recon}} \cdot \lambda_{\text{dom}} \cdot \mathcal{L}_{\text{recon}} + \mathcal{L}_{\text{sim}} + \lambda_{\text{stab}} \cdot \mathcal{L}_{\text{stab}},
     \label{eq:mwae_total}
 \end{equation}
-where:
+where the stability loss $\mathcal{L}_{\text{stab}}$ is an optional attractor term used in the AMWAE++ variant only (Sec.~\ref{sec:stability}).  The remaining terms are:
 
 \paragraph{1. Scene Graph Loss ($\mathcal{L}_{\text{SG}}$).}  Same visible/unseen split as 4DST (Eq.~\ref{eq:4dst_total}).
 
@@ -531,8 +549,35 @@ For artificially masked objects, the model re-predicts relationships using the c
 \end{equation}
 This creates a powerful self-supervised signal: the model is trained to predict relationships for objects it \emph{can} see but has been told to pretend are unseen.  Since the ground truth is clean (not VLM pseudo-labels), this provides high-quality gradients for learning the completion-to-prediction pathway.  This ``simulated occlusion'' training strategy is conceptually related to the dropout-based regularization used in~\cite{chen2019counterfactual} for counterfactual reasoning in SGG, but applied at the object level rather than the feature level.
 
+\subsection{Optional: Attractor Stability Loss (AMWAE++)}
+\label{sec:stability}
+
+The AMWAE++ variant adds an optional attractor stability loss that regularizes the enriched object representations to remain close to a slowly-evolving target:
+\begin{equation}
+    \mathcal{L}_{\text{stab}} = \op{MSE}(\mat{h}_{\text{final}},\, \op{sg}(\mat{h}_{\text{prev}})),
+    \label{eq:stability_loss}
+\end{equation}
+where $\op{sg}(\cdot)$ denotes stop-gradient (the target is detached from the computation graph).  This loss is only active when $\lambda_{\text{stab}} > 0$ and $\mat{h}_{\text{prev}}$ is available.
+
 \subsection{Full Pipeline}
-The MWAE pipeline replaces the LKS buffer and tokenizer with the Scaffold Tokenizer and Associative Retriever, while adding the reconstruction head.  The remaining components (Spatial GNN, Node Predictor, Relationship Predictor, Temporal Edge Attention) are identical to PWG and 4DST.
+
+The MWAE pipeline processes all $T$ frames in a single batched forward pass:
+\begin{enumerate}
+    \item \textbf{Structural Encoding}: $\mat{C}_{\text{all}} \to \mat{G}_{\text{all}} \in \mR^{T \times N \times d_{\text{struct}}}$
+    \item \textbf{Camera Encoding}: $\mat{T}_{\text{all}} \to \mat{c}_{\text{all}} \in \mR^{T \times N \times d_{\text{camera}}}$
+    \item \textbf{Ego-Motion Encoding}: $\mat{T}_{\text{all}} \to \mat{e}_{\text{all}} \in \mR^{T \times d_{\text{camera}}}$
+    \item \textbf{Motion Feature Encoding}: $(\mat{v}_{\text{all}},\, \mat{a}_{\text{all}}) \to \mat{\mu}_{\text{all}} \in \mR^{T \times N \times d_{\text{motion}}}$
+    \item \textbf{Scaffold Tokenization}: $[\mat{G}, \mat{f}\;\text{or}\;\mat{e}_{\text{[MASK]}}, \mat{c}, \mat{\mu}, \mat{e}] \to \mat{X} \in \mR^{T \times N \times d_{\text{model}}}$
+    \item \textbf{Associative Retriever}: $\mat{X} \to \hat{\mat{X}} \in \mR^{T \times N \times d_{\text{model}}}$ \quad (per-object cross-attention)
+    \item \textbf{Visibility Embedding}: $\hat{\mat{X}} \mathrel{+}= \mat{e}_{\text{vis}}[\text{effective\_vis}]$
+    \item \textbf{Spatial GNN}: $\hat{\mat{X}} \to \mat{H} \in \mR^{T \times N \times d_{\text{model}}}$
+    \item \textbf{Node Prediction}: $\mat{H} \to \hat{\mat{Y}}^{\text{obj}} \in \mR^{T \times N \times C_{\text{obj}}}$
+    \item \textbf{Cross-View Reconstruction}: $\hat{\mat{X}} \to \hat{\mat{f}} \in \mR^{T \times N \times d_{\text{visual}}}$
+    \item \textbf{Batched Edge Formation + Self-Attention}: $(\mat{H}, \hat{\mat{Y}}^{\text{obj}}) \to \mat{R} \in \mR^{T \times K_{\max} \times d_{\text{rel}}}$
+    \item \textbf{Temporal Edge Attention}: $\mat{R} \to \tilde{\mat{R}} \in \mR^{T \times K_{\max} \times d_{\text{rel}}}$
+    \item \textbf{Prediction Heads}: $\tilde{\mat{R}} \to (\hat{\mat{y}}_{\text{att}},\,\hat{\mat{y}}_{\text{spa}},\,\hat{\mat{y}}_{\text{con}})$
+\end{enumerate}
+The remaining components (Spatial GNN, Node Predictor, Relationship Predictor, Temporal Edge Attention) are identical to PWG and 4DST.
 
 
 % ====================================================================================
@@ -557,8 +602,10 @@ $\mathcal{L}_{\text{node}}$ (Node classification) & \checkmark$^*$ & \checkmark$
 Label Smoothing (unseen) & \checkmark & \checkmark & \checkmark \\
 $\mathcal{L}_{\text{recon}}$ (Reconstruction) & $-$ & $-$ & \checkmark \\
 $\mathcal{L}_{\text{sim}}$ (Simulated-unseen) & $-$ & $-$ & \checkmark \\
+$\mathcal{L}_{\text{stab}}$ (Stability) & $-$ & $-$ & \checkmark$^\dagger$ \\
 \bottomrule
-\multicolumn{4}{l}{\footnotesize $^*$Only in SGCls/SGDet modes.}
+\multicolumn{4}{l}{\footnotesize $^*$Only in SGCls/SGDet modes.} \\
+\multicolumn{4}{l}{\footnotesize $^\dagger$AMWAE++ variant only ($\lambda_{\text{stab}} > 0$).}
 \end{tabular}
 \end{table}
 
@@ -594,5 +641,8 @@ The three methods form a principled progression of increasing sophistication in 
     \item \textbf{4DST $\to$ MWAE}: Joint self-attention (where masked object tokens attend alongside visible ones) $\to$ explicit encoder-decoder factorization with asymmetric cross-attention.  This is directly analogous to the evolution from BERT~\cite{devlin2019bert} (joint encoding of masked and visible tokens) to MAE~\cite{he2022masked} (separate visible encoder, masked decoder).  The scaffold tokenizer explicitly disentangles geometry (always available from the 3D wireframe) from visual evidence (only available when the object is visible), enabling more principled handling of the information asymmetry inherent in the WorldSGG problem.  The addition of cross-view reconstruction and simulated-unseen losses provides a self-supervised training signal that does not depend on noisy VLM pseudo-labels, addressing a fundamental limitation of the previous two methods for unseen object reasoning.
 \end{enumerate}
 
+
+\bibliographystyle{splncs04}
+\bibliography{main}
 
 \end{document}
