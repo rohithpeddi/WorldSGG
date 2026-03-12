@@ -1,0 +1,565 @@
+% ==================================================================================
+% Monocular 3D Object Detector — Detailed Technical Report (from Source Code)
+% Target Venue: ECCV
+% Source: lib/detector/monocular3d/
+% ==================================================================================
+\documentclass[runningheads]{llncs}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{color}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{bm}
+\usepackage{multirow}
+\usepackage{xcolor}
+
+\newcommand{\mR}{\mathbb{R}}
+\newcommand{\op}[1]{\operatorname{#1}}
+\newcommand{\tens}[1]{\bm{\mathcal{#1}}}
+\newcommand{\mat}[1]{\bm{#1}}
+
+\begin{document}
+
+\title{Monocular 3D Object Detection for World Scene Graph Generation: Architecture, Training, and Evaluation}
+
+\maketitle
+
+
+% ====================================================================================
+\section{Overview}
+\label{sec:mono3d_overview}
+% ====================================================================================
+
+The monocular 3D object detector provides the geometric scaffolding upon which World Scene Graph Generation (WorldSGG) is built.  Given a single RGB frame from the Action Genome~\cite{ji2020action} dataset, the detector simultaneously produces (i)~2D bounding boxes with class labels for standard object detection, and (ii)~8-corner oriented 3D bounding boxes (OBBs) in camera-frame coordinates for every detected object.  The 3D boxes are subsequently lifted into the persistent world frame via extrinsic camera matrices, providing the structural prior consumed by all three WorldSGG methods (PWG, 4DST, MWAE).
+
+The system follows a modular Faster R-CNN~\cite{ren2015faster} architecture with three major innovations tailored to the WorldSGG setting:
+\begin{enumerate}
+    \item A \textbf{frozen DINOv2/v3 ViT backbone}~\cite{oquab2023dinov2} paired with a learnable \textbf{Simple Feature Pyramid Network} (SimpleFPN)~\cite{li2022exploring} for multi-scale feature extraction;
+    \item A \textbf{factorized 3D prediction head} that decomposes 3D box regression into interpretable sub-problems (dimensions, rotation, depth, center offset) and reconstructs full 8-corner OBBs via pinhole back-projection;
+    \item An \textbf{OVMono3D-style disentangled 3D loss}~\cite{zhang2023ovmono3d} with per-sample uncertainty weighting and geometry-level Chamfer supervision.
+\end{enumerate}
+
+
+% ====================================================================================
+\section{Model Architecture}
+\label{sec:mono3d_architecture}
+% ====================================================================================
+
+The full model, \textsc{DinoV3Monocular3D}, follows the pipeline:
+\begin{equation}
+    \text{Image} \;\xrightarrow{\text{Transform}}\; \text{Backbone} \;\xrightarrow{\text{FPN}}\; \text{RPN} \;\xrightarrow{\text{ROI Heads}}\; \text{2D Detections} + \text{3D Boxes}.
+    \label{eq:full_pipeline}
+\end{equation}
+
+
+% ------------------------------------------------------------------------------------
+\subsection{Backbone: Frozen DINOv2/v3 Vision Transformer}
+\label{sec:backbone}
+
+The backbone $\mathcal{B}$ is a Vision Transformer (ViT)~\cite{dosovitskiy2021image} pretrained with the DINOv2~\cite{oquab2023dinov2} self-supervised objective, loaded from HuggingFace and kept entirely \textbf{frozen} during training.  Four model variants are supported:
+
+\begin{table}[h]
+\centering
+\caption{Supported backbone variants.}
+\label{tab:backbone_variants}
+\small
+\begin{tabular}{@{}lllrl@{}}
+\toprule
+\textbf{Key} & \textbf{Model} & \textbf{Hidden dim} & \textbf{Params} & \textbf{Patch size} \\
+\midrule
+\texttt{v2}  & DINOv2 ViT-B & 768  &  86M & 14 \\
+\texttt{v2s} & DINOv2 ViT-S & 384  &  22M & 14 \\
+\texttt{v2l} & DINOv2 ViT-L & 1024 & 304M & 14 \\
+\texttt{v3l} & DINOv3 ViT-L & 1024 & 304M & 16 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Token Selection.}  The ViT produces a sequence of length $N_{\text{total}} = 1 + N_{\text{reg}} + N_{\text{patch}}$, where $N_{\text{patch}} = H_p \times W_p$ is the number of spatial patch tokens.  Only the \emph{last} $N_{\text{patch}}$ tokens are kept (stripping the CLS and any register tokens):
+\begin{equation}
+    \mat{F} = \op{reshape}\bigl(\text{ViT}(\mat{I})[:, -N_{\text{patch}}:, :]\bigr) \in \mR^{B \times C \times H_p \times W_p},
+    \label{eq:backbone_output}
+\end{equation}
+where $H_p = \lfloor H_{\text{img}} / P \rfloor$, $W_p = \lfloor W_{\text{img}} / P \rfloor$, $P$ is the patch size, and $C$ is the hidden dimension.
+
+\paragraph{AMP for Backbone.}  Since the backbone is frozen, its forward pass is wrapped in \texttt{torch.amp.autocast} for aggressive mixed-precision inference, reducing VRAM consumption without affecting trained parameter precision.
+
+
+% ------------------------------------------------------------------------------------
+\subsection{Simple Feature Pyramid Network (SimpleFPN)}
+\label{sec:fpn}
+
+To produce multi-scale features suitable for region-based detection, we adapt the SimpleFPN architecture from ViTDet~\cite{li2022exploring}.  The FPN takes the single-scale backbone output $\mat{F} \in \mR^{B \times C \times H_p \times W_p}$ and produces a pyramid of feature maps at multiple strides via transposed convolutions (for upsampling) and max-pooling (for downsampling):
+
+\begin{table}[h]
+\centering
+\caption{SimpleFPN pyramid levels.  The base stride is the backbone's patch size $P$.}
+\label{tab:fpn_levels}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Level} & \textbf{Scale factor} & \textbf{Operation} & \textbf{Stride ($P / \text{scale}$)} \\
+\midrule
+\texttt{p2} & $4\times$ & $2\times$ ConvTranspose2D $\times 2$ + GELU     & $P/4$ \\
+\texttt{p3} & $2\times$ & $1\times$ ConvTranspose2D                        & $P/2$ \\
+\texttt{p4} & $1\times$ & Identity                                          & $P$   \\
+\texttt{p5} & $0.5\times$ & MaxPool2D($2\times 2$)                          & $2P$  \\
+\texttt{p6} & ---        & MaxPool2D($1\times 1$, stride 2) on \texttt{p5}  & $4P$  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each level is followed by channel projection ($C_{\text{out}} \to 256$) via a $1\times 1$ convolution, BatchNorm, ReLU, a $3\times 3$ refinement convolution, and a final BatchNorm.  All convolutions use learnable parameters; only the backbone is frozen.
+
+\paragraph{Top Block.}  The \texttt{p6} level is produced by a \texttt{LastLevelMaxPool} module that applies $1\times 1$ max-pooling with stride 2 to the \texttt{p5} features, extending the pyramid for detecting large objects.
+
+
+% ------------------------------------------------------------------------------------
+\subsection{Region Proposal Network (RPN)}
+\label{sec:rpn}
+
+The RPN uses standard Faster R-CNN~\cite{ren2015faster} anchors matched to the FPN pyramid:
+\begin{equation}
+    \text{Anchor sizes} = \{32, 64, 128, 256, 512\} \;\text{for levels}\; \{p2, p3, p4, p5, p6\},
+    \label{eq:anchors}
+\end{equation}
+with three aspect ratios $(0.5, 1.0, 2.0)$ at each level, yielding $3$ anchors per spatial position per level.
+
+\paragraph{Losses.}  The RPN contributes two losses:
+\begin{align}
+    \mathcal{L}_{\text{rpn-obj}} &= \op{BCEWithLogits}(\hat{o}, o^*), & &\text{(objectness classification)} \label{eq:rpn_obj} \\
+    \mathcal{L}_{\text{rpn-box}} &= \op{SmoothL1}(\hat{\mat{b}}, \mat{b}^*), & &\text{(anchor-relative box regression)} \label{eq:rpn_box}
+\end{align}
+where $o^*$ and $\mat{b}^*$ are the objectness targets and regression targets computed from anchor--GT IoU matching.
+
+
+% ------------------------------------------------------------------------------------
+\subsection{ROI Heads: 2D Detection}
+\label{sec:roi_heads}
+
+Proposals from the RPN are processed by the standard Faster R-CNN ROI pipeline:
+\begin{enumerate}
+    \item \textbf{Proposal sampling:} 512 proposals per image; 25\% positive (IoU~$\geq 0.5$), 75\% negative.
+    \item \textbf{ROI pooling:} MultiScaleRoIAlign with output size $7 \times 7$, sampling ratio 2, operating across all FPN levels.
+    \item \textbf{Box head:} Two fully-connected layers (with ReLU) producing a \emph{shared} 1024-dimensional feature vector per proposal.
+    \item \textbf{Box predictor:} Parallel linear heads for classification logits and bounding box regression deltas.
+\end{enumerate}
+
+\paragraph{2D Detection Losses.}
+\begin{align}
+    \mathcal{L}_{\text{cls}} &= \op{CrossEntropy}(\hat{\mat{y}}_{\text{cls}}, y_{\text{cls}}), \label{eq:cls_loss} \\
+    \mathcal{L}_{\text{box}} &= \op{SmoothL1}(\hat{\mat{b}}_{\text{reg}}, \mat{b}_{\text{reg}}^*). \label{eq:box_loss}
+\end{align}
+
+
+% ------------------------------------------------------------------------------------
+\subsection{3D Prediction Head}
+\label{sec:3d_head}
+
+The 3D head is a lightweight branch that shares the 1024-dimensional ROI features from the box head and produces 8-corner 3D bounding boxes via a factorized parameterization.
+
+\subsubsection{Architecture Modes}
+\label{sec:head_modes}
+
+Two integration modes are supported:
+\begin{itemize}
+    \item \textbf{Unified} (\texttt{Mono3DRoIHeads}): The 3D branch is embedded inside the ROI heads module, directly sharing the FC layers. Training and inference share the same proposal sampling.
+    \item \textbf{Separate} (\texttt{SeparateMono3DHead}): A standalone module that captures the shared FC features via a forward hook on \texttt{box\_head}. At inference, it re-pools detected boxes through the shared layers.
+\end{itemize}
+
+\subsubsection{Factorized Parameterization (V1)}
+\label{sec:3d_v1}
+
+The V1 3D head takes the concatenation of the shared features, normalized 2D box coordinates, and normalized camera intrinsics:
+\begin{equation}
+    \mat{x}_{\text{3d}} = \bigl[\mat{h} \;\|\; \mat{b}_{\text{2d}} / S \;\|\; [f_x, f_y, c_x, c_y] / S\bigr] \in \mR^{1036},
+    \label{eq:3d_input}
+\end{equation}
+where $S = 1000$ is a reference normalization scale that brings pixel-valued inputs to the same $O(1)$ range as ViT features.  This vector is processed by a shared context FC layer with ReLU:
+\begin{equation}
+    \mat{z} = \op{ReLU}\bigl(\mat{W}_{\text{ctx}} \mat{x}_{\text{3d}} + \mat{b}_{\text{ctx}}\bigr) \in \mR^{512}.
+    \label{eq:context_fc}
+\end{equation}
+
+Five parallel prediction heads produce the factorized 3D parameters:
+\begin{align}
+    \hat{\mat{d}} &= \op{softplus}(\mat{W}_d \mat{z} + \mat{b}_d) + \epsilon \in \mR^{3}, & &\text{(dimensions: $l, w, h$)} \label{eq:dims} \\
+    [\hat{s}, \hat{c}] &= \frac{\mat{W}_r \mat{z} + \mat{b}_r}{\|\mat{W}_r \mat{z} + \mat{b}_r\|_2 + \epsilon} \in \mR^{2}, & &\text{(rotation: $\sin\theta, \cos\theta$)} \label{eq:rot} \\
+    \hat{z}_c &= \op{softplus}(\mat{W}_z \mat{z} + \mat{b}_z) + \epsilon \in \mR^{1}, & &\text{(depth)} \label{eq:depth} \\
+    \hat{\mat{\delta}} &= \mat{W}_\delta \mat{z} + \mat{b}_\delta \in \mR^{2}, & &\text{(2D center offset)} \label{eq:offset} \\
+    \hat{\mu} &= \mat{W}_\mu \mat{z} + \mat{b}_\mu \in \mR^{1}, & &\text{(uncertainty)} \label{eq:mu}
+\end{align}
+where $\epsilon = 10^{-4}$ ensures strictly positive dimensions and depth.  The rotation is L2-normalized to lie on the unit circle, and the softplus activation ($\log(1 + e^x)$) provides smooth positive-valued outputs.
+
+\subsubsection{Pinhole Back-Projection to 8 Corners}
+\label{sec:backproj}
+
+The 3D camera-frame center is recovered by intersecting the projected 2D point with the predicted depth via the pinhole camera model:
+\begin{align}
+    u &= c_{x,\text{2d}} + \hat{\delta}_x, \quad v = c_{y,\text{2d}} + \hat{\delta}_y, \label{eq:projected_center} \\
+    X_c &= \frac{(u - c_x)}{f_x} \cdot \hat{z}_c, \quad Y_c = \frac{(v - c_y)}{f_y} \cdot \hat{z}_c, \quad Z_c = \hat{z}_c, \label{eq:cam_center}
+\end{align}
+where $(c_{x,\text{2d}}, c_{y,\text{2d}})$ is the 2D box center, $(f_x, f_y)$ are the focal lengths (clamped $\geq 1$), and $(c_x, c_y)$ is the principal point.
+
+\paragraph{Numerical Stability:} The division is performed as $(u - c_x) / f_x \cdot \hat{z}_c$ rather than $(u - c_x) \cdot \hat{z}_c / f_x$ to prevent intermediate overflow in float16 (the product of pixel offsets and depth can exceed 65,504).
+
+The 8 corners are constructed in the local frame at $(\pm l/2, \pm w/2, \pm h/2)$, rotated by the predicted yaw $\theta$ in the $xy$-plane, and translated to the camera-frame center:
+\begin{equation}
+    \mat{C} = \mat{R}_\theta \; \mat{C}_{\text{local}} + [X_c, Y_c, Z_c]^\top \in \mR^{8 \times 3}.
+    \label{eq:corners}
+\end{equation}
+
+\subsubsection{V2 Extension: Depth Statistics}
+\label{sec:3d_v2}
+
+The V2 head (\texttt{\_Mono3DPredictionLayersV2}) augments the input with 5 per-ROI depth statistics $[\text{median}, \text{mean}, \text{std}, \text{min}, \text{max}]$ extracted from pre-computed monocular depth maps (e.g., from DepthAnything~\cite{yang2024depth} or UniDepth~\cite{piccinelli2024unidepth}) within each proposal bounding box:
+\begin{equation}
+    \mat{x}_{\text{3d}}^{\text{v2}} = \bigl[\mat{h} \;\|\; \mat{b}_{\text{2d}} / S \;\|\; \mat{K} / S \;\|\; \mat{d}_{\text{stats}}\bigr] \in \mR^{1041}.
+    \label{eq:3d_v2_input}
+\end{equation}
+V2 adds a LayerNorm after the context FC and uses a slightly deeper initial depth bias ($\op{softplus}(1.5) \approx 1.8$\,m vs.\ $\op{softplus}(1.0) \approx 1.3$\,m for V1), reflecting the indoor Action Genome scene statistics.
+
+
+\subsubsection{Targeted Weight Initialization}
+\label{sec:3d_init}
+
+Default Kaiming-uniform initialization causes 4-order-of-magnitude variance in the initial 3D loss due to:
+\begin{itemize}
+    \item \textbf{Depth}: $\op{softplus}(\text{random})$ can produce arbitrarily large depths $\to$ extreme corner magnitudes.
+    \item \textbf{Dimensions}: $\op{softplus}(\text{random})$ can produce arbitrarily large box sizes.
+    \item \textbf{Uncertainty}: Negative $\mu$ causes $\exp(-\mu)$ to exponentially amplify $\mathcal{L}_{\text{3D}}$.
+\end{itemize}
+We therefore apply targeted initialization:
+\begin{itemize}
+    \item Context FC: Xavier uniform + zero bias.
+    \item Depth: $\mathcal{N}(0, 0.001)$ weights, bias $= 1.0$ (V1) or $1.5$ (V2) $\to$ initial depth $\approx 1.3$--$1.8$\,m.
+    \item Dimensions: $\mathcal{N}(0, 0.001)$ weights, zero bias $\to$ initial size $\approx 0.7$\,m.
+    \item Rotation: bias $= [0, 1]$ $\to$ identity rotation ($\sin=0, \cos=1$).
+    \item Center offset: zero bias $\to$ no initial 2D offset.
+    \item Uncertainty ($\mu$): zero bias $\to$ $\exp(-0) = 1$, no loss amplification.
+\end{itemize}
+
+
+% ------------------------------------------------------------------------------------
+\subsection{Image Transform}
+\label{sec:transform}
+
+The \texttt{\_NoOpRCNNTransform} overrides the standard \texttt{GeneralizedRCNNTransform}: both the \texttt{resize} and \texttt{normalize} methods are identity operations.  All resizing and normalization are performed in the dataset \texttt{\_\_getitem\_\_} to avoid redundant computation during the forward pass.  The transform only handles batching (\texttt{ImageList} construction) with \texttt{size\_divisible} set to the backbone patch size $P$.
+
+
+% ====================================================================================
+\section{OVMono3D Disentangled 3D Loss}
+\label{sec:loss_3d}
+% ====================================================================================
+
+The 3D loss follows the OVMono3D~\cite{zhang2023ovmono3d} formulation, combining uncertainty-weighted supervision with geometry-level disentanglement.
+
+\subsection{Disentangled Attribute Losses}
+\label{sec:disentangled}
+
+Given predicted corners $\hat{\mat{C}} \in \mR^{8 \times 3}$ and ground-truth corners $\mat{C}^* \in \mR^{8 \times 3}$, both are decomposed into interpretable attributes via PCA-based decomposition:
+\begin{equation}
+    (\hat{\mat{p}}, \hat{\mat{d}}, \hat{\theta}) = \op{corners\_to\_attributes}(\hat{\mat{C}}), \quad
+    (\mat{p}^*, \mat{d}^*, \theta^*) = \op{corners\_to\_attributes}(\mat{C}^*),
+    \label{eq:decompose}
+\end{equation}
+where $\mat{p} \in \mR^3$ is the center, $\mat{d} = (l, w, h) \in \mR^3$ are oriented dimensions, and $\theta \in [-\pi, \pi]$ is the yaw angle.
+
+\paragraph{PCA-Based Yaw Estimation.}  The yaw $\theta$ is estimated from the $xy$-plane covariance of the 8 corners via the double-angle formula:
+\begin{equation}
+    \theta = \tfrac{1}{2} \op{atan2}(2 \cdot \op{Cov}_{xy}, \op{Cov}_{xx} - \op{Cov}_{yy}),
+    \label{eq:pca_yaw}
+\end{equation}
+with a degeneracy guard for axis-aligned boxes ($|dy| < 10^{-6}$ and $|dx| < 10^{-6}$).  The length/width ambiguity is resolved by enforcing $l \geq w$ and rotating $\theta$ by $\pi/2$ when swapped.
+
+\paragraph{Disentangled Boxes.}  For each attribute group $a \in \{xy, z, \text{dims}, r\}$, a ``mixed'' box is constructed using the predicted attribute and ground-truth values for all other attributes:
+\begin{alignat}{2}
+    \mathcal{L}_{xy}:& \quad \mat{C}_{xy} &&= \op{build}(\hat{p}_{xy} \| p_z^*, \mat{d}^*, \theta^*), \label{eq:l_xy} \\
+    \mathcal{L}_{z}:& \quad \mat{C}_{z} &&= \op{build}(p_{xy}^* \| \hat{p}_z, \mat{d}^*, \theta^*), \label{eq:l_z} \\
+    \mathcal{L}_{\text{dims}}:& \quad \mat{C}_d &&= \op{build}(\mat{p}^*, \hat{\mat{d}}, \theta^*), \label{eq:l_dims} \\
+    \mathcal{L}_{r}:& \quad \mat{C}_r &&= \op{build}(\mat{p}^*, \mat{d}^*, \hat{\theta}). \label{eq:l_r}
+\end{alignat}
+
+\paragraph{Holistic Loss.}  An additional loss compares the full predicted corners to the full GT corners:
+\begin{equation}
+    \mathcal{L}_{\text{all}} = \op{Chamfer}_{\text{SL1}}(\hat{\mat{C}}, \mat{C}^*).
+    \label{eq:l_all}
+\end{equation}
+
+\subsection{Chamfer Distance with Smooth L1}
+
+All Chamfer computations use Smooth L1 (Huber) distance instead of L2$^2$ for stability during early training, when predictions may be far from GT:
+\begin{equation}
+    \op{Chamfer}_{\text{SL1}}(\mat{P}, \mat{Q}) = \frac{1}{8}\sum_{i=1}^{8}\min_j \op{SL1}(\mat{p}_i, \mat{q}_j) + \frac{1}{8}\sum_{j=1}^{8}\min_i \op{SL1}(\mat{p}_i, \mat{q}_j).
+    \label{eq:chamfer}
+\end{equation}
+
+\paragraph{Scale Normalization.}  All Chamfer values are divided by the GT box diagonal (clamped $\geq 0.5$\,m) to make the loss scale-invariant, preventing small objects from being dominated by large ones.
+
+\subsection{Per-Sample Uncertainty Weighting}
+
+The total per-sample 3D loss combines all disentangled and holistic terms with learned uncertainty:
+\begin{equation}
+    \mathcal{L}_i = \sqrt{2} \cdot \exp(-\hat{\mu}_i) \cdot \mathcal{L}_{\text{3D},i} + \hat{\mu}_i, \quad \text{where} \quad \mathcal{L}_{\text{3D},i} = \mathcal{L}_{xy,i} + \mathcal{L}_{z,i} + \mathcal{L}_{\text{dims},i} + \mathcal{L}_{r,i} + \mathcal{L}_{\text{all},i}.
+    \label{eq:uncertainty}
+\end{equation}
+
+The uncertainty $\hat{\mu}_i$ is STE-clamped (straight-through estimator) to $[-5, 10]$: the forward value is clamped, but gradients flow through unrestricted, allowing out-of-range values to recover.  Per-sample $\mathcal{L}_{\text{3D},i}$ is also clamped at 100 to prevent a single bad box from dominating the batch.
+
+\subsection{Validity Filtering and NaN Guards}
+
+Multiple layers of filtering ensure numerical stability:
+\begin{enumerate}
+    \item \textbf{GT filtering}: Zero-padded ($\|\mat{C}^*\|_1 < 10^{-6}$), non-finite, or extreme-magnitude ($>10^6$) GT boxes are removed.
+    \item \textbf{PCA validity}: Boxes producing NaN/Inf attributes in PCA decomposition (degenerate/coplanar corners) are filtered.
+    \item \textbf{Per-sample Inf/NaN}: Remaining non-finite per-sample losses are excluded from the mean.
+    \item \textbf{Batch-level guard}: If the final loss is non-finite, a zero-valued sentinal (\texttt{torch.tensor(0.0, requires\_grad=True)}) is returned.
+\end{enumerate}
+
+
+% ====================================================================================
+\section{Total Training Loss}
+\label{sec:total_loss}
+% ====================================================================================
+
+The total training loss combines all Faster R-CNN losses and the 3D loss with configurable weights:
+\begin{equation}
+    \mathcal{L}_{\text{total}} = w_{\text{cls}} \mathcal{L}_{\text{cls}} + w_{\text{box}} \mathcal{L}_{\text{box}} + w_{\text{obj}} \mathcal{L}_{\text{rpn-obj}} + w_{\text{rpn}} \mathcal{L}_{\text{rpn-box}} + w_{\text{3d}}(e) \cdot \mathcal{L}_{\text{3D}},
+    \label{eq:total_loss}
+\end{equation}
+where all weights default to 1.0 and $w_{\text{3d}}(e)$ follows a staged ramp schedule (Sec.~\ref{sec:ramp}).
+
+\subsection{Staged 3D Loss Ramp}
+\label{sec:ramp}
+
+To stabilize early training, the 3D loss weight follows a three-phase schedule controlled by $R$ (\texttt{weight\_3d\_ramp\_epochs}, default 5):
+\begin{equation}
+    w_{\text{3d}}(e) = \begin{cases}
+        0 & \text{if } e < R \quad \text{(2D-only phase)}, \\
+        w_{\text{3d}}^{\text{target}} \cdot \frac{e - R}{R} & \text{if } R \leq e < 2R \quad \text{(linear ramp)}, \\
+        w_{\text{3d}}^{\text{target}} & \text{if } e \geq 2R \quad \text{(full weight)}.
+    \end{cases}
+    \label{eq:ramp}
+\end{equation}
+This ensures the 2D detection heads have stabilized before 3D gradients are introduced, preventing the initially large 3D loss from destabilizing the shared representations.
+
+
+% ====================================================================================
+\section{Dataset: \texttt{ActionGenomeDataset3D}}
+\label{sec:dataset}
+% ====================================================================================
+
+\subsection{Data Sources}
+
+The dataset loads from three sources:
+\begin{enumerate}
+    \item \textbf{2D annotations}: Per-frame person and object bounding boxes from the standard Action Genome annotation pickles (37 object classes including background).
+    \item \textbf{3D annotations}: Per-video pickle files containing 8-corner OBB coordinates (\texttt{obb\_corners\_final}) in camera frame, with per-video camera intrinsics $(f_x, f_y, c_x, c_y)$.
+    \item \textbf{Depth maps} (optional, for V2 head): Pre-computed monocular depth from UniDepth (.npz) or DepthAnything (.npy), resized to match target image resolution.
+\end{enumerate}
+
+\paragraph{Label Remapping.}  Compound class names shortened in the OBB generator are mapped back to full dataset names (e.g., \texttt{closet} $\to$ \texttt{closet/cabinet}, \texttt{cup} $\to$ \texttt{cup/glass/bottle}).
+
+\paragraph{3D--2D Matching.}  For each frame, 3D objects are matched to 2D objects by class index using a greedy first-match strategy.  Unmatched objects receive zero-padded 3D corners ($\mat{0}_{8 \times 3}$).
+
+\subsection{Image Preprocessing: Pi3-Compatible Resize}
+\label{sec:pi3_resize}
+
+Images are resized to an aspect-ratio-preserving resolution where both dimensions are multiples of the patch size $P$ and total pixels $\leq$ a configurable limit (default 255,000):
+\begin{align}
+    s &= \sqrt{\text{pixel\_limit} / (W \cdot H)}, \label{eq:scale} \\
+    W_t &= \max(1, \lfloor W \cdot s / P \rceil) \cdot P, \quad H_t = \max(1, \lfloor H \cdot s / P \rceil) \cdot P, \label{eq:target_dims}
+\end{align}
+with an iterative shrink if $W_t \cdot H_t$ still exceeds the limit.  This eliminates the need for padding within the ViT.
+
+\paragraph{DINOv2 Normalization.}  Images are normalized with ImageNet statistics $(\mu = [0.485, 0.456, 0.406], \sigma = [0.229, 0.224, 0.225])$ in the dataset rather than the model transform, avoiding redundant computation.
+
+\paragraph{Intrinsics Scaling.}  Camera intrinsics are scaled proportionally: $f_x' = f_x \cdot W_t / W$, $c_x' = c_x \cdot W_t / W$, etc.
+
+\subsection{Resolution-Bucketed Batch Sampling}
+\label{sec:bucketing}
+
+Since different Action Genome videos have different native resolutions, images are grouped into \emph{resolution buckets} sharing the same $(W_t, H_t)$.  The \texttt{ResolutionBucketBatchSampler} guarantees that all images in a batch have identical dimensions, enabling \texttt{torch.stack} without padding:
+\begin{enumerate}
+    \item \textbf{Per-video bucketing:} One image header is read per video to determine native resolution; all frames in that video share the same target size.
+    \item \textbf{Intra-bucket shuffling:} Within each bucket, frame indices are shuffled.  Frames from \emph{different} videos in the same resolution bucket can appear in the same batch.
+    \item \textbf{Inter-bucket shuffling:} The batch ordering across buckets is shuffled each epoch.
+\end{enumerate}
+This maximizes GPU utilization and gradient diversity while maintaining batch-level homogeneity.
+
+
+% ====================================================================================
+\section{Training Pipeline: \texttt{DinoAGTrainer3D}}
+\label{sec:trainer}
+% ====================================================================================
+
+\subsection{Setup}
+\label{sec:setup}
+
+The training pipeline is orchestrated by the \texttt{DinoAGTrainer3D} class in five phases:
+\begin{enumerate}
+    \item \textbf{Datasets}: Load Action Genome annotations + 3D pickles + resolution bucketing.
+    \item \textbf{DataLoaders}: Resolution-bucketed batch samplers with configurable workers and prefetching.
+    \item \textbf{Model}: Instantiate \texttt{DinoV3Monocular3D} with backbone auto-selected from config.
+    \item \textbf{Optimizer \& Scheduler}: AdamW~\cite{loshchilov2019decoupled} with linear warmup $\to$ cosine annealing.
+    \item \textbf{Accelerator}: Device placement via HuggingFace Accelerate (or \texttt{DummyAccelerator} for single GPU) + speed toggles.
+\end{enumerate}
+
+\subsection{Optimizer and Learning Rate Schedule}
+
+Only trainable parameters are optimized (backbone is frozen):
+\begin{align}
+    \text{Optimizer:}& \quad \op{AdamW}(\theta_{\text{trainable}},\; \text{lr} = 10^{-4},\; \text{wd} = 10^{-3}), \label{eq:optimizer} \\
+    \text{Warmup:}& \quad \text{Linear } 0.1 \cdot \text{lr} \to \text{lr} \text{ over } \lfloor 0.01 \cdot N_{\text{steps}} \rfloor \text{ steps}, \label{eq:warmup} \\
+    \text{Decay:}& \quad \text{Cosine annealing to } 0.1 \cdot \text{lr} \text{ over remaining steps}. \label{eq:cosine}
+\end{align}
+
+\subsection{Mixed Precision and Gradient Stability}
+
+\paragraph{AMP and GradScaler.}  For single-GPU training, \texttt{torch.amp.GradScaler} handles loss scaling for mixed precision.  With Accelerate, the built-in \texttt{autocast} and gradient scaling are used.
+
+\paragraph{Gradient Clipping.}  Global gradient norm is clipped to \texttt{max\_grad\_norm} (default 1.0) after unscaling, preventing exploding gradients from the 3D loss during early ramp-up.
+
+\paragraph{NaN/Inf Skip.}  If the total loss is non-finite after aggregation, the batch is skipped: gradients are zeroed and the optimizer step is not taken, preventing optimizer state corruption.
+
+\subsection{Speed Toggles}
+
+The following CUDA optimizations are enabled:
+\begin{itemize}
+    \item \texttt{cudnn.benchmark = True}: Auto-tune convolution algorithms.
+    \item \texttt{cuda.matmul.allow\_tf32 = True} and \texttt{cudnn.allow\_tf32 = True}: TF32 for matrix multiplications.
+    \item Flash Attention and memory-efficient SDP where available.
+    \item \texttt{pin\_memory=True} with \texttt{non\_blocking=True} data transfer.
+    \item \texttt{persistent\_workers=True} with configurable prefetch factor.
+\end{itemize}
+
+\subsection{Checkpointing}
+
+End-of-epoch checkpoints save:
+\begin{itemize}
+    \item Model state dict (via \texttt{accelerator.unwrap\_model}).
+    \item Optimizer state dict (Adam momentum buffers).
+    \item Scheduler state dict.
+    \item Epoch number and current learning rate.
+\end{itemize}
+
+Resume loads model $\to$ scheduler $\to$ optimizer sequentially with intermediate \texttt{gc.collect()} and \texttt{cuda.empty\_cache()} to prevent double-memory peak.
+
+\subsection{Logging}
+
+\paragraph{Weights \& Biases.}  Per-iteration losses (\texttt{iter/total\_loss}, \texttt{iter/cls\_loss}, \texttt{iter/box\_loss}, \texttt{iter/object\_loss}, \texttt{iter/rpn\_loss}, \texttt{iter/3d\_loss}, \texttt{iter/3d\_loss\_raw}) and learning rate are logged every \texttt{iter\_log\_every} steps.  End-of-epoch metrics include all training losses, 2D COCO mAP, and 3D metrics.
+
+\paragraph{Local JSON Logger.}  All metrics are also persisted to \texttt{train\_log.json} via the \texttt{LocalLogger} utility, with automatic corruption recovery (JSON corruption from mid-write crashes is backed up).
+
+
+% ====================================================================================
+\section{Evaluation}
+\label{sec:evaluation}
+% ====================================================================================
+
+Evaluation is performed in a \textbf{single fused forward pass} over the full test set via \texttt{evaluate\_2d\_and\_3d\_fused}, simultaneously computing 2D and 3D metrics.
+
+\subsection{2D Evaluation: COCO-Style mAP}
+\label{sec:eval_2d}
+
+We use the \texttt{torchmetrics.MeanAveragePrecision} implementation with standard COCO settings:
+\begin{itemize}
+    \item \textbf{IoU thresholds}: $[0.50, 0.55, \ldots, 0.95]$ (10 thresholds).
+    \item \textbf{Reported metrics}: mAP (averaged over all thresholds), mAP@50, mAP@75, and per-class AP.
+\end{itemize}
+
+\paragraph{Diagnostic Precision/Recall.}  A simpler greedy-matching evaluation at a fixed IoU threshold (default 0.5) provides per-class TP/FP/FN counts, useful for diagnosing class-level detection failures.
+
+\subsection{3D Evaluation}
+\label{sec:eval_3d}
+
+3D metrics are computed on \emph{matched} prediction--GT pairs.  Matching is performed via 2D IoU: for each GT box with a valid (non-zero) 3D annotation, the highest-IoU prediction with the same class label and IoU $\geq 0.5$ is selected (greedy, without replacement).
+
+\subsubsection{Box-Level Metrics}
+
+\begin{itemize}
+    \item \textbf{Chamfer distance}: Bidirectional Chamfer using L2$^2$: $\frac{1}{8}\sum_i \min_j \|\mat{p}_i - \mat{q}_j\|^2 + \frac{1}{8}\sum_j \min_i \|\mat{p}_i - \mat{q}_j\|^2$.
+    \item \textbf{Corner L2}: Mean L2 distance over the 8 corners (one-to-one, assumed consistent ordering): $\frac{1}{8}\sum_{i=1}^{8}\|\hat{\mat{c}}_i - \mat{c}_i^*\|_2$.
+    \item \textbf{3D IoU (OBB)}: Oriented 3D IoU via polygon clipping in the $xy$-plane (Sutherland--Hodgman~\cite{sutherland1974reentrant}) combined with $z$-axis overlap:
+    \begin{equation}
+        \op{IoU}_{3D} = \frac{V_{\cap}}{V_1 + V_2 - V_{\cap}}, \quad V_{\cap} = A_{xy}^{\cap} \cdot \Delta z_{\cap}.
+        \label{eq:iou3d}
+    \end{equation}
+    The bottom face is extracted as the 4 lowest-$z$ corners, projected to $xy$, and wrapped in a convex hull.
+\end{itemize}
+
+\subsubsection{Attribute-Level Metrics}
+
+\begin{itemize}
+    \item \textbf{Center L2}: $\|\hat{\mat{p}} - \mat{p}^*\|_2$ (meters).
+    \item \textbf{Dimensions L1}: Mean absolute difference of axis-aligned extents: $\frac{1}{3}\sum_{d \in \{x,y,z\}} |\hat{e}_d - e_d^*|$ (meters).
+    \item \textbf{Rotation error}: Wrapped angular difference from the first edge vector: $|\op{atan2}(\sin(\hat{\theta} - \theta^*), \cos(\hat{\theta} - \theta^*))|$ (degrees).
+\end{itemize}
+
+\subsubsection{Hit Rates}
+
+IoU hit rates at thresholds 50\% and 75\% are reported as the fraction of matched pairs exceeding the threshold:
+\begin{equation}
+    \text{Hit@}k = \frac{1}{M}\sum_{i=1}^{M}\mathbb{1}[\op{IoU}_{3D,i} \geq k/100].
+    \label{eq:hit_rate}
+\end{equation}
+These are \emph{hit rates}, not mAP---they measure the quality of 3D regression for correctly detected objects, not the recall-precision trade-off.
+
+
+% ====================================================================================
+\section{Configuration Reference}
+\label{sec:config}
+% ====================================================================================
+
+All hyperparameters are specified via a YAML configuration file with CLI overrides.  Key parameters are summarized in Table~\ref{tab:config}.
+
+\begin{table}[h]
+\centering
+\caption{Key training configuration parameters.}
+\label{tab:config}
+\small
+\begin{tabular}{@{}llp{6cm}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{model} & \texttt{v2} & Backbone variant (Table~\ref{tab:backbone_variants}) \\
+\texttt{lr} & $10^{-4}$ & Peak learning rate \\
+\texttt{weight\_decay} & $10^{-3}$ & AdamW weight decay \\
+\texttt{batch\_size} & 128 & Per-GPU batch size \\
+\texttt{epochs} & 70 & Total training epochs \\
+\texttt{max\_grad\_norm} & 1.0 & Gradient clipping threshold \\
+\texttt{warmup\_fraction} & 0.01 & Fraction of steps for LR warmup \\
+\texttt{head\_3d\_mode} & \texttt{unified} & 3D head integration mode \\
+\texttt{head\_3d\_version} & \texttt{v1} & 3D head architecture \\
+\texttt{max\_3d\_proposals} & 64 & Cap on positive proposals for 3D loss \\
+\texttt{weight\_3d} & 1.0 & Target 3D loss weight \\
+\texttt{weight\_3d\_ramp\_epochs} & 5 & Staged ramp duration ($R$) \\
+\texttt{pixel\_limit} & 255,000 & Max pixels for Pi3 resize \\
+\texttt{patch\_size} & 14 & Must match backbone \\
+\texttt{input\_reference\_size} & 1000 & Normalization divisor for pixel inputs \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ====================================================================================
+\section{Numerical Stability and Engineering}
+\label{sec:engineering}
+% ====================================================================================
+
+\paragraph{Float32 for 3D Loss.}  All 3D loss computation is wrapped in \texttt{torch.amp.autocast(enabled=False)} to force float32, because Chamfer squared distances on world coordinates overflow float16.
+
+\paragraph{Proposal Subsampling.}  The 3D loss operates on at most \texttt{max\_3d\_proposals} (default 64) positive proposals per batch, randomly subsampled.  This caps memory since OVMono3D creates a $5\times$ expansion for disentangled supervision.
+
+\paragraph{Fast Image Dimension Reading.}  Resolution bucketing reads only JPEG/PNG headers ($\leq 32$ bytes) using \texttt{struct.unpack} on SOF/IHDR markers, avoiding full image decode for the $\sim\!7$K per-video dimension queries.
+
+\paragraph{Numpy Compatibility.}  A custom unpickler handles numpy 2.x $\to$ 1.x compatibility (\texttt{numpy.\_core} $\to$ \texttt{numpy.core}) for annotation pickles.
+
+\paragraph{Multiprocessing.}  The sharing strategy is set to \texttt{file\_system} to avoid the default \texttt{/dev/shm} open-file limit on Linux servers.
+
+
+\bibliographystyle{splncs04}
+\bibliography{main}
+
+\end{document}
