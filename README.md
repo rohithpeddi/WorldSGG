@@ -52,11 +52,15 @@ An overview of the ActionGenome4D dataset, which provides rich 4D annotations fo
 ![Manual Relationship Correction Interface](analysis/assets/WorldSGGManualRelCorrection.png)
 The Manual Relationship Correction interface allows for human-in-the-loop review and fine-grained modification of generated relationships, ensuring high-quality ground-truth annotations.
 
-### 5. WSGG Model Pipeline
+### 5. Manual 3D Floor Correction
+![Manual 3D Floor Correction Interface](analysis/assets/WorldSGGManual3DFloorCorrection.png)
+The Manual 3D Floor Correction tool provides a 3D annotation interface for aligning reconstructed point clouds with the ground plane. Through a multi-step process of rotation and translation adjustments, annotators correct the floor alignment to ensure accurate world-frame coordinate systems for all objects in the scene.
+
+### 6. WSGG Model Pipeline
 ![WSGG Model Pipeline Architecture](analysis/assets/WorldSGGWSGG.png)
 The WorldSGG architecture includes specialized encoders (structural, motion, camera pose), unobserved object representations (such as PWG, MWAE, and 4DST variants), and spatio-temporal decoders to predict complex object relationships in 4D.
 
-### 6. MLLM Evaluation Pipeline
+### 7. MLLM Evaluation Pipeline
 ![MLLM Evaluation Pipeline](analysis/assets/WorldSGGMLLMPipeline.png)
 The MLLM Pipeline utilizes Vision-Language Models to generate coarse event graphs and employs Large Language Models powered by Graph RAG to infer continuous world scene graphs from video segments.
 
