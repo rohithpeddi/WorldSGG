@@ -3,7 +3,7 @@
 </h1>
 
 <p align=center>  
-  Rohith Peddi, Shravan, Saurabh, Samarth, Yu Xiang, Parag Singla, Vibhav Gogate
+  Rohith Peddi, Shravan Shanmugam, Saurabh, Likhitha Pallapothula, Yu Xiang, Parag Singla, Vibhav Gogate
 </p>
 
 <p align="center">
