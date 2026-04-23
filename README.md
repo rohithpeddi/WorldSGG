@@ -63,74 +63,62 @@ The **4D Scene Pipeline** processes monocular video to construct a comprehensive
 ---
 
 ### 3. ActionGenome4D Dataset
-![Dataset Picture](analysis/assets/WorldSGGDatasetPicture.png)
 
 An overview of the **ActionGenome4D** dataset, which provides rich 4D annotations for objects and their dynamic interactions over time across a variety of indoor environments.
 
-<table>
-  <tr>
-    <td align="center"><strong>Human Mesh Determination</strong></td>
-    <td align="center"><strong>Static Scene Reconstruction</strong></td>
-  </tr>
-  <tr>
-    <td align="center">
-      <img src="analysis/assets/ag4D_samples/HumanMesh_Determination_0DJ6R_It2.gif" width="400" alt="Human Mesh Determination">
-      <br><sub>Human mesh estimation and determination for scene <code>0DJ6R</code></sub>
-    </td>
-    <td align="center">
-      <img src="analysis/assets/ag4D_samples/StaticScene_0DJ6R_Pi3_Refined_Rectangular_Masks_Removed_blacks.gif" width="400" alt="Static Scene Reconstruction">
-      <br><sub>Static scene reconstruction with refined masks for <code>0DJ6R</code></sub>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <strong>Human Mesh Determination</strong><br>
+  <img src="analysis/assets/ag4D_samples/HumanMesh_Determination_0DJ6R_It2.gif" width="800" alt="Human Mesh Determination"><br>
+  <sub>Human mesh estimation and determination for scene <code>0DJ6R</code></sub>
+</p>
+
+<p align="center">
+  <strong>Static Scene Reconstruction</strong><br>
+  <img src="analysis/assets/ag4D_samples/StaticScene_0DJ6R_Pi3_Refined_Rectangular_Masks_Removed_blacks.gif" width="800" alt="Static Scene Reconstruction"><br>
+  <sub>Static scene reconstruction with refined masks for <code>0DJ6R</code></sub>
+</p>
+
+![Dataset Picture](analysis/assets/WorldSGGDatasetPicture.png)
 
 ---
 
 ### 4. Manual Relationship Correction
-![Manual Relationship Correction Interface](analysis/assets/WorldSGGManualRelCorrection.png)
 
 The **Manual Relationship Correction** interface allows for human-in-the-loop review and fine-grained modification of generated relationships, ensuring high-quality ground-truth annotations.
 
-<table>
-  <tr>
-    <td align="center"><strong>Scene Graph Corrector — Part 1</strong></td>
-    <td align="center"><strong>Scene Graph Corrector — Part 2</strong></td>
-  </tr>
-  <tr>
-    <td align="center">
-      <img src="analysis/assets/world_rel_tool/WorldSceneGraphCorrectorFinal-2.gif" width="400" alt="Scene Graph Corrector Part 1">
-      <br><sub>World scene graph relationship correction workflow</sub>
-    </td>
-    <td align="center">
-      <img src="analysis/assets/world_rel_tool/WorldSceneGraphCorrectorFinal-3.gif" width="400" alt="Scene Graph Corrector Part 2">
-      <br><sub>Continued scene graph correction and validation</sub>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <strong>Scene Graph Corrector — Part 1</strong><br>
+  <img src="analysis/assets/world_rel_tool/WorldSceneGraphCorrectorFinal-2.gif" width="800" alt="Scene Graph Corrector Part 1"><br>
+  <sub>World scene graph relationship correction workflow</sub>
+</p>
+
+<p align="center">
+  <strong>Scene Graph Corrector — Part 2</strong><br>
+  <img src="analysis/assets/world_rel_tool/WorldSceneGraphCorrectorFinal-3.gif" width="800" alt="Scene Graph Corrector Part 2"><br>
+  <sub>Continued scene graph correction and validation</sub>
+</p>
+
+![Manual Relationship Correction Interface](analysis/assets/WorldSGGManualRelCorrection.png)
 
 ---
 
 ### 5. Manual 3D Floor Correction
-![Manual 3D Floor Correction Interface](analysis/assets/WorldSGGManual3DFloorCorrection.png)
 
 The **Manual 3D Floor Correction** tool provides a 3D annotation interface for aligning reconstructed point clouds with the ground plane. Through a multi-step process of rotation and translation adjustments, annotators correct the floor alignment to ensure accurate world-frame coordinate systems for all objects in the scene.
 
-<table>
-  <tr>
-    <td align="center"><strong>Monocular 3D Annotations Corrections</strong></td>
-    <td align="center"><strong>World Annotations Corrections</strong></td>
-  </tr>
-  <tr>
-    <td align="center">
-      <img src="analysis/assets/world_geom_tool/Monocular3DAnnotationsCorrections_final.gif" width="400" alt="Monocular 3D Annotations Corrections">
-      <br><sub>Correcting monocular 3D bounding box annotations</sub>
-    </td>
-    <td align="center">
-      <img src="analysis/assets/world_geom_tool/WorldAnnotationsCorrections_3.gif" width="400" alt="World Annotations Corrections">
-      <br><sub>Correcting world-frame geometry annotations</sub>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <strong>Monocular 3D Annotations Corrections</strong><br>
+  <img src="analysis/assets/world_geom_tool/Monocular3DAnnotationsCorrections_final.gif" width="800" alt="Monocular 3D Annotations Corrections"><br>
+  <sub>Correcting monocular 3D bounding box annotations</sub>
+</p>
+
+<p align="center">
+  <strong>World Annotations Corrections</strong><br>
+  <img src="analysis/assets/world_geom_tool/WorldAnnotationsCorrections_3.gif" width="800" alt="World Annotations Corrections"><br>
+  <sub>Correcting world-frame geometry annotations</sub>
+</p>
+
+![Manual 3D Floor Correction Interface](analysis/assets/WorldSGGManual3DFloorCorrection.png)
 
 ---
 
