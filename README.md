@@ -60,6 +60,8 @@ The **World Scene Graph Generation (WSGG)** task involves predicting 3D bounding
 
 The **4D Scene Pipeline** processes monocular video to construct a comprehensive 4D representation of the environment, integrating motion features, camera pose, 3D object detection, tracking, and metric space projection of objects in the scene.
 
+Picture generated using ChatGPT
+
 ---
 
 ### 3. ActionGenome4D Dataset
@@ -73,9 +75,9 @@ An overview of the **ActionGenome4D** dataset, which provides rich 4D annotation
 </p>
 
 <p align="center">
-  <strong>Static Scene Reconstruction</strong><br>
+  <strong>4D Object Reconstruction</strong><br>
   <img src="analysis/assets/ag4D_samples/StaticScene_0DJ6R_Pi3_Refined_Rectangular_Masks_Removed_blacks.gif" width="800" alt="Static Scene Reconstruction"><br>
-  <sub>Static scene reconstruction with refined masks for <code>0DJ6R</code></sub>
+  <sub>4D object reconstruction for scene <code>0DJ6R</code></sub>
 </p>
 
 ![Dataset Picture](analysis/assets/WorldSGGDatasetPicture.png)
@@ -89,13 +91,13 @@ The **Manual Relationship Correction** interface allows for human-in-the-loop re
 <p align="center">
   <strong>Scene Graph Corrector — Part 1</strong><br>
   <img src="analysis/assets/world_rel_tool/WorldSceneGraphCorrectorFinal-2.gif" width="800" alt="Scene Graph Corrector Part 1"><br>
-  <sub>World scene graph relationship correction workflow</sub>
+  <sub>World frame relationship annotation workflow</sub>
 </p>
 
 <p align="center">
   <strong>Scene Graph Corrector — Part 2</strong><br>
   <img src="analysis/assets/world_rel_tool/WorldSceneGraphCorrectorFinal-3.gif" width="800" alt="Scene Graph Corrector Part 2"><br>
-  <sub>Continued scene graph correction and validation</sub>
+  <sub>Continued world frame relationship annotation</sub>
 </p>
 
 ![Manual Relationship Correction Interface](analysis/assets/WorldSGGManualRelCorrection.png)
@@ -113,9 +115,9 @@ The **Manual 3D Floor Correction** tool provides a 3D annotation interface for a
 </p>
 
 <p align="center">
-  <strong>World Annotations Corrections</strong><br>
+  <strong>3D annotations Corrections</strong><br>
   <img src="analysis/assets/world_geom_tool/WorldAnnotationsCorrections_3.gif" width="800" alt="World Annotations Corrections"><br>
-  <sub>Correcting world-frame geometry annotations</sub>
+  <sub>Correcting 3D annotations</sub>
 </p>
 
 ![Manual 3D Floor Correction Interface](analysis/assets/WorldSGGManual3DFloorCorrection.png)
