@@ -74,15 +74,11 @@ An overview of the **ActionGenome4D** dataset, which provides rich 4D annotation
   </tr>
   <tr>
     <td align="center">
-      <video src="analysis/assets/ag4D_samples/HumanMesh_Determination_0DJ6R_It2.mp4" width="400" controls>
-        Your browser does not support the video tag.
-      </video>
+      <img src="analysis/assets/ag4D_samples/HumanMesh_Determination_0DJ6R_It2.gif" width="400" alt="Human Mesh Determination">
       <br><sub>Human mesh estimation and determination for scene <code>0DJ6R</code></sub>
     </td>
     <td align="center">
-      <video src="analysis/assets/ag4D_samples/StaticScene_0DJ6R_Pi3_Refined_Rectangular_Masks_Removed_blacks.mp4" width="400" controls>
-        Your browser does not support the video tag.
-      </video>
+      <img src="analysis/assets/ag4D_samples/StaticScene_0DJ6R_Pi3_Refined_Rectangular_Masks_Removed_blacks.gif" width="400" alt="Static Scene Reconstruction">
       <br><sub>Static scene reconstruction with refined masks for <code>0DJ6R</code></sub>
     </td>
   </tr>
@@ -102,15 +98,11 @@ The **Manual Relationship Correction** interface allows for human-in-the-loop re
   </tr>
   <tr>
     <td align="center">
-      <video src="analysis/assets/world_rel_tool/WorldSceneGraphCorrectorFinal-2.mp4" width="400" controls>
-        Your browser does not support the video tag.
-      </video>
+      <img src="analysis/assets/world_rel_tool/WorldSceneGraphCorrectorFinal-2.gif" width="400" alt="Scene Graph Corrector Part 1">
       <br><sub>World scene graph relationship correction workflow</sub>
     </td>
     <td align="center">
-      <video src="analysis/assets/world_rel_tool/WorldSceneGraphCorrectorFinal-3.mp4" width="400" controls>
-        Your browser does not support the video tag.
-      </video>
+      <img src="analysis/assets/world_rel_tool/WorldSceneGraphCorrectorFinal-3.gif" width="400" alt="Scene Graph Corrector Part 2">
       <br><sub>Continued scene graph correction and validation</sub>
     </td>
   </tr>
@@ -130,15 +122,11 @@ The **Manual 3D Floor Correction** tool provides a 3D annotation interface for a
   </tr>
   <tr>
     <td align="center">
-      <video src="analysis/assets/world_geom_tool/Monocular3DAnnotationsCorrections_final.mp4" width="400" controls>
-        Your browser does not support the video tag.
-      </video>
+      <img src="analysis/assets/world_geom_tool/Monocular3DAnnotationsCorrections_final.gif" width="400" alt="Monocular 3D Annotations Corrections">
       <br><sub>Correcting monocular 3D bounding box annotations</sub>
     </td>
     <td align="center">
-      <video src="analysis/assets/world_geom_tool/WorldAnnotationsCorrections_3.mp4" width="400" controls>
-        Your browser does not support the video tag.
-      </video>
+      <img src="analysis/assets/world_geom_tool/WorldAnnotationsCorrections_3.gif" width="400" alt="World Annotations Corrections">
       <br><sub>Correcting world-frame geometry annotations</sub>
     </td>
   </tr>
