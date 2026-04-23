@@ -56,9 +56,9 @@ The **World Scene Graph Generation (WSGG)** task involves predicting 3D bounding
 ---
 
 ### 2. 4D Scene Pipeline
-![4D Scene Pipeline](analysis/assets/WorldSGG4DScenePipeline.png)
+![4D Scene Pipeline](analysis/assets/4DScenePipeline.png)
 
-The **4D Scene Pipeline** processes monocular video to construct a comprehensive 4D representation of the environment, integrating 3D object detection, tracking, and metric space projection across time.
+The **4D Scene Pipeline** processes monocular video to construct a comprehensive 4D representation of the environment, integrating motion features, camera pose, 3D object detection, tracking, and metric space projection of objects in the scene.
 
 ---
 
