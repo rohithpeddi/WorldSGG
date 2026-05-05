@@ -48,6 +48,7 @@ if _ROOT not in sys.path:
 
 from ..datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
 from ..models.dino_mono_3d import DinoV3Monocular3D
+from ..models.resnet_mono_3d import ResNetMonocular3D
 from ..utils.cuda_utils import clear_cuda_cache_for_current_process
 
 
@@ -439,14 +440,18 @@ def main():
     parser.add_argument("--no_precision_recall", action="store_true",
                         help="Skip simple precision/recall diagnostic")
     parser.add_argument("--model", type=str, default="v3l",
-                        help="Model variant: v2, v2l, v3l")
+                        help="Model variant: v2, v2l, v3l (used for DINOv2/v3 backbones)")
+    parser.add_argument("--backbone", type=str, default="dino_v3",
+                        choices=["dino_v2", "dino_v3", "resnet50"],
+                        help="Backbone architecture")
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
     # ── Dataset ──
-    kwargs = {"phase": "test", "target_size": args.target_size}
+    use_patch = (args.backbone != "resnet50")
+    kwargs = {"phase": "test", "target_size": args.target_size, "use_patch_alignment": use_patch}
     if args.world_3d_annotations_path:
         kwargs["world_3d_annotations_path"] = args.world_3d_annotations_path
     test_dataset = ActionGenomeDataset3D(args.data_path, **kwargs)
@@ -469,7 +474,10 @@ def main():
     num_classes = len(ds.object_classes) if hasattr(ds, "object_classes") else 37
     class_names = list(ds.object_classes) if hasattr(ds, "object_classes") else [f"class_{i}" for i in range(num_classes)]
 
-    model = DinoV3Monocular3D(num_classes=num_classes, pretrained=False, model=args.model)
+    if args.backbone == "resnet50":
+        model = ResNetMonocular3D(num_classes=num_classes, pretrained=False)
+    else:
+        model = DinoV3Monocular3D(num_classes=num_classes, pretrained=False, model=args.model)
     model.to(device)
     model.eval()
 
@@ -485,7 +493,7 @@ def main():
     else:
         model.load_state_dict(state, strict=True)
     print(f"✓ Loaded checkpoint: {ckpt_path}")
-    print(f"  Model: {args.model}  |  Classes: {num_classes}  |  Device: {device}")
+    print(f"  Backbone: {args.backbone}  |  Model: {args.model}  |  Classes: {num_classes}  |  Device: {device}")
     print(f"  Test samples: {len(test_dataset)}")
     print()
 

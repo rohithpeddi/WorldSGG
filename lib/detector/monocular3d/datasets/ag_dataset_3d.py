@@ -105,6 +105,7 @@ class ActionGenomeDataset3D(Dataset):
             patch_size: int = 14,
             world_3d_annotations_path: Optional[str] = "/data/rohith/ag/world_annotations/monocular3d_bbox_annotations",
             depth_maps_dir: Optional[str] = None,
+            use_patch_alignment: bool = True,
     ):
         self.data_path = data_path
         self.phase = phase
@@ -113,7 +114,8 @@ class ActionGenomeDataset3D(Dataset):
         self.filter_small_box = filter_small_box
         self.pixel_limit = pixel_limit
         self.target_size = target_size  # If set, forces square resize (legacy)
-        self.patch_size = patch_size    # Must match backbone patch_size
+        self.patch_size = patch_size    # Must match backbone patch_size (ViT) or 32 (ResNet)
+        self.use_patch_alignment = use_patch_alignment  # False → use div-32 for ResNet
         self.frames_path = os.path.join(self.data_path, const.FRAMES)
         self.world_3d_annotations = world_3d_annotations_path
 
@@ -314,11 +316,13 @@ class ActionGenomeDataset3D(Dataset):
 
         # Read one sample frame per video to get native resolution
         video_target_size: Dict[str, Tuple[int, int]] = {}
+        # Effective patch_size: if not using ViT patch alignment, use 32 (ResNet conv divisibility)
+        effective_patch = self.patch_size if self.use_patch_alignment else 32
         for video_id, indices in tqdm(video_to_indices.items(), desc=f"  [{self.phase}] Reading resolutions", ascii=True):
             sample_frame = self.frame_names[indices[0]]
             img_path = os.path.join(self.frames_path, self.samples[sample_frame]['filename'])
             orig_w, orig_h = _read_image_dims_fast(img_path)
-            tw, th = self._compute_target_size(orig_w, orig_h, self.pixel_limit, self.patch_size)
+            tw, th = self._compute_target_size(orig_w, orig_h, self.pixel_limit, effective_patch)
             video_target_size[video_id] = (tw, th)
 
         # Assign target sizes to all frames and build resolution buckets

@@ -1,6 +1,6 @@
 # Monocular 3D Object Detection
 
-DINOv2/DINOv3-based monocular 3D object detector trained on Action Genome. Combines a frozen ViT backbone with a SimpleFPN, Faster R-CNN (2D detection), and a factorized 3D head for predicting 8-corner 3D bounding boxes from monocular images.
+Multi-backbone monocular 3D object detector trained on Action Genome. Supports three configurable backbone architectures (DINOv2, DINOv3, ResNet50-FPN), each combined with Faster R-CNN (2D detection) and a factorized 3D head for predicting 8-corner 3D bounding boxes from monocular images.
 
 ## Directory Structure
 
@@ -9,13 +9,14 @@ monocular3d/
 ├── datasets/                   # ActionGenomeDataset3D + collate_fn
 ├── evaluation/                 # 2D COCO mAP + 3D metrics (fused single-pass)
 ├── losses/                     # OVMono3D disentangled 3D loss
-├── models/                     # DinoV3Monocular3D model (backbone + FPN + RCNN + 3D head)
+├── models/
+│   ├── dino_mono_3d.py         # DINOv2/v3 backbone + SimpleFPN + RCNN + 3D head
+│   └── resnet_mono_3d.py       # ResNet50-FPN backbone + RCNN + 3D head
 ├── utils/                      # JSON logger
 ├── train.py                    # Entry point (YAML config + CLI overrides)
 └── trainer.py                  # DinoAGTrainer3D (training loop, evaluation, checkpointing)
 
-# Training configs are in the project root configs/ folder:
-# configs/default_rohith.yaml, configs/dinov2b_saurabh_separate.yaml, etc.
+# Training configs are in the project root configs/detector/ folder
 ```
 
 ## Prerequisites
@@ -68,6 +69,28 @@ ulimit -n 65536
 
 ---
 
+## Backbone Options
+
+All three backbones share the same 3D head architecture and can be selected via the `backbone` config field:
+
+| Config Key | Backbone | Params | FPN | Pretrained On | Fine-tuned | `backbone` |
+|-----------|----------|--------|-----|---------------|------------|------------|
+| DINOv2 ViT-B | `v2` | 86M | Custom SimpleFPN | ImageNet | FPN+RPN+ROI+3D only | `dino_v2` |
+| DINOv2 ViT-L | `v2l` | 304M | Custom SimpleFPN | ImageNet | FPN+RPN+ROI+3D only | `dino_v2` |
+| DINOv3 ViT-L | `v3l` | 304M | Custom SimpleFPN | LVD-1689M | FPN+RPN+ROI+3D only | `dino_v3` |
+| ResNet50-FPN-V2 | — | 26M | torchvision FPN | COCO (detection) | **Full model** | `resnet50` |
+
+### Architecture Diagram
+
+```
+DINOv2/v3 path:  Image → Dataset(resize+norm) → _NoOpTransform → ViT(frozen) → SimpleFPN → RPN → ROI+3D → Detections
+ResNet50 path:   Image → Dataset(resize+norm) → _NoOpTransform → ResNet+FPN(trainable) → RPN → ROI+3D → Detections
+```
+
+The 3D head (Mono3DRoIHeads / SeparateMono3DHead) and loss function (OVMono3D) are identical across all backbones.
+
+---
+
 ## Training
 
 ### Basic Usage
@@ -75,18 +98,28 @@ ulimit -n 65536
 ```bash
 cd <project_root>
 
-# Train with a specific config
-python -m lib.detector.monocular3d.train --config configs/default_rohith.yaml
+# ResNet50-FPN training (COCO-pretrained, fully fine-tuned)
+python -m lib.detector.monocular3d.train --config configs/detector/resnet50_unified_v1.yaml
+
+# DINOv2-Base training
+python -m lib.detector.monocular3d.train --config configs/detector/dinov2_saurabh_v1.yaml
+
+# DINOv3-Large training
+python -m lib.detector.monocular3d.train --config configs/detector/dinov3l_saurabh_v1.yaml
 ```
 
 ### Available Configs
 
-| Config | Backbone | Params | W&B Project | Server |
-|--------|----------|--------|-------------|--------|
-| `default_rohith.yaml` | DINOv2 ViT-B | 86M | `DINOv2-Object-Detector-AG-3D` | Rohith |
-| `dinov2b_saurabh.yaml` | DINOv2 ViT-B | 86M | `DINOv2-base-Object-Detector-AG-3D` | Saurabh |
-| `dinov2l_saurabh.yaml` | DINOv2 ViT-L | 304M | `DINOv2-large-Object-Detector-AG-3D` | Saurabh |
-| `dinov3l_saurabh.yaml` | DINOv3 ViT-L | 304M | `DINOv3-large-Object-Detector-AG-3D` | Saurabh |
+| Config | Backbone | 3D Head | W&B Project |
+|--------|----------|---------|-------------|
+| `dinov2_saurabh_v1.yaml` | DINOv2 ViT-B | Unified | `DINOv2-Object-Detector-AG-3D` |
+| `dinov2_saurabh_separate_v1.yaml` | DINOv2 ViT-B | Separate | `DINOv2-separate-Object-Detector-AG-3D` |
+| `dinov2l_saurabh_v1.yaml` | DINOv2 ViT-L | Unified | `DINOv2-large-Object-Detector-AG-3D` |
+| `dinov2l_saurabh_separate_v1.yaml` | DINOv2 ViT-L | Separate | `DINOv2-large-Object-Detector-AG-3D` |
+| `dinov3l_saurabh_v1.yaml` | DINOv3 ViT-L | Unified | `DINOv3-large-Object-Detector-AG-3D` |
+| `dinov3l_saurabh_separate_v1.yaml` | DINOv3 ViT-L | Separate | `DINOv3-large-Object-Detector-AG-3D` |
+| `resnet50_unified_v1.yaml` | ResNet50-FPN | Unified | `ResNet50-Object-Detector-AG-3D` |
+| `resnet50_separate_v1.yaml` | ResNet50-FPN | Separate | `ResNet50-separate-Object-Detector-AG-3D` |
 
 ### CLI Overrides
 
@@ -95,31 +128,58 @@ Any YAML config field can be overridden via CLI:
 ```bash
 # Change learning rate and batch size
 python -m lib.detector.monocular3d.train \
-    --config configs/default_rohith.yaml \
+    --config configs/detector/resnet50_unified_v1.yaml \
     --lr 5e-5 \
     --batch_size 64
 
+# Switch backbone via CLI override
+python -m lib.detector.monocular3d.train \
+    --config configs/detector/dinov2_saurabh_v1.yaml \
+    --backbone resnet50 \
+    --lr 5e-5
+
 # Disable W&B for a quick test
 python -m lib.detector.monocular3d.train \
-    --config configs/default_rohith.yaml \
+    --config configs/detector/resnet50_unified_v1.yaml \
     --use_wandb false \
     --epochs 2
-
-# Use a different backbone
-python -m lib.detector.monocular3d.train \
-    --config configs/default_rohith.yaml \
-    --model v2l
 ```
 
 ### Resume from Checkpoint
 
 ```bash
 python -m lib.detector.monocular3d.train \
-    --config configs/default_rohith.yaml \
+    --config configs/detector/resnet50_unified_v1.yaml \
     --ckpt checkpoint_10
 ```
 
 The checkpoint folder is located at `<save_path>/<experiment_name>/checkpoint_<epoch>/`.
+
+---
+
+## Training Methodology
+
+### DINOv2/v3 Training
+
+- Backbone is **frozen** (ViT weights from HuggingFace). Only the custom SimpleFPN, RPN, ROI heads, and 3D head are trained.
+- ~9M trainable parameters.
+- Learning rate: `1e-4`.
+- Images resized to `pixel_limit` with patch-size-aligned dimensions (multiples of 14 or 16).
+
+### ResNet50-FPN Training
+
+- Full model is **trainable** (COCO-pretrained ResNet50 body + FPN + RPN + ROI heads + 3D head).
+- ~26M trainable parameters.
+- Learning rate: `5e-5` (lower for fine-tuning COCO-pretrained weights).
+- Images resized to `pixel_limit` with div-32-aligned dimensions.
+
+### Training Schedule (Staged 3D Ramp)
+
+With `weight_3d_ramp_epochs=5`:
+
+1. **Epochs 1–5**: 2D-only training (3D loss weight = 0). Stabilizes 2D detection.
+2. **Epochs 6–10**: 3D loss ramps linearly from 0 → `weight_3d`. Joint 2D + 3D training begins.
+3. **Epochs 11+**: Full joint training with stable 3D loss weight.
 
 ---
 
@@ -129,24 +189,49 @@ When `use_accelerator: true` is set in the config:
 
 ```bash
 # Single GPU (default)
-python -m lib.detector.monocular3d.train --config configs/default_rohith.yaml
+python -m lib.detector.monocular3d.train --config configs/detector/resnet50_unified_v1.yaml
 
 # Multi-GPU with accelerate
 accelerate launch --num_processes 4 \
     -m lib.detector.monocular3d.train \
-    --config configs/default_rohith.yaml
+    --config configs/detector/resnet50_unified_v1.yaml
 ```
 
 ---
 
-## Model Variants
+## Evaluation
 
-| Key | Model | Hidden Size | Patch Size | Notes |
-|-----|-------|-------------|------------|-------|
-| `v2` | DINOv2 ViT-B | 768 | 14 | Fast, 86M params — default |
-| `v2s` | DINOv2 ViT-S | 384 | 14 | Smallest, 22M params |
-| `v2l` | DINOv2 ViT-L | 1024 | 14 | Large, 304M params |
-| `v3l` | DINOv3 ViT-L | 1024 | 16 | DINOv3 variant |
+### 2D COCO mAP
+
+```bash
+# ResNet50
+python -m lib.detector.monocular3d.evaluation.evaluate_2d \
+    --checkpoint /path/to/checkpoint_XX \
+    --data_path /path/to/action_genome \
+    --backbone resnet50
+
+# DINOv3
+python -m lib.detector.monocular3d.evaluation.evaluate_2d \
+    --checkpoint /path/to/checkpoint_XX \
+    --backbone dino_v3 --model v3l
+```
+
+Reports: `mAP`, `mAP@50`, `mAP@75`, per-class AP, precision/recall.
+
+### 3D Metrics
+
+```bash
+python -m lib.detector.monocular3d.evaluation.evaluate_3d \
+    --checkpoint /path/to/checkpoint_XX \
+    --data_path /path/to/action_genome \
+    --backbone resnet50
+```
+
+Reports: Chamfer distance, corner L2, oriented 3D IoU hit rates (@50, @75), center L2, dimension L1, rotation error.
+
+### Fused 2D + 3D (End-of-Epoch)
+
+During training, `evaluate_all()` runs a fused 2D + 3D evaluator in a single forward pass at the end of every epoch. This is backbone-agnostic.
 
 ---
 
@@ -190,13 +275,14 @@ data_path: "/path/to/action_genome" # Action Genome root directory
 world_3d_annotations_path: null     # null = auto (data_path/world_annotations/...)
 
 # --- Model ---
-model: "v2"                         # v2 | v2s | v2l | v3l
+backbone: "dino_v2"                 # "dino_v2" | "dino_v3" | "resnet50"
+model: "v2"                         # v2 | v2l | v3l (used for DINOv2/v3 only)
 num_classes: null                   # null = auto-detect from dataset
-pretrained: true                    # Use HuggingFace pretrained weights
+pretrained: true                    # Use pretrained weights
 use_compile: false                  # torch.compile() (PyTorch 2.0+)
 
 # --- Training ---
-lr: 1.0e-4                          # Learning rate
+lr: 1.0e-4                          # Learning rate (5e-5 recommended for ResNet50)
 weight_decay: 0.001                 # AdamW weight decay
 batch_size: 128                     # Per-GPU batch size
 epochs: 70                          # Total training epochs
@@ -204,10 +290,24 @@ gradient_accumulation_steps: 1      # Effective batch = batch_size × this
 max_grad_norm: 1.0                  # Gradient clipping
 warmup_fraction: 0.01               # Fraction of steps for LR warmup
 
+# --- 3D Head ---
+head_3d_mode: "unified"             # "unified" | "separate"
+head_3d_version: "v1"               # "v1" | "v2" (v2 adds depth stats)
+max_3d_proposals: 64                # Max proposals for 3D loss
+depth_maps_dir: null                # Path to depth maps (required for v2)
+
+# --- Loss Weights ---
+weight_cls: 1.0                     # Classification loss
+weight_box: 1.0                     # Box regression loss
+weight_obj: 1.0                     # RPN objectness loss
+weight_rpn: 1.0                     # RPN box regression loss
+weight_3d: 1.0                      # 3D head loss
+weight_3d_ramp_epochs: 5            # Staged ramp (0 = disabled)
+
 # --- Image ---
-target_size: null                   # Fixed resize (null = dynamic Pi3 resize)
+target_size: null                   # Fixed resize (null = dynamic pixel_limit resize)
 pixel_limit: 255000                 # Max pixels for dynamic resize
-patch_size: 14                      # Must match backbone (14 for DINOv2)
+patch_size: 14                      # 14 for DINOv2, 16 for DINOv3, 32 for ResNet50
 
 # --- DataLoader ---
 num_workers_train: 8                # DataLoader workers for training
@@ -238,7 +338,7 @@ ckpt: null                          # Checkpoint folder to resume from
 
 1. Copy an existing config:
    ```bash
-   cp configs/default_rohith.yaml configs/my_experiment.yaml
+   cp configs/detector/resnet50_unified_v1.yaml configs/detector/my_experiment.yaml
    ```
 
 2. Update the server-specific paths:
@@ -246,11 +346,15 @@ ckpt: null                          # Checkpoint folder to resume from
    - `save_path` — where checkpoints are saved
    - `data_path` — Action Genome dataset location
 
-3. Choose your backbone (`model: "v2"` / `"v2l"` / `"v3l"`)
+3. Choose your backbone:
+   - `backbone: "dino_v2"` + `model: "v2"` — DINOv2 ViT-Base
+   - `backbone: "dino_v2"` + `model: "v2l"` — DINOv2 ViT-Large
+   - `backbone: "dino_v3"` + `model: "v3l"` — DINOv3 ViT-Large
+   - `backbone: "resnet50"` — ResNet50-FPN-V2 (COCO-pretrained)
 
 4. Set a unique `experiment_name` and `wandb_project`
 
 5. Run:
    ```bash
-   python -m lib.detector.monocular3d.train --config configs/my_experiment.yaml
+   python -m lib.detector.monocular3d.train --config configs/detector/my_experiment.yaml
    ```

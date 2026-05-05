@@ -37,6 +37,7 @@ from matplotlib.lines import Line2D
 
 from .datasets.ag_dataset_3d import ActionGenomeDataset3D, ResolutionBucketBatchSampler, collate_fn
 from .models.dino_mono_3d import DinoV3Monocular3D
+from .models.resnet_mono_3d import ResNetMonocular3D
 from .utils.json_logger import LocalLogger
 from .utils.cuda_utils import clear_cuda_cache_for_current_process
 from .evaluation.evaluate_3d import evaluate_3d_metrics
@@ -153,6 +154,7 @@ class TrainConfig:
     ckpt: Optional[str] = None
 
     # Model
+    backbone: str = "dino_v2"  # "dino_v2" | "dino_v3" | "resnet50" — backbone architecture
     model: str = "v3l"
     num_classes: Optional[int] = None  # None = auto-detect from dataset
     pretrained: bool = True
@@ -275,11 +277,13 @@ class DinoAGTrainer3D:
         self.accelerator.print("━" * 60)
         self.accelerator.print("  [1/5] Building datasets...")
         self.accelerator.print("━" * 60)
+        use_patch = (self.cfg.backbone != "resnet50")
         kwargs = {
             "phase": "train",
             "target_size": self.cfg.target_size,
             "pixel_limit": self.cfg.pixel_limit,
             "patch_size": self.cfg.patch_size,
+            "use_patch_alignment": use_patch,
         }
         if self.cfg.world_3d_annotations_path is not None:
             kwargs["world_3d_annotations_path"] = self.cfg.world_3d_annotations_path
@@ -324,19 +328,31 @@ class DinoAGTrainer3D:
         )
 
     def build_model(self) -> None:
-        """Initialize the DINOv2 + Faster R-CNN + 3D head model."""
+        """Initialize the detection model + 3D head (backbone selected via config)."""
         self.accelerator.print("  [3/5] Building model...")
         num_classes = self.cfg.num_classes or len(self.train_dataset.object_classes)
-        self.accelerator.print(f"    Model variant: {self.cfg.model}  |  Classes: {num_classes}")
-        self.model = DinoV3Monocular3D(
-            num_classes=num_classes,
-            pretrained=self.cfg.pretrained,
-            model=self.cfg.model,
-            head_3d_mode=self.cfg.head_3d_mode,
-            max_3d_proposals=self.cfg.max_3d_proposals,
-            head_3d_version=self.cfg.head_3d_version,
-            input_reference_size=self.cfg.input_reference_size,
-        )
+        self.accelerator.print(f"    Backbone: {self.cfg.backbone}  |  Model variant: {self.cfg.model}  |  Classes: {num_classes}")
+
+        if self.cfg.backbone == "resnet50":
+            self.model = ResNetMonocular3D(
+                num_classes=num_classes,
+                pretrained=self.cfg.pretrained,
+                head_3d_mode=self.cfg.head_3d_mode,
+                max_3d_proposals=self.cfg.max_3d_proposals,
+                head_3d_version=self.cfg.head_3d_version,
+                input_reference_size=self.cfg.input_reference_size,
+            )
+        else:
+            # backbone == "dino_v2" or "dino_v3" — map to model registry key
+            self.model = DinoV3Monocular3D(
+                num_classes=num_classes,
+                pretrained=self.cfg.pretrained,
+                model=self.cfg.model,
+                head_3d_mode=self.cfg.head_3d_mode,
+                max_3d_proposals=self.cfg.max_3d_proposals,
+                head_3d_version=self.cfg.head_3d_version,
+                input_reference_size=self.cfg.input_reference_size,
+            )
         # Count trainable vs frozen parameters
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.model.parameters())

@@ -32,6 +32,7 @@ from ..utils.cuda_utils import clear_cuda_cache_for_current_process
 
 from ..datasets.ag_dataset_3d import ActionGenomeDataset3D, collate_fn
 from ..models.dino_mono_3d import DinoV3Monocular3D
+from ..models.resnet_mono_3d import ResNetMonocular3D
 
 
 def _polygon_clip(subject: list, clip: list) -> list:
@@ -309,7 +310,7 @@ def evaluate_3d_metrics(model, dataloader, device, iou_threshold_2d=0.5):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate DINOv2 Monocular 3D detector")
+    parser = argparse.ArgumentParser(description="Evaluate Monocular 3D detector (DINOv2/v3 or ResNet50)")
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Path to checkpoint dir (containing checkpoint_state.pth) or to .pth file")
     parser.add_argument("--data_path", type=str, default="/data/rohith/ag/",
@@ -325,13 +326,19 @@ def main():
                         help="Save metrics JSON to this path")
     parser.add_argument("--no_2d", action="store_true", help="Skip 2D mAP evaluation")
     parser.add_argument("--no_3d", action="store_true", help="Skip 3D metrics")
+    parser.add_argument("--model", type=str, default="v3l",
+                        help="Model variant: v2, v2l, v3l (used for DINOv2/v3 backbones)")
+    parser.add_argument("--backbone", type=str, default="dino_v3",
+                        choices=["dino_v2", "dino_v3", "resnet50"],
+                        help="Backbone architecture")
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
     # Dataset
-    kwargs = {"phase": "test", "target_size": args.target_size}
+    use_patch = (args.backbone != "resnet50")
+    kwargs = {"phase": "test", "target_size": args.target_size, "use_patch_alignment": use_patch}
     if args.world_3d_annotations_path:
         kwargs["world_3d_annotations_path"] = args.world_3d_annotations_path
     test_dataset = ActionGenomeDataset3D(args.data_path, **kwargs)
@@ -350,7 +357,10 @@ def main():
     # Model
     ds = test_dataset.dataset if hasattr(test_dataset, "dataset") else test_dataset
     num_classes = len(ds.object_classes) if hasattr(ds, "object_classes") else 37
-    model = DinoV3Monocular3D(num_classes=num_classes, pretrained=False, model="v3l")
+    if args.backbone == "resnet50":
+        model = ResNetMonocular3D(num_classes=num_classes, pretrained=False)
+    else:
+        model = DinoV3Monocular3D(num_classes=num_classes, pretrained=False, model=args.model)
     model.to(device)
     model.eval()
 
@@ -366,6 +376,7 @@ def main():
     else:
         model.load_state_dict(state, strict=True)
     print(f"Loaded checkpoint: {ckpt_path}")
+    print(f"  Backbone: {args.backbone}  |  Model: {args.model}  |  Classes: {num_classes}")
 
     metrics = {}
 
