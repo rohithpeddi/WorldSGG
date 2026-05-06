@@ -1,0 +1,254 @@
+% ==================================================================================
+% WorldWise Method — Detailed Technical Report
+% Target Venue: NeurIPS
+% ==================================================================================
+\documentclass{article}
+
+% Uncomment if neurips_2026.sty is available
+% \usepackage[preprint]{neurips_2026}
+% Fallback to standard margins if neurips is unavailable:
+\usepackage[margin=1in]{geometry}
+
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{bm}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,calc,backgrounds}
+
+\newcommand{\mR}{\mathbb{R}}
+\newcommand{\op}[1]{\operatorname{#1}}
+\newcommand{\mat}[1]{\bm{#1}}
+
+\title{WorldWise: Masked World Auto-Encoders for Scene Graph Generation}
+\author{Anonymous Authors}
+
+\begin{document}
+
+\maketitle
+
+% ====================================================================================
+\section{Introduction}
+\label{sec:intro}
+% ====================================================================================
+
+We present WorldWise, a novel architecture for World Scene Graph Generation (WorldSGG) based on the Masked World Auto-Encoder (MWAE) paradigm. Unlike baseline methods (e.g., W-STTran, W-DsgDetr) that rely on zero-order hold memory buffers to persist occluded objects, WorldWise embraces occlusions as natural masking events. It utilizes a top-down structural initialization strategy where every object receives a token at every frame, grounded by its 3D oriented bounding box (OBB).
+
+Missing visual features (due to occlusion or field-of-view limits) are replaced by a learnable `[MASK]` embedding. An asymmetric cross-attention mechanism—the \emph{AssociativeRetriever}—allows these masked queries to attend strictly to visible tokens, smoothly recovering object states without explicit tracking. The architecture supports rigorous ablation through configuration flags that cleanly toggle camera, motion, and temporal edge modules while keeping the MWAE core intact. WorldWise employs frozen DinoV2/V3 backbones, leveraging their strong generic visual representations.
+
+% ====================================================================================
+\section{Pipeline Overview}
+\label{sec:pipeline}
+% ====================================================================================
+
+The dataflow is illustrated in Figure~\ref{fig:pipeline_worldwise}. Structural and visual inputs are tokenized via the ScaffoldTokenizer. The AssociativeRetriever refines these tokens, visibility embeddings are added, and spatial relationships are predicted. A Cross-View Reconstruction projection provides a self-supervised auxiliary signal.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  scale=0.75, transform shape, >=Stealth,
+  block/.style={draw=black!70, rounded corners=3pt, line width=0.8pt, fill=blue!5, minimum width=3.2cm, minimum height=0.6cm, font=\small\bfseries, align=center},
+  toggle/.style={draw=orange!80, rounded corners=3pt, line width=0.8pt, fill=orange!10, minimum width=3.2cm, minimum height=0.6cm, font=\small\bfseries, align=center, dashed},
+  arrow/.style={->, thick, black!70}
+]
+
+\node[block] (mono) {DinoV2/V3 Mono3D};
+\node[block, right=0.3cm of mono] (gse) {GlobalStructuralEncoder};
+\node[toggle, below=0.3cm of gse] (ose) {[ObjectSpatialEncoder]};
+\node[toggle, left=0.3cm of ose] (cte) {[CameraTemporalEncoder]};
+\node[toggle, left=0.3cm of cte] (ome) {[ObjectMotionEncoder]};
+\node[block, below=0.3cm of ose] (tok) {ScaffoldTokenizer};
+\node[block, left=0.3cm of tok] (ret) {AssociativeRetriever};
+\node[block, left=0.3cm of ret] (vis) {VisibilityEmbedding};
+\node[block, below=0.3cm of vis] (iot) {InterObjectTransformer};
+\node[block, right=0.3cm of iot] (np) {NodePredictor};
+\node[block, right=0.3cm of np] (rp) {RelationshipPredictor};
+\node[toggle, right=0.3cm of rp] (tea) {[TemporalEdgeAttention]};
+\node[block, right=0.3cm of tea] (recon) {ReconstructionProjection};
+
+\draw[arrow] (mono) -- (gse);
+\draw[arrow] (gse) -- (ose);
+\draw[arrow] (ose) -- (cte);
+\draw[arrow] (cte) -- (ome);
+\draw[arrow] (ome) -- (tok);
+\draw[arrow] (tok) -- (ret);
+\draw[arrow] (ret) -- (vis);
+\draw[arrow] (vis) -- (iot);
+\draw[arrow] (iot) -- (np);
+\draw[arrow] (np) -- (rp);
+\draw[arrow] (rp) -- (tea);
+\draw[arrow] (tea) -- (recon);
+
+\end{tikzpicture}
+\caption{The WorldWise pipeline. Bracketed modules (orange dashed) are togglable via configuration flags for systematic ablation studies.}
+\label{fig:pipeline_worldwise}
+\end{figure}
+
+% ====================================================================================
+\section{Encoders}
+\label{sec:encoders}
+% ====================================================================================
+
+\subsection{GlobalStructuralEncoder}
+Generates 3D structural tokens $\mat{g}_n$ from zero-centered OBB corners $\tilde{\mat{c}}_{n,i}$ and absolute centers $\bar{\mat{c}}_n$:
+\begin{equation}
+    \mat{g}_n = \op{MLP}_{\text{obj}}\bigl([\op{flatten}(\tilde{\mat{c}}_{n,i}) \;\|\; \bar{\mat{c}}_n]\bigr) \in \mR^{d_{\text{struct}}}.
+    \label{eq:gse}
+\end{equation}
+
+\subsection{ObjectSpatialEncoder (Togglable)}
+Computes camera-relative view features from extrinsic matrices $\mat{T} = [\mat{R}\,|\,\mat{t}]$. The object direction $\mat{d}_n = \bar{\mat{c}}_n - \mat{t}$, view alignment $\alpha_n$, and azimuth $\beta_n$ form the token:
+\begin{equation}
+    \mat{c}_n = \op{MLP}\bigl([\log\|\mat{d}_n\|,\;\alpha_n,\;\beta_n^{\sin},\;\beta_n^{\cos}]\bigr) \in \mR^{d_{\text{camera}}}.
+    \label{eq:cam_per_obj}
+\end{equation}
+
+\subsection{CameraTemporalEncoder (Togglable)}
+Encodes the ego-motion sequence using relative consecutive poses:
+\begin{align}
+    \mat{R}_{\text{rel}}^{(t)} &= \mat{R}_t \mat{R}_{t-1}^{\!\top}, \quad
+    \mat{t}_{\text{rel}}^{(t)} = \mat{t}_t - \mat{R}_{\text{rel}}^{(t)}\mat{t}_{t-1}. \label{eq:rel_pose} \\
+    \mat{e}_t &= \op{EgoAttn}\bigl(\{\op{MLP}([\op{6D}(\mat{R}_{\text{rel}}^{(\tau)}) \;\|\; \mat{t}_{\text{rel}}^{(\tau)}]) + \mat{e}_{\tau}\}_{\tau=0}^{T-1}\bigr). \label{eq:ego_motion}
+\end{align}
+
+\subsection{ObjectMotionEncoder (Togglable)}
+Calculates 3D velocity $\mat{v}_n^{(t)}$ and acceleration $\mat{a}_n^{(t)}$ via finite differences. Concatenated with camera-relative velocity $\mat{R}^{\!\top}\mat{v}_n$, an MLP projects this 11-dimensional vector to $\mat{\mu}_n^{(t)} \in \mR^{d_{\text{motion}}}$.
+
+% ====================================================================================
+\section{ScaffoldTokenizer}
+\label{sec:tokenizer}
+% ====================================================================================
+
+The ScaffoldTokenizer performs top-down initialization: every object receives a token regardless of visibility. For visual features, we project the DINO features $\mat{f}_n$ if the object is visible, or use a learned `[MASK]` embedding otherwise. During training, visible objects are randomly masked with probability $p_{\text{mask}}$ to simulate occlusion.
+\begin{equation}
+    \mat{v}_n^{(t)} = \begin{cases}
+        \mat{W}_v \mat{f}_n^{(t)} + \mat{b}_v & \text{if visible \& unmasked}, \\
+        \mat{e}_{\text{mask}} & \text{if occluded or masked}.
+    \end{cases}
+    \label{eq:vis_mask}
+\end{equation}
+The token fuses geometry, the visual/mask feature, and any enabled togglable encoders:
+\begin{equation}
+    \mat{x}_n^{(t)} = \op{FusionProj}\bigl([\mat{g}_n^{(t)} \;\|\; \mat{v}_n^{(t)} \;\|\; \mat{c}_n^{(t)} \;\|\; \mat{\mu}_n^{(t)} \;\|\; \mat{e}_t]\bigr) \in \mR^{d_{\text{model}}}.
+    \label{eq:tokenizer}
+\end{equation}
+
+% ====================================================================================
+\section{AssociativeRetriever}
+\label{sec:retriever}
+% ====================================================================================
+
+The \emph{AssociativeRetriever} restores masked states via per-object bidirectional cross-attention across the video sequence.
+The Query contains all tokens (both visible and masked). Key and Value contain \emph{only} tokens that are visible and unmasked, enforced by a visibility padding mask.
+
+We introduce a view-aware bias by adding projected camera features to Queries and Keys (but not Values):
+\begin{equation}
+    \mat{Q} = \mat{X} + \mat{W}_q \mat{C}, \quad
+    \mat{K} = \mat{X}_{\text{vis}} + \mat{W}_k \mat{C}_{\text{vis}}, \quad
+    \mat{V} = \mat{X}_{\text{vis}}.
+    \label{eq:qkv}
+\end{equation}
+This biases the retrieval mechanism to preferentially attend to frames with similar camera viewpoints, aiding appearance constancy. The tokens are iteratively refined across transformer layers.
+
+% ====================================================================================
+\section{Visibility Embedding and Spatial Reasoning}
+\label{sec:vis_iot}
+% ====================================================================================
+
+Following retrieval, a learned \emph{VisibilityEmbedding} is added to the tokens. The mask is based on \emph{effective} visibility (artificially masked objects are considered occluded here).
+
+The tokens then undergo global spatial reasoning via the \emph{InterObjectTransformer}, which adds continuous pairwise 3D spatial positional encodings $\mat{S}^{(t)}$ and performs self-attention:
+\begin{equation}
+    \mat{H}^{(t)} = \op{TransformerEncoder}\bigl(\mat{\hat{X}}^{(t)} + \mat{S}^{(t)},\; \text{mask}=\overline{\mat{v}}^{(t)}\bigr).
+    \label{eq:iot}
+\end{equation}
+
+% ====================================================================================
+\section{Predictors and Cross-View Reconstruction}
+\label{sec:predictors}
+% ====================================================================================
+
+The \emph{Node Predictor} (2-layer MLP) outputs class logits $\hat{\mat{Y}}^{\text{obj}}$.
+
+The \emph{Relationship Predictor} forms initial pairs $\mat{r}_{po}$, applies intra-frame self-attention, and if enabled, passes tokens to the \emph{TemporalEdgeAttention} module, which applies temporal cross-frame self-attention via $\op{TemporalEncoder}$. The refined edge tokens map to attention, spatial, and contacting logits.
+
+Additionally, a \emph{Cross-View Reconstruction} branch projects the fully refined tokens to reconstruct the original DINO features. This provides a self-supervised signal:
+\begin{equation}
+    \hat{\mat{f}}_n^{(t)} = \mat{W}_{\text{recon}} \mat{h}_n^{(t)} + \mat{b}_{\text{recon}}.
+    \label{eq:recon}
+\end{equation}
+
+% ====================================================================================
+\section{Loss Function}
+\label{sec:loss}
+% ====================================================================================
+
+The WorldWise multi-objective loss function is defined as:
+\begin{equation}
+    \mathcal{L} = \mathcal{L}_{\text{SG}} + \lambda_{\text{recon}}\lambda_{\text{dom}}\mathcal{L}_{\text{recon}} + \mathcal{L}_{\text{sim}} + \lambda_{\text{stab}}\mathcal{L}_{\text{stab}}.
+    \label{eq:total_loss}
+\end{equation}
+Where:
+\begin{itemize}
+    \item $\mathcal{L}_{\text{SG}}$: Scene graph loss on visible and unseen buckets (CE + BCE).
+    \item $\mathcal{L}_{\text{recon}}$: Mean Squared Error between $\hat{\mat{f}}_n^{(t)}$ and GT $\mat{f}_n^{(t)}$, computed \emph{only} on artificially masked objects.
+    \item $\mathcal{L}_{\text{sim}}$: Simulated-unseen loss, applying clean ground truth relationship labels to pairs that are artificially masked.
+    \item $\mathcal{L}_{\text{stab}}$: Optional attractor stability constraint.
+\end{itemize}
+
+% ====================================================================================
+\section{Ablation Matrix}
+\label{sec:ablation}
+% ====================================================================================
+
+WorldWise allows controlled toggling of four components, maintaining the MWAE core across 3 backbones (DinoV2-B, DinoV2-L, DinoV3-L).
+
+\begin{table}[h]
+\centering
+\caption{WorldWise Configuration Flags}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Flag} & \textbf{Effect when False} \\
+\midrule
+\texttt{use\_object\_spatial\_encoder} & No camera-relative position features \\
+\texttt{use\_camera\_temporal} & No ego-motion token sequences \\
+\texttt{use\_object\_motion\_encoder} & No 3D object velocities/accelerations \\
+\texttt{use\_temporal\_edge\_attn} & Direct edge prediction without temporal attention \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This systematic toggling generates 30 configurations (3 backbones × 5 settings × 2 modes).
+
+% ====================================================================================
+\section{Algorithm: Forward Pass}
+\label{sec:algorithm}
+% ====================================================================================
+
+\begin{algorithm}[h]
+\caption{WorldWise Forward Pass}
+\begin{algorithmic}[1]
+\Require $\mat{f}_{\text{all}}$ (visual), $\mat{C}_{\text{all}}$ (OBBs), $\mat{T}_{\text{all}}$ (camera)
+\Ensure $\hat{\mat{y}}_{\text{att}}, \hat{\mat{y}}_{\text{spa}}, \hat{\mat{y}}_{\text{con}}$, $\hat{\mat{f}}_{\text{recon}}$
+\State $\mat{G}_{\text{all}} \gets \text{GlobalStructuralEncoder}(\mat{C}_{\text{all}})$
+\State $\mat{c}_{\text{all}} \gets \text{ObjectSpatialEncoder}(\mat{T}_{\text{all}}, \mat{C}_{\text{all}})$ \Comment{If enabled}
+\State $\mat{e}_{\text{all}} \gets \text{CameraTemporalEncoder}(\mat{T}_{\text{all}})$ \Comment{If enabled}
+\State $\mat{\mu}_{\text{all}} \gets \text{ObjectMotionEncoder}(\mat{C}_{\text{all}}, \mat{T}_{\text{all}})$ \Comment{If enabled}
+\State $\mat{X} \gets \text{ScaffoldTokenizer}(\mat{G}_{\text{all}}, \mat{f}_{\text{all}}, \mat{c}_{\text{all}}, \mat{\mu}_{\text{all}}, \mat{e}_{\text{all}})$
+\State $\mat{X}_{\text{ret}} \gets \text{AssociativeRetriever}(\mat{X}, \mat{c}_{\text{all}})$ \Comment{Masked queries $\to$ Visible keys}
+\State $\hat{\mat{X}} \gets \mat{X}_{\text{ret}} + \text{VisibilityEmbedding}(\text{mask})$
+\State $\mat{H} \gets \text{InterObjectTransformer}(\hat{\mat{X}})$
+\State $\hat{\mat{f}}_{\text{recon}} \gets \mat{W}_{\text{recon}} \mat{H} + \mat{b}_{\text{recon}}$ \Comment{Cross-View Reconstruction}
+\State $\hat{\mat{Y}}^{\text{obj}} \gets \text{NodePredictor}(\mat{H})$
+\State $\mat{R} \gets \text{RelationshipFormationAndSelfAttention}(\mat{H}, \hat{\mat{Y}}^{\text{obj}})$
+\State $\tilde{\mat{R}} \gets \text{TemporalEdgeAttention}(\mat{R})$ \Comment{If enabled}
+\State $(\hat{\mat{y}}_{\text{att}}, \hat{\mat{y}}_{\text{spa}}, \hat{\mat{y}}_{\text{con}}) \gets \text{PredictionHeads}(\tilde{\mat{R}})$
+\State \Return $\hat{\mat{y}}_{\text{att}}, \hat{\mat{y}}_{\text{spa}}, \hat{\mat{y}}_{\text{con}}$, $\hat{\mat{f}}_{\text{recon}}$
+\end{algorithmic}
+\end{algorithm}
+
+\end{document}
