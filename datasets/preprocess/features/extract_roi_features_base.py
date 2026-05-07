@@ -53,7 +53,7 @@ logger = logging.getLogger("roi_feature_extraction")
 # Constants
 # ---------------------------------------------------------------------------
 
-MODEL_TO_DIR = {"v2": "dinov2b", "v2l": "dinov2l", "v3l": "dinov3l"}
+MODEL_TO_DIR = {"v2": "dinov2b", "v2l": "dinov2l", "v3l": "dinov3l", "resnet50": "resnet50"}
 
 # Label normalization: GT compound names → short form
 LABEL_NORMALIZE_MAP = {
@@ -109,6 +109,7 @@ class ExtractConfig:
     """Configuration for ROI feature extraction."""
     # Detector
     model: str = "v2"
+    backbone: str = "dino_v2"         # "dino_v2" | "dino_v3" | "resnet50"
     experiment_name: str = "dinov2_separate"
     working_dir: str = ""
     ckpt: Optional[str] = None
@@ -432,21 +433,40 @@ class BaseROIFeatureExtractor(ABC):
         self.log_dir = self.output_dir / "logs"
         os.makedirs(self.log_dir, exist_ok=True)
 
-        # Build and load model
-        logger.info(f"Building DinoV3Monocular3D (model={cfg.model}, head_3d_mode={cfg.head_3d_mode})")
-        print(f"Building DinoV3Monocular3D (model={cfg.model}, head_3d_mode={cfg.head_3d_mode})...")
-        self.model = DinoV3Monocular3D(
-            num_classes=cfg.num_classes,
-            pretrained=cfg.pretrained,
-            model=cfg.model,
-            head_3d_mode=cfg.head_3d_mode,
-        )
+        # Build model based on backbone type
+        _backbone = getattr(cfg, "backbone", "dino_v2")
+        if _backbone == "resnet50":
+            from lib.detector.monocular3d.models.resnet_mono_3d import ResNetMonocular3D
+            logger.info(f"Building ResNetMonocular3D (head_3d_mode={cfg.head_3d_mode})")
+            print(f"Building ResNetMonocular3D (head_3d_mode={cfg.head_3d_mode})...")
+            self.model = ResNetMonocular3D(
+                num_classes=cfg.num_classes,
+                pretrained=cfg.pretrained,
+                head_3d_mode=cfg.head_3d_mode,
+            )
+        else:
+            logger.info(f"Building DinoV3Monocular3D (model={cfg.model}, head_3d_mode={cfg.head_3d_mode})")
+            print(f"Building DinoV3Monocular3D (model={cfg.model}, head_3d_mode={cfg.head_3d_mode})...")
+            self.model = DinoV3Monocular3D(
+                num_classes=cfg.num_classes,
+                pretrained=cfg.pretrained,
+                model=cfg.model,
+                head_3d_mode=cfg.head_3d_mode,
+            )
 
         # Load trained checkpoint
         if cfg.ckpt is not None:
             ckpt_path = os.path.join(
                 cfg.working_dir, cfg.experiment_name, cfg.ckpt, "checkpoint_state.pth"
             )
+            # Fallback: checkpoint_state.pth directly in experiment dir
+            # (e.g. fasterrcnn_separate/checkpoint_state.pth)
+            if not os.path.exists(ckpt_path):
+                ckpt_path_flat = os.path.join(
+                    cfg.working_dir, cfg.experiment_name, "checkpoint_state.pth"
+                )
+                if os.path.exists(ckpt_path_flat):
+                    ckpt_path = ckpt_path_flat
             if os.path.exists(ckpt_path):
                 print(f"Loading checkpoint: {ckpt_path}")
                 logger.info(f"Loading checkpoint: {ckpt_path}")

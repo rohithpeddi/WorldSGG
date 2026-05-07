@@ -1,0 +1,161 @@
+% Requires:
+% \usepackage{booktabs}
+% \usepackage{longtable}
+
+For ease of reference, Table~\ref{sup:tab:notation} consolidates all
+mathematical notation used throughout the main paper and supplementary
+material.
+
+\begingroup
+\small
+\renewcommand{\arraystretch}{1.20}
+
+\begin{longtable}{@{}p{0.27\textwidth}@{\hspace{0.02\textwidth}}p{0.69\textwidth}@{}}
+\caption{\textbf{Notation reference.}}
+\label{sup:tab:notation}\\
+\toprule
+\textbf{Symbol / Notation} & \textbf{Description} \\
+\midrule
+\endfirsthead
+
+\multicolumn{2}{@{}l}{\small\itshape Table~\ref{sup:tab:notation} continued from previous page} \\
+\toprule
+\textbf{Symbol / Notation} & \textbf{Description} \\
+\midrule
+\endhead
+
+\midrule
+\multicolumn{2}{r@{}}{\small\itshape Continued on next page} \\
+\endfoot
+
+\bottomrule
+\endlastfoot
+
+\multicolumn{2}{@{}l}{\textit{Task Formalization}} \\
+$V_{1}^{T} = \{I^{1}, \dots, I^{T}\}$ & Video consisting of $T$ frames \\
+$I^{t}$ & Video frame at timestamp $t$ \\
+$\mathcal{W}^{t}$ & World state at timestamp $t$ (all objects in the scene) \\
+$\mathcal{O}^{t}$ & Set of observed objects visible in frame $I^{t}$ \\
+$\mathcal{U}^{t}$ & Set of unobserved objects not visible in frame $I^{t}$ \\
+$w_{k}^{t}$ & Object $k$ in the world state at timestamp $t$ \\
+$\mathcal{G}^{t}$ & Frame-level scene graph over $\mathcal{O}^{t}$ \\
+$\mathcal{G}_{\mathcal{W}}^{t}$ & World scene graph over $\mathcal{W}^{t}$ \\
+$N$ & Total number of objects in the world state \\
+\midrule
+
+\multicolumn{2}{@{}l}{\textit{Object Representation}} \\
+$\mathbf{b}_{k}^{t} \in \mathbb{R}^{8 \times 3}$ & Oriented 3D bounding box (8 corners) for object $k$ at $t$ \\
+$\mathbf{C}_{k} \in \mathbb{R}^{8 \times 3}$ & OBB corner coordinates for object $k$ \\
+$\bar{\mathbf{c}}_{k}$ & Centroid of OBB $k$ \\
+$V_{k}$ & Volume of OBB $k$ \\
+$C_{\text{obj}}$ & Number of object categories (37 including person) \\
+$\mathbf{f}_{k}^{t} \in \mathbb{R}^{d_{\text{roi}}}$ & Per-object visual features from DINOv2/v3 \\
+\midrule
+
+\multicolumn{2}{@{}l}{\textit{Predicates and Relationships}} \\
+$\mathcal{P}_{\text{att}}$ & Attention predicate set ($|\mathcal{P}_{\text{att}}| = 3$, single-label) \\
+$\mathcal{P}_{\text{spa}}$ & Spatial predicate set ($|\mathcal{P}_{\text{spa}}| = 6$, multi-label) \\
+$\mathcal{P}_{\text{con}}$ & Contacting predicate set ($|\mathcal{P}_{\text{con}}| = 17$, multi-label) \\
+$(p, o)$ & Human--object pair (person $p$, object $o$) \\
+\midrule
+
+\multicolumn{2}{@{}l}{\textit{Camera and Geometry}} \\
+$\mathbf{T}^{t} = [\mathbf{R}^{t} \,|\, \boldsymbol{\tau}^{t}]$ & Camera-to-world SE(3) extrinsic at timestamp $t$ \\
+$\mathbf{R}^{t} \in SO(3)$ & Rotation component of the camera pose \\
+$\boldsymbol{\tau}^{t} \in \mathbb{R}^{3}$ & Translation component of the camera pose \\
+$\mathbf{R}_{\text{rel}}, \boldsymbol{\tau}_{\text{rel}}$ & Relative rotation/translation between consecutive frames \\
+$(f_x, f_y, c_x, c_y)$ & Camera intrinsics (focal lengths and principal point) \\
+\midrule
+
+\multicolumn{2}{@{}l}{\textit{Shared Architectural Components}} \\
+$d_{\text{model}}$ & Model hidden dimension \\
+$d_{\text{struct}}$ & Structural token dimension \\
+$d_{\text{rel}}$ & Relationship token dimension \\
+$d_{\text{camera}}$ & Camera feature dimension \\
+$d_{\text{memory}}$ & Temporal memory dimension (4DST) \\
+$\mathbf{g}_{n}^{(t)}$ & Structural token for object $n$ at frame $t$ (from GSE) \\
+$\mathbf{g}_{\text{global}}$ & Global structural token (max-pooled over objects) \\
+$\mathbf{s}_{i}$ & Spatial positional encoding for object $i$ \\
+$d_{ij}$ & Euclidean distance between objects $i$ and $j$ \\
+$\hat{\mathbf{d}}_{ij}$ & Unit direction vector from object $i$ to $j$ \\
+$\rho_{ij}$ & Log-volume ratio $\log V_i - \log V_j$ \\
+$\mathbf{S}^{(t)}$ & Spatial PE matrix at frame $t$ \\
+$\mathbf{X}^{(t)}$ & Input token matrix at frame $t$ \\
+$\mathbf{H}^{(t)} \in \mathbb{R}^{N \times d_{\text{model}}}$ & Output of the Spatial GNN at frame $t$ \\
+$\overline{\mathbf{v}}^{(t)}$ & Object validity mask at frame $t$ \\
+$\mathbf{h}_{n}$ & Refined object representation for object $n$ \\
+$\hat{\mathbf{y}}_{n}^{\text{obj}} \in \mathbb{R}^{C_{\text{obj}}}$ & Predicted object class logits \\
+$\mathbf{r}_{po}$ & Relationship token for pair $(p, o)$ \\
+$\mathbf{u}_{po}$ & Union ROI features for pair $(p,o)$ \\
+$\mathbf{e}_p^{\text{txt}}, \mathbf{e}_o^{\text{txt}}$ & CLIP text embeddings indexed by predicted class \\
+$\mathbf{R}^{(t)}$ & Refined relationship tokens after RelTransformer \\
+$\mathbf{c}_{\text{cam}}$ & Encoded camera pose token \\
+$\mathbf{e}_{\tau}$ & Temporal positional embedding at position $\tau$ \\
+\midrule
+
+\multicolumn{2}{@{}l}{\textit{PWG (Persistent World Graph)}} \\
+$\mathbf{m}_{n}^{(t)}$ & LKS memory buffer output for object $n$ at $t$ \\
+$\tau^{*}$ & Nearest visible frame for object $n$ \\
+$\Delta_{n}^{(t)}$ & Staleness: $|t - \tau^{*}|$ for object $n$ \\
+$\lambda_{\text{vlm}}$ & Weight for unobserved-pair VLM pseudo-label loss \\
+\midrule
+
+\multicolumn{2}{@{}l}{\textit{4DST (4D Scene Transformer)}} \\
+$\mathbf{z}_{n}^{(t)}$ & Fused input token for object $n$ at $t$ \\
+$\tilde{\mathbf{z}}_{n}^{(t)}$ & Temporally refined token after Temporal Object Transformer \\
+$\mathbf{e}_{\text{vis}}[\cdot]$ & Learned visibility embedding \\
+\midrule
+
+\multicolumn{2}{@{}l}{\textit{MWAE (Masked World Auto-Encoder)}} \\
+$\mathbf{e}_{\text{[MASK]}}$ & Learnable mask embedding for non-visible objects \\
+$p_{\text{mask}}$ & Training-time masking fraction for visible objects \\
+$\hat{\mathbf{x}}_{n}^{(t)}$ & Retrieved (filled-in) token after Associative Retriever \\
+$\hat{\mathbf{f}}_{n}^{(t)}$ & Reconstructed visual features for masked object \\
+$\lambda_{\text{recon}}$ & Reconstruction loss weight \\
+$\lambda_{\text{dom}}$ & Dominance factor for reconstruction loss \\
+\midrule
+
+\multicolumn{2}{@{}l}{\textit{Loss Functions}} \\
+$\mathcal{L}_{\text{PWG}}$ & Total loss for PWG method \\
+$\mathcal{L}_{\text{4DST}}$ & Total loss for 4DST method \\
+$\mathcal{L}_{\text{MWAE}}$ & Total loss for MWAE method \\
+$\mathcal{L}_{r}^{\text{vis}}$ & Loss for predicate $r$ on visible pairs (clean GT) \\
+$\mathcal{L}_{r}^{\text{unobs}}$ & Loss for predicate $r$ on unobserved pairs (pseudo-labels) \\
+$\mathcal{L}_{\text{node}}$ & Node classification loss (SGDet/SGCls only) \\
+$\mathcal{L}_{\text{recon}}$ & Feature reconstruction MSE loss (MWAE) \\
+$\mathcal{L}_{\text{sim}}$ & Simulated-unseen relationship loss (MWAE) \\
+$\mathcal{L}_{\text{SG}}$ & Scene graph prediction loss (visible + unobserved) \\
+\midrule
+
+\multicolumn{2}{@{}l}{\textit{3D Scene Construction}} \\
+$\pi^3$ & Feed-forward monocular 3D reconstruction model \\
+$\mathcal{P}_{\text{local}}^{t}$ & Local 3D point cloud at frame $t$ \\
+$\mathcal{P}_{\text{world}}^{t}$ & World-frame 3D point cloud at frame $t$ \\
+$\mathcal{S}$ & Static scene point cloud (inpainted background) \\
+$\mathcal{F}^{t}$ & Dynamic scene point cloud at frame $t$ \\
+\midrule
+
+\multicolumn{2}{@{}l}{\textit{Floor Alignment and Coordinate Transforms}} \\
+$s_{g}$ & Global floor similarity scale factor \\
+$\mathbf{R}_{g}, \boldsymbol{\tau}_{g}$ & Global floor similarity rotation and translation \\
+$\mathbf{R}_{\text{align}}, \boldsymbol{\tau}_{\text{align}}$ & World-to-floor alignment transform \\
+$\mathbf{R}_{\text{final}}, \boldsymbol{\tau}_{\text{final}}$ & World-to-final coordinate transform \\
+$\mathbf{T}_{\delta}$ & Manual floor correction transform (rotation $\mathbf{R}_{\delta}$, translation $\boldsymbol{\tau}_{\delta}$, scale $\mathbf{s}_{\delta}$) \\
+$\mathbf{T}_{\text{XY}}$ & Automated XY-plane alignment transform \\
+$\hat{\mathbf{n}}$ & Estimated floor-plane normal \\
+\midrule
+
+\multicolumn{2}{@{}l}{\textit{Geometric Annotation}} \\
+Grounding DINO & Zero-shot open-vocabulary 2D detector \\
+SAM2 & Segment Anything Model 2 (image and video modes) \\
+SMPL & Parametric body mesh model (floor estimation) \\
+\midrule
+
+\multicolumn{2}{@{}l}{\textit{Evaluation Metrics}} \\
+$\mathrm{R}\text{@}K$ & Recall at $K$ \\
+$\mathrm{mR}\text{@}K$ & Mean recall at $K$ (averaged over predicate classes) \\
+$\mathrm{PredCls}$ & Predicate classification (GT labels and localizations given) \\
+$\mathrm{SGDet}$ & Scene graph detection (end-to-end) \\
+
+\end{longtable}
+\endgroup

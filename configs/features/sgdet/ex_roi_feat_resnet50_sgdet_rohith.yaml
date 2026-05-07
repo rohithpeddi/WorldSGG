@@ -1,0 +1,48 @@
+# =============================================================================
+# ROI Feature Extraction Config — SGDet (ResNet50-FPN)
+# =============================================================================
+# Runs ResNet50 detector → filter → GT matching → augmentation → 3D prediction.
+# All bboxes in Pi-3 space. Train gets GT augmentation, test does not.
+# Output: {data_path}/features/roi_features/sgdet/resnet50/{train,test}/
+#
+# Usage:
+#   python datasets/preprocess/features/extract_roi_features_sgdet.py \
+#       --config configs/features/sgdet/ex_roi_feat_resnet50_sgdet_rohith.yaml
+#
+#   Override via CLI:
+#       --video 001YG.mp4 --split train
+# =============================================================================
+
+# --- Detector (must match training config) ---
+backbone: "resnet50"
+model: "resnet50"
+experiment_name: "fasterrcnn_separate"
+working_dir: "/home/rxp190007/CODE/Scene4Cast/lib/detector/monocular3d"
+ckpt: "."
+
+# --- Detector architecture (must match training) ---
+head_3d_mode: "separate"
+num_classes: 37
+pretrained: true
+
+# --- Data ---
+data_path: "/data/rohith/ag"
+
+# --- Image processing (must match detector training config) ---
+pixel_limit: 255000
+patch_size: 32                       # ResNet stride-32 divisibility
+
+# --- SGDet detection parameters ---
+score_threshold: 0.1
+nms_threshold: 0.5
+assign_iou_train: 0.5
+assign_iou_test: 0.3
+use_supply: true
+
+# --- Feature Extraction ---
+output_dir: null
+store_dtype: "float16"
+overwrite: false
+gpu: 0
+video: null
+split: null
