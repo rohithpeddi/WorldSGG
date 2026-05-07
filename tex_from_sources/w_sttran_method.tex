@@ -180,9 +180,9 @@ where $C_{\text{obj}}=37$ is the number of object categories.
 
 The Relationship Predictor generates the final edge classifications via a three-phase process:
 
-\paragraph{Phase 1: Token Formation.} For each human-object pair $(p, o)$, a relationship token is formed by concatenating the node features, union region-of-interest features $\mat{u}_{po}$, and projected CLIP text embeddings $\mat{t}_p, \mat{t}_o$ representing the object classes:
+\paragraph{Phase 1: Token Formation.} For each human-object pair $(p, o)$, a relationship token is formed by concatenating the node features, union region-of-interest features $\mat{u}_{po}$, and projected CLIP text embeddings $\mat{e}_p^{\text{txt}}, \mat{e}_o^{\text{txt}}$ representing the object classes:
 \begin{equation}
-    \mat{r}_{po} = \op{Proj}\bigl([\mat{h}_p \;\|\; \mat{h}_o \;\|\; \mat{u}_{po} \;\|\; \mat{t}_p \;\|\; \mat{t}_o]\bigr) \in \mR^{d_{\text{rel}}}.
+    \mat{r}_{po} = \op{Proj}\bigl([\mat{h}_p \;\|\; \mat{h}_o \;\|\; \mat{u}_{po} \;\|\; \mat{e}_p^{\text{txt}} \;\|\; \mat{e}_o^{\text{txt}}]\bigr) \in \mR^{d_{\text{rel}}}.
     \label{eq:rel_token}
 \end{equation}
 

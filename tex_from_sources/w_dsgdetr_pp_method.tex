@@ -107,7 +107,7 @@ The \emph{GlobalStructuralEncoder} generates 3D geometric tokens. The 8 OBB corn
 % ====================================================================================
 
 \subsection{ObjectSpatialEncoder}
-Camera-relative positions are computed from the extrinsic matrix $\mat{T} = [\mat{R}\,|\,\mat{t}]$. A global camera token $\mat{c}_{\text{cam}}$ is formed from $\op{MLP}([\op{6D}(\mat{R}) \;\|\; \mat{t}])$. For each object, the direction $\mat{d}_n = \bar{\mat{c}}_n - \mat{t}$, view alignment $\alpha_n$, and azimuth $\beta_n$ are projected:
+Camera-relative positions are computed from the extrinsic matrix $\mat{T} = [\mat{R}\,|\,\boldsymbol{\tau}]$. A global camera token $\mat{c}_{\text{cam}}$ is formed from $\op{MLP}([\op{6D}(\mat{R}) \;\|\; \boldsymbol{\tau}])$. For each object, the direction $\mat{d}_n = \bar{\mat{c}}_n - \boldsymbol{\tau}$, view alignment $\alpha_n$, and azimuth $\beta_n$ are projected:
 \begin{equation}
     \mat{c}_n = \op{MLP}\bigl([\log\|\mat{d}_n\|,\;\alpha_n,\;\beta_n^{\sin},\;\beta_n^{\cos}]\bigr) \in \mR^{d_{\text{camera}}}.
     \label{eq:cam_per_obj}
@@ -117,11 +117,11 @@ Camera-relative positions are computed from the extrinsic matrix $\mat{T} = [\ma
 To capture ego-motion (e.g., panning, orbiting), we compute relative camera poses between consecutive frames:
 \begin{align}
     \mat{R}_{\text{rel}}^{(t)} &= \mat{R}_t \mat{R}_{t-1}^{\!\top}, \label{eq:rel_rot} \\
-    \mat{t}_{\text{rel}}^{(t)} &= \mat{t}_t - \mat{R}_{\text{rel}}^{(t)}\mat{t}_{t-1}. \label{eq:rel_trans}
+    \boldsymbol{\tau}_{\text{rel}}^{(t)} &= \boldsymbol{\tau}_t - \mat{R}_{\text{rel}}^{(t)}\boldsymbol{\tau}_{t-1}. \label{eq:rel_trans}
 \end{align}
 The sequence of relative poses is encoded via self-attention:
 \begin{equation}
-    \mat{e}_t = \op{EgoAttn}\bigl(\{\op{MLP}([\op{6D}(\mat{R}_{\text{rel}}^{(\tau)}) \;\|\; \mat{t}_{\text{rel}}^{(\tau)}]) + \mat{e}_{\tau}\}_{\tau=0}^{T-1}\bigr),
+    \mat{e}_t = \op{EgoAttn}\bigl(\{\op{MLP}([\op{6D}(\mat{R}_{\text{rel}}^{(\tau)}) \;\|\; \boldsymbol{\tau}_{\text{rel}}^{(\tau)}]) + \mat{e}_{\tau}\}_{\tau=0}^{T-1}\bigr),
     \label{eq:ego_motion}
 \end{equation}
 yielding an ego-motion token $\mat{e}_t \in \mR^{d_{\text{camera}}}$ for each frame.

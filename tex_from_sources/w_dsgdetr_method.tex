@@ -120,7 +120,7 @@ The distinguishing component of W-DsgDetr is the \emph{TemporalObjectEncoder}. F
 
 We add sinusoidal temporal positional encodings $\mat{PE}_{\text{sin}}(t)$ to sequence elements:
 \begin{equation}
-    \hat{\mat{X}}_n = \op{TransformerEncoder}\bigl(\{\mat{x}_n^{(t)} + \mat{PE}_{\text{sin}}(t)\}_{t=1}^T,\; \text{mask}=\text{pad\_mask}_n\bigr),
+    \tilde{\mat{X}}_n = \op{TransformerEncoder}\bigl(\{\mat{x}_n^{(t)} + \mat{PE}_{\text{sin}}(t)\}_{t=1}^T,\; \text{mask}=\text{pad\_mask}_n\bigr),
     \label{eq:toe}
 \end{equation}
 where the padding mask excludes entirely invalid frames for that object. The resulting sequence replaces the original input features. This enables the model to interpolate and contextualize representations across time.
@@ -130,9 +130,9 @@ where the padding mask excludes entirely invalid frames for that object. The res
 \label{sec:iot_predictors}
 % ====================================================================================
 
-The temporally-refined tokens $\hat{\mat{X}}^{(t)}$ are passed through the \emph{InterObjectTransformer} for intra-frame spatial reasoning. Additive pairwise spatial positional embeddings $\mat{S}^{(t)}$ provide 3D relational biases:
+The temporally-refined tokens $\tilde{\mat{X}}^{(t)}$ are passed through the \emph{InterObjectTransformer} for intra-frame spatial reasoning. Additive pairwise spatial positional embeddings $\mat{S}^{(t)}$ provide 3D relational biases:
 \begin{equation}
-    \mat{H}^{(t)} = \op{TransformerEncoder}\bigl(\hat{\mat{X}}^{(t)} + \mat{S}^{(t)},\; \text{mask}=\overline{\mat{v}}^{(t)}\bigr).
+    \mat{H}^{(t)} = \op{TransformerEncoder}\bigl(\tilde{\mat{X}}^{(t)} + \mat{S}^{(t)},\; \text{mask}=\overline{\mat{v}}^{(t)}\bigr).
     \label{eq:iot}
 \end{equation}
 
@@ -169,8 +169,8 @@ Unseen pair losses are weighted by $\lambda_{\text{vlm}}$ and utilize label smoo
 \State $(\mat{m}_{\text{all}}, \bm{\Delta}_{\text{all}}) \gets \text{LKS\_Buffer}(\mat{f}_{\text{all}})$
 \State $\mat{G}_{\text{all}} \gets \text{GlobalStructuralEncoder}(\mat{C}_{\text{all}})$
 \State $\mat{X} \gets \text{Tokenizer}(\mat{G}_{\text{all}}, \mat{m}_{\text{all}}, \log \bm{\Delta}_{\text{all}})$
-\State $\hat{\mat{X}} \gets \text{TemporalObjectEncoder}(\mat{X})$ \Comment{Explicit temporal tracking}
-\State $\mat{H} \gets \text{InterObjectTransformer}(\hat{\mat{X}})$
+\State $\tilde{\mat{X}} \gets \text{TemporalObjectEncoder}(\mat{X})$ \Comment{Explicit temporal tracking}
+\State $\mat{H} \gets \text{InterObjectTransformer}(\tilde{\mat{X}})$
 \State $\hat{\mat{Y}}^{\text{obj}} \gets \text{NodePredictor}(\mat{H})$
 \State $\mat{R} \gets \text{RelationshipFormationAndSelfAttention}(\mat{H}, \hat{\mat{Y}}^{\text{obj}})$
 \State $\tilde{\mat{R}} \gets \text{TemporalEdgeAttention}(\mat{R})$

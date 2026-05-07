@@ -1,0 +1,87 @@
+We present the proposed \WSGG{} task following the formulation of
+\cite{peddi2024scenegraphanticipation}. Given an input video segment $V_{1}^{T} =
+\{I^{t}\}_{t=1}^{T}$ of $T$ monocular frames, we define the \emph{world state} $\mathcal{W}^{t}$ at
+timestamp $t$ as the complete set of objects that exist in the scene at that instant. The world
+state is partitioned into two disjoint subsets: $\mathcal{W}^{t} = \mathcal{O}^{t} \;\cup\;
+\mathcal{U}^{t}, \mathcal{O}^{t} \cap \mathcal{U}^{t} = \emptyset$, where $\mathcal{O}^{t} =
+\{w_{k}^{t}\}_{k=1}^{N(t)}$ is the set of \emph{observed} objects that are visible in frame $I^{t}$,
+and $\mathcal{U}^{t} = \{w_{k}^{t}\}_{k=N(t)+1}^{M(t)}$ is the set of \emph{unobserved} objects that
+are not visible due to occlusions, camera motion, or other factors. Here $M(t)$ denotes the total
+number of objects in the world state and $N(t)$ the number of observed objects at timestamp $t$. We
+operate under the assumption that all objects, both observed and unobserved, always persist in the
+world state. We define a binary visibility indicator $\text{vis}(k,t) \in \{0,1\}$ that equals $1$
+if and only if object $w_{k}^{t} \in \mathcal{O}^{t}$ (i.e., the object is observed in frame
+$I^{t}$). The camera extrinsic parameters at $t$ are given by the SE(3) transformation
+$\mathbf{T}^{t} = [\mathbf{R}^{t} \mid \boldsymbol{\tau}^{t}] \in \mathbb{R}^{4 \times 4}$.
+
+
+% across timestamps; that is, an object that leaves the
+% camera's field of view continues to exist and may re-enter in a subsequent frame.
+\vspace{1mm}
+\noindent\textbf{Objects.} Let $\mathcal{C}$ denote the set of all object categories.
+Each object $w_{k}^{t} \in \mathcal{W}^{t}$ is characterised by its category $c_{k}^{t} \in
+\mathcal{C}$, a \emph{3D oriented bounding box} $\mathbf{b}_{k}^{t} \in \mathbb{R}^{8 \times 3}$
+given as eight corner vertices in world coordinate frame, and for observed objects, a \emph{2D
+bounding box} $\mathbf{d}_{k}^{t} \in \mathbb{R}^{4}$ in image coordinates. Because the persistent
+geometric scaffold provides world-frame grounding at all times, 3D boxes are available for every
+object in $\mathcal{W}^{t}$, whereas 2D boxes are defined only for $\mathcal{O}^{t}$.
+
+\vspace{1mm}
+\noindent\textbf{Relationships.} Let $\mathcal{P}$ be the set comprising all predicate classes.
+Each pair of objects $\left(w_{i}^{t},\, w_{j}^{t}\right)$ in the world state may exhibit multiple
+relationships, defined through predicates $\{p_{ijk}^{t}\}_{k}$ where $p_{ijk}^{t} \in \mathcal{P}$.
+We define a relationship instance $r_{ijk}^{t}$ as a triplet $\left(w_{i}^{t},\, p_{ijk}^{t},\,
+w_{j}^{t}\right)$ that combines two distinct objects and a predicate.
+
+\vspace{1mm}
+\noindent\textbf{Scene Graphs.} We consider a scene graph as a symbolic representation of interacting
+objects
+and their pair-wise relationships. The \emph{frame-level scene graph} $\mathcal{G}^{t}$ is the set
+of all relationship triplets among observed objects: $\mathcal{G}^{t} = \{r_{ijk}^{t} \mid
+w_{i}^{t}, w_{j}^{t} \in \mathcal{O}^{t}\}$. The \emph{world scene graph}
+$\mathcal{G}_{\mathcal{W}}^{t}$ is the set of all relationship triplets over the full world state:
+$\mathcal{G}_{\mathcal{W}}^{t} = \{r_{ijk}^{t} \mid w_{i}^{t}, w_{j}^{t} \in \mathcal{W}^{t}\}$. For
+each object $w_{i}^{t}$ and a pair of objects $\left(w_{i}^{t},\, w_{j}^{t}\right)$, we use
+$\hat{\mathbf{c}}_{i}^{t} \in \left[0,1\right]^{|\mathcal{C}|}$ and $\hat{\mathbf{p}}_{ij}^{t} \in
+\left[0,1\right]^{|\mathcal{P}|}$ to represent the predicted distributions over object categories
+and predicate classes respectively. Here $\sum_{k} \hat{c}_{ik}^{t} = 1$ and $\sum_{k}
+\hat{p}_{ijk}^{t} = 1$. Each observed object $w_{k}^{t} \in \mathcal{O}^{t}$ is associated with a
+visual feature vector $\mathbf{f}_{k}^{t} \in \mathbb{R}^{d_{\text{roi}}}$.
+
+\vspace{1mm}
+\noindent\textbf{Problem Description.} We formally define the tasks of Video Scene Graph Generation
+(VidSGG)
+and \WorldSGG{} (\WSGG{}) as follows:
+
+\begin{itemize}[nosep]
+    \item [--] The goal of \textbf{VidSGG} is to build frame-level scene graphs
+    $\{\mathcal{G}^{t}\}_{t=1}^{T}$ for the observed video segment
+    $V_{1}^{T} = \{I^{t}\}_{t=1}^{T}$.  It entails the detection of observed objects
+    $\{w_{k}^{t}\}_{k=1}^{N(t)}$ in each frame and the prediction of all pair-wise relationships
+    $\{r_{ijk}^{t}\}_{ijk}$ between detected objects.
+    \item [--] The goal of \textbf{\WSGG{}} is to construct the world scene graph
+    $\mathcal{G}_{\mathcal{W}}^{t}$ at each timestamp $t$, given the monocular frames
+    $V_{1}^{T}$ of a dynamic scene.  This entails:
+    \begin{enumerate}[label=(\alph*)]
+        \item \emph{3D Localization}: Estimating the 3D oriented bounding box $\mathbf{b}_{k}^{t}$
+        in the world coordinate frame for each object $w_{k}^{t} \in \mathcal{W}^{t}$.
+        \item \emph{Semantic Relationship Prediction}: Predicting all pair-wise relationships
+        $\{r_{ijk}^{t}\}_{ijk}$ among all interacting objects in $\mathcal{W}^{t}$, encompassing
+        interactions between observed-observed, observed-unobserved, and unobserved-unobserved object pairs.
+    \end{enumerate}
+\end{itemize}
+
+% \WSGG{} thus generalizes VidSGG from per-frame, visibility-limited scene graphs to temporally persistent, world-anchored scene graphs that account for the full set of objects in the scene.
+
+\noindent \textbf{Graph Building Strategies.} Following VidSGG conventions, we consider two
+graph construction strategies:
+\begin{itemize}[nosep]
+    \item [--] \textbf{With Constraint:} Each object pair
+    $\left(w_{i}^{t},\, w_{j}^{t}\right)$ is assigned exactly one predicate
+    $p^t_{ij}$, yielding a single-edge graph
+    $\mathcal{G}_{\mathcal{W}}^t = \{r_{ij}^t\}_{ij}$.
+    \item [--] \textbf{No Constraint:} Each object pair may carry multiple
+    predicates, producing a multi-edge graph
+    $\mathcal{G}_{\mathcal{W}}^t = \{r_{ijk}^{t}\}_{ijk}$ that captures
+    richer relational structure.
+\end{itemize}

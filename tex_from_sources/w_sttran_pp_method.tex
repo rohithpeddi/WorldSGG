@@ -122,14 +122,14 @@ The local corners and absolute center are passed through an MLP to generate per-
 
 Unlike standard VidSGG, WorldSGG involves moving cameras. The \emph{ObjectSpatialEncoder} (formerly CameraPoseEncoder) computes camera-relative features for each object.
 
-Given the camera extrinsic matrix $\mat{T} = [\mat{R}\,|\,\mat{t}]$, we encode the global camera token:
+Given the camera extrinsic matrix $\mat{T} = [\mat{R}\,|\,\boldsymbol{\tau}]$, we encode the global camera token:
 \begin{equation}
-    \mat{c}_{\text{cam}} = \op{MLP}_{\text{cam}}\bigl([\op{6D}(\mat{R}) \;\|\; \mat{t}]\bigr) \in \mR^{d_{\text{camera}}},
+    \mat{c}_{\text{cam}} = \op{MLP}_{\text{cam}}\bigl([\op{6D}(\mat{R}) \;\|\; \boldsymbol{\tau}]\bigr) \in \mR^{d_{\text{camera}}},
     \label{eq:cam_global}
 \end{equation}
 where $\op{6D}(\mat{R})$ is the continuous 6D rotation representation. For each object $n$, camera-relative features are computed:
 \begin{align}
-    \mat{d}_n &= \bar{\mat{c}}_n - \mat{t}, \quad \text{(direction)} \label{eq:cam_dir} \\
+    \mat{d}_n &= \bar{\mat{c}}_n - \boldsymbol{\tau}, \quad \text{(direction)} \label{eq:cam_dir} \\
     \alpha_n &= \hat{\mat{d}}_n \cdot (-\mat{R}_{:,2}), \quad \text{(view alignment)} \label{eq:view_align} \\
     \beta_n^{\sin},\,\beta_n^{\cos} &= \hat{\mat{d}}_n \cdot \mat{R}_{:,0},\; \alpha_n. \quad \text{(azimuth)} \label{eq:azimuth}
 \end{align}
