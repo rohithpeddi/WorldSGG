@@ -207,13 +207,11 @@ class WSTTranPP(nn.Module):
         )
         if T > 1:
             velocity = ObjectMotionEncoder.compute_velocity(
-                corners_seq[1:].mean(dim=2), corners_seq[:-1].mean(dim=2),
+                corners_seq[1:], corners_seq[:-1],
             )
-            # Reshape: velocity is (T-1, N, 3), need (T-1, N, d_motion)
-            vel_expanded = velocity.unsqueeze(0).expand(T - 1, -1, -1) if velocity.dim() == 2 else velocity
             camera_R = camera_pose_seq[1:, :3, :3] if camera_pose_seq is not None else None
             motion_from_t1 = self.object_motion_encoder(
-                velocity=vel_expanded,
+                velocity=velocity,
                 camera_R=camera_R,
                 valid_mask=valid_mask_seq[1:],
             )
