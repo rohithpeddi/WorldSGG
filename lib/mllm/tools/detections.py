@@ -57,12 +57,24 @@ def _to_np(x) -> np.ndarray:
     return np.asarray(x)
 
 
+class _CPUUnpickler(pickle.Unpickler):
+    """The GDino pickles hold CUDA tensors; map them to CPU so cache builders
+    never touch (or need) a GPU."""
+
+    def find_class(self, module, name):
+        if module == "torch.storage" and name == "_load_from_bytes":
+            import io
+            import torch
+            return lambda b: torch.load(io.BytesIO(b), map_location="cpu", weights_only=False)
+        return super().find_class(module, name)
+
+
 def load_gdino_raw(video: WorldBBoxVideo, det_dir: str) -> Dict[str, Any]:
     p = Path(det_dir) / f"{video.video_id}.mp4.pkl"
     if not p.exists():
         return {}
     with open(p, "rb") as f:
-        return pickle.load(f)
+        return _CPUUnpickler(f).load()
 
 
 def build_detections(video: WorldBBoxVideo, det_dir: str, min_score: float = 0.25,
