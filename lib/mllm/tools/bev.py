@@ -123,7 +123,14 @@ def render_base(cloud: Dict[str, np.ndarray], meta: Dict[str, float]) -> Image.I
         u, v, z, c = u[order], v[order], z[order], c[order]
         shade = np.clip(0.55 + 0.45 * np.clip(z, 0, 2.0) / 2.0, 0, 1)[:, None]
         c = np.clip(c * shade + 25 * (1 - shade), 0, 255).astype(np.uint8)
-        canvas[v, u] = c
+        # splat each voxel as a square of about one voxel (3 cm) so the map is
+        # a continuous surface instead of isolated dots
+        r = max(1, int(round(0.03 * meta["px_per_m"])))
+        for du in range(r):
+            for dv in range(r):
+                uu = np.clip(u + du - r // 2, 0, W - 1)
+                vv = np.clip(v + dv - r // 2, 0, H - 1)
+                canvas[vv, uu] = c
     img = Image.fromarray(canvas)
     d = ImageDraw.Draw(img)
     f = _font(12)

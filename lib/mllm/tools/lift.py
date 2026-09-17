@@ -44,7 +44,8 @@ def _erode(mask: np.ndarray, k: int) -> np.ndarray:
 
 
 def lift_bbox(video: WorldBBoxVideo, k: int, bbox_pi3: Sequence[float], conf_min: float = 0.05,
-              trim: float = 5.0, kernels=KERNELS, min_points: int = MIN_POINTS) -> Optional[Dict[str, Any]]:
+              trim: float = 5.0, kernels=KERNELS, min_points: int = MIN_POINTS,
+              depth_band_min: float = 0.25, depth_band_rel: float = 0.15) -> Optional[Dict[str, Any]]:
     """Lift one Pi-3-space box on Pi3 frame ``k`` to OBB corners in the canonical frame."""
     pts, ok = video.points_final(k, conf_min=conf_min)
     H, W = ok.shape
@@ -55,9 +56,27 @@ def lift_bbox(video: WorldBBoxVideo, k: int, bbox_pi3: Sequence[float], conf_min
         return None
     box = np.zeros((H, W), bool)
     box[y1:y2, x1:x2] = True
+    # Depth anchoring: a 2D box also covers background along the viewing ray
+    # (a laptop box lifted to a 1.5 m slab of table + floor).  Anchor on the
+    # median camera depth of the central half of the box and keep only points
+    # within a depth band around it (Pi3 local_points are camera-frame points).
+    depth_ok = ok
+    try:
+        depth = np.asarray(video.pi3["local_points"][k])[..., 2]
+        cx1, cx2 = x1 + (x2 - x1) // 4, x2 - (x2 - x1) // 4
+        cy1, cy2 = y1 + (y2 - y1) // 4, y2 - (y2 - y1) // 4
+        core = np.zeros((H, W), bool)
+        core[cy1:max(cy2, cy1 + 1), cx1:max(cx2, cx1 + 1)] = True
+        d_core = depth[core & ok]
+        if d_core.size >= 5:
+            d0 = float(np.median(d_core))
+            band = max(depth_band_min, depth_band_rel * d0)
+            depth_ok = ok & (np.abs(depth - d0) <= band)
+    except Exception:
+        pass
     best = None
     for kz in kernels:
-        sel = _erode(box, kz) & ok
+        sel = _erode(box, kz) & depth_ok
         n = int(sel.sum())
         if n < min_points:
             continue
