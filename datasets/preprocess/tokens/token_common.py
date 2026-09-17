@@ -119,13 +119,23 @@ def _union_boxes(boxes: np.ndarray, labels: List[str], label_ids: List[int],
     return out
 
 
+class _NumpyCompatUnpickler(pickle.Unpickler):
+    """Feature PKLs were written with numpy 2 (``numpy._core``); the pi3 env has
+    numpy 1.26 — map the module path back."""
+
+    def find_class(self, module, name):
+        if module.startswith("numpy._core"):
+            module = module.replace("numpy._core", "numpy.core", 1)
+        return super().find_class(module, name)
+
+
 def load_feature_boxes(mode: str, split: str, video: str) -> Optional[Dict[str, Dict[str, np.ndarray]]]:
     """frame_file -> {"boxes": (N,4) f32 Pi3-space, "union_boxes": (P,4) f32, "target_size": (W,H)}"""
     p = feature_split_dir(mode, split) / f"{video}.pkl"
     if not p.exists():
         return None
     with open(p, "rb") as f:
-        d = pickle.load(f)
+        d = _NumpyCompatUnpickler(f).load()
     out = {}
     for fr, fd in d["frames"].items():
         boxes = np.asarray(fd["bboxes_xyxy"], dtype=np.float32).reshape(-1, 4)
