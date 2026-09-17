@@ -484,7 +484,8 @@ class WorldAG(Dataset):
 
             # Store real GT annotation bbox (for SGDet localization eval)
             if annot_obj is not None:
-                gt_box = annot_obj.get("bbox", None)
+                # PKLs store the 2D box under "bbox_2d" (legacy key "bbox")
+                gt_box = annot_obj.get("bbox_2d", annot_obj.get("bbox", None))
                 if gt_box is not None:
                     gt_bboxes_2d[i] = torch.tensor(
                         np.asarray(gt_box, dtype=np.float32)
@@ -525,7 +526,7 @@ class WorldAG(Dataset):
                 visibility_mask[i] = False
 
         # --- Person GT bbox and GT 3D corners (slot 0) ---
-        person_bbox = person_info.get("person_bbox", None)
+        person_bbox = person_info.get("bbox_2d", person_info.get("person_bbox", None))
         if person_bbox is not None:
             gt_bboxes_2d[0] = torch.tensor(
                 np.asarray(person_bbox, dtype=np.float32)

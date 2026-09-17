@@ -82,6 +82,18 @@ def check(data_path, mode, feature_model, annot_dir, limit=0, max_objects=64):
             c["zero_gt_corners"] += int(zero_gtc.sum())
             c["zero_gt_bboxes_2d"] += int(zero_2d.sum())
             c["invisible_slots"] += int((valid & ~t["visibility_mask"]).sum())
+            # 2D-box consistency: feature boxes vs annotation gt boxes (both
+            # should be Pi3-space xyxy; predcls feature boxes ARE the GT boxes)
+            has2d = valid & ~zero_2d & (t["bboxes_2d"].abs().sum(dim=1) > 0)
+            if int(has2d.sum()) > 0:
+                a, b = t["bboxes_2d"][has2d], t["gt_bboxes_2d"][has2d]
+                lt = np.maximum(a[:, :2].numpy(), b[:, :2].numpy())
+                rb = np.minimum(a[:, 2:].numpy(), b[:, 2:].numpy())
+                wh = np.clip(rb - lt, 0, None); inter = wh[:, 0] * wh[:, 1]
+                area = lambda x: np.clip((x[:, 2] - x[:, 0]) * (x[:, 3] - x[:, 1]), 0, None)
+                iou = inter / np.maximum(area(a.numpy()) + area(b.numpy()) - inter, 1e-6)
+                c["iou2d_n"] += int(iou.size); c["iou2d_sum"] += float(iou.sum())
+                c["iou2d_ge05"] += int((iou >= 0.5).sum())
             c["pairs"] += len(t["valid_raw_pair_indices"])
             if bool(valid[0]) and float(t["gt_corners"][0].abs().sum()) > 0:
                 person_zmin.append(float(t["gt_corners"][0][:, 2].min()))
@@ -107,6 +119,8 @@ def check(data_path, mode, feature_model, annot_dir, limit=0, max_objects=64):
         "invisible_slots": c["invisible_slots"],
         "invisible_pct": _pct(c["invisible_slots"], c["valid_slots"]),
         "pairs": c["pairs"],
+        "gt2d_iou_mean": (c["iou2d_sum"] / c["iou2d_n"]) if c["iou2d_n"] else None,
+        "gt2d_iou_ge05_pct": _pct(c["iou2d_ge05"], c["iou2d_n"]),
         "person_zmin_mean": float(z.mean()) if z.size else None,
         "person_zmin_p05": float(np.percentile(z, 5)) if z.size else None,
         "person_zmin_p50": float(np.percentile(z, 50)) if z.size else None,
@@ -148,6 +162,7 @@ def main():
             "feat_objects", "annot_objects", "feat_only_pct", "annot_only_pct",
             "valid_slots", "zero_corners_pct", "zero_gt_corners_pct",
             "zero_gt_bboxes_2d_pct", "invisible_pct", "pairs",
+            "gt2d_iou_mean", "gt2d_iou_ge05_pct",
             "person_zmin_p05", "person_zmin_p50", "person_zmin_p95"]
     cols = [k for k in reports if k != "video_set"]
     header = "metric".ljust(28) + "".join(reports[k]["annot_dir"][-24:].rjust(26) for k in cols)
