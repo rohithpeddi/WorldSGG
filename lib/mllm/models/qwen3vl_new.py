@@ -176,7 +176,10 @@ class Qwen3VLModel(BaseVideoModel):
                         text, None, tokenizer=tokenizer,
                     )
                 )
-        sp = SamplingParams(temperature=0.2, max_tokens=max(max_tokens_list))
+        sp = SamplingParams(temperature=getattr(self.args, 'temperature', 0.2),
+                            top_p=getattr(self.args, 'top_p', 1.0),
+                            seed=getattr(self.args, 'seed', None),
+                            max_tokens=max(max_tokens_list))
         outputs = self._vllm_batch_generate(prompt_inputs, sp)
         return [o.outputs[0].text for o in outputs]
 
