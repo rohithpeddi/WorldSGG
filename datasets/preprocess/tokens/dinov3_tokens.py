@@ -31,6 +31,7 @@ import os
 import sys
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -89,12 +90,14 @@ def run_backbone(model, batch: torch.Tensor, patch: int):
 
 
 def process_video(model, patch: int, video: str, split: str, device, batch_size: int,
-                  tier2: bool = True):
+                  tier2: bool = True, decode_pool: ThreadPoolExecutor = None,
+                  writer: ThreadPoolExecutor = None):
     frames = annotated_frames(video)
     tensors, keep = [], []
     tsize = None
-    for f in frames:
-        r = load_frame(video, f)
+    loaded = decode_pool.map(lambda f: load_frame(video, f), frames) if decode_pool else map(
+        lambda f: load_frame(video, f), frames)
+    for f, r in zip(frames, loaded):
         if r is None:
             continue
         tensors.append(r[0])
@@ -133,14 +136,17 @@ def process_video(model, patch: int, video: str, split: str, device, batch_size:
     for mode in MODES:
         boxes = load_feature_boxes(mode, split, video)
         arrays.update(pool_tier1(grids, frames, boxes, 1.0 / patch, mode))
+    if writer is not None:  # overlap the (I/O-bound) npz write with the next video
+        return len(frames), writer.submit(atomic_savez, out_path(STREAM, split, video), **arrays)
     atomic_savez(out_path(STREAM, split, video), **arrays)
-    return len(frames)
+    return len(frames), None
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_common_args(ap)
     ap.add_argument("--batch_size", type=int, default=16)
+    ap.add_argument("--decode_threads", type=int, default=6)
     args = ap.parse_args()
 
     from transformers import AutoModel
@@ -157,6 +163,22 @@ def main():
                     n_videos=len(videos), pid=os.getpid())
     n_ok = n_skip = n_err = n_frames = 0
     t0 = time.time()
+    decode_pool = ThreadPoolExecutor(max_workers=args.decode_threads)
+    writer = ThreadPoolExecutor(max_workers=1)
+    pending = []  # (video, future) of in-flight npz writes; marked done once written
+
+    def _drain(max_pending: int):
+        nonlocal n_ok, n_err
+        while len(pending) > max_pending:
+            pv, fut = pending.pop(0)
+            try:
+                fut.result()
+                done.add(pv)
+                n_ok += 1
+            except Exception as e:  # noqa: BLE001
+                n_err += 1
+                print(f"[ERR write] {pv}: {e}", flush=True)
+
     for i, v in enumerate(videos):
         if not args.overwrite and (v in done or out_path(STREAM, args.split, v).exists()):
             n_skip += 1
@@ -164,10 +186,11 @@ def main():
                 done.add(v)
             continue
         try:
-            n_frames += process_video(model, patch, v, args.split, device, args.batch_size,
-                                      tier2=not args.no_tier2)
-            done.add(v)
-            n_ok += 1
+            nf, fut = process_video(model, patch, v, args.split, device, args.batch_size,
+                                    tier2=not args.no_tier2, decode_pool=decode_pool, writer=writer)
+            n_frames += nf
+            pending.append((v, fut))
+            _drain(2)
         except Exception as e:  # noqa: BLE001
             n_err += 1
             print(f"[ERR] {v}: {e}", flush=True)
@@ -181,6 +204,9 @@ def main():
                          state="running")
         if (i + 1) % 50 == 0:
             torch.cuda.empty_cache()
+    _drain(0)
+    writer.shutdown()
+    decode_pool.shutdown()
     status.write(processed=len(videos), ok=n_ok, skipped=n_skip, errors=n_err, frames=n_frames,
                  state="finished")
     print(f"[{tag}] finished ok={n_ok} skip={n_skip} err={n_err}", flush=True)
