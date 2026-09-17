@@ -108,7 +108,7 @@ def _buckets(acc: BucketAccumulator) -> Dict[str, Any]:
 
 
 def collect_records(model: str, mode: str, pred_dir: str, limit: int = 0, cfg=None,
-                    video_list: str = None) -> Dict[str, Any]:
+                    video_list: str = None, objects_key: str = "objects") -> Dict[str, Any]:
     ts = WorldBBoxTestSet(cfg)
     ids = ts.video_ids
     if video_list:
@@ -127,7 +127,7 @@ def collect_records(model: str, mode: str, pred_dir: str, limit: int = 0, cfg=No
             missing.append(vid)
             continue
         try:
-            preds = prediction_lookup(load_run_pkl(str(p)))
+            preds = prediction_lookup(load_run_pkl(str(p)), objects_key=objects_key)
             records.extend(build_records(ts.load(vid), preds, mode=mode))
         except Exception as e:  # noqa
             errors.append((vid, repr(e)))
@@ -186,14 +186,19 @@ def main():
     ap.add_argument("--video_list", default=None,
                     help="restrict to these videos (e.g. the 442-video subset with pre-existing Stage-1 graphs)")
     ap.add_argument("--subset_tag", default="", help="suffix for output names when --video_list is used")
+    ap.add_argument("--objects_key", default="objects",
+                    help="Track outputs: 'objects' (final) or 'objects_pre' (Track B first proposal = -critic arm)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     cfg = load_config()
     pred_dir = args.pred_dir or get_path(cfg, f"outputs.{args.method}")
     tag = f"{args.method}__{args.model}__{args.mode}"
     suffix = (f"__lim{args.limit}" if args.limit else "") + (f"__{args.subset_tag}" if args.subset_tag else "")
+    if args.objects_key != "objects":
+        suffix += f"__{args.objects_key}"
     t0 = time.time()
-    col = collect_records(args.model, args.mode, pred_dir, args.limit, cfg, video_list=args.video_list)
+    col = collect_records(args.model, args.mode, pred_dir, args.limit, cfg, video_list=args.video_list,
+                          objects_key=args.objects_key)
     logger.info(f"{tag}: {col['n_videos']}/{col['n_split']} videos, {len(col['records'])} frames, "
                 f"{len(col['missing'])} missing, {len(col['errors'])} errors")
     res: Dict[str, Any] = {

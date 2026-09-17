@@ -90,9 +90,11 @@ def load_run_pkl(path: str) -> Dict[str, Any]:
         return pickle.load(f)
 
 
-def prediction_lookup(record: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+def prediction_lookup(record: Dict[str, Any], objects_key: str = "objects") -> Dict[str, Dict[str, Dict[str, Any]]]:
     """``{frame_file: {short_label: {"attention": [(lab,p)], "spatial": [...],
-    "contacting": [...], "corners": (8,3)|None, "score": float}}}``."""
+    "contacting": [...], "corners": (8,3)|None, "score": float}}}``.
+    ``objects_key``: which per-frame dict to read for Track outputs ("objects" =
+    final answer, "objects_pre" = Track B's first proposal, the -critic arm)."""
     out: Dict[str, Dict[str, Dict[str, Any]]] = {}
     frames = record.get("frames", {}) or {}
     obj_scores = ((record.get("estimation_meta") or {}).get("object_scores") or {})
@@ -115,7 +117,7 @@ def prediction_lookup(record: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, A
                     "score": float((obj_scores.get(lab) or {}).get("yes_prob", 1.0)),
                 }
         else:                                            # Track A/B format
-            objs = fdata.get("objects", {}) or {}
+            objs = fdata.get(objects_key, fdata.get("objects", {})) or {}
             if isinstance(objs, list):
                 objs = {o.get("label"): o for o in objs}
             for lab, p in objs.items():
