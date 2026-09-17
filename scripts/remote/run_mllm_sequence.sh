@@ -56,5 +56,7 @@ while :; do
   printf '{"state": "%s", "pid": %d, "started": "%s", "ended": "%s", "exit_code": %d, "gpu": "%s", "queue": "%s", "cmd": "%s"}\n' \
     "$STATE" "$P" "$START" "$(date -Is)" $RC "$GPU" "$QUEUE" "$MOD $ARGS" > "$STATUS"
   echo "[$QUEUE] $STATE $JOB rc=$RC $(date -Is)"
+  # a failed job is retried (resumable), but never in a tight loop
+  [ "$STATE" = failed ] && sleep 120
 done
 echo "[$QUEUE] end $(date -Is) (no runnable jobs left)"

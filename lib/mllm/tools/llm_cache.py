@@ -119,8 +119,17 @@ class CachedVLM:
             else:
                 out[i] = r
         if todo:
-            batch = [{"text": prompts[i]["text"], "video_inputs": self._to_tensor(prompts[i].get("images", [])),
-                      "max_new_tokens": prompts[i].get("max_new_tokens", 1024)} for i in todo]
+            multi = bool(getattr(self.model, "supports_images", False))
+            batch = []
+            for i in todo:
+                ims = [im.convert("RGB") for im in prompts[i].get("images", [])]
+                item = {"text": prompts[i]["text"], "max_new_tokens": prompts[i].get("max_new_tokens", 1024)}
+                if multi:
+                    item["images"] = ims
+                    item["video_inputs"] = None
+                else:
+                    item["video_inputs"] = self._to_tensor(ims)
+                batch.append(item)
             resps = self.model.mllm_batch_response(batch)
             for i, r in zip(todo, resps):
                 r = r if isinstance(r, str) else ""

@@ -23,10 +23,24 @@ class Qwen3VLModel(BaseVideoModel):
         self.model = LLM(
             model=self.model_name,
             trust_remote_code=True,
-            limit_mm_per_prompt={"video": 1},
+            limit_mm_per_prompt={"video": 1, "image": int(getattr(self.args, "max_images", 8))},
             tensor_parallel_size=self.args.tensor_parallel_size,
             **self._vllm_engine_kwargs(),
         )
+        self.supports_images = True   # multi-image prompts via mllm_batch_response(images=[...])
+
+    def _prepare_image_prompt(self, text, images, tokenizer=None):
+        """Multi-image prompt (WorldSGG Track A/B): one <image> placeholder per PIL image."""
+        from vllm import TextPrompt
+        if tokenizer is None:
+            tokenizer = self.model.get_tokenizer()
+        messages = [{"role": "user", "content": [{"type": "image"} for _ in images] + [
+            {"type": "text", "text": text},
+        ]}]
+        prompt_text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        return TextPrompt(prompt=prompt_text, multi_modal_data={"image": list(images)})
 
     # -------------------------------------------------------------- helpers
     @staticmethod
@@ -148,6 +162,9 @@ class Qwen3VLModel(BaseVideoModel):
         for p in prompts:
             text, video_inputs = p["text"], p.get("video_inputs")
             max_tokens_list.append(p.get("max_new_tokens", 512))
+            if p.get("images"):
+                prompt_inputs.append(self._prepare_image_prompt(text, p["images"], tokenizer=tokenizer))
+                continue
             if video_inputs is not None:
                 raw = video_inputs[0] if isinstance(video_inputs, list) else video_inputs
                 vid_key = id(raw)
