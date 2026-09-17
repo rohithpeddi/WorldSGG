@@ -53,6 +53,9 @@ while :; do
     "$P" "$START" "$GPU" "$QUEUE" "$MOD $ARGS" > "$STATUS"
   wait $P; RC=$?
   STATE=done; [ $RC -eq 0 ] || STATE=failed
+  # vLLM's EngineCore child survives its parent (e.g. after a kill) and keeps
+  # the whole GPU; never let it leak into the next job
+  sleep 3; pkill -f "^VLLM::EngineCor[e]" 2>/dev/null && { echo "[$QUEUE] killed a leftover VLLM::EngineCore"; sleep 5; }
   printf '{"state": "%s", "pid": %d, "started": "%s", "ended": "%s", "exit_code": %d, "gpu": "%s", "queue": "%s", "cmd": "%s"}\n' \
     "$STATE" "$P" "$START" "$(date -Is)" $RC "$GPU" "$QUEUE" "$MOD $ARGS" > "$STATUS"
   echo "[$QUEUE] $STATE $JOB rc=$RC $(date -Is)"
