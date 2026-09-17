@@ -50,7 +50,9 @@ def build_cloud(video: WorldBBoxVideo, conf_min: float = 0.05, stride: int = 2,
         pts = pts[::stride, ::stride]
         m = mask[::stride, ::stride]
         col = img[::stride, ::stride]
-        m &= (pts[..., 2] > -0.3) & (pts[..., 2] < z_max)
+        # generous height band: a few videos have their floor fit above the
+        # scene (all points at z<0), so do not clip at the nominal floor
+        m &= (pts[..., 2] > -2.0) & (pts[..., 2] < z_max)
         xs.append(pts[m].reshape(-1, 3))
         cs.append(col[m].reshape(-1, 3))
     xyz = np.concatenate(xs, 0) if xs else np.zeros((0, 3), np.float32)

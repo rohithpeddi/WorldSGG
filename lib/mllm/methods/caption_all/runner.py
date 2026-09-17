@@ -326,7 +326,9 @@ class ActionGenomeCaptionAllObjectsProcessor(ActionGenomeBaseProcessor):
         video_frames_dir = self.frames_dir / video_id
         frame_to_clip: Dict[int, Any] = {}
 
-        if clip_intervals:
+        # Clips are only consumed by the Yes/No verification pass (skipped with
+        # --skip-verification): do not decode them in that case.
+        if clip_intervals and not self.skip_verification:
             logger.info(
                 f"[{video_id}] Loading {len(clip_intervals)} "
                 f"annotation-driven clips ..."

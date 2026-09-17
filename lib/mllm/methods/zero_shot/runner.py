@@ -244,7 +244,9 @@ class ActionGenomeZeroShotProcessor(ActionGenomeBaseProcessor):
         # 3b. Pre-load per-frame clips (centered on each annotated frame) --
         bbox_frames_all = video_data.get("bbox_frames", {})
         frame_to_clip: Dict[int, Any] = {}
-        for frame_stem in bbox_frames_all.keys():
+        # Frame-local clips are only consumed by the Yes/No verification pass;
+        # with --skip-verification they would cost ~10 s of PNG decoding per video.
+        for frame_stem in ([] if self.skip_verification else bbox_frames_all.keys()):
             m = re.search(r"(\d+)", frame_stem)
             if m:
                 fidx = int(m.group(1))
