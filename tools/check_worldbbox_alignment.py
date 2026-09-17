@@ -72,7 +72,8 @@ def check(data_path, mode, feature_model, annot_dir, limit=0, max_objects=64):
             c["feat_only"] += len(fs - as_)
             c["annot_only"] += len(as_ - fs)
 
-            t = ds._build_frame_tensors(ff, af, max_objects)
+            t = ds._build_frame_tensors(ff, af, max_objects,
+                                        bbox_scale=ds._bbox_scale(vid, fr, ff))
             valid = t["valid_mask"]
             c["valid_slots"] += int(valid.sum())
             zero_c = valid & (t["corners"].abs().sum(dim=(1, 2)) == 0)
