@@ -41,6 +41,7 @@ Usage::
 """
 
 import logging
+import math
 import os
 import pickle
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -106,6 +107,36 @@ for _short, _full in LABEL_DENORMALIZE_MAP.items():
 def _to_short(label: str) -> str:
     """Full AG name → short form. E.g. 'closet/cabinet' → 'closet'."""
     return LABEL_NORMALIZE_MAP.get(label, label)
+
+
+def _compute_target_size(orig_w: int, orig_h: int, pixel_limit: int = 255000,
+                         patch_size: int = 14):
+    """Pi-3 resize target (identical to the ROI feature extractor /
+    ag_dataset_3d.py): aspect-preserving, multiples of patch_size,
+    total pixels <= pixel_limit."""
+    scale = math.sqrt(pixel_limit / (orig_w * orig_h)) if orig_w * orig_h > 0 else 1
+    w_target, h_target = orig_w * scale, orig_h * scale
+    k = round(w_target / patch_size)
+    m = round(h_target / patch_size)
+    while (k * patch_size) * (m * patch_size) > pixel_limit:
+        if k / m > w_target / h_target:
+            k -= 1
+        else:
+            m -= 1
+    return max(1, k) * patch_size, max(1, m) * patch_size
+
+
+def _png_size(path: str):
+    """(w, h) from a PNG header without decoding the image."""
+    import struct
+    with open(path, "rb") as f:
+        head = f.read(24)
+    if len(head) >= 24 and head[:8] == b"\x89PNG\r\n\x1a\n":
+        w, h = struct.unpack(">II", head[16:24])
+        return int(w), int(h)
+    from PIL import Image  # fallback for non-PNG frames
+    with Image.open(path) as im:
+        return im.size
 
 
 def _multi_hot(rel_strings: List[str], label_to_idx: Dict[str, int],
@@ -186,6 +217,10 @@ class WorldAG(Dataset):
         self._include_invisible = include_invisible
         self._max_objects = max_objects
         self._annot_dir_name = annot_dir_name
+        # Original frame size per video (for scaling annotation 2D boxes,
+        # stored in original-frame pixels, into Pi-3 feature space)
+        self._orig_size_cache: Dict[str, Optional[tuple]] = {}
+        self._warned_no_frames = False
 
         # Directories
         self._feat_dir = (
@@ -341,11 +376,48 @@ class WorldAG(Dataset):
     # Per-frame tensor construction
     # ------------------------------------------------------------------
 
+    def _bbox_scale(self, video_id: str, frame_file: str,
+                    feat_frame: Dict[str, Any]):
+        """(sx, sy) mapping annotation ``bbox_2d`` (original frame pixels)
+        to the Pi-3 space of the feature PKL boxes. Target size comes from
+        the feature PKL (``target_size``) or is recomputed; original size is
+        read from the frame PNG header once per video."""
+        if video_id not in self._orig_size_cache:
+            size = None
+            for sub in ("frames_annotated", "frames"):
+                for suffix in (".mp4", ""):
+                    p = self._data_path / sub / f"{video_id}{suffix}" / frame_file
+                    if p.exists():
+                        try:
+                            size = _png_size(str(p))
+                        except Exception:
+                            size = None
+                        break
+                if size is not None:
+                    break
+            if size is None and not self._warned_no_frames:
+                logger.warning(
+                    f"[WorldAG] frame images not found under {self._data_path}/frames_annotated; "
+                    f"annotation 2D boxes are used unscaled (gt_bboxes_2d may mismatch feature boxes)")
+                self._warned_no_frames = True
+            self._orig_size_cache[video_id] = size
+        size = self._orig_size_cache[video_id]
+        if size is None:
+            return (1.0, 1.0)
+        ow, oh = size
+        ts = feat_frame.get("target_size", None)
+        if ts is None:
+            tw, th = _compute_target_size(ow, oh)
+        else:
+            tw, th = int(ts[0]), int(ts[1])
+        return (tw / ow, th / oh)
+
     def _build_frame_tensors(
         self,
         feat_frame: Dict[str, Any],
         annot_frame: Dict[str, Any],
         max_N: int,
+        bbox_scale=(1.0, 1.0),
     ):
         """Build padded tensors for a single frame.
 
@@ -446,10 +518,17 @@ class WorldAG(Dataset):
         visibility_mask = torch.zeros(max_N, dtype=torch.bool)
         object_classes = torch.zeros(max_N, dtype=torch.long)
 
+        sx, sy = float(bbox_scale[0]), float(bbox_scale[1])
+        box_scale = np.array([sx, sy, sx, sy], dtype=np.float32)
+
         for i in range(N):
             visual_features[i] = roi_features[i]
             if i < bboxes_xyxy.shape[0]:
                 bboxes_2d[i] = bboxes_xyxy[i]
+                # Default GT box = the feature box (detector / supply box in
+                # sgdet); overridden below by the annotation box when the
+                # object has one (unobserved objects have none).
+                gt_bboxes_2d[i] = bboxes_xyxy[i]
             valid_mask[i] = True
 
             # Object class label (GT for predcls, detector for sgdet —
@@ -484,11 +563,13 @@ class WorldAG(Dataset):
 
             # Store real GT annotation bbox (for SGDet localization eval)
             if annot_obj is not None:
-                gt_box = annot_obj.get("bbox", None)
+                # PKLs store the 2D box under "bbox_2d" (legacy key "bbox"),
+                # in ORIGINAL frame pixels -> scale into Pi-3 feature space
+                gt_box = annot_obj.get("bbox_2d", annot_obj.get("bbox", None))
                 if gt_box is not None:
-                    gt_bboxes_2d[i] = torch.tensor(
-                        np.asarray(gt_box, dtype=np.float32)
-                    )
+                    gb = np.asarray(gt_box, dtype=np.float32).reshape(-1)
+                    if gb.size >= 4:
+                        gt_bboxes_2d[i] = torch.from_numpy(gb[:4] * box_scale)
                 # Store real GT 3D corners (FINAL space, for 3D IoU eval)
                 gt_c = annot_obj.get("corners_final", None)
                 if gt_c is not None:
@@ -525,11 +606,11 @@ class WorldAG(Dataset):
                 visibility_mask[i] = False
 
         # --- Person GT bbox and GT 3D corners (slot 0) ---
-        person_bbox = person_info.get("person_bbox", None)
+        person_bbox = person_info.get("bbox_2d", person_info.get("person_bbox", None))
         if person_bbox is not None:
-            gt_bboxes_2d[0] = torch.tensor(
-                np.asarray(person_bbox, dtype=np.float32)
-            )
+            pb = np.asarray(person_bbox, dtype=np.float32).reshape(-1)
+            if pb.size >= 4:
+                gt_bboxes_2d[0] = torch.from_numpy(pb[:4] * box_scale)
         person_gt_corners = person_info.get("corners_final", None)
         if person_gt_corners is not None:
             person_gt_corners = np.asarray(person_gt_corners, dtype=np.float32)
@@ -726,7 +807,10 @@ class WorldAG(Dataset):
             af_key = annot_frame_to_key.get(frame_file, frame_file)
             af = annot_frames.get(af_key, {})
 
-            frame_tensors = self._build_frame_tensors(ff, af, N_max)
+            frame_tensors = self._build_frame_tensors(
+                ff, af, N_max,
+                bbox_scale=self._bbox_scale(video_id, frame_file, ff),
+            )
 
             # Node tensors (already N_max padded)
             all_visual.append(frame_tensors["visual_features"])
