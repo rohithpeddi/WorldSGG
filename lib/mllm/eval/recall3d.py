@@ -24,7 +24,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from lib.detector.monocular3d.evaluation.evaluate_3d import compute_iou_3d_obb
+from lib.mllm.eval.iou3d import compute_iou_3d_obb
 from lib.supervised.evaluation_recall import argsort_desc, intersect_2d
 from lib.supervised.evaluation_recall_bucketed import BucketAccumulator, bucket_name
 

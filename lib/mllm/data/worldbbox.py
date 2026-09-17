@@ -118,6 +118,41 @@ def _wb_cfg(cfg: Optional[dict] = None) -> dict:
     return wb
 
 
+class _LazyNpz:
+    """Per-key lazy reader for a ``.npz``; ``shape(key)`` parses only the .npy header."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self._cache: Dict[str, np.ndarray] = {}
+        self._shapes: Dict[str, tuple] = {}
+
+    @property
+    def files(self) -> List[str]:
+        import zipfile
+        with zipfile.ZipFile(self.path) as zf:
+            return [n[:-4] for n in zf.namelist() if n.endswith(".npy")]
+
+    def shape(self, key: str) -> tuple:
+        if key in self._cache:
+            return self._cache[key].shape
+        if key not in self._shapes:
+            import zipfile
+            with zipfile.ZipFile(self.path) as zf, zf.open(f"{key}.npy") as f:
+                version = np.lib.format.read_magic(f)
+                shp, _, _ = np.lib.format._read_array_header(f, version)
+            self._shapes[key] = tuple(int(x) for x in shp)
+        return self._shapes[key]
+
+    def __getitem__(self, key: str) -> np.ndarray:
+        if key not in self._cache:
+            with np.load(self.path) as z:
+                self._cache[key] = z[key]
+        return self._cache[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.files
+
+
 # ---------------------------------------------------------------------------
 # Per-video record
 # ---------------------------------------------------------------------------
@@ -237,22 +272,21 @@ class WorldBBoxVideo:
         return Path(self._wb["pi3_dynamic"]) / f"{self.video_id}_10" / "predictions.npz"
 
     @property
-    def pi3(self) -> dict:
-        """Raw Pi3 outputs (mmap'd); keys points, local_points, conf, camera_poses, images."""
+    def pi3(self) -> "_LazyNpz":
+        """Raw Pi3 outputs, loaded per key on first access (an .npz cannot be
+        memory-mapped; ``points``/``images`` are ~100 MB each per video)."""
         if self._pi3 is None:
-            z = np.load(self.pi3_path, mmap_mode="r")
-            self._pi3 = {k: z[k] for k in z.files}
+            self._pi3 = _LazyNpz(self.pi3_path)
         return self._pi3
 
     @property
     def pi3_num_frames(self) -> int:
-        return int(self.pi3["camera_poses"].shape[0])
+        return int(self.pi3.shape("camera_poses")[0])
 
     @property
     def pi3_size(self) -> Tuple[int, int]:
         """(W, H) of the Pi3 grids = the Pi-3 feature space of WorldAG boxes."""
-        s = self.pi3["camera_poses"].shape  # cheap; points is (S,H,W,3)
-        H, W = self.pi3["conf"].shape[1:3]
+        _, H, W = self.pi3.shape("conf")[:3]
         return int(W), int(H)
 
     @property
