@@ -120,6 +120,11 @@ def prediction_lookup(record: Dict[str, Any], objects_key: str = "objects") -> D
             objs = fdata.get(objects_key, fdata.get("objects", {})) or {}
             if isinstance(objs, list):
                 objs = {o.get("label"): o for o in objs}
+            pc = fdata.get("person_corners")
+            if pc is not None:                            # the track's own person OBB (sgdet slot 0)
+                pc = np.asarray(pc, dtype=np.float64)
+                if pc.size == 24:
+                    entry["__person__"] = {"corners": pc.reshape(8, 3)}
             for lab, p in objs.items():
                 lab = to_short(str(lab).strip().lower())
                 entry[lab] = {
@@ -164,6 +169,8 @@ def build_records(video: WorldBBoxVideo, preds: Optional[Dict[str, Dict[str, Dic
     sx, sy = video.bbox_scale if video.pi3_path.exists() else (1.0, 1.0)
     placeholder = np.array([0.0, 0.0, float(W), float(H)], dtype=np.float32)
     preds = preds or {}
+    if person_pred_corners is None:                       # Track outputs carry the person OBB per frame
+        person_pred_corners = {f: e["__person__"]["corners"] for f, e in preds.items() if "__person__" in e}
     frames = video.frames
     T = len(frames)
     records: List[Dict[str, Any]] = []
@@ -183,7 +190,7 @@ def build_records(video: WorldBBoxVideo, preds: Optional[Dict[str, Dict[str, Dic
         extra = []
         if mode == "sgdet":
             for lab in sorted(fp.keys()):
-                if lab not in seen and lab != "person" and lab in NAME_TO_IDX:
+                if lab not in seen and lab != "person" and lab in NAME_TO_IDX and not lab.startswith("__"):
                     extra.append(lab)
                     labels.append(lab)
         N = len(labels)
