@@ -1,0 +1,160 @@
+# ── Pseudo-Label Generation Pipeline Configuration ──────────────────────
+#
+# All paths, model definitions, and inference defaults are configured here.
+# CLI arguments always override values from this file.
+#
+# WorldSGG server config (CS93371). Auto-discovered by lib/mllm/core/config_loader.py
+# (override with $WSGG_MLLM_CONFIG or --config).  Vendored from
+# WorldSceneGraphAnnotationTool@c686be1 backend/pseudo/config_utd.yaml.
+#
+# Storage rule: /data (read-only, 100 % full) holds inputs; everything this
+# pipeline WRITES goes under /data3/rohith/ag/ (cache_root).
+# ────────────────────────────────────────────────────────────────────────
+
+# ── Directories ─────────────────────────────────────────────────────────
+paths:
+  ffmpeg_bin: ffmpeg
+  ag_root: /data/rohith/ag
+  ag_annotations: /data/rohith/ag/annotations/
+  ag_frames: /data/rohith/ag/frames/
+  ag_frames_zipped: /data/rohith/ag/frames_zipped/
+  ag_videos: /data/rohith/ag/videos/
+  ag_frames_annotated: /data/rohith/ag/frames_annotated/
+  dynamic_scenes: /data2/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic
+  # Local VLM weights: <model_weights>/<model_key>/ (only models not in the
+  # default HF cache live here, e.g. qwen3vl_8b_thinking).
+  model_weights: /data3/rohith/hf/vlm_weights/
+  # Stage-1 graphs: merged view = symlinks to the 2,667 reusable
+  # /data/rohith/ag/graphs/qwen25vl_7b/*.pkl + graphs generated for test
+  # videos that were missing (scripts/remote/link_graphs.sh).
+  graphs: /data3/rohith/ag/cache/mllm/graphs/
+  graphs_legacy: /data/rohith/ag/graphs/
+  cache_root: /data3/rohith/ag
+  outputs:
+    graphs: /data3/rohith/ag/cache/mllm/graphs/
+    rag: /data3/rohith/ag/runs/mllm/rag/
+    rag_all: /data3/rohith/ag/runs/mllm/rag_all/
+    caption: /data3/rohith/ag/runs/mllm/caption/
+    caption_all: /data3/rohith/ag/runs/mllm/caption_all/
+    zero_shot: /data3/rohith/ag/runs/mllm/zero_shot/
+    wsg_agent: /data3/rohith/ag/runs/mllm/wsg_agent/
+    track_a: /data3/rohith/ag/runs/mllm/track_a/
+    track_b: /data3/rohith/ag/runs/mllm/track_b/
+    visualizations: /data3/rohith/ag/runs/mllm/visualizations/
+    wsg_corrections: /data/rohith/ag/wsg_corrections/
+    wsg_2d_augmentations: /data/rohith/ag/wsg_2d_augmentations/
+    predictions: /data3/rohith/ag/runs/mllm/predictions/
+    dumps: /data3/rohith/ag/runs/mllm/dumps/
+    logs: /data3/rohith/ag/logs/
+
+  # worldbbox test set (item 1 of docs/EXECUTION_PLAN_WORLDBBOX.md)
+  worldbbox:
+    annotations_test: /data/rohith/ag/world4d_rel_annotations_worldbbox/test/
+    annotation_version_name: test_worldbbox
+    split_file: /data3/rohith/ag/splits/test_worldbbox_1511.txt
+    manifest: /data3/rohith/ag/cache/manifest.json
+    pi3_dynamic: /data2/rohith/ag/ag4D/dynamic_scenes/pi3_dynamic
+    sampled_frames_idx: /data/rohith/ag/sampled_frames_idx/
+    caches:
+      bev: /data3/rohith/ag/cache/mllm/bev/
+      detections: /data3/rohith/ag/cache/mllm/detections/
+      lifted3d: /data3/rohith/ag/cache/mllm/lifted3d/
+      llm_cache: /data3/rohith/ag/cache/mllm/llm_cache/
+
+  # Annotation sub-directories (relative to ag_root unless absolute)
+  annotations:
+    object_classes: /data/rohith/ag/annotations/object_classes.txt
+    gt_annotations: /data/rohith/ag/gt_annotations/
+    world_annotations: /data/rohith/ag/world_annotations/
+    bbox_3d_gt_obb_final: /data/rohith/ag/world_annotations/bbox_annotations_3d_obb_final/
+    detection_dynamic: /data/rohith/ag/detection/gdino_bboxes/
+    detection_static: /data/rohith/ag/detection/gdino_bboxes_static/
+    sampled_frames_idx: /data/rohith/ag/sampled_frames_idx/
+
+# ── Model Registry ──────────────────────────────────────────────────────
+# Each entry maps a model key to its HuggingFace ID, Python module, and
+# class name.  Vgent loads models dynamically from this registry.
+models:
+  # Baselines (vLLM + HuggingFace Transformers)
+  internvl25_8b:
+    hf_id: OpenGVLab/InternVL2_5-8B
+    module: lib.mllm.models.internvl
+    class: InternVLModel
+  kimikvl_a3b:
+    hf_id: moonshotai/Kimi-VL-A3B-Instruct
+    module: lib.mllm.models.kimik
+    class: KimikModel
+  qwen25vl_7b:
+    hf_id: Qwen/Qwen2.5-VL-7B-Instruct
+    module: lib.mllm.models.qwenvl
+    class: QwenVLModel
+
+  # New candidates (vLLM-only)
+  tarsier2_7b:
+    hf_id: omni-research/Tarsier2-7b-0115
+    module: lib.mllm.models.tarsier2
+    class: Tarsier2Model
+  keyevl15_8b:
+    hf_id: Kwai-Keye/Keye-VL-1_5-8B
+    module: lib.mllm.models.keyevl
+    class: KeyeVLModel
+  internvl35_8b:
+    hf_id: OpenGVLab/InternVL3_5-8B
+    module: lib.mllm.models.internvl35
+    class: InternVL35Model
+  internvl35_14b:
+    hf_id: OpenGVLab/InternVL3_5-14B
+    module: lib.mllm.models.internvl35
+    class: InternVL35Model
+  qwen3vl_8b:
+    hf_id: Qwen/Qwen3-VL-8B-Instruct
+    module: lib.mllm.models.qwen3vl_new
+    class: Qwen3VLModel
+  qwen3vl_8b_thinking:
+    hf_id: Qwen/Qwen3-VL-8B-Thinking
+    module: lib.mllm.models.qwen3vl_new
+    class: Qwen3VLModel
+  qwen3vl_30b_a3b:
+    hf_id: Qwen/Qwen3-VL-30B-A3B-Instruct
+    module: lib.mllm.models.qwen3vl_new
+    class: Qwen3VLModel
+  ovis25_9b:
+    hf_id: AIDC-AI/Ovis2.5-9B
+    module: lib.mllm.models.ovis
+    class: OvisModel
+  llava_ov_7b:
+    hf_id: llava-hf/llava-onevision-qwen2-7b-ov-hf
+    module: lib.mllm.models.llava_ov
+    class: LLaVAOneVisionModel
+  minicpmv45:
+    hf_id: openbmb/MiniCPM-V-4_5
+    module: lib.mllm.models.minicpmv
+    class: MiniCPMVModel
+  minicpmo26:
+    hf_id: openbmb/MiniCPM-o-2_6
+    module: lib.mllm.models.minicpmv
+    class: MiniCPMVModel
+
+# ── Embedding Models ────────────────────────────────────────────────────
+# Used by Vgent for text similarity / retrieval (entity graph matching).
+embedding_models:
+  bge_large:
+    hf_id: BAAI/bge-large-en-v1.5
+
+# ── Inference defaults ──────────────────────────────────────────────────
+inference:
+  default_model: qwen25vl_7b
+  use_vllm: true
+  fps: 1.0
+  chunk_size: 128
+  total_pixels: 128000
+
+# ── vLLM Engine Settings ────────────────────────────────────────────────
+# A40 46 GB, one engine per GPU (CUDA_VISIBLE_DEVICES=<gpu>, TP=1).
+# CLI arguments always override these values.
+vllm:
+  gpu_memory_utilization: 0.90    # 10% safety buffer
+  max_model_len: 16384            # shorter context to fit in smaller VRAM
+  max_num_seqs: 16                # fewer concurrent sequences
+  enable_chunked_prefill: true    # still beneficial for throughput
+  dtype: bfloat16                 # explicit; change to float16 for older GPUs

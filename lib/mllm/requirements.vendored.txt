@@ -1,0 +1,32 @@
+# ── Core ML framework ───────────────────────────────────────────────
+# NOTE: Install with CUDA 12.4 index:
+#   pip install torch>=2.6.0 torchvision>=0.21.0 --index-url https://download.pytorch.org/whl/cu124
+torch>=2.6.0
+torchvision>=0.21.0
+
+# ── Inference & model loading ───────────────────────────────────────
+transformers==4.57.6
+tokenizers==0.22.2
+vllm==0.15.1
+accelerate
+huggingface_hub>=0.25.0
+
+# ── Video / image utilities ─────────────────────────────────────────
+decord
+#flash-attn==2.7.4.post1
+Pillow
+qwen_vl_utils
+timm
+
+# ── Data & config ───────────────────────────────────────────────────
+PyYAML>=6.0
+pyarrow
+numpy
+networkx
+
+# ── Misc ────────────────────────────────────────────────────────────
+pysubs2
+requests
+packaging
+tqdm
+boxsdk>=3.0,<4.0
