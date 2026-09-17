@@ -113,7 +113,8 @@ class TrackAContext:
             self.lift.save()
 
 
-def build_payload(ctx: TrackAContext, fr, n_context: int, ctx_side: int = 384) -> Dict[str, Any]:
+def build_payload(ctx: TrackAContext, fr, n_context: int, ctx_side: int = 320,
+                  bev_side: int = 640, target_side: int = 640) -> Dict[str, Any]:
     v = ctx.video
     frames = v.frames
     # ---- objects / ids ----
@@ -144,7 +145,7 @@ def build_payload(ctx: TrackAContext, fr, n_context: int, ctx_side: int = 384) -
             objs.append({"id": len(objs) + 1, "label": d["label"], "bbox": d["bbox"], "score": d["score"],
                          "corners": corners, "obb": obb_dict(corners), "visible": True})
     # ---- images ----
-    target = mark_frame(ctx.frame_image(fr.file), objs, person_bbox=person_bbox)
+    target = mark_frame(ctx.frame_image(fr.file), objs, person_bbox=person_bbox, max_side=target_side)
     others = [f for f in frames if f.file != fr.file]
     if n_context and others:
         idx = np.unique(np.linspace(0, len(others) - 1, min(n_context, len(others))).round().astype(int))
@@ -159,6 +160,9 @@ def build_payload(ctx: TrackAContext, fr, n_context: int, ctx_side: int = 384) -
     if cam_pose is None and fr.pi3_index is not None:
         cam_pose = v.camera_pose_final_for_pi3(fr.pi3_index)
     bev = mark_bev(ctx.bev_img, ctx.bev_meta, objs, camera_pose=cam_pose, person_corners=person_corners)
+    if max(bev.size) > bev_side:
+        sc = bev_side / max(bev.size)
+        bev = bev.resize((int(bev.width * sc), int(bev.height * sc)), Image.BILINEAR)
     images = [target] + ctx_imgs + [bev]
     cam = camera_dict(cam_pose)
     pobb = obb_dict(person_corners)
@@ -284,7 +288,9 @@ def main():
     ap.add_argument("--video_list", default=None)
     ap.add_argument("--video_id", default=None)
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--context_frames", type=int, default=4)
+    ap.add_argument("--context_frames", type=int, default=2)
+    ap.add_argument("--videos_per_batch", type=int, default=4,
+                    help="pool the prompts of this many videos into one vLLM generate() call")
     ap.add_argument("--max_new_tokens", type=int, default=4096)
     ap.add_argument("--max_model_len", type=int, default=24576)
     ap.add_argument("--temperature", type=float, default=0.6)
@@ -319,6 +325,43 @@ def main():
     dry_dir = Path("/data3/rohith/ag/logs/track_a_dry") / args.mode
     t0 = time.time()
     n_done = n_skip = n_fail = 0
+    def flush(group):
+        """One generate() over the prompts of several videos, then parse + save per video."""
+        nonlocal n_done, n_fail
+        prompts = [{"text": p["text"], "images": p["images"], "max_new_tokens": args.max_new_tokens}
+                   for _, payloads in group for _, p in payloads]
+        responses = vlm.generate(prompts)
+        pos = 0
+        for vid, payloads in group:
+            resp_v = responses[pos:pos + len(payloads)]
+            pos += len(payloads)
+            try:
+                frames_out: Dict[str, Any] = {}
+                n_parsed = 0
+                for (fr, p), resp in zip(payloads, resp_v):
+                    d = extract_json(resp)
+                    objs = parse_objects(d, p, args.mode)
+                    n_parsed += d is not None
+                    frames_out[fr.file] = {"objects": objs, "raw_response": resp,
+                                           "ids": {o["id"]: o["label"] for o in p["objects"]},
+                                           "person_corners": None if p["person_corners"] is None
+                                           else np.asarray(p["person_corners"], np.float32).tolist()}
+                rec = {"video_id": f"{vid}.mp4", "mode": args.mode, "model_name": args.model_name + args.tag,
+                       "track": "A", "context_frames": args.context_frames, "frames": frames_out,
+                       "n_frames": len(frames_out), "n_parsed": n_parsed}
+                out_path = out_dir / f"{vid}.mp4.pkl"
+                tmp = out_path.with_suffix(".pkl.tmp")
+                with open(tmp, "wb") as f:
+                    pickle.dump(rec, f)
+                os.replace(tmp, out_path)
+                n_done += 1
+                logger.info(f"{vid}: {len(frames_out)} frames, {n_parsed} parsed, cache hits={cache.hits} "
+                            f"misses={cache.misses}, {time.time() - t0:.0f}s")
+            except Exception as e:  # noqa
+                n_fail += 1
+                logger.exception(f"[{vid}] save failed: {e!r}")
+
+    group: List[Tuple[str, list]] = []
     for i, vid in enumerate(ids):
         out_path = out_dir / f"{vid}.mp4.pkl"
         if out_path.exists() and not args.dry_run:
@@ -339,29 +382,12 @@ def main():
                 logger.info(f"[{vid}] dry run: {len(payloads)} frames -> {d}")
                 n_done += 1
                 continue
-            prompts = [{"text": p["text"], "images": p["images"], "max_new_tokens": args.max_new_tokens}
-                       for _, p in payloads]
-            responses = vlm.generate(prompts)
-            frames_out: Dict[str, Any] = {}
-            n_parsed = 0
-            for (fr, p), resp in zip(payloads, responses):
-                d = extract_json(resp)
-                objs = parse_objects(d, p, args.mode)
-                n_parsed += d is not None
-                frames_out[fr.file] = {"objects": objs, "raw_response": resp,
-                                       "ids": {o["id"]: o["label"] for o in p["objects"]},
-                                       "person_corners": None if p["person_corners"] is None
-                                       else np.asarray(p["person_corners"], np.float32).tolist()}
-            rec = {"video_id": f"{vid}.mp4", "mode": args.mode, "model_name": args.model_name + args.tag,
-                   "track": "A", "context_frames": args.context_frames, "frames": frames_out,
-                   "n_frames": len(frames_out), "n_parsed": n_parsed}
-            tmp = out_path.with_suffix(".pkl.tmp")
-            with open(tmp, "wb") as f:
-                pickle.dump(rec, f)
-            os.replace(tmp, out_path)
-            n_done += 1
-            logger.info(f"[{i + 1}/{len(ids)}] {vid}: {len(frames_out)} frames, {n_parsed} parsed, "
-                        f"cache hits={cache.hits} misses={cache.misses}, {time.time() - t0:.0f}s")
+            group.append((vid, payloads))
+            if len(group) >= args.videos_per_batch:
+                logger.info(f"[{i + 1}/{len(ids)}] generating for {len(group)} videos "
+                            f"({sum(len(p) for _, p in group)} prompts)")
+                flush(group)
+                group = []
         except Exception as e:  # noqa
             n_fail += 1
             logger.exception(f"[{vid}] failed: {e!r}")
@@ -370,6 +396,11 @@ def main():
                 json.dump({"state": "running" if i + 1 < len(ids) else "done", "done": n_done, "skipped": n_skip,
                            "failed": n_fail, "total": len(ids), "cache_hits": cache.hits,
                            "cache_misses": cache.misses, "seconds": round(time.time() - t0)}, f)
+    if group:
+        flush(group)
+    with open(status_path, "w") as f:
+        json.dump({"state": "done", "done": n_done, "skipped": n_skip, "failed": n_fail, "total": len(ids),
+                   "cache_hits": cache.hits, "cache_misses": cache.misses, "seconds": round(time.time() - t0)}, f)
     logger.info(f"finished: done={n_done} skipped={n_skip} failed={n_fail} in {time.time() - t0:.0f}s")
 
 

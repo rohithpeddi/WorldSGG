@@ -68,8 +68,8 @@ def predcls_prompt(frame_file: str, objects: Sequence[Dict[str, Any]], person_ob
     lines.append("")
     lines.append("Task: for EVERY listed object id, decide the person's attention, contacting and spatial "
                  "relationships with it at the target frame. Use the map and the boxes for objects that are "
-                 "not visible; use the images for what the person is doing. Think briefly, then answer with "
-                 "ONLY this JSON (no prose after it):")
+                 "not visible; use the images for what the person is doing. Answer with ONLY this JSON, "
+                 "compact on one line, no markdown, no explanation:")
     lines.append('{"objects": [{"id": 1, "attention": "<label>", "contacting": ["<label>", ...], '
                  '"spatial": ["<label>", ...]}, ...]}')
     return "\n".join(lines)
@@ -98,8 +98,8 @@ def sgdet_prompt(frame_file: str, detections: Sequence[Dict[str, Any]], person_o
                  "the person sat on earlier). For each object give its label, a 3D box in the world frame "
                  "(copy or correct a proposal's box; estimate a plausible box for objects without a proposal), "
                  "and the person's attention / contacting / spatial relationships with it. Keep proposal ids "
-                 "when you keep a proposal; use \"new\" for objects you add. Think briefly, then answer with "
-                 "ONLY this JSON (no prose after it):")
+                 "when you keep a proposal; use \"new\" for objects you add. Answer with ONLY this JSON, "
+                 "compact on one line, no markdown, no explanation:")
     lines.append('{"objects": [{"id": 1, "label": "<vocab name>", "center": [x, y, z], "size": [l, w, h], '
                  '"yaw_deg": 0, "attention": "<label>", "contacting": ["<label>", ...], '
                  '"spatial": ["<label>", ...]}, ...]}')
