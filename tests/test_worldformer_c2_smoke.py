@@ -46,14 +46,16 @@ def main():
     crit = WorldFormerC2Loss(C, one_to_many_iou=0.5)
     losses = crit(out, targets, image_hw)
     losses["total"].backward()
-    n_grad = sum(1 for p in model.parameters() if p.requires_grad and p.grad is not None
-                 and torch.isfinite(p.grad).all())
-    n_param = sum(1 for p in model.parameters() if p.requires_grad)
+    # geo_encoder.global_mlp produces the encoder's global summary, which C2 discards
+    params = [(n, p) for n, p in model.named_parameters()
+              if p.requires_grad and not n.startswith("geo_encoder.global_mlp")]
+    n_grad = sum(1 for _, p in params if p.grad is not None and torch.isfinite(p.grad).all())
+    n_param = len(params)
     print({k: round(float(v), 4) for k, v in losses.items()})
     print(f"params with finite grads: {n_grad}/{n_param}; "
           f"total params {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
     assert torch.isfinite(losses["total"])
-    assert n_grad >= n_param - 2  # target_proj is frozen; rot/off heads always used
+    assert n_grad == n_param, [n for n, p in params if p.grad is None]
     print("C2 scaffold smoke test OK")
 
 
