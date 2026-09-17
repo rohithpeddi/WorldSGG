@@ -36,7 +36,8 @@ from tqdm import tqdm
 # Allow imports from the parent package
 
 from lib.mllm.core.vgent import Vgent
-from lib.mllm.core.ag_data import AgDataBBAnnotations
+from lib.mllm.core.ag_data import AgDataBBAnnotations  # noqa: F401 (legacy source)
+from lib.mllm.data.worldbbox import make_ag_data
 from lib.mllm.core.logger_utils import setup_logging
 from lib.mllm.models.utils import fetch_video, resize_video
 
@@ -175,9 +176,9 @@ class ActionGenomeBaseProcessor(ABC):
         self.graph_dir = Path(graph_dir)
 
         # ---- AG data loader ------------------------------------------------
-        self.ag_data = AgDataBBAnnotations(
-            ag_root_directory=ag_root_directory,
-        )
+        # worldbbox test PKLs by default (inference.annotation_source), legacy
+        # bbox_annotations_3d_obb_final when set to "legacy".
+        self.ag_data = make_ag_data(ag_root_directory)
 
         # ---- Frame directories ---------------------------------------------
         self.frames_dir = Path(ag_root_directory) / "frames"

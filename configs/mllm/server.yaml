@@ -143,6 +143,9 @@ embedding_models:
 
 # ── Inference defaults ──────────────────────────────────────────────────
 inference:
+  # object lists / frames come from world4d_rel_annotations_worldbbox (item 1);
+  # "legacy" = world_annotations/bbox_annotations_3d_obb_final (old MLLM runs)
+  annotation_source: worldbbox
   default_model: qwen25vl_7b
   use_vllm: true
   fps: 1.0
