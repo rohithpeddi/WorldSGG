@@ -35,7 +35,13 @@ while :; do
     [ "$ST" = "done" ] && continue
     if [ -d "$LOCK" ]; then
       P=$(pid_of "$STATUS")
-      if [ "$ST" = "running" ] && [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then BUSY=1; continue; fi
+      if [ "$ST" = "running" ] && [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then
+        # live job: if it runs on THIS GPU (e.g. an orphan of a previous worker) we
+        # must wait for it -- one vLLM engine per GPU; jobs on other GPUs are skipped
+        JG=$(sed -n 's/.*"gpu": *"\([^"]*\)".*/\1/p' "$STATUS")
+        if [ "$JG" = "$GPU" ]; then NEXT="__WAIT__"; break; fi
+        BUSY=1; continue
+      fi
       # claimed but its worker died (or it never started): release the stale lock
       echo "[$WORKER] stale lock for $JOB (state=$ST pid=$P) -> unlocking"; rmdir "$LOCK" 2>/dev/null
     fi
@@ -46,6 +52,7 @@ while :; do
     [ "$BUSY" = 1 ] && { sleep 60; continue; }
     break
   fi
+  if [ "$NEXT" = "__WAIT__" ]; then sleep 60; continue; fi
   set -- $NEXT; JOB="$1"; MOD="$2"; shift 2; ARGS="$*"
   STATUS="$LOGDIR/$JOB.status.json"; LOG="$LOGDIR/$JOB.log"; LOCK="$LOGDIR/$JOB.lock"
   echo "[$WORKER] run  $JOB  $(date -Is)   ($MOD $ARGS)"
