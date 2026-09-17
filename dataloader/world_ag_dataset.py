@@ -162,6 +162,7 @@ class WorldAG(Dataset):
         feature_model: str = "dinov2b",
         include_invisible: bool = True,
         max_objects: int = 64,
+        annot_dir_name: str = "world4d_rel_annotations",
     ):
         """
         Args:
@@ -171,6 +172,10 @@ class WorldAG(Dataset):
             feature_model: Feature model directory name (e.g. "dinov2b")
             include_invisible: If True, include RAG-predicted objects
             max_objects: Maximum number of objects per frame (N_max cap)
+            annot_dir_name: Annotation folder under ``data_path`` (e.g.
+                "world4d_rel_annotations" or the WorldBBox release set
+                "world4d_rel_annotations_worldbbox"; the loader reads
+                ``<data_path>/<annot_dir_name>/<phase>/<video>.pkl``)
         """
         super().__init__()
 
@@ -180,6 +185,7 @@ class WorldAG(Dataset):
         self._feature_model = feature_model
         self._include_invisible = include_invisible
         self._max_objects = max_objects
+        self._annot_dir_name = annot_dir_name
 
         # Directories
         self._feat_dir = (
@@ -187,7 +193,7 @@ class WorldAG(Dataset):
             / mode / feature_model / phase
         )
         self._annot_dir = (
-            self._data_path / "world4d_rel_annotations" / phase
+            self._data_path / annot_dir_name / phase
         )
 
         # Expose vocabularies for model construction
@@ -202,7 +208,7 @@ class WorldAG(Dataset):
 
         logger.info(
             f"[WorldAG][{phase}] mode={mode}, features={feature_model}, "
-            f"{len(self.video_list)} videos"
+            f"annotations={annot_dir_name}, {len(self.video_list)} videos"
         )
 
     # ------------------------------------------------------------------

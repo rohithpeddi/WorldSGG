@@ -85,6 +85,7 @@ def compute_split_statistics(
     phase: str,
     mode: str,
     feature_model: str,
+    annot_dir_name: str = "world4d_rel_annotations",
 ) -> Dict[str, Any]:
     """Compute all statistics for a single split (train or test).
 
@@ -94,7 +95,7 @@ def compute_split_statistics(
     Returns a dict with all per-split statistics.
     """
     feat_dir = data_path / "features" / "roi_features" / mode / feature_model / phase
-    annot_dir = data_path / "world4d_rel_annotations" / phase
+    annot_dir = data_path / annot_dir_name / phase
 
     if not feat_dir.exists():
         raise FileNotFoundError(f"Feature directory not found: {feat_dir}")
@@ -758,6 +759,15 @@ def main():
         default=None,
         help="Path to save JSON results (default: analysis/ag4d_statistics.json)",
     )
+    parser.add_argument(
+        "--train_annot_dir", type=str, default="world4d_rel_annotations",
+        help="Annotation folder (under data_path) for the train split",
+    )
+    parser.add_argument(
+        "--test_annot_dir", type=str, default="world4d_rel_annotations",
+        help="Annotation folder (under data_path) for the test split "
+             "(e.g. world4d_rel_annotations_worldbbox)",
+    )
     args = parser.parse_args()
 
     data_path = Path(args.data_path)
@@ -771,10 +781,10 @@ def main():
 
     # Compute statistics for both splits
     train_stats = compute_split_statistics(
-        data_path, "train", args.mode, args.feature_model
+        data_path, "train", args.mode, args.feature_model, args.train_annot_dir
     )
     test_stats = compute_split_statistics(
-        data_path, "test", args.mode, args.feature_model
+        data_path, "test", args.mode, args.feature_model, args.test_annot_dir
     )
 
     # Print formatted output

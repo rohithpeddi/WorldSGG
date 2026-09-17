@@ -64,6 +64,7 @@ class TrainWSGGBase(WSGGBase):
         skip_test = getattr(self._conf, 'skip_test', False)
         logger.info("Initializing WorldAG datasets...")
 
+        from wsgg_base import annot_dir_for
         self._train_dataset = WorldAG(
             phase="train",
             data_path=self._conf.data_path,
@@ -71,6 +72,7 @@ class TrainWSGGBase(WSGGBase):
             feature_model=getattr(self._conf, 'feature_model', 'dinov2b'),
             include_invisible=getattr(self._conf, 'include_invisible', True),
             max_objects=getattr(self._conf, 'max_objects', 64),
+            annot_dir_name=annot_dir_for(self._conf, "train"),
         )
 
         self._object_classes = self._train_dataset.object_classes
@@ -88,6 +90,7 @@ class TrainWSGGBase(WSGGBase):
                 feature_model=getattr(self._conf, 'feature_model', 'dinov2b'),
                 include_invisible=getattr(self._conf, 'include_invisible', True),
                 max_objects=getattr(self._conf, 'max_objects', 64),
+                annot_dir_name=annot_dir_for(self._conf, "test"),
             )
             self._dataloader_test = DataLoader(
                 self._test_dataset, batch_size=1, shuffle=False, num_workers=0,

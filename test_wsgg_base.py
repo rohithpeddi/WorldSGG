@@ -48,6 +48,7 @@ class TestWSGGBase(WSGGBase):
 
         logger.info("Initializing WorldAG test dataset...")
 
+        from wsgg_base import annot_dir_for
         self._test_dataset = WorldAG(
             phase="test",
             data_path=self._conf.data_path,
@@ -55,6 +56,7 @@ class TestWSGGBase(WSGGBase):
             feature_model=getattr(self._conf, 'feature_model', 'dinov2b'),
             include_invisible=getattr(self._conf, 'include_invisible', True),
             max_objects=getattr(self._conf, 'max_objects', 64),
+            annot_dir_name=annot_dir_for(self._conf, "test"),
         )
 
         self._dataloader_test = DataLoader(

@@ -155,10 +155,12 @@ def main():
     conf = load_wsgg_config(args.config)
     from dataloader.world_ag_dataset import WorldAG, world_collate_fn
     from torch.utils.data import DataLoader
+    from wsgg_base import annot_dir_for
     ds = WorldAG(phase="test", data_path=conf.data_path, mode="predcls",
                  feature_model=getattr(conf, "feature_model", "resnet50"),
                  include_invisible=getattr(conf, "include_invisible", True),
-                 max_objects=getattr(conf, "max_objects", 64))
+                 max_objects=getattr(conf, "max_objects", 64),
+                 annot_dir_name=annot_dir_for(conf, "test"))
     dl = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0,
                     collate_fn=world_collate_fn)
     n_videos = len(dl) if args.limit <= 0 else min(args.limit, len(dl))

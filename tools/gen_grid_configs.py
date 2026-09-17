@@ -46,6 +46,9 @@ def backbones_for(method):
 COMMON = [
     ("data_path", "/data/rohith/ag"),
     ("save_path", "/data/rohith/ag/checkpoints"),
+    # Annotation folders per split (2026-09-17: test = WorldBBox release set)
+    ("train_annot_dir", "world4d_rel_annotations"),
+    ("test_annot_dir", "world4d_rel_annotations_worldbbox"),
     ("results_path", "results"),
     ("ckpt", None),
     ("world_sg_dir", ""),

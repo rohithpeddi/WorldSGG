@@ -73,6 +73,11 @@ def load_wsgg_config(yaml_path: str = None) -> SimpleNamespace:
     parser.add_argument("--wandb_project", default=None, type=str)
     parser.add_argument("--use_amp", action="store_true", default=None)
     parser.add_argument("--datasize", default=None, type=str)
+    # Annotation folder per split (under data_path). The test split moved to
+    # the WorldBBox release set (world4d_rel_annotations_worldbbox) on
+    # 2026-09-17; train still uses world4d_rel_annotations.
+    parser.add_argument("--train_annot_dir", default=None, type=str)
+    parser.add_argument("--test_annot_dir", default=None, type=str)
 
     args, _ = parser.parse_known_args()
     cli_args = {k: v for k, v in vars(args).items() if v is not None and k != "config"}
@@ -111,9 +116,22 @@ def load_wsgg_config(yaml_path: str = None) -> SimpleNamespace:
         if k in merged and merged[k] is not None:
             merged[k] = int(merged[k])
 
+    merged.setdefault("train_annot_dir", DEFAULT_ANNOT_DIR)
+    merged.setdefault("test_annot_dir", DEFAULT_ANNOT_DIR)
+
     merged["args"] = merged.copy()  # for WandB logging
 
     return SimpleNamespace(**merged)
+
+
+DEFAULT_ANNOT_DIR = "world4d_rel_annotations"
+
+
+def annot_dir_for(conf, phase: str) -> str:
+    """Annotation folder name (under data_path) for a split, from the config
+    keys ``train_annot_dir`` / ``test_annot_dir`` (default: the legacy
+    ``world4d_rel_annotations``)."""
+    return getattr(conf, f"{phase}_annot_dir", None) or DEFAULT_ANNOT_DIR
 
 
 

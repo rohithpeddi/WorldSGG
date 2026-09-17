@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--feature_model", type=str, default="dinov3l")
     parser.add_argument("--phase", type=str, default="test")
     parser.add_argument("--n_videos", type=int, default=5)
+    parser.add_argument("--annot_dir", type=str, default="world4d_rel_annotations")
     args = parser.parse_args()
 
     from dataloader.world_ag_dataset import WorldAG, world_collate_fn
@@ -41,6 +42,7 @@ def main():
         feature_model=args.feature_model,
         include_invisible=True,
         max_objects=64,
+        annot_dir_name=args.annot_dir,
     )
     print(f"Dataset: {len(dataset)} videos ({args.phase}, {args.mode})")
 

@@ -22,6 +22,14 @@ winner **v2e** (pair geometry + τ=0.5 + λ_vlm=0 + mask 0.3; experiment stem
   `annotations/`, `world_annotations/`, `world4d_rel_annotations/{train,test}/`,
   and `features/clip_features/clip_text_embeddings.npy`.
 - Trained detector checkpoints per backbone (see [RUN_MON3D.md](RUN_MON3D.md)).
+- **Annotation folders per split** are config keys (2026-09-17): `train_annot_dir`
+  (default `world4d_rel_annotations`) and `test_annot_dir` (all method configs now
+  set `world4d_rel_annotations_worldbbox`, the 1,511-video WorldBBox release set).
+  Both are CLI-overridable. Before reporting numbers on a new test folder run
+  `python tools/check_worldbbox_alignment.py --annot_dir <folder> --ref_annot_dir world4d_rel_annotations`
+  (feature/annotation object alignment, zero-corner slots, floor height) and lock the
+  set with `python tools/make_test_split_worldbbox.py` (writes the video list and an
+  `annotation_version` into `/data3/rohith/ag/cache/manifest.json`; see `tools/cache_manifest.py`).
 - Environment: torch + CUDA.
 - **wandb** (`use_wandb: true` in every config): all cells log to one shared
   project `wandb_project` (default `worldsgg-v2`), each run named by
