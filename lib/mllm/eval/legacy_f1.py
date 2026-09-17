@@ -28,8 +28,10 @@ def restricted_gt_dir(cfg: Optional[dict] = None, video_ids=None) -> str:
     src = Path(get_path(cfg, "outputs.wsg_2d_augmentations"))
     ts = WorldBBoxTestSet(cfg)
     ids = set(video_ids or ts.video_ids)
+    import hashlib
+    sub = "" if video_ids is None else "_" + hashlib.md5(",".join(sorted(ids)).encode()).hexdigest()[:8]
     dst = Path(get_path(cfg, "cache_root") or "/data3/rohith/ag") / "cache" / "mllm" / \
-        f"legacy_gt_{ts.split_file.stem}"
+        f"legacy_gt_{ts.split_file.stem}{sub}"
     dst.mkdir(parents=True, exist_ok=True)
     n_new = n_missing = 0
     for vid in sorted(ids):
