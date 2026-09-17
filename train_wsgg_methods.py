@@ -353,6 +353,22 @@ class TrainWorldWise(TrainWSGGBase):
 # Entry Point
 # ============================================================================
 
+class TrainWorldFormerC1(TrainWorldWise):
+    """WorldWise whose appearance projectors consume cached foundation tokens
+    (lib/supervised/worldformer/c1_tokenswap). Training loop / loss identical."""
+
+    def init_model(self):
+        from lib.supervised.worldformer.c1_tokenswap import WorldFormerC1
+
+        self._model = WorldFormerC1(
+            config=self._conf,
+            num_object_classes=len(self._object_classes),
+            attention_class_num=len(self._train_dataset.attention_relationships),
+            spatial_class_num=len(self._train_dataset.spatial_relationships),
+            contact_class_num=len(self._train_dataset.contacting_relationships),
+        ).to(self._device)
+
+
 METHOD_MAP = {
     # Nested baseline ladder (any backbone via feature_model)
     "w_sttran": TrainWSTTran,
@@ -363,6 +379,8 @@ METHOD_MAP = {
     "w_usg": TrainWUSG,
     # WorldWise (full proposed method — MWAE + tail-aware loss)
     "worldwise": TrainWorldWise,
+    # WorldFormer C1: WorldWise over cached DINOv3 / Pi3 tokens (gated fusion)
+    "worldformer_c1": TrainWorldFormerC1,
 }
 
 

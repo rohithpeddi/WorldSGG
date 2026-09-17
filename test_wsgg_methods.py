@@ -219,6 +219,19 @@ class TestWorldWise(TestWSGGBase):
 # Entry Point
 # ============================================================================
 
+class TestWorldFormerC1(TestWorldWise):
+    def init_model(self):
+        from lib.supervised.worldformer.c1_tokenswap import WorldFormerC1
+
+        self._model = WorldFormerC1(
+            config=self._conf,
+            num_object_classes=len(self._test_dataset.object_classes),
+            attention_class_num=len(self._test_dataset.attention_relationships),
+            spatial_class_num=len(self._test_dataset.spatial_relationships),
+            contact_class_num=len(self._test_dataset.contacting_relationships),
+        ).to(self._device)
+
+
 METHOD_MAP = {
     # Baseline adaptations (FasterRCNN / ResNet50 backbone)
     "w_sttran": TestWSTTran,
@@ -229,6 +242,7 @@ METHOD_MAP = {
     "w_usg": TestWUSG,
     # WorldWise (Dino backbones — ablation via config flags)
     "worldwise": TestWorldWise,
+    "worldformer_c1": TestWorldFormerC1,
 }
 
 

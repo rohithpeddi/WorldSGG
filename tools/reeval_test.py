@@ -65,6 +65,8 @@ def build_model(conf, test_dataset, device):
         from lib.supervised.baselines.w_usg.w_usg import WUSG as C
     elif m == "worldwise":
         from lib.supervised.worldwise.worldwise import WorldWise as C
+    elif m == "worldformer_c1":
+        from lib.supervised.worldformer.c1_tokenswap import WorldFormerC1 as C
     else:
         raise ValueError(f"Unknown method_name: {m}")
     return C(conf, nobj, natt, nspa, ncon).to(device)
@@ -81,7 +83,7 @@ def forward_all_frames(model, conf, b):
     )
     # GT node labels feed the text pathway in predcls only (task input)
     kw["node_labels_seq"] = b.get("object_classes") if conf.mode == "predcls" else None
-    if conf.method_name == "worldwise":
+    if conf.method_name in ("worldwise", "worldformer_c1"):
         kw["p_mask_visible"] = 0.0
     return model(**kw)
 
