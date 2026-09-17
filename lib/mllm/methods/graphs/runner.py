@@ -741,8 +741,8 @@ class ActionGenomeProcessor:
             video_ids = [v for v in video_ids if Path(v).stem in keep]
             logger.info(f"Filtered to {len(video_ids)} videos from list {video_list}")
         
-        # --- split filtering ---------------------------------------------------
-        split = self.args.split
+        # --- split filtering (skipped when an explicit video list is given) ----
+        split = None if video_list else self.args.split
         if split in ("test", "train"):
             # Use the JSON-defined split list
             split_ids = list(load_split_video_ids(split))

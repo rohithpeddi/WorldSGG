@@ -1,0 +1,12 @@
+# B3 queue for GPU 0 (see run_mllm_sequence.sh). Order: zero_shot needs no graphs;
+# then Stage-1 graphs for the test videos that have none (existing graphs are
+# symlinked, never regenerated); then the graph-based strategies.
+b3_zero_shot_predcls   lib.mllm.methods.zero_shot.runner   --model_name qwen25vl_7b --mode predcls --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
+b3_graphs_fill         lib.mllm.methods.graphs.runner      --model_name qwen25vl_7b --tensor_parallel_size 1 --fast --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
+b3_zero_shot_sgdet     lib.mllm.methods.zero_shot.runner   --model_name qwen25vl_7b --mode sgdet --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
+b3_caption_all_predcls lib.mllm.methods.caption_all.runner --model_name qwen25vl_7b --mode predcls --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
+b3_rag_all_predcls     lib.mllm.methods.rag_all.runner     --model_name qwen25vl_7b --mode predcls --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
+b3_wsg_agent_predcls   lib.mllm.methods.wsg_agent.runner   --model_name qwen25vl_7b --mode predcls --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
+b3_caption_all_sgdet   lib.mllm.methods.caption_all.runner --model_name qwen25vl_7b --mode sgdet --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
+b3_rag_all_sgdet       lib.mllm.methods.rag_all.runner     --model_name qwen25vl_7b --mode sgdet --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
+b3_wsg_agent_sgdet     lib.mllm.methods.wsg_agent.runner   --model_name qwen25vl_7b --mode sgdet --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt

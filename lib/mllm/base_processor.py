@@ -638,7 +638,7 @@ class ActionGenomeBaseProcessor(ABC):
     # Batch chunking helpers
     # ------------------------------------------------------------------
 
-    BATCH_CHUNK_SIZE = 16  # max prompts per vLLM generate() call
+    BATCH_CHUNK_SIZE = 64  # max prompts per vLLM generate() call (== vllm.max_num_seqs)
 
     def _chunked_batch_response(
         self, prompts: List[Dict[str, Any]],
@@ -1126,8 +1126,8 @@ class ActionGenomeBaseProcessor(ABC):
             if (self.frames_annotated_dir / d).is_dir()
         )
 
-        # ---- Split filtering ------------------------------------------------
-        split = self.args.split
+        # ---- Split filtering (skipped when an explicit video list is given) --
+        split = None if video_list else self.args.split
         if split in ("test", "train"):
             split_ids = load_split_video_ids(split)
             video_ids = [v for v in video_ids if Path(v).stem in split_ids]

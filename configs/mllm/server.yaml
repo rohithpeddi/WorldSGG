@@ -158,6 +158,6 @@ inference:
 vllm:
   gpu_memory_utilization: 0.90    # 10% safety buffer
   max_model_len: 16384            # shorter context to fit in smaller VRAM
-  max_num_seqs: 16                # fewer concurrent sequences
+  max_num_seqs: 64                # decode is memory-bound; prompts are ~1k tokens
   enable_chunked_prefill: true    # still beneficial for throughput
   dtype: bfloat16                 # explicit; change to float16 for older GPUs
