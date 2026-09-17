@@ -29,7 +29,13 @@ run_mode predcls &
 run_mode sgdet &
 wait
 # the WorldWise@dinov3l reference dumps (rescore run) sit next to ours for the bucket table
+for m in predcls sgdet; do
+  ref=/data3/rohith/ag/runs/rescore/dumps/worldwise_${m}_dinov3l__all.pkl
+  [ -f $ref ] && ln -sfn $ref $OUT/dumps/worldwise_${m}_dinov3l__all.pkl
+done
 $PY tools/bucketed_breakdown.py --dumps $OUT/dumps --out $OUT/bucketed_breakdown_c1.json \
     > $LOG/score_c1_bucketed.log 2>&1
 echo "bucketed exit=$?" >> $OUT/status.txt
+$PY tools/render_worldformer_c1_results.py --score_dir $OUT --constraint nc --k 20 > $OUT/table_nc.md
+$PY tools/render_worldformer_c1_results.py --score_dir $OUT --constraint wc --k 20 > $OUT/table_wc.md
 echo DONE >> $OUT/status.txt
