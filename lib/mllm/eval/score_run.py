@@ -107,9 +107,14 @@ def _buckets(acc: BucketAccumulator) -> Dict[str, Any]:
     return out
 
 
-def collect_records(model: str, mode: str, pred_dir: str, limit: int = 0, cfg=None) -> Dict[str, Any]:
+def collect_records(model: str, mode: str, pred_dir: str, limit: int = 0, cfg=None,
+                    video_list: str = None) -> Dict[str, Any]:
     ts = WorldBBoxTestSet(cfg)
-    ids = ts.video_ids[:limit] if limit else ts.video_ids
+    ids = ts.video_ids
+    if video_list:
+        keep = {Path(l.strip()).stem for l in open(video_list, encoding="utf-8") if l.strip()}
+        ids = [v for v in ids if v in keep]
+    ids = ids[:limit] if limit else ids
     pkl_dir = Path(pred_dir) / mode / model
     records: List[Dict[str, Any]] = []
     missing, errors = [], []
@@ -178,14 +183,17 @@ def main():
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--no_legacy", action="store_true")
     ap.add_argument("--no_dump", action="store_true")
+    ap.add_argument("--video_list", default=None,
+                    help="restrict to these videos (e.g. the 442-video subset with pre-existing Stage-1 graphs)")
+    ap.add_argument("--subset_tag", default="", help="suffix for output names when --video_list is used")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     cfg = load_config()
     pred_dir = args.pred_dir or get_path(cfg, f"outputs.{args.method}")
     tag = f"{args.method}__{args.model}__{args.mode}"
-    suffix = f"__lim{args.limit}" if args.limit else ""
+    suffix = (f"__lim{args.limit}" if args.limit else "") + (f"__{args.subset_tag}" if args.subset_tag else "")
     t0 = time.time()
-    col = collect_records(args.model, args.mode, pred_dir, args.limit, cfg)
+    col = collect_records(args.model, args.mode, pred_dir, args.limit, cfg, video_list=args.video_list)
     logger.info(f"{tag}: {col['n_videos']}/{col['n_split']} videos, {len(col['records'])} frames, "
                 f"{len(col['missing'])} missing, {len(col['errors'])} errors")
     res: Dict[str, Any] = {
@@ -198,7 +206,10 @@ def main():
     if not args.no_legacy and not args.limit:
         try:
             from lib.mllm.eval.legacy_f1 import legacy_f1, summarize_legacy
-            res["legacy"] = summarize_legacy(legacy_f1(pred_dir, args.mode, args.model, cfg))
+            vids = None
+            if args.video_list:
+                vids = [Path(l.strip()).stem for l in open(args.video_list, encoding="utf-8") if l.strip()]
+            res["legacy"] = summarize_legacy(legacy_f1(pred_dir, args.mode, args.model, cfg, video_ids=vids))
         except Exception as e:  # noqa
             logger.exception("legacy F1 failed")
             res["legacy"] = {"error": repr(e)}

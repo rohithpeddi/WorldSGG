@@ -70,7 +70,10 @@ def lift_bbox(video: WorldBBoxVideo, k: int, bbox_pi3: Sequence[float], conf_min
         d_core = depth[core & ok]
         if d_core.size >= 5:
             d0 = float(np.median(d_core))
-            band = max(depth_band_min, depth_band_rel * d0)
+            # physical size of the box at that depth (Pi3 has no intrinsics; f ~ 1.1*max(W,H))
+            f_px = 1.1 * max(W, H)
+            phys = d0 * max(x2 - x1, y2 - y1) / f_px
+            band = max(depth_band_min, depth_band_rel * d0, 0.6 * phys)
             depth_ok = ok & (np.abs(depth - d0) <= band)
     except Exception:
         pass
