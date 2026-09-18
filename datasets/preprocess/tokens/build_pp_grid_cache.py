@@ -47,9 +47,11 @@ import json  # noqa: E402
 import multiprocessing as mp  # noqa: E402
 import pickle  # noqa: E402
 import random  # noqa: E402
+import struct  # noqa: E402
 import sys  # noqa: E402
 import time  # noqa: E402
 import traceback  # noqa: E402
+import zipfile  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Dict, List, Optional, Sequence, Tuple  # noqa: E402
 
@@ -137,21 +139,67 @@ def hw_from_wh(target_size: np.ndarray, grid_hw: Tuple[int, int], patch: int, wh
     raise RuntimeError(f"{what}: target_size {target_size.tolist()} inconsistent with grid_hw {grid_hw}")
 
 
+def read_member_rows(path: Path, member: str, rows: Optional[Sequence[int]] = None) -> Tuple[np.ndarray, int]:
+    """Read an uncompressed ``.npy`` member of an npz with ONE large sequential read of the
+    contiguous row block [min(rows), max(rows)] (whole member if rows is None).
+
+    ``np.load(npz)[member]`` streams the member in 256 KB chunks through zipfile, which
+    interleaves badly with the other readers of the spinning disk (measured ~2x slower than
+    a single read).  Returns (block, first_row); block[i] == member[first_row + i]."""
+    with zipfile.ZipFile(path) as z:
+        info = z.getinfo(member + ".npy")
+    if info.compress_type != zipfile.ZIP_STORED:
+        raise ValueError(f"{path}:{member} is compressed")
+    with open(path, "rb") as f:
+        f.seek(info.header_offset)
+        h = f.read(30)
+        if h[:4] != b"PK\x03\x04":
+            raise ValueError(f"{path}:{member} bad local header")
+        n_name, n_extra = struct.unpack("<HH", h[26:30])
+        f.seek(info.header_offset + 30 + n_name + n_extra)
+        ver = np.lib.format.read_magic(f)
+        rd = np.lib.format.read_array_header_1_0 if ver == (1, 0) else np.lib.format.read_array_header_2_0
+        shape, fortran, dtype = rd(f)
+        if fortran or len(shape) < 1:
+            raise ValueError(f"{path}:{member} unexpected layout {shape} fortran={fortran}")
+        arr_off = f.tell()
+        row_bytes = int(np.prod(shape[1:], dtype=np.int64)) * dtype.itemsize
+        r0, r1 = (0, shape[0]) if rows is None else ((min(rows), max(rows) + 1) if len(rows) else (0, 0))
+        buf = np.empty((r1 - r0,) + tuple(shape[1:]), dtype=dtype)
+        if buf.nbytes:
+            try:
+                os.posix_fadvise(f.fileno(), arr_off + r0 * row_bytes, buf.nbytes, os.POSIX_FADV_SEQUENTIAL)
+            except (AttributeError, OSError):
+                pass
+            f.seek(arr_off + r0 * row_bytes)
+            mv = memoryview(buf).cast("B")
+            got = 0
+            while got < len(mv):
+                n = f.readinto(mv[got:])
+                if not n:
+                    raise IOError(f"{path}:{member} short read {got}/{len(mv)}")
+                got += n
+    return buf, r0
+
+
 def load_stream(stream: str, split: str, video: str, layer: str, want: Optional[Sequence[str]] = None):
     """Read ONE grid member (+ metadata) of a token npz.  Returns dict with
     frames (list), grid (T',Hg,Wg,1024) f16 for the wanted frames (all if want is None),
     grid_hw (Hg,Wg), target_wh, padded_wh (dino only)."""
-    with np.load(src_path(stream, split, video)) as z:
+    path = src_path(stream, split, video)
+    with np.load(path) as z:
         frames = [str(f) for f in z["frames"]]
         grid_hw = tuple(int(x) for x in z["grid_hw"])
         target_wh = z["target_size"].astype(np.int64)
         padded_wh = z["padded_size"].astype(np.int64) if "padded_size" in z.files else None
-        g = z[layer]
-        if want is not None:
-            idx = {f: i for i, f in enumerate(frames)}
-            rows = [idx[f] for f in want if f in idx]
-            g = g[rows] if rows else g[:0]
-            frames = [f for f in want if f in idx]
+    if want is None:
+        g, _ = read_member_rows(path, layer)
+    else:
+        idx = {f: i for i, f in enumerate(frames)}
+        rows = [idx[f] for f in want if f in idx]
+        frames = [f for f in want if f in idx]
+        blk, r0 = read_member_rows(path, layer, rows)
+        g = blk[[r - r0 for r in rows]] if rows else blk
     return {"frames": frames, "grid": g, "grid_hw": grid_hw, "target_wh": target_wh, "padded_wh": padded_wh}
 
 
@@ -321,6 +369,9 @@ def cmd_build(args):
                     n_shards=args.n_shards, n_videos=len(videos), pid=os.getpid(), workers=args.workers)
     todo = [v for v in videos if args.overwrite or not out_path(args.split, v).exists()]
     n_skip = len(videos) - len(todo)
+    if out_dir(args.split).exists():
+        for stale in out_dir(args.split).glob(".*.tmp.npz"):   # leftovers of a killed run
+            stale.unlink()
     print(f"build {args.split}{tag}: {len(videos)} videos, {n_skip} already cached, {len(todo)} to do, "
           f"{args.workers} workers -> {out_dir(args.split)}", flush=True)
     n_ok = n_err = n_frames = n_missing = 0
