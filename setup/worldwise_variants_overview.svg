@@ -24,8 +24,8 @@
   <rect width="1240" height="910" fill="#f8fafc"/>
 
   <!-- ══ header ══ -->
-  <text class="t h1" x="40" y="46">WorldFormer</text>
-  <text class="m sub" x="40" y="70">Geometric (π³) + semantic (DINOv3) foundation-model <tspan font-weight="700" fill="#0f172a">latents</tspan> for world scene graph generation — replacing the decoded perception stack.</text>
+  <text class="t h1" x="40" y="46">WorldWise  →  WorldWise+  →  WorldWise++</text>
+  <text class="m sub" x="40" y="70">Geometric (π³) + semantic (DINOv3) foundation-model <tspan font-weight="700" fill="#0f172a">latents</tspan> for world scene graphs — first as the representation, then as the image the model reasons over.</text>
 
   <!-- ══ band 1: frozen front-end ══ -->
   <text class="m lbl" x="40" y="106">1 · FROZEN FRONT-END — CACHED ONCE, ANNOTATION-INDEPENDENT</text>
@@ -58,23 +58,23 @@
 
   <!-- Tier 2 -->
   <rect x="640" y="230" width="540" height="92" rx="11" fill="#eff6ff" stroke="#3b82f6"/>
-  <text class="t h2" x="660" y="255">Tier-2 · full patch grids  <tspan class="m mono sm" font-weight="400">fp16</tspan></text>
-  <text class="mono bt" x="660" y="277" fill="#0f766e">π³      F14, G14   (T, 27, 48, 1024)</text>
-  <text class="mono bt" x="660" y="295" fill="#6d28d9">DINOv3  L16, L24n  (T, 24, 42, 1024)</text>
+  <text class="t h2" x="660" y="255">Tier-2 · full patch grids  <tspan class="m mono sm" font-weight="400">fp16 · + PCA-256 training cache on NVMe</tspan></text>
+  <text class="mono bt" x="660" y="277" fill="#0f766e">π³      G14        (T, 27, 48, 1024)  →  256</text>
+  <text class="mono bt" x="660" y="295" fill="#6d28d9">DINOv3  L24n       (T, 24, 42, 1024)  →  π³ lattice, 256</text>
   <text class="m xs" x="660" y="313">both streams share π³ pixel space → a grid cell addresses the same pixels</text>
 
   <path d="M330 322 V 366" stroke="#64748b" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
   <path d="M910 322 V 366" stroke="#64748b" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
 
-  <!-- ══ band 2: C1 ══ -->
+  <!-- ══ band 2: WorldWise+ ══ -->
   <rect x="40" y="372" width="580" height="428" rx="14" fill="#fffdf6" stroke="#eadbb8"/>
-  <text class="t h2" x="64" y="400">C1 · Token swap</text>
+  <text class="t h2" x="64" y="400">WorldWise+ · token swap</text>
   <rect x="470" y="384" width="128" height="22" rx="11" fill="#166534"/>
   <text class="xs" x="534" y="399" text-anchor="middle" fill="#ffffff" font-weight="700">TRAINED · 6 CELLS</text>
 
   <rect x="64" y="416" width="532" height="52" rx="9" fill="#ffffff" stroke="#d6cfc0"/>
-  <text class="t bd" x="80" y="437">ROI tokens</text>
-  <text class="m mono sm" x="80" y="456">3072-d single stream   ·   6144-d fused</text>
+  <text class="t bd" x="80" y="437">ROI latents in place of the decoded FRCNN box-head vector</text>
+  <text class="m mono sm" x="80" y="456">3072-d single stream (dinov3_tok · pi3_tok)   ·   6144-d fused</text>
 
   <path d="M330 468 V 490" stroke="#64748b" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
 
@@ -89,51 +89,51 @@
   <rect x="64" y="616" width="532" height="96" rx="9" fill="#ffffff" stroke="#d6cfc0"/>
   <text class="t bd" x="80" y="637">WorldWise core — <tspan fill="#b45309">unchanged</tspan></text>
   <text class="m bt" x="80" y="657">geometry scaffold · MWAE masking (p = 0.3) · EMA recon target</text>
-  <text class="m bt" x="80" y="675">associative retriever · relation head + pair geometry</text>
-  <text class="m bt" x="80" y="693">temporal edge attention · τ = 0.5 logit adjustment</text>
+  <text class="m bt" x="80" y="675">associative retriever · inter-object transformer · relation head + pair geometry</text>
+  <text class="m bt" x="80" y="693">temporal edge attention · τ = 0.5 logit adjustment · λ_vlm = 0</text>
 
   <path d="M330 712 V 734" stroke="#64748b" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
 
   <rect x="64" y="740" width="532" height="44" rx="9" fill="#f0fdf4" stroke="#16a34a"/>
-  <text class="t bd" x="80" y="767">World scene graph  <tspan class="m mono sm" font-weight="400">26 predicates × person–object pairs</tspan></text>
+  <text class="t bd" x="80" y="767">World scene graph  <tspan class="m mono sm" font-weight="400">26 predicates × person–object pairs · same eval protocol</tspan></text>
 
-  <!-- ══ band 3: C2 ══ -->
+  <!-- ══ band 3: WorldWise++ ══ -->
   <rect x="620" y="372" width="580" height="428" rx="14" fill="#f7fbff" stroke="#d3e3f5"/>
-  <text class="t h2" x="644" y="400">C2 · WorldFormer</text>
-  <rect x="1078" y="384" width="98" height="22" rx="11" fill="#475569"/>
-  <text class="xs" x="1127" y="399" text-anchor="middle" fill="#ffffff" font-weight="700">SCAFFOLD</text>
+  <text class="t h2" x="644" y="400">WorldWise++ · entity decoder</text>
+  <rect x="1078" y="384" width="98" height="22" rx="11" fill="#b45309"/>
+  <text class="xs" x="1127" y="399" text-anchor="middle" fill="#ffffff" font-weight="700">TRAINING</text>
 
   <rect x="644" y="416" width="532" height="70" rx="9" fill="#ffffff" stroke="#c7dcf0"/>
-  <text class="t bd" x="660" y="437">Grid fusion</text>
-  <text class="m bt" x="660" y="456">crop padding · resample DINOv3 → π³ grid · per-cell softmax gate</text>
-  <text class="mono sm" x="660" y="475" fill="#1d4ed8">memory (T, 1296, d) + 2-D sine positional encoding</text>
+  <text class="t bd" x="660" y="437">Grid fusion — the model now sees the image</text>
+  <text class="m bt" x="660" y="456">PCA-256 grids on the π³ lattice · per-cell softmax gate · LayerNorm</text>
+  <text class="mono sm" x="660" y="475" fill="#1d4ed8">memory Mₜ (T, Hp·Wp, d) + 2-D sine positional encoding</text>
 
   <path d="M910 486 V 506" stroke="#64748b" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
 
   <rect x="644" y="512" width="532" height="88" rx="9" fill="#eef6ff" stroke="#3b82f6"/>
   <text class="t bd" x="660" y="533">Queries</text>
-  <text class="m bt" x="660" y="552">Q free DETR queries  →  detection</text>
-  <text class="m bt" x="660" y="570">N persistent world slots  ←  geometry encoder over corners</text>
-  <text class="bt" x="660" y="588" fill="#1d4ed8">invisible / masked slot → <tspan class="mono" font-weight="700">[MASK]</tspan> — MWAE at the query level</text>
+  <text class="m bt" x="660" y="552">Q free DETR queries  →  joint detection (class · 2D box · 3D OBB)</text>
+  <text class="m bt" x="660" y="570">N world slots  =  WorldWise+ scaffold tokens (geometry ⊕ ROI latent ⊕ cam ⊕ motion)</text>
+  <text class="bt" x="660" y="588" fill="#1d4ed8">unseen / masked slot → <tspan class="mono" font-weight="700">[MASK]</tspan> — MWAE at the query level</text>
 
   <path d="M910 600 V 620" stroke="#64748b" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
 
   <rect x="644" y="626" width="532" height="70" rx="9" fill="#ffffff" stroke="#c7dcf0"/>
-  <text class="t bd" x="660" y="647">Decoder × L</text>
-  <text class="m bt" x="660" y="666">self-attention (weights kept) + cross-attention to memory</text>
-  <text class="bt" x="660" y="685" fill="#1d4ed8">last self-attention map = EGTR relation by-product</text>
+  <text class="t bd" x="660" y="647">Decoder × L  <tspan class="m sm" font-weight="400">replaces retriever + inter-object transformer</tspan></text>
+  <text class="m bt" x="660" y="666">temporal slot attention (own frames) · spatial self-attention (weights kept) · cross-attn to Mₜ</text>
+  <text class="bt" x="660" y="685" fill="#1d4ed8">attention weights p↔o  =  the pair feature (EGTR) — no union-box features</text>
 
   <path d="M910 696 V 716" stroke="#64748b" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
 
   <rect x="644" y="722" width="532" height="62" rx="9" fill="#f0fdf4" stroke="#16a34a"/>
-  <text class="t bd" x="660" y="743">Joint heads</text>
-  <text class="m bt" x="660" y="762">class (C+1) · 2D box · <tspan fill="#0f172a" font-weight="600">3D OBB</tspan> (factorised) · relations + connectivity · slot reconstruction</text>
-  <text class="m xs" x="660" y="778">Hungarian matching + Hydra-SGG one-to-many assignment</text>
+  <text class="t bd" x="660" y="743">Heads</text>
+  <text class="m bt" x="660" y="762">free queries: Hungarian + one-to-many detection · slots: nodes · box/OBB refinement · recon</text>
+  <text class="m xs" x="660" y="778">relations through WorldWise's relation head + temporal edge attention → same eval protocol</text>
 
   <!-- ══ claim bar ══ -->
   <rect x="40" y="820" width="1160" height="62" rx="12" fill="#0f172a"/>
-  <text class="xs" x="64" y="845" fill="#94a3b8" font-weight="700" letter-spacing=".08em">THE CLAIM BEING TESTED</text>
-  <text class="bt" x="64" y="867" fill="#e2e8f0">C1 changes <tspan font-weight="700" fill="#ffffff">only the representation</tspan> — latents in place of the decoded FRCNN box-head 1024-d seam.</text>
+  <text class="xs" x="64" y="845" fill="#94a3b8" font-weight="700" letter-spacing=".08em">THE TWO CLAIMS BEING TESTED</text>
+  <text class="bt" x="64" y="867" fill="#e2e8f0">+ changes <tspan font-weight="700" fill="#ffffff">only the representation</tspan> (latents vs decoded);  ++ changes <tspan font-weight="700" fill="#ffffff">only the core</tspan> (image-grounded, joint).</text>
   <text class="mono bt" x="700" y="845" fill="#94a3b8">predcls @20, last-frame, WorldBBox test (1,511 videos)</text>
-  <text class="mono bt" x="700" y="867" fill="#e2e8f0">decoded 69.0 / 48.8   →   <tspan fill="#4ade80" font-weight="700">dinov3_tok 73.1 / 52.6</tspan>   (R / mR)</text>
+  <text class="mono bt" x="700" y="867" fill="#e2e8f0">WorldWise 69.0 / 48.8   →   <tspan fill="#4ade80" font-weight="700">WorldWise+ 73.1 / 52.6</tspan>   (R / mR)</text>
 </svg>

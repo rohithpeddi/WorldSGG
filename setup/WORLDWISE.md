@@ -18,6 +18,22 @@ Loss: [loss.py](../lib/supervised/worldwise/loss.py) →
 [amwae_loss.py](../lib/supervised/worldwise/amwae_loss.py) ·
 Config source of truth: `tools/gen_grid_configs.py` (WORLDWISE_EXTRA)
 
+## The lineage: WorldWise → WorldWise+ → WorldWise++
+
+Two variants build on this model without touching its loss recipe or the
+evaluation protocol; each changes exactly one layer of the story.
+
+| Variant | Appearance input | Object-token core | Detection | Doc |
+|---|---|---|---|---|
+| **WorldWise** | decoded FRCNN box-head (1024-d) + fitted OBBs | scaffold → associative retriever → inter-object transformer | none (external detector) | this file |
+| **WorldWise+** | frozen DINOv3 / π³ *latent* ROI tokens, gated fusion | unchanged | none | [WORLDWISE_PLUS.md](WORLDWISE_PLUS.md) |
+| **WorldWise++** | + the full DINOv3 / π³ token grids | entity decoder: temporal slot attention · spatial self-attention · cross-attention to the grid | joint (free DETR queries + slot refinement) | [WORLDWISE_PP.md](WORLDWISE_PP.md) |
+
+WorldWise+ tests *latents vs decoded outputs* with the architecture held
+fixed; WorldWise++ tests *image-grounded, jointly-detecting reasoning* with
+the representation held fixed. Overview figure:
+[worldwise_variants_overview.svg](worldwise_variants_overview.svg).
+
 ## Forward pipeline (single batched pass, B = T frames)
 
 ```
