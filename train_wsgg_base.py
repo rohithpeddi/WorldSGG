@@ -57,23 +57,29 @@ class TrainWSGGBase(WSGGBase):
     # ------------------------------------------------------------------
     # Dataset
     # ------------------------------------------------------------------
-    def init_dataset(self):
-        """Initialize WorldAG train (and optionally test) datasets."""
-        from dataloader.world_ag_dataset import WorldAG, world_collate_fn
-
-        skip_test = getattr(self._conf, 'skip_test', False)
-        logger.info("Initializing WorldAG datasets...")
-
+    def _make_dataset(self, phase: str):
+        """Dataset for one split. Methods needing extra per-video inputs (e.g.
+        WorldWise++ token grids) override this and return a WorldAG subclass."""
+        from dataloader.world_ag_dataset import WorldAG
         from wsgg_base import annot_dir_for
-        self._train_dataset = WorldAG(
-            phase="train",
+        return WorldAG(
+            phase=phase,
             data_path=self._conf.data_path,
             mode=self._conf.mode,
             feature_model=getattr(self._conf, 'feature_model', 'dinov2b'),
             include_invisible=getattr(self._conf, 'include_invisible', True),
             max_objects=getattr(self._conf, 'max_objects', 64),
-            annot_dir_name=annot_dir_for(self._conf, "train"),
+            annot_dir_name=annot_dir_for(self._conf, phase),
         )
+
+    def init_dataset(self):
+        """Initialize WorldAG train (and optionally test) datasets."""
+        from dataloader.world_ag_dataset import world_collate_fn
+
+        skip_test = getattr(self._conf, 'skip_test', False)
+        logger.info("Initializing WorldAG datasets...")
+
+        self._train_dataset = self._make_dataset("train")
 
         self._object_classes = self._train_dataset.object_classes
 
@@ -83,15 +89,7 @@ class TrainWSGGBase(WSGGBase):
         )
 
         if not skip_test:
-            self._test_dataset = WorldAG(
-                phase="test",
-                data_path=self._conf.data_path,
-                mode=self._conf.mode,
-                feature_model=getattr(self._conf, 'feature_model', 'dinov2b'),
-                include_invisible=getattr(self._conf, 'include_invisible', True),
-                max_objects=getattr(self._conf, 'max_objects', 64),
-                annot_dir_name=annot_dir_for(self._conf, "test"),
-            )
+            self._test_dataset = self._make_dataset("test")
             self._dataloader_test = DataLoader(
                 self._test_dataset, batch_size=1, shuffle=False, num_workers=0,
                 collate_fn=world_collate_fn,

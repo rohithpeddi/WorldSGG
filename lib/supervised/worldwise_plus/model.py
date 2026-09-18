@@ -1,5 +1,5 @@
 """
-WorldFormer C1 — token-swap model.
+WorldWise+ — token-swap model (formerly "WorldFormer C1").
 
 WorldWise with its single appearance seam (``ScaffoldTokenizer.visual_projector``,
 plus the relation head's ``union_proj``) replaced by a projector over frozen
@@ -15,14 +15,17 @@ foundation-model tokens instead of the FRCNN ``box_head`` output:
                    reduces exactly to the base ``Linear -> ReLU -> LayerNorm``.
 
 Everything else (geometry scaffold, MWAE masking, EMA reconstruction target,
-associative retriever, relation head, temporal edges) is untouched, so C1 vs
-WorldWise@dinov3l isolates "latents vs decoded outputs".
+associative retriever, relation head, temporal edges) is untouched, so
+WorldWise+ vs WorldWise@dinov3l isolates "latents vs decoded outputs".
 
-Config keys (see configs/methods/*/worldformer_c1_*.yaml):
+Config keys (see configs/methods/*/worldwise_plus_*.yaml):
     token_streams: [3072]            # single stream  (dinov3_tok / pi3_tok)
     token_streams: [3072, 3072]      # fused: dims of the concatenated blocks, in order
     fusion: gated | concat           # concat = one Linear over the full vector
     d_detector_roi / d_union_roi     # must equal sum(token_streams)
+
+Lineage: WorldWise -> WorldWise+ (this file) -> WorldWise++ (lib/supervised/worldwise_pp).
+``lib.supervised.worldformer.c1_tokenswap`` re-exports this class as ``WorldFormerC1``.
 """
 from __future__ import annotations
 
@@ -74,7 +77,7 @@ class GatedFusionProjector(nn.Module):
         return self.post((g * H).sum(dim=-2))
 
 
-class WorldFormerC1(WorldWise):
+class WorldWisePlus(WorldWise):
     """WorldWise whose appearance projectors consume cached foundation tokens."""
 
     def __init__(self, config, num_object_classes: int = 37, attention_class_num: int = 3,
@@ -86,7 +89,7 @@ class WorldFormerC1(WorldWise):
         if sum(streams) != config.d_detector_roi:
             raise ValueError(f"token_streams {streams} must sum to d_detector_roi={config.d_detector_roi}")
         if config.d_union_roi != config.d_detector_roi:
-            raise ValueError("C1 expects d_union_roi == d_detector_roi (same token layout for union boxes)")
+            raise ValueError("WorldWise+ expects d_union_roi == d_detector_roi (same token layout for union boxes)")
 
         tok = self.scaffold_tokenizer
         tok.visual_projector = GatedFusionProjector(streams, tok.d_visual, fusion)
@@ -106,5 +109,12 @@ class WorldFormerC1(WorldWise):
         vp = self.scaffold_tokenizer.visual_projector
         if getattr(vp, "fusion", "concat") != "gated":
             return None
-        return {"visual": vp.last_gate_mean.tolist(),
-                "union": self.rel_predictor.union_proj.last_gate_mean.tolist()}
+        union = self.rel_predictor.union_proj
+        out = {"visual": vp.last_gate_mean.tolist()}
+        if isinstance(union, GatedFusionProjector):
+            out["union"] = union.last_gate_mean.tolist()
+        return out
+
+
+# Backward-compatible name (checkpoints are keyed by module attributes, not class names)
+WorldFormerC1 = WorldWisePlus

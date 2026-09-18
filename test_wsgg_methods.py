@@ -219,17 +219,80 @@ class TestWorldWise(TestWSGGBase):
 # Entry Point
 # ============================================================================
 
-class TestWorldFormerC1(TestWorldWise):
-    def init_model(self):
-        from lib.supervised.worldformer.c1_tokenswap import WorldFormerC1
+class TestWorldWisePlus(TestWorldWise):
+    """WorldWise+ (formerly WorldFormer C1)."""
 
-        self._model = WorldFormerC1(
+    def init_model(self):
+        from lib.supervised.worldwise_plus import WorldWisePlus
+
+        self._model = WorldWisePlus(
             config=self._conf,
             num_object_classes=len(self._test_dataset.object_classes),
             attention_class_num=len(self._test_dataset.attention_relationships),
             spatial_class_num=len(self._test_dataset.spatial_relationships),
             contact_class_num=len(self._test_dataset.contacting_relationships),
         ).to(self._device)
+
+
+TestWorldFormerC1 = TestWorldWisePlus
+
+
+class TestWorldWisePP(TestWorldWisePlus):
+    """WorldWise++: needs the token-grid cache (config ``grid_cache_root``)."""
+
+    def _make_test_dataset(self):
+        from lib.supervised.worldwise_pp.dataset import WorldAGGrid
+        from wsgg_base import annot_dir_for
+        return WorldAGGrid(
+            phase="test",
+            data_path=self._conf.data_path,
+            mode=self._conf.mode,
+            feature_model=getattr(self._conf, 'feature_model', 'dinov2b'),
+            include_invisible=getattr(self._conf, 'include_invisible', True),
+            max_objects=getattr(self._conf, 'max_objects', 64),
+            annot_dir_name=annot_dir_for(self._conf, "test"),
+            grid_cache_root=self._conf.grid_cache_root,
+            allow_missing_grids=getattr(self._conf, 'grid_cache_allow_missing', False),
+        )
+
+    def init_model(self):
+        from lib.supervised.worldwise_pp import WorldWisePP
+
+        self._model = WorldWisePP(
+            config=self._conf,
+            num_object_classes=len(self._test_dataset.object_classes),
+            attention_class_num=len(self._test_dataset.attention_relationships),
+            spatial_class_num=len(self._test_dataset.spatial_relationships),
+            contact_class_num=len(self._test_dataset.contacting_relationships),
+        ).to(self._device)
+
+    def process_test_video(self, batch) -> dict:
+        b = _to_device(batch, self._device)
+
+        pred = self._model.forward(
+            visual_features_seq=b["visual_features"],
+            corners_seq=b["corners"],
+            valid_mask_seq=b["valid_mask"],
+            visibility_mask_seq=b["visibility_mask"],
+            person_idx_seq=b["person_idx"],
+            object_idx_seq=b["object_idx"],
+            pair_valid=b["pair_valid"],
+            camera_pose_seq=b.get("camera_poses"),
+            node_labels_seq=b.get("object_classes") if self._conf.mode == "predcls" else None,
+            grid_dino_seq=b["grid_dino"],
+            grid_pi3_seq=b["grid_pi3"],
+            image_hw=b["image_hw"],
+            bboxes_2d_seq=b.get("bboxes_2d"),
+        )
+
+        T = b["visual_features"].shape[0]
+        if T > 0:
+            return {
+                "attention_distribution": pred["attention_distribution"][-1],
+                "spatial_distribution": pred["spatial_distribution"][-1],
+                "contacting_distribution": pred["contacting_distribution"][-1],
+            }
+        return None
 
 
 METHOD_MAP = {
@@ -242,7 +305,9 @@ METHOD_MAP = {
     "w_usg": TestWUSG,
     # WorldWise (Dino backbones — ablation via config flags)
     "worldwise": TestWorldWise,
-    "worldformer_c1": TestWorldFormerC1,
+    "worldwise_plus": TestWorldWisePlus,
+    "worldformer_c1": TestWorldWisePlus,   # legacy name
+    "worldwise_pp": TestWorldWisePP,
 }
 
 

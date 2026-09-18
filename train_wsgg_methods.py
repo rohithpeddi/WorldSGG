@@ -353,20 +353,154 @@ class TrainWorldWise(TrainWSGGBase):
 # Entry Point
 # ============================================================================
 
-class TrainWorldFormerC1(TrainWorldWise):
-    """WorldWise whose appearance projectors consume cached foundation tokens
-    (lib/supervised/worldformer/c1_tokenswap). Training loop / loss identical."""
+class TrainWorldWisePlus(TrainWorldWise):
+    """WorldWise+ (formerly "WorldFormer C1"): WorldWise whose appearance projectors
+    consume cached foundation tokens (lib/supervised/worldwise_plus). Training loop
+    and loss identical to WorldWise."""
 
     def init_model(self):
-        from lib.supervised.worldformer.c1_tokenswap import WorldFormerC1
+        from lib.supervised.worldwise_plus import WorldWisePlus
 
-        self._model = WorldFormerC1(
+        self._model = WorldWisePlus(
             config=self._conf,
             num_object_classes=len(self._object_classes),
             attention_class_num=len(self._train_dataset.attention_relationships),
             spatial_class_num=len(self._train_dataset.spatial_relationships),
             contact_class_num=len(self._train_dataset.contacting_relationships),
         ).to(self._device)
+
+
+TrainWorldFormerC1 = TrainWorldWisePlus  # backward-compatible name
+
+
+def _pp_grid_kwargs(b):
+    """Extra forward inputs of WorldWise++ (from WorldAGGrid items)."""
+    return dict(
+        grid_dino_seq=b["grid_dino"],
+        grid_pi3_seq=b["grid_pi3"],
+        image_hw=b["image_hw"],
+        bboxes_2d_seq=b.get("bboxes_2d"),
+    )
+
+
+class TrainWorldWisePP(TrainWorldWisePlus):
+    """WorldWise++ (lib/supervised/worldwise_pp): entity decoder over fused DINOv3 /
+    Pi3 token grids with joint free-query detection and an EGTR-style relation
+    readout. Needs the grid cache (config ``grid_cache_root``)."""
+
+    def _make_dataset(self, phase: str):
+        from lib.supervised.worldwise_pp.dataset import WorldAGGrid
+        from wsgg_base import annot_dir_for
+        return WorldAGGrid(
+            phase=phase,
+            data_path=self._conf.data_path,
+            mode=self._conf.mode,
+            feature_model=getattr(self._conf, 'feature_model', 'dinov2b'),
+            include_invisible=getattr(self._conf, 'include_invisible', True),
+            max_objects=getattr(self._conf, 'max_objects', 64),
+            annot_dir_name=annot_dir_for(self._conf, phase),
+            grid_cache_root=self._conf.grid_cache_root,
+            allow_missing_grids=getattr(self._conf, 'grid_cache_allow_missing', False),
+        )
+
+    def init_model(self):
+        from lib.supervised.worldwise_pp import WorldWisePP
+
+        self._model = WorldWisePP(
+            config=self._conf,
+            num_object_classes=len(self._object_classes),
+            attention_class_num=len(self._train_dataset.attention_relationships),
+            spatial_class_num=len(self._train_dataset.spatial_relationships),
+            contact_class_num=len(self._train_dataset.contacting_relationships),
+        ).to(self._device)
+
+    def init_loss_fn(self):
+        from lib.supervised.worldwise_pp import WorldWisePPLoss
+        c = self._conf
+        self._loss_fn = WorldWisePPLoss(
+            num_object_classes=len(self._object_classes),
+            lambda_det=getattr(c, 'lambda_det', 1.0),
+            lambda_slot_box=getattr(c, 'lambda_slot_box', 1.0),
+            det_one_to_many_iou=getattr(c, 'det_one_to_many_iou', 0.5),
+            no_object_weight=getattr(c, 'det_no_object_weight', 0.1),
+            # WorldWiseLoss settings (identical to TrainWorldWise.init_loss_fn)
+            lambda_vlm=c.lambda_vlm,
+            lambda_recon=c.lambda_reconstruction,
+            lambda_recon_dominance=c.lambda_recon_dominance,
+            p_simulate_unseen=c.p_simulate_unseen,
+            label_smoothing=c.label_smoothing_vlm,
+            mode=c.mode,
+            use_logit_adjustment=getattr(c, 'use_logit_adjustment', False),
+            logit_adjustment_tau=getattr(c, 'logit_adjustment_tau', 1.0),
+            predicate_priors_path=getattr(c, 'predicate_priors_path', None),
+            data_path=c.data_path,
+            use_confidence_weighted_vlm=getattr(c, 'use_confidence_weighted_vlm', False),
+            lambda_stability=getattr(c, 'lambda_stability', 0.0),
+        ).to(self._device)
+
+    def process_train_video(self, batch) -> dict:
+        b = _to_device(batch, self._device)
+
+        pred = self._model.forward(
+            visual_features_seq=b["visual_features"],
+            corners_seq=b["corners"],
+            valid_mask_seq=b["valid_mask"],
+            visibility_mask_seq=b["visibility_mask"],
+            person_idx_seq=b["person_idx"],
+            object_idx_seq=b["object_idx"],
+            pair_valid=b["pair_valid"],
+            p_mask_visible=getattr(self._conf, 'p_mask_visible', 0.3),
+            camera_pose_seq=b.get("camera_poses"),
+            node_labels_seq=_predcls_labels(self._conf, b),
+            gt_contacting_seq=b.get("gt_contacting"),
+            **_pp_grid_kwargs(b),
+        )
+
+        losses = self._loss_fn(
+            predictions=pred,
+            gt_attention=b["gt_attention"],
+            gt_spatial=b["gt_spatial"],
+            gt_contacting=b["gt_contacting"],
+            pair_valid=b["pair_valid"],
+            visibility_mask=b["visibility_mask"],
+            person_idx=b["person_idx"],
+            object_idx=b["object_idx"],
+            valid_mask=b.get("valid_mask"),
+            corners=b.get("corners"),
+            gt_node_labels=b.get("object_classes"),
+            vlm_confidence=b.get("vlm_confidence"),
+            # joint detection targets
+            gt_bboxes_2d=b.get("gt_bboxes_2d"),
+            gt_corners=b.get("gt_corners"),
+            camera_poses=b.get("camera_poses"),
+        )
+
+        return losses
+
+    def process_test_video(self, batch) -> dict:
+        b = _to_device(batch, self._device)
+
+        pred = self._model.forward(
+            visual_features_seq=b["visual_features"],
+            corners_seq=b["corners"],
+            valid_mask_seq=b["valid_mask"],
+            visibility_mask_seq=b["visibility_mask"],
+            person_idx_seq=b["person_idx"],
+            object_idx_seq=b["object_idx"],
+            pair_valid=b["pair_valid"],
+            camera_pose_seq=b.get("camera_poses"),
+            node_labels_seq=_predcls_labels(self._conf, b),
+            **_pp_grid_kwargs(b),
+        )
+
+        T = b["visual_features"].shape[0]
+        if T > 0:
+            return {
+                "attention_distribution": pred["attention_distribution"][-1],
+                "spatial_distribution": pred["spatial_distribution"][-1],
+                "contacting_distribution": pred["contacting_distribution"][-1],
+            }
+        return None
 
 
 METHOD_MAP = {
@@ -379,8 +513,11 @@ METHOD_MAP = {
     "w_usg": TrainWUSG,
     # WorldWise (full proposed method — MWAE + tail-aware loss)
     "worldwise": TrainWorldWise,
-    # WorldFormer C1: WorldWise over cached DINOv3 / Pi3 tokens (gated fusion)
-    "worldformer_c1": TrainWorldFormerC1,
+    # WorldWise+: WorldWise over cached DINOv3 / Pi3 tokens (gated fusion)
+    "worldwise_plus": TrainWorldWisePlus,
+    "worldformer_c1": TrainWorldWisePlus,   # legacy name (running jobs / old configs)
+    # WorldWise++: entity decoder over fused token grids + joint detection
+    "worldwise_pp": TrainWorldWisePP,
 }
 
 

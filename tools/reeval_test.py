@@ -65,11 +65,30 @@ def build_model(conf, test_dataset, device):
         from lib.supervised.baselines.w_usg.w_usg import WUSG as C
     elif m == "worldwise":
         from lib.supervised.worldwise.worldwise import WorldWise as C
-    elif m == "worldformer_c1":
-        from lib.supervised.worldformer.c1_tokenswap import WorldFormerC1 as C
+    elif m in ("worldwise_plus", "worldformer_c1"):
+        from lib.supervised.worldwise_plus import WorldWisePlus as C
+    elif m == "worldwise_pp":
+        from lib.supervised.worldwise_pp import WorldWisePP as C
     else:
         raise ValueError(f"Unknown method_name: {m}")
     return C(conf, nobj, natt, nspa, ncon).to(device)
+
+
+def make_test_dataset(conf):
+    """Test-split dataset for the config's method (WorldAGGrid for WorldWise++,
+    which also needs the token-grid cache; plain WorldAG otherwise)."""
+    from wsgg_base import annot_dir_for
+    kw = dict(phase="test", data_path=conf.data_path, mode=conf.mode,
+              feature_model=getattr(conf, "feature_model", "dinov2b"),
+              include_invisible=getattr(conf, "include_invisible", True),
+              max_objects=getattr(conf, "max_objects", 64),
+              annot_dir_name=annot_dir_for(conf, "test"))
+    if conf.method_name == "worldwise_pp":
+        from lib.supervised.worldwise_pp.dataset import WorldAGGrid
+        return WorldAGGrid(grid_cache_root=conf.grid_cache_root,
+                           allow_missing_grids=getattr(conf, "grid_cache_allow_missing", False), **kw)
+    from dataloader.world_ag_dataset import WorldAG
+    return WorldAG(**kw)
 
 
 def forward_all_frames(model, conf, b):
@@ -83,8 +102,11 @@ def forward_all_frames(model, conf, b):
     )
     # GT node labels feed the text pathway in predcls only (task input)
     kw["node_labels_seq"] = b.get("object_classes") if conf.mode == "predcls" else None
-    if conf.method_name in ("worldwise", "worldformer_c1"):
+    if conf.method_name in ("worldwise", "worldwise_plus", "worldformer_c1", "worldwise_pp"):
         kw["p_mask_visible"] = 0.0
+    if conf.method_name == "worldwise_pp":
+        kw.update(grid_dino_seq=b["grid_dino"], grid_pi3_seq=b["grid_pi3"],
+                  image_hw=b["image_hw"], bboxes_2d_seq=b.get("bboxes_2d"))
     return model(**kw)
 
 
@@ -205,14 +227,9 @@ def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     ks = [10, 20, 50, 100]
 
-    from dataloader.world_ag_dataset import WorldAG, world_collate_fn
+    from dataloader.world_ag_dataset import world_collate_fn
     from torch.utils.data import DataLoader
-    from wsgg_base import annot_dir_for
-    ds = WorldAG(phase="test", data_path=conf.data_path, mode=conf.mode,
-                 feature_model=getattr(conf, "feature_model", "dinov2b"),
-                 include_invisible=getattr(conf, "include_invisible", True),
-                 max_objects=getattr(conf, "max_objects", 64),
-                 annot_dir_name=annot_dir_for(conf, "test"))
+    ds = make_test_dataset(conf)
     dl = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0,
                     collate_fn=world_collate_fn)
     print(f"Test videos: {len(ds)} | mode={conf.mode} | method={conf.method_name} "
