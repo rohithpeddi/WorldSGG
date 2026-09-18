@@ -82,7 +82,7 @@ token_streams:
 - 3072
 fusion: gated
 grid_cache_root: /data3/rohith/ag/cache/pp_grids
-grid_cache_allow_missing: false
+grid_cache_allow_missing: true
 d_grid: 256
 n_free_queries: 0
 n_decoder_layers: 4

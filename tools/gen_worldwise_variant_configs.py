@@ -50,7 +50,7 @@ HEADER_PP = """# ===============================================================
 
 PP_KEYS = {
     "grid_cache_root": GRID_CACHE,
-    "grid_cache_allow_missing": False,
+    "grid_cache_allow_missing": True,   # ATI0Z has no Pi3 token cache -> dropped (logged), 1/7516 train videos
     "d_grid": 256,
     "n_free_queries": 30,
     "n_decoder_layers": 4,
