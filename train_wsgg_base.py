@@ -83,16 +83,27 @@ class TrainWSGGBase(WSGGBase):
 
         self._object_classes = self._train_dataset.object_classes
 
+        # Every item re-reads its feature + annotation PKLs (and, for
+        # WorldWise++, its token grids) from disk, so with num_workers=0 the
+        # GPU waits on each read. num_workers>0 overlaps them with compute.
+        # Default 0 keeps the historical behaviour for already-running cells.
+        n_workers = int(getattr(self._conf, 'num_workers', 0))
+        loader_kw = {"num_workers": n_workers}
+        if n_workers > 0:
+            loader_kw.update(persistent_workers=True,
+                             prefetch_factor=int(getattr(self._conf, 'prefetch_factor', 4)))
+        logger.info(f"  DataLoader workers: {n_workers}")
+
         self._dataloader_train = DataLoader(
-            self._train_dataset, batch_size=1, shuffle=True, num_workers=0,
-            collate_fn=world_collate_fn,
+            self._train_dataset, batch_size=1, shuffle=True,
+            collate_fn=world_collate_fn, **loader_kw,
         )
 
         if not skip_test:
             self._test_dataset = self._make_dataset("test")
             self._dataloader_test = DataLoader(
-                self._test_dataset, batch_size=1, shuffle=False, num_workers=0,
-                collate_fn=world_collate_fn,
+                self._test_dataset, batch_size=1, shuffle=False,
+                collate_fn=world_collate_fn, **loader_kw,
             )
             logger.info(f"  Train: {len(self._train_dataset)} items | Test: {len(self._test_dataset)} items")
         else:

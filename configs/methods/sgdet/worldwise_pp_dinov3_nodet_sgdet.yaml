@@ -93,3 +93,5 @@ lambda_det: 0.0
 lambda_slot_box: 0.0
 det_one_to_many_iou: 0.5
 det_no_object_weight: 0.1
+num_workers: 4
+prefetch_factor: 4

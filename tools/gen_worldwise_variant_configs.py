@@ -61,6 +61,11 @@ PP_KEYS = {
     "lambda_slot_box": 1.0,
     "det_one_to_many_iou": 0.5,
     "det_no_object_weight": 0.1,
+    # Each item re-reads two PKLs + its token grids from disk; with
+    # num_workers=0 the GPU waits on every one (measured: sgdet 3.2 s/video
+    # with the process in D state). Prefetch overlaps them with compute.
+    "num_workers": 4,
+    "prefetch_factor": 4,
 }
 PP_NODET = {"n_free_queries": 0, "lambda_det": 0.0, "lambda_slot_box": 0.0}
 

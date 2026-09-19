@@ -23,6 +23,7 @@ import numpy as np
 import torch
 
 from dataloader.world_ag_dataset import WorldAG
+from datasets.preprocess.tokens.build_pp_grid_cache import read_member_rows
 
 logger = logging.getLogger(__name__)
 
@@ -55,16 +56,21 @@ class WorldAGGrid(WorldAG):
             raise FileNotFoundError(f"[WorldAGGrid] grid cache missing for {video_id}: {path}")
         with np.load(path) as z:
             frames = [str(f) for f in z["frames"].tolist()]
-            row = {f: i for i, f in enumerate(frames)}
-            try:
-                idx = np.array([row[f] for f in frame_names], dtype=np.int64)
-            except KeyError as e:
-                raise KeyError(f"[WorldAGGrid] frame {e} of {video_id} not in grid cache {path} "
-                               f"(cache has {len(frames)} frames, e.g. {frames[:3]})") from None
-            dino = np.ascontiguousarray(z["dino"][idx])
-            pi3 = np.ascontiguousarray(z["pi3"][idx])
             grid_hw = tuple(int(v) for v in z["grid_hw"].tolist())
             target = tuple(int(v) for v in z["target_size"].tolist())
+        row = {f: i for i, f in enumerate(frames)}
+        try:
+            idx = np.array([row[f] for f in frame_names], dtype=np.int64)
+        except KeyError as e:
+            raise KeyError(f"[WorldAGGrid] frame {e} of {video_id} not in grid cache {path} "
+                           f"(cache has {len(frames)} frames, e.g. {frames[:3]})") from None
+        # One sequential read of the needed contiguous row block per member:
+        # np.load's member indexing streams the whole array through zipfile in
+        # 256 KB chunks (measured ~8x slower here).
+        dino_blk, r0d = read_member_rows(path, "dino", idx)
+        pi3_blk, r0p = read_member_rows(path, "pi3", idx)
+        dino = np.ascontiguousarray(dino_blk[idx - r0d])
+        pi3 = np.ascontiguousarray(pi3_blk[idx - r0p])
         if dino.shape != pi3.shape or dino.ndim != 4:
             raise ValueError(f"[WorldAGGrid] bad grid shapes for {video_id}: dino {dino.shape} pi3 {pi3.shape}")
         if tuple(dino.shape[1:3]) != grid_hw:
