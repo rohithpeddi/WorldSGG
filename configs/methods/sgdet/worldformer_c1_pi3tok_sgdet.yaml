@@ -80,3 +80,5 @@ test_annot_dir: world4d_rel_annotations_worldbbox
 token_streams:
 - 3072
 fusion: gated
+num_workers: 4
+prefetch_factor: 4
