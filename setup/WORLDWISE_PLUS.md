@@ -184,29 +184,55 @@ via `scripts/remote/score_worldwise_variants.sh`.
 
 ---
 
-## 6. Results so far
+## 6. Results
 
-Trainer (online, **last-frame**) metrics, with-constraint @ K=20, WorldBBox
-test split. Reference = WorldWise v2e @ dinov3l — the same model reading the
-decoded FRCNN features.
+**All-frame, best epoch, WorldBBox test (1,511 videos)** — same protocol and
+same scripts as the 20-checkpoint reference table, so these are directly
+comparable to it. Reference = WorldWise v2e @ dinov3l: the identical model
+reading the decoded FRCNN features.
 
-| Cell | epoch | predcls R / mR | sgdet R / mR |
-|---|---|---|---|
-| WorldWise@dinov3l *(reference, last-frame)* | 20 | 69.0 / 48.8 | — |
-| **`dinov3tok`** (WorldWise+ @ DINOv3) | 20 / 20 | **73.1 / 52.6** | 55.8 / 25.4 |
-| `pi3tok` | 7 / 20 (predcls), 4 / 20 (sgdet) | 71.2 / 53.7 | 54.0 / 23.0 |
-| `fused` | 5 / 20 (predcls), 3 / 20 (sgdet) | 72.2 / 52.5 | 54.6 / 23.6 |
+**predcls — WorldWise+ wins every column.**
 
-The finished `dinov3tok` cell is **+4.1 R / +3.8 mR over the decoded-feature
-reference** on the comparable last-frame protocol — the first direct evidence
-for the latents-vs-decoded claim. The π³ and fused cells are early
-(`dinov3tok` itself read 68.2 / 36.3 at epoch 1), so their standing is open.
+| Model | wc R@10 | wc R@20 | wc mR@10 | wc mR@20 | wc mR@50 | nc R@20 | nc mR@20 |
+|---|---|---|---|---|---|---|---|
+| WorldWise @ dinov3l | 63.2 | 69.0 | 40.1 | 49.6 | 49.7 | 92.6 | 82.4 |
+| **WorldWise+ @ DINOv3** | **67.6** | **73.5** | **44.3** | **54.7** | **54.9** | **94.3** | **85.6** |
+| Δ | +4.4 | **+4.5** | +4.2 | **+5.1** | +5.2 | +1.7 | +3.2 |
 
-These are last-frame numbers and **not comparable to the all-frame reference
-table**; the definitive all-frame + visibility-bucket numbers for `dinov3tok`
-are being computed now (`/data3/rohith/ag/runs/worldformer/score/`) and the
-comparison table across all methods lives in the results section of
-[WORLDWISE_PP.md](WORLDWISE_PP.md) once WorldWise++ has trained.
+**sgdet — wins overall, and the tail gains are the large ones.**
+
+| Model | wc R@20 | wc R@50 | wc mR@20 | wc mR@50 | nc R@20 | nc mR@20 |
+|---|---|---|---|---|---|---|
+| WorldWise @ dinov3l | 52.6 | 68.6 | 21.5 | 38.8 | 57.1 | 37.5 |
+| **WorldWise+ @ DINOv3** | **54.2** | **70.5** | **23.1** | **45.5** | **58.6** | **43.3** |
+| Δ | +1.6 | +1.9 | +1.6 | **+6.7** | +1.5 | **+5.8** |
+
+**Visibility buckets (no-constraint, K=20)** — and here is the one place the
+swap does *not* win:
+
+| Model | mode | OO R | OU R | OU-nt R | OU-nt mR |
+|---|---|---|---|---|---|
+| WorldWise | predcls | 90.9 | 80.5 | 72.9 | 41.1 |
+| **WorldWise+** | predcls | **93.4** | **81.4** | **76.0** | **45.2** |
+| WorldWise | sgdet | 53.3 | **25.6** | **28.1** | **21.3** |
+| **WorldWise+** | sgdet | **54.9** | 24.7 | 26.6 | 20.5 |
+
+In predcls the latents help most exactly where the method's claim lives — the
+occluded, non-trivial pairs (+3.1 R, +4.1 mR). **In sgdet they do not**: the
+observed bucket improves (+1.6) while the unobserved buckets lose 0.8–1.5.
+This should be reported, not hidden. The plausible reading is that richer
+appearance latents sharpen recognition of what is *visible*, while unobserved
+pairs in sgdet hinge on detector-supplied boxes the token swap never touches —
+which is precisely the gap WorldWise++ is built to close, since its slots
+reach the image directly.
+
+Trainer-time last-frame metrics for the in-progress stream ablations (not
+comparable to the tables above): `pi3tok` 71.2 / 53.7 predcls @ epoch 7,
+`fused` 72.2 / 52.5 predcls @ epoch 5 — both early (`dinov3tok` itself read
+68.2 / 36.3 at epoch 1 and finished at 73.5 / 54.7 all-frame).
+
+The full cross-method table is built with
+`tools/aggregate_rescore.py --root <rescore> <plus> <pp>`.
 
 **Ablations the design supports** (mostly free, since the cells exist):
 stream identity (`dinov3tok` vs `pi3tok` vs `fused`) · fusion mechanism
