@@ -185,11 +185,11 @@ detection result.
 
 ## 6. Cells and compute
 
-| Experiment | Mode | GPU | What it isolates |
-|---|---|---|---|
-| `worldwise_pp_dinov3_predcls` | predcls | 0 | the headline — WorldWise++ @ DINOv3 |
-| `worldwise_pp_dinov3_sgdet` | sgdet | 1 | idem |
-| `worldwise_pp_dinov3_nodet_{predcls,sgdet}` | both | 2 | `n_free_queries = 0`, `λ_det = λ_slot = 0`: the decoder without the detection objective |
+| Experiment | Mode | GPU | What it isolates | Status |
+|---|---|---|---|---|
+| `worldwise_pp_dinov3_predcls` | predcls | 0 | the headline — WorldWise++ @ DINOv3 | done 20/20 |
+| `worldwise_pp_dinov3_sgdet` | sgdet | 1 | idem | done 20/20 |
+| `worldwise_pp_dinov3_nodet_{predcls,sgdet}` | both | 2 | `n_free_queries = 0`, `λ_det = λ_slot = 0`: the decoder without the detection objective | done 20/20 |
 
 Config source: `tools/gen_worldwise_variant_configs.py` (from the
 `worldwise_plus_dinov3tok_*` cells: 20 epochs, lr 1e-4, AMP, `d_model 256`,
@@ -199,21 +199,79 @@ Launcher `scripts/remote/run_worldwise_pp_train.sh`; scoring
 `scripts/remote/score_worldwise_variants.sh` (CPU, best epoch, dump → reeval
 → buckets) feeding the comparison table below.
 
+**Throughput note.** These cells are dataloader-bound, not GPU-bound: each
+item re-reads two PKLs plus ~32 MB of grids. With the trainer's historical
+`num_workers=0` the SGDet cell ran at 3.2 s/video with the GPU at 0-5 %
+(≈5.5 days for 20 epochs); with `num_workers: 4` + `prefetch_factor: 4` it
+runs at ~1.7 it/s. Keep those keys set in any new cell.
+
 ---
 
 ## 7. Results
 
-*(filled in as the cells finish — the comparison against all 20 reference
-checkpoints of [analysis/worldbbox_reference_2026-09-17.md](../analysis/worldbbox_reference_2026-09-17.md),
-WorldWise+ and WorldWise++, all-frame, both constraints, visibility buckets.)*
+**All-frame, best epoch, WorldBBox test (1,511 videos)**, same protocol and
+scripts as every other row of
+[analysis/worldbbox_lineage_2026-09-19.md](../analysis/worldbbox_lineage_2026-09-19.md).
+All four cells trained the full 20 epochs.
 
-| Method | backbone | predcls wc R@20 / mR@20 | sgdet wc R@20 / mR@20 | sgdet nc R@20 / mR@20 | OU-nt R@20 |
-|---|---|---|---|---|---|
-| WorldWise (v2e) | dinov3l | 69.0 / 49.6 | 52.6 / 21.5 | — | 28.1 |
-| WorldWise+ | DINOv3 latents | scoring | scoring | scoring | scoring |
-| WorldWise++ | DINOv3 latents + grids | training | training | training | training |
+**PredCls**
 
----
+| Model | wc R@20 | wc mR@20 | nc R@20 | nc mR@20 | OO R@20 | OU R@20 | OU-nt R@20 | OU-nt mR@20 |
+|---|---|---|---|---|---|---|---|---|
+| Best baseline (W-DSGDetr++) | 68.5 | 38.9 | 92.7 | 71.0 | 91.4 | 77.0 | 55.3 | 26.1 |
+| WorldWise @ dinov3l | 69.0 | 49.6 | 92.6 | 82.4 | 90.9 | 80.5 | 72.9 | 41.1 |
+| WorldWise+ @ dinov3tok | 73.5 | **54.7** | 94.3 | 85.6 | 93.4 | 81.4 | 76.0 | 45.2 |
+| **WorldWise++** | **74.8** | 54.4 | **94.6** | **86.2** | **93.6** | **82.5** | **76.6** | **48.1** |
+| WorldWise++ `nodet` | 74.1 | 54.3 | 94.2 | 86.0 | **93.6** | 79.7 | 75.0 | 40.1 |
+
+**SGDet**
+
+| Model | wc R@20 | wc mR@20 | wc mR@50 | nc R@20 | nc mR@20 | OU-nt R@20 | OU-nt mR@20 |
+|---|---|---|---|---|---|---|---|
+| Best baseline (W-DSGDetr / ++) | **56.6** | 20.3 | 35.4 | 63.8 | 31.2 | 14.3 | 7.7 |
+| WorldWise @ dinov3l | 52.6 | 21.5 | 38.8 | 57.1 | 37.5 | 28.1 | 21.3 |
+| WorldWise+ @ dinov3tok | 54.2 | 23.1 | 45.5 | 58.6 | 43.3 | 26.6 | 20.5 |
+| **WorldWise++** | 54.6 | **24.5** | **48.6** | 59.4 | **44.1** | **27.8** | **22.3** |
+| WorldWise++ `nodet` | **54.8** | 24.1 | 48.4 | **59.5** | 43.9 | 27.7 | 21.9 |
+
+### What the results establish
+
+1. **WorldWise++ is the strongest model in the lineage on recall.** PredCls
+   wc R@20 74.8 is **+6.3 over the best baseline** and +1.3 over WorldWise+;
+   it also takes both no-constraint columns and every occlusion bucket. The
+   ladder 68.5 -> 69.0 -> 73.5 -> 74.8 is monotone.
+2. **The detection objective is what buys occlusion reasoning.** The `nodet`
+   ablation is the decisive cell: removing the free queries and the
+   box/corner refinement costs **8.0 mR@20 on the occluded non-trivial bucket
+   in PredCls (48.1 -> 40.1)** and 1.6 R on OU, while barely moving the
+   headline numbers (74.8 -> 74.1 R). Learning to *localize* is what teaches
+   the slots to reason about objects the camera cannot see — which is the
+   paper's central claim, and it is supported by an ablation rather than an
+   assertion.
+3. **Mean recall has plateaued.** WorldWise+ 54.7 -> WorldWise++ 54.4 in
+   PredCls is flat-to-slightly-down. The mR gains in this line of work came
+   from the loss recipe (WorldWise) and the representation swap
+   (WorldWise+); the architecture change buys recall, no-constraint
+   performance and occlusion, not tail recall. SGDet is the exception, where
+   ++ does take mR@20 (24.5) and mR@50 (48.6) outright.
+4. **WorldWise++ repairs WorldWise+'s SGDet occlusion regression.**
+   WorldWise+ @ dinov3tok had fallen *below* the decoded reference on the
+   unobserved buckets (26.6 / 20.5 vs 28.1 / 21.3). WorldWise++ recovers to
+   27.8 / **22.3**, the best OU-nt mR of any model including WorldWise.
+   Giving the slots direct access to the image is what closed it.
+5. **SGDet wc-R remains the one baseline-favouring column** (56.6 vs 54.6).
+   The gap narrowed across the lineage (52.6 -> 54.2 -> 54.6) but did not
+   close. Present SGDet on mR, no-constraint and the occlusion buckets, where
+   ++ leads by 2-3x on the buckets and by ~13 points on mR@50.
+
+**A caveat worth keeping.** Both `nodet` cells edge out the full model on
+SGDet wc R@20 (54.8 vs 54.6) and nc R@20 (59.5 vs 59.4) — differences well
+inside noise, but they mean the detection objective's benefit in SGDet is
+specific to mR and the occluded buckets, not a uniform win.
+
+**Not yet measured:** the free queries' own detection quality (2-D AP /
+recall against the GT boxes). The heads are trained and the numbers above
+depend on them, but detection is not yet reported as a standalone result.
 
 ## 8. Ablations the design supports, and open items
 
@@ -225,12 +283,24 @@ from the image only), EGTR readout vs union tokens, `n_free_queries`.
 
 Open:
 
-1. **Detection is trained from frozen features on ~184 k frames** — DETR-style
-   heads converge slowly; the one-to-many assignment is there for that reason,
-   but 20 epochs may under-train the free queries. Report detection honestly
-   even if the scene-graph numbers are the headline.
+1. **Free-query detection quality is still unreported.** The heads are
+   trained and the `nodet` ablation shows they matter (OU-nt mR 48.1 vs 40.1),
+   but the standalone 2-D AP / recall of the free queries has not been
+   measured. DETR-style heads converge slowly from frozen features on ~184 k
+   frames, so 20 epochs may under-train them; report the number honestly once
+   measured, even if it is weak — the scene-graph results do not depend on it
+   being strong.
 2. **PCA-256 is a compromise** forced by disk throughput; the retained
    variance is logged and the full-rank grids remain cached for a re-run on
    faster storage.
 3. **3-D OBBs of the free queries are camera-frame** (pinhole back-projection
    with an assumed focal length); the world-frame slots are the ones scored.
+4. **Mean recall plateaued** (54.7 -> 54.4 PredCls). If tail recall is the
+   target, the lever is the loss recipe, not more architecture — the same
+   conclusion the WorldWise plugin round reached.
+5. **`_best_score` is not stored in checkpoints**, so a resumed run selects
+   `best_model.pth` among post-resume epochs only. The two SGDet WorldWise+
+   ablation cells were resumed mid-run (from epochs 4 and 6 of 20); their
+   best-epoch selection therefore covers epochs 5-20 and 7-20 respectively.
+   Immaterial here (best epochs were late) but worth fixing before any run
+   where an early epoch could win.

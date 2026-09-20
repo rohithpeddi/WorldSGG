@@ -187,60 +187,64 @@ via `scripts/remote/score_worldwise_variants.sh`.
 ## 6. Results
 
 **All-frame, best epoch, WorldBBox test (1,511 videos)** — same protocol and
-same scripts as the 20-checkpoint reference table, so these are directly
-comparable to it. Reference = WorldWise v2e @ dinov3l: the identical model
-reading the decoded FRCNN features.
+same scripts as every other row of
+[analysis/worldbbox_lineage_2026-09-19.md](../analysis/worldbbox_lineage_2026-09-19.md).
+Reference = WorldWise v2e @ dinov3l: the identical model reading the decoded
+FRCNN features.
 
-**predcls — WorldWise+ wins every column.**
+**PredCls**
 
-| Model | wc R@10 | wc R@20 | wc mR@10 | wc mR@20 | wc mR@50 | nc R@20 | nc mR@20 |
+| Cell | wc R@20 | wc mR@20 | nc R@20 | nc mR@20 | OO R@20 | OU-nt R@20 | OU-nt mR@20 |
 |---|---|---|---|---|---|---|---|
-| WorldWise @ dinov3l | 63.2 | 69.0 | 40.1 | 49.6 | 49.7 | 92.6 | 82.4 |
-| **WorldWise+ @ DINOv3** | **67.6** | **73.5** | **44.3** | **54.7** | **54.9** | **94.3** | **85.6** |
-| Δ | +4.4 | **+4.5** | +4.2 | **+5.1** | +5.2 | +1.7 | +3.2 |
+| WorldWise @ dinov3l *(reference)* | 69.0 | 49.6 | 92.6 | 82.4 | 90.9 | 72.9 | 41.1 |
+| `pi3tok` | 71.9 | 51.5 | 93.8 | 84.4 | 92.4 | 75.4 | **46.0** |
+| `fused` (gated) | 73.2 | 54.1 | 94.2 | 84.5 | 93.0 | 75.9 | 44.1 |
+| **`dinov3tok`** | **73.5** | **54.7** | **94.3** | **85.6** | **93.4** | **76.0** | 45.2 |
 
-**sgdet — wins overall, and the tail gains are the large ones.**
+**SGDet**
 
-| Model | wc R@20 | wc R@50 | wc mR@20 | wc mR@50 | nc R@20 | nc mR@20 |
-|---|---|---|---|---|---|---|
-| WorldWise @ dinov3l | 52.6 | 68.6 | 21.5 | 38.8 | 57.1 | 37.5 |
-| **WorldWise+ @ DINOv3** | **54.2** | **70.5** | **23.1** | **45.5** | **58.6** | **43.3** |
-| Δ | +1.6 | +1.9 | +1.6 | **+6.7** | +1.5 | **+5.8** |
+| Cell | wc R@20 | wc mR@20 | wc mR@50 | nc R@20 | nc mR@20 | OU-nt R@20 | OU-nt mR@20 |
+|---|---|---|---|---|---|---|---|
+| WorldWise @ dinov3l *(reference)* | 52.6 | 21.5 | 38.8 | 57.1 | 37.5 | **28.1** | 21.3 |
+| `pi3tok` | 53.2 | 22.9 | 43.8 | 57.9 | 41.1 | 27.2 | **22.4** |
+| **`fused` (gated)** | **54.2** | **23.9** | **46.9** | **59.1** | **43.5** | 27.1 | 21.1 |
+| `dinov3tok` | **54.2** | 23.1 | 45.5 | 58.6 | 43.3 | 26.6 | 20.5 |
 
-**Visibility buckets (no-constraint, K=20)** — and here is the one place the
-swap does *not* win:
+### What the ablation establishes
 
-| Model | mode | OO R | OU R | OU-nt R | OU-nt mR |
-|---|---|---|---|---|---|
-| WorldWise | predcls | 90.9 | 80.5 | 72.9 | 41.1 |
-| **WorldWise+** | predcls | **93.4** | **81.4** | **76.0** | **45.2** |
-| WorldWise | sgdet | 53.3 | **25.6** | **28.1** | **21.3** |
-| **WorldWise+** | sgdet | **54.9** | 24.7 | 26.6 | 20.5 |
+1. **Latents beat decoded outputs — the central claim holds.** `dinov3tok` is
+   **+4.5 R / +5.1 mR** over the reference in PredCls with *nothing else
+   changed*, and +1.6 R / +1.6 mR (+6.7 mR@50) in SGDet. Every stream beats
+   the decoded baseline in both modes.
+2. **Semantics > geometry as a single stream**: `dinov3tok` 73.5 > `pi3tok`
+   71.9 (PredCls). But π³ is not redundant — see 4.
+3. **The gate does not earn its parameters in PredCls.** `fused` (73.2 / 54.1)
+   fails to beat its own best single stream `dinov3tok` (73.5 / 54.7). This is
+   exactly the failure condition this document specified in advance, so
+   **report `concat` or the single stream for PredCls, not the gate.**
+   In **SGDet the gate does earn them**: `fused` is the best WorldWise+ cell
+   on mR@20 (23.9), mR@50 (**46.9**) and nc mR@20 (43.5), beating both single
+   streams. The honest summary is mode-dependent, not a blanket win.
+4. **π³ geometry latents specifically help occluded reasoning.** In SGDet,
+   `pi3tok` has the best OU-non-trivial mR@20 (22.4) — above `dinov3tok`
+   (20.5), `fused` (21.1) *and* the decoded reference (21.3). Geometry tokens
+   carry information about objects the camera no longer sees that semantic
+   patch tokens do not.
+5. **One regression, stated plainly.** In SGDet, `dinov3tok` *loses* on the
+   unobserved buckets relative to the decoded reference (OU-nt 26.6 / 20.5 vs
+   28.1 / 21.3) even while winning overall. Richer appearance latents sharpen
+   recognition of what is visible; they do nothing for detector-supplied
+   boxes on unobserved pairs. [WorldWise++](WORLDWISE_PP.md) repairs this
+   (27.8 / 22.3) by giving the slots direct access to the image.
 
-In predcls the latents help most exactly where the method's claim lives — the
-occluded, non-trivial pairs (+3.1 R, +4.1 mR). **In sgdet they do not**: the
-observed bucket improves (+1.6) while the unobserved buckets lose 0.8–1.5.
-This should be reported, not hidden. The plausible reading is that richer
-appearance latents sharpen recognition of what is *visible*, while unobserved
-pairs in sgdet hinge on detector-supplied boxes the token swap never touches —
-which is precisely the gap WorldWise++ is built to close, since its slots
-reach the image directly.
+**Where this sits in the lineage** (PredCls wc R@20 / mR@20): WorldWise
+69.0 / 49.6 -> **WorldWise+ 73.5 / 54.7** -> WorldWise++ 74.8 / 54.4.
 
-Trainer-time last-frame metrics for the in-progress stream ablations (not
-comparable to the tables above): `pi3tok` 71.2 / 53.7 predcls @ epoch 7,
-`fused` 72.2 / 52.5 predcls @ epoch 5 — both early (`dinov3tok` itself read
-68.2 / 36.3 at epoch 1 and finished at 73.5 / 54.7 all-frame).
-
-The full cross-method table is built with
-`tools/aggregate_rescore.py --root <rescore> <plus> <pp>`.
-
-**Ablations the design supports** (mostly free, since the cells exist):
-stream identity (`dinov3tok` vs `pi3tok` vs `fused`) · fusion mechanism
-(gated vs concat) · gate statistics per mode (`gate_summary()`) · layer
-selection within a stream (re-derive only) · WorldWise+ vs WorldWise@dinov3l
-vs the resnet50/dinov2 ladder · with/without MWAE on the token substrate.
-
----
+**Ablations this design supports** (all realised above except the last two):
+stream identity · fusion mechanism (gated vs concat) · gate statistics per
+mode (`gate_summary()`) · layer selection within a stream (re-derive only) ·
+WorldWise+ vs the resnet50/dinov2 ladder · with/without MWAE on the token
+substrate.
 
 ## 7. Files, and what is still open
 
