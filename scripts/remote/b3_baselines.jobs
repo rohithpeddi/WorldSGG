@@ -1,26 +1,38 @@
-# GPU-0 job queue for the MLLM workstream (see run_mllm_sequence.sh; a second worker
-# on another GPU may serve the same file).  Order agreed with the coordinator 2026-09-17:
-# zero_shot predcls -> Stage-1 graph fill (existing graphs are symlinked, never regenerated)
-# -> Track A predcls+sgdet (Qwen3-VL-8B-Instruct) -> caption_all/rag_all/wsg_agent predcls
-# -> Track B predcls+sgdet -> the four sgdet baselines -> Thinking-model rows on the fixed
-# 150-video subset (predcls first, Track A then Track B), queued LAST.
-b3_zero_shot_predcls   lib.mllm.methods.zero_shot.runner   --model_name qwen25vl_7b --mode predcls --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
+# ---------------------------------------------------------------- Stage 1 --
 b3_graphs_fill         lib.mllm.methods.graphs.runner      --model_name qwen25vl_7b --tensor_parallel_size 1 --fast --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
 b3_graphs_register     lib.mllm.tools.register_graphs --model qwen25vl_7b
+# ------------------------------------------- PRIORITY: RAG x thinking (B8) --
+# 2x2 on the 150-video thinking subset, all Qwen3-VL-8B so the cells are
+# comparable: {RAG context, Track-A context} x {standard decode, thinking}.
+# The Track-A standard cell needs no GPU -- it is the existing full-split run
+# scored with --subset test_worldbbox_thinking150.txt.
+b8_rag_think_smoke     lib.mllm.methods.rag_all.runner --model_name qwen3vl_8b_thinking --mode predcls --tensor_parallel_size 1 --skip-verification --max_new_tokens 4096 --temperature 0.6 --top_p 0.95 --tag _think_smoke --limit 2 --video_list /data3/rohith/ag/splits/test_worldbbox_thinking150.txt
+b8_rag_std150_predcls  lib.mllm.methods.rag_all.runner --model_name qwen3vl_8b --mode predcls --tensor_parallel_size 1 --skip-verification --temperature 0.2 --tag _150 --video_list /data3/rohith/ag/splits/test_worldbbox_thinking150.txt
+#HOLD b8_rag_think150_predcls lib.mllm.methods.rag_all.runner --model_name qwen3vl_8b_thinking --mode predcls --tensor_parallel_size 1 --skip-verification --max_new_tokens 4096 --temperature 0.6 --top_p 0.95 --tag _think150 --video_list /data3/rohith/ag/splits/test_worldbbox_thinking150.txt
+b8_rag_std150_sgdet    lib.mllm.methods.rag_all.runner --model_name qwen3vl_8b --mode sgdet --tensor_parallel_size 1 --skip-verification --temperature 0.2 --tag _150 --video_list /data3/rohith/ag/splits/test_worldbbox_thinking150.txt
+#HOLD b8_rag_think150_sgdet  lib.mllm.methods.rag_all.runner --model_name qwen3vl_8b_thinking --mode sgdet --tensor_parallel_size 1 --skip-verification --max_new_tokens 4096 --temperature 0.6 --top_p 0.95 --tag _think150 --video_list /data3/rohith/ag/splits/test_worldbbox_thinking150.txt
+b5_think150_track_a_predcls lib.mllm.methods.track_a_prompt.runner --model_name qwen3vl_8b_thinking --mode predcls --max_new_tokens 4096 --temperature 0.6 --top_p 0.95 --tag _think150 --video_list /data3/rohith/ag/splits/test_worldbbox_thinking150.txt
+b5_think150_track_a_sgdet lib.mllm.methods.track_a_prompt.runner --model_name qwen3vl_8b_thinking --mode sgdet --max_new_tokens 4096 --temperature 0.6 --top_p 0.95 --tag _think150 --video_list /data3/rohith/ag/splits/test_worldbbox_thinking150.txt
+#HOLD b8_score_think150      lib.mllm.eval.score_all --subset /data3/rohith/ag/splits/test_worldbbox_thinking150.txt --out_prefix results/mllm_worldbbox_think150
+# ------------------------------------------------- done: predcls baselines --
 b5_track_a_predcls     lib.mllm.methods.track_a_prompt.runner --model_name qwen3vl_8b --mode predcls --max_new_tokens 1024 --temperature 0.2 --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
 b5_track_a_sgdet       lib.mllm.methods.track_a_prompt.runner --model_name qwen3vl_8b --mode sgdet --max_new_tokens 1024 --temperature 0.2 --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
 b3_caption_all_predcls lib.mllm.methods.caption_all.runner --model_name qwen25vl_7b --mode predcls --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
 b3_rag_all_predcls     lib.mllm.methods.rag_all.runner     --model_name qwen25vl_7b --mode predcls --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
-b3_wsg_agent_predcls   lib.mllm.methods.wsg_agent.runner   --model_name qwen25vl_7b --mode predcls --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
-b6_track_b_predcls     lib.mllm.methods.track_b_agent.runner --model_name qwen3vl_8b --mode predcls --max_new_tokens 1024 --temperature 0.2 --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
-b6_track_b_sgdet       lib.mllm.methods.track_b_agent.runner --model_name qwen3vl_8b --mode sgdet --max_new_tokens 1024 --temperature 0.2 --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
-b7_score_mid           lib.mllm.eval.score_all --out_prefix results/mllm_worldbbox_mid
+# ------------------------------------------ non-agent sgdet baselines (B3) --
 b3_zero_shot_sgdet     lib.mllm.methods.zero_shot.runner   --model_name qwen25vl_7b --mode sgdet --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
 b3_caption_all_sgdet   lib.mllm.methods.caption_all.runner --model_name qwen25vl_7b --mode sgdet --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
 b3_rag_all_sgdet       lib.mllm.methods.rag_all.runner     --model_name qwen25vl_7b --mode sgdet --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
+b7_score_mid           lib.mllm.eval.score_all --out_prefix results/mllm_worldbbox_mid
+# ------------------------------------------------- DEFERRED: agent tracks --
+# Moved to the tail 2026-09-20: finish the RAG x thinking cell first, then come
+# back to the agent application. All runners are resumable per video, so a
+# stopped job restarts from its existing pkls (wsg_agent 282, track_b predcls
+# 564, track_b sgdet 260 videos already on disk).
+b3_wsg_agent_predcls   lib.mllm.methods.wsg_agent.runner   --model_name qwen25vl_7b --mode predcls --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
+b6_track_b_predcls     lib.mllm.methods.track_b_agent.runner --model_name qwen3vl_8b --mode predcls --max_new_tokens 1024 --temperature 0.2 --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
+b6_track_b_sgdet       lib.mllm.methods.track_b_agent.runner --model_name qwen3vl_8b --mode sgdet --max_new_tokens 1024 --temperature 0.2 --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
 b3_wsg_agent_sgdet     lib.mllm.methods.wsg_agent.runner   --model_name qwen25vl_7b --mode sgdet --tensor_parallel_size 1 --skip-verification --video_list /data3/rohith/ag/splits/test_worldbbox_1511.txt
-b5_think150_track_a_predcls lib.mllm.methods.track_a_prompt.runner --model_name qwen3vl_8b_thinking --mode predcls --max_new_tokens 4096 --temperature 0.6 --top_p 0.95 --tag _think150 --video_list /data3/rohith/ag/splits/test_worldbbox_thinking150.txt
 b6_think150_track_b_predcls lib.mllm.methods.track_b_agent.runner --model_name qwen3vl_8b_thinking --mode predcls --max_new_tokens 4096 --temperature 0.6 --top_p 0.95 --tag _think150 --video_list /data3/rohith/ag/splits/test_worldbbox_thinking150.txt
-b5_think150_track_a_sgdet lib.mllm.methods.track_a_prompt.runner --model_name qwen3vl_8b_thinking --mode sgdet --max_new_tokens 4096 --temperature 0.6 --top_p 0.95 --tag _think150 --video_list /data3/rohith/ag/splits/test_worldbbox_thinking150.txt
 b6_think150_track_b_sgdet lib.mllm.methods.track_b_agent.runner --model_name qwen3vl_8b_thinking --mode sgdet --max_new_tokens 4096 --temperature 0.6 --top_p 0.95 --tag _think150 --video_list /data3/rohith/ag/splits/test_worldbbox_thinking150.txt
 b7_score_all           lib.mllm.eval.score_all --out_prefix results/mllm_worldbbox_final

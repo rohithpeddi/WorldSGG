@@ -417,7 +417,7 @@ class ActionGenomeRAGAllObjectsProcessor(ActionGenomeBaseProcessor):
                 check_prompts.append({
                     "text": instruct,
                     "video_inputs": [node_clip],
-                    "max_new_tokens": 256,
+                    "max_new_tokens": getattr(self, "gen_max_tokens", None) or 256,
                 })
                 check_mapping.append((uidx, node))
 
@@ -520,7 +520,7 @@ class ActionGenomeRAGAllObjectsProcessor(ActionGenomeBaseProcessor):
             batch_prompts.append({
                 "text": full_prompt,
                 "video_inputs": [query_visual],
-                "max_new_tokens": 128,
+                "max_new_tokens": getattr(self, "gen_max_tokens", None) or 128,
             })
 
         self._log_prompts(video_id or "unknown", batch_prompts, tag="rag")
@@ -537,6 +537,27 @@ class ActionGenomeRAGAllObjectsProcessor(ActionGenomeBaseProcessor):
     # Per-video processing
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Thinking-model support
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _strip_thinking(text):
+        """Drop a Qwen3-VL-Thinking reasoning trace, keeping the final answer.
+
+        ``parse_relationship_response`` falls back to a greedy ``{.*}`` search,
+        which would otherwise span from the first brace inside the trace to the
+        last brace of the answer and fail to decode.
+        """
+        if not text:
+            return text
+        if "</think>" in text:
+            text = text.rsplit("</think>", 1)[1]
+        return text.strip()
+
+    def _chunked_batch_response(self, prompts, *a, **kw):
+        return [self._strip_thinking(r)
+                for r in super()._chunked_batch_response(prompts, *a, **kw)]
+
     def process_video(self, video_id: str):
         """Process a single video end-to-end.
 
@@ -544,7 +565,8 @@ class ActionGenomeRAGAllObjectsProcessor(ActionGenomeBaseProcessor):
         ALL frames with deduplicated retrieval and frame-specific
         annotation-driven clips.
         """
-        save_dir = self.output_dir / self.mode / self.args.model_name
+        save_dir = (self.output_dir / self.mode
+                    / (self.args.model_name + getattr(self, "run_tag", "")))
         save_dir.mkdir(parents=True, exist_ok=True)
         save_path = save_dir / f"{video_id}.pkl"
 
@@ -842,6 +864,26 @@ def main():
         help="Text file of video stems to process (e.g. the worldbbox test split).",
     )
     parser.add_argument(
+        "--max_new_tokens", type=int, default=None,
+        help=(
+            "Generation budget per call (default: the built-in 256 for node "
+            "checks / 128 for final answers). Thinking models need ~4096: the "
+            "reasoning trace is emitted before the answer."
+        ),
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=0.2,
+        help="Sampling temperature (Qwen3-VL-Thinking wants 0.6).",
+    )
+    parser.add_argument(
+        "--top_p", type=float, default=1.0,
+        help="Nucleus sampling top-p (Qwen3-VL-Thinking wants 0.95).",
+    )
+    parser.add_argument(
+        "--tag", default="",
+        help="Suffix for the output model dir (prompt/ablation variants).",
+    )
+    parser.add_argument(
         "--randomize",
         action="store_true",
         default=False,
@@ -863,6 +905,10 @@ def main():
     )
     processor.skip_verification = args.skip_verification
     processor.print_prompts = args.print_prompts
+    processor.gen_max_tokens = args.max_new_tokens
+    processor.run_tag = args.tag
+    processor.args.temperature = args.temperature
+    processor.args.top_p = args.top_p
     processor.run(limit=args.limit, video_id=args.video_id, randomize=args.randomize,
                   video_list=args.video_list)
 

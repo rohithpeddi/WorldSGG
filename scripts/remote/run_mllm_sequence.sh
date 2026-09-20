@@ -79,10 +79,17 @@ while :; do
   # the whole GPU; kill any that belongs to THIS GPU's job (children of $P are
   # gone with it; orphans are found by their env CUDA_VISIBLE_DEVICES)
   sleep 3
+  # vLLM 0.15's EngineCore does NOT carry CUDA_VISIBLE_DEVICES in its environ
+  # (verified 2026-09-20: the env check never matched, so a killed job leaked
+  # its whole 40 GB and the next job on that GPU OOMed 14 s in).  Ask the
+  # driver which pids still hold this GPU instead.
+  GPUPIDS=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i $GPU 2>/dev/null | tr -d ' ')
   for EP in $(pgrep -f "^VLLM::EngineCor[e]"); do
-    if tr '\0' '\n' < /proc/$EP/environ 2>/dev/null | grep -q "^CUDA_VISIBLE_DEVICES=$GPU$"; then
-      kill $EP 2>/dev/null && echo "[$WORKER] killed leftover VLLM::EngineCore $EP (gpu $GPU)"; sleep 5
-    fi
+    for GP in $GPUPIDS; do
+      [ "$EP" = "$GP" ] || continue
+      kill $EP 2>/dev/null && echo "[$WORKER] killed leftover VLLM::EngineCore $EP (gpu $GPU)"
+      sleep 5
+    done
   done
   [ "$STATE" = failed ] && sleep 120
 done
