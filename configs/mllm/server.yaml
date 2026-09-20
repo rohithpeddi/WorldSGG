@@ -156,7 +156,7 @@ inference:
 # A40 46 GB, one engine per GPU (CUDA_VISIBLE_DEVICES=<gpu>, TP=1).
 # CLI arguments always override these values.
 vllm:
-  gpu_memory_utilization: 0.90    # 10% safety buffer
+  gpu_memory_utilization: 0.85    # 15% buffer: wsg_agent OOMed at 0.90 on multi-image batches (2026-09-20)
   max_model_len: 16384            # shorter context to fit in smaller VRAM
   max_num_seqs: 64                # decode is memory-bound; prompts are ~1k tokens
   enable_chunked_prefill: true    # still beneficial for throughput

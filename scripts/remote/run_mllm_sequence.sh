@@ -57,12 +57,20 @@ while :; do
   STATUS="$LOGDIR/$JOB.status.json"; LOG="$LOGDIR/$JOB.log"; LOCK="$LOGDIR/$JOB.lock"
   echo "[$WORKER] run  $JOB  $(date -Is)   ($MOD $ARGS)"
   START=$(date -Is)
+  LINES0=$(wc -l < "$LOG" 2>/dev/null || echo 0)
   $PY -m $MOD $ARGS >> "$LOG" 2>&1 &
   P=$!
   printf '{"state": "running", "pid": %d, "started": "%s", "gpu": "%s", "worker": "%s", "cmd": "%s"}\n' \
     "$P" "$START" "$GPU" "$WORKER" "$MOD $ARGS" > "$STATUS"
   wait $P; RC=$?
   STATE=done; [ $RC -eq 0 ] || STATE=failed
+  # a dead vLLM EngineCore (e.g. OOM) makes the vendored runners swallow one
+  # exception per video and still exit 0 -> the job would be marked done with
+  # almost no output.  Only this run's lines are inspected (the log is appended).
+  if [ "$STATE" = done ] && tail -n +$((LINES0 + 1)) "$LOG" 2>/dev/null | grep -aq "EngineDeadError"; then
+    STATE=failed; RC=97
+    echo "[$WORKER] $JOB exited 0 but its engine died (EngineDeadError) -> marking failed"
+  fi
   printf '{"state": "%s", "pid": %d, "started": "%s", "ended": "%s", "exit_code": %d, "gpu": "%s", "worker": "%s", "cmd": "%s"}\n' \
     "$STATE" "$P" "$START" "$(date -Is)" $RC "$GPU" "$WORKER" "$MOD $ARGS" > "$STATUS"
   rmdir "$LOCK" 2>/dev/null
