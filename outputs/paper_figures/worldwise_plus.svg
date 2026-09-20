@@ -1,0 +1,486 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="518.4pt" height="598.428pt" viewBox="0 0 518.4 598.428" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:date>2026-09-20T02:02:45.221498</dc:date>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.11.1, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 598.428 
+L 518.4 598.428 
+L 518.4 0 
+L 0 0 
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 119.88 94.932 
+Q 130.720276 94.932 140.666125 94.932 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+    <path d="M 137.866125 93.532 
+L 140.666125 94.932 
+L 137.866125 96.332 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #182b3a; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+   </g>
+   <g id="line2d_1">
+    <path d="M 119.88 169.452 
+L 131.22 169.452 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke-dasharray: 2.96,1.28; stroke-dashoffset: 0; stroke: #182b3a; stroke-width: 0.8"/>
+   </g>
+   <g id="line2d_2">
+    <path d="M 131.22 169.452 
+L 131.22 113.4 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke-dasharray: 2.96,1.28; stroke-dashoffset: 0; stroke: #182b3a; stroke-width: 0.8"/>
+   </g>
+   <g id="patch_3">
+    <path d="M 131.22 113.4 
+Q 136.390276 113.4 140.666125 113.4 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke-dasharray: 2.96,1.28; stroke-dashoffset: 0; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+    <path d="M 137.866125 112 
+L 140.666125 113.4 
+L 137.866125 114.8 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #182b3a; stroke-dasharray: 2.96,1.28; stroke-dashoffset: 0; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 255.96 94.932 
+Q 266.800276 94.932 276.746125 94.932 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+    <path d="M 273.946125 93.532 
+L 276.746125 94.932 
+L 273.946125 96.332 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #182b3a; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+   </g>
+   <g id="line2d_3">
+    <path d="M 324 124.74 
+L 324 134.46 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: square"/>
+   </g>
+   <g id="line2d_4">
+    <path d="M 324 134.46 
+L 267.3 134.46 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: square"/>
+   </g>
+   <g id="line2d_5">
+    <path d="M 267.3 134.46 
+L 267.3 222.588 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: square"/>
+   </g>
+   <g id="line2d_6">
+    <path d="M 267.3 222.588 
+L 66.42 222.588 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: square"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 66.42 222.588 
+Q 66.42 225.813683 66.42 228.144938 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+    <path d="M 67.82 225.344938 
+L 66.42 228.144938 
+L 65.02 225.344938 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #182b3a; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+   </g>
+   <g id="line2d_7">
+    <path d="M 466.56 124.74 
+L 466.56 132.192 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: square"/>
+   </g>
+   <g id="line2d_8">
+    <path d="M 466.56 132.192 
+L 511.92 132.192 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: square"/>
+   </g>
+   <g id="line2d_9">
+    <path d="M 511.92 132.192 
+L 511.92 206.712 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: square"/>
+   </g>
+   <g id="line2d_10">
+    <path d="M 511.92 206.712 
+L 335.34 206.712 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: square"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 335.34 206.712 
+Q 335.34 217.876236 335.34 228.146045 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+    <path d="M 336.74 225.346045 
+L 335.34 228.146045 
+L 333.94 225.346045 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #182b3a; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 119.88 253.368 
+Q 130.720276 253.368 140.666125 253.368 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+    <path d="M 137.866125 251.968 
+L 140.666125 253.368 
+L 137.866125 254.768 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #182b3a; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 255.96 253.368 
+Q 266.800276 253.368 276.746125 253.368 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+    <path d="M 273.946125 251.968 
+L 276.746125 253.368 
+L 273.946125 254.768 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #182b3a; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 392.04 253.368 
+Q 402.880276 253.368 412.826125 253.368 
+" clip-path="url(#pa3dba7225f)" style="fill: none; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+    <path d="M 410.026125 251.968 
+L 412.826125 253.368 
+L 410.026125 254.768 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #182b3a; stroke: #182b3a; stroke-width: 0.8; stroke-linecap: round"/>
+   </g>
+   <g id="patch_10">
+    <path d="M 16.848 124.74 
+L 115.992 124.74 
+Q 119.88 124.74 119.88 120.852 
+L 119.88 68.688 
+Q 119.88 64.8 115.992 64.8 
+L 16.848 64.8 
+Q 12.96 64.8 12.96 68.688 
+L 12.96 120.852 
+Q 12.96 124.74 16.848 124.74 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #f3f5f7; stroke: #687782; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_11">
+    <path d="M 16.848 199.26 
+L 115.992 199.26 
+Q 119.88 199.26 119.88 195.372 
+L 119.88 143.208 
+Q 119.88 139.32 115.992 139.32 
+L 16.848 139.32 
+Q 12.96 139.32 12.96 143.208 
+L 12.96 195.372 
+Q 12.96 199.26 16.848 199.26 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #f3f5f7; stroke-dasharray: 3.33,1.44; stroke-dashoffset: 0; stroke: #687782; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_12">
+    <path d="M 146.448 124.74 
+L 252.072 124.74 
+Q 255.96 124.74 255.96 120.852 
+L 255.96 68.688 
+Q 255.96 64.8 252.072 64.8 
+L 146.448 64.8 
+Q 142.56 64.8 142.56 68.688 
+L 142.56 120.852 
+Q 142.56 124.74 146.448 124.74 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #eaf2fa; stroke: #326a9b; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_13">
+    <path d="M 146.448 199.26 
+L 252.072 199.26 
+Q 255.96 199.26 255.96 195.372 
+L 255.96 143.208 
+Q 255.96 139.32 252.072 139.32 
+L 146.448 139.32 
+Q 142.56 139.32 142.56 143.208 
+L 142.56 195.372 
+Q 142.56 199.26 146.448 199.26 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #fff1df; stroke: #ab6c22; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_14">
+    <path d="M 282.528 124.74 
+L 501.552 124.74 
+Q 505.44 124.74 505.44 120.852 
+L 505.44 68.688 
+Q 505.44 64.8 501.552 64.8 
+L 282.528 64.8 
+Q 278.64 64.8 278.64 68.688 
+L 278.64 120.852 
+Q 278.64 124.74 282.528 124.74 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #e6f3ef; stroke: #267d70; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_15">
+    <path d="M 16.848 277.02 
+L 115.992 277.02 
+Q 119.88 277.02 119.88 273.132 
+L 119.88 233.928 
+Q 119.88 230.04 115.992 230.04 
+L 16.848 230.04 
+Q 12.96 230.04 12.96 233.928 
+L 12.96 273.132 
+Q 12.96 277.02 16.848 277.02 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #eaf2fa; stroke: #326a9b; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_16">
+    <path d="M 146.448 277.02 
+L 252.072 277.02 
+Q 255.96 277.02 255.96 273.132 
+L 255.96 233.928 
+Q 255.96 230.04 252.072 230.04 
+L 146.448 230.04 
+Q 142.56 230.04 142.56 233.928 
+L 142.56 273.132 
+Q 142.56 277.02 146.448 277.02 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #e6f3ef; stroke: #267d70; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_17">
+    <path d="M 282.528 277.02 
+L 388.152 277.02 
+Q 392.04 277.02 392.04 273.132 
+L 392.04 233.928 
+Q 392.04 230.04 388.152 230.04 
+L 282.528 230.04 
+Q 278.64 230.04 278.64 233.928 
+L 278.64 273.132 
+Q 278.64 277.02 282.528 277.02 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #eaf2fa; stroke: #326a9b; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_18">
+    <path d="M 418.608 277.02 
+L 501.552 277.02 
+Q 505.44 277.02 505.44 273.132 
+L 505.44 233.928 
+Q 505.44 230.04 501.552 230.04 
+L 418.608 230.04 
+Q 414.72 230.04 414.72 233.928 
+L 414.72 273.132 
+Q 414.72 277.02 418.608 277.02 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #fff1df; stroke: #ab6c22; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_19">
+    <path d="M 16.848 336.96 
+L 501.552 336.96 
+Q 505.44 336.96 505.44 333.072 
+L 505.44 301.968 
+Q 505.44 298.08 501.552 298.08 
+L 16.848 298.08 
+Q 12.96 298.08 12.96 301.968 
+L 12.96 333.072 
+Q 12.96 336.96 16.848 336.96 
+z
+" clip-path="url(#pa3dba7225f)" style="fill: #f0ecf7; stroke: #78609a; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="text_1">
+    <text style="font-weight: 700; font-size: 12px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="12.96" y="20.02575" transform="rotate(-0 12.96 20.02575)">WorldWise+</text>
+   </g>
+   <g id="text_2">
+    <text style="font-size: 7.5px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #516271" x="12.96" y="34.145531" transform="rotate(-0 12.96 34.145531)">Replace decoded appearance with frozen foundation-model ROI latents</text>
+   </g>
+   <g id="text_3">
+    <text style="font-weight: 700; font-size: 7.5px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="12.96" y="54.528234" transform="rotate(-0 12.96 54.528234)">(a) Appearance replacement at two projector inputs</text>
+   </g>
+   <g id="text_4">
+    <text style="font-weight: 700; font-size: 7.7px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #182b3a" x="66.42" y="78.94268" transform="rotate(-0 66.42 78.94268)">Frozen DINOv3-L</text>
+   </g>
+   <g id="text_5">
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(37.375875 95.09175)">L16 / L20 / L24n</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(23.286375 105.18075)">1024-d tokens per layer</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(31.714875 116.31825)">ROI concat: 3072-d</text>
+   </g>
+   <g id="text_6">
+    <text style="font-weight: 700; font-size: 7.7px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #182b3a" x="66.42" y="153.444031" transform="rotate(-0 66.42 153.444031)">Frozen π³</text>
+   </g>
+   <g id="text_7">
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(41.034937 169.61175)">F4 / F14 / G14</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(23.286375 179.70075)">1024-d tokens per layer</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(31.714875 190.83825)">ROI concat: 3072-d</text>
+   </g>
+   <g id="text_8">
+    <text style="font-weight: 700; font-size: 7.7px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #182b3a" x="199.26" y="78.234641" transform="rotate(-0 199.26 78.234641)">Object + union ROIs</text>
+   </g>
+   <g id="text_9">
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(147.907125 94.74075)">7 × 7 × 1024 → 1024 / layer</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(161.86275 105.18075)">Objects: (T, N, 3072)</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(163.519875 115.894688)">Unions: (T, K, 3072)</text>
+   </g>
+   <g id="text_10">
+    <text style="font-weight: 700; font-size: 7.7px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #182b3a" x="199.26" y="152.754641" transform="rotate(-0 199.26 152.754641)">Stream configurations</text>
+   </g>
+   <g id="text_11">
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(158.450625 169.26075)">Headline: DINOv3 only</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(154.382062 179.70075)">Ablations: π³ only / fused</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(163.22175 190.14075)">Fused input: 6144-d</text>
+   </g>
+   <g id="text_12">
+    <text style="font-weight: 700; font-size: 7.7px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #182b3a" x="392.04" y="78.234641" transform="rotate(-0 392.04 78.234641)">Separate object and union projectors</text>
+   </g>
+   <g id="text_13">
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(286.359187 94.74075)">Input: 3072 (single) / 6144 (fused) → object 256 / union 64</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(300.189375 105.18075)">Fused gates per ROI: (2, 256) object / (2, 64) union</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(312.696562 115.62075)">Outputs: (T, N, 256) object / (T, K, 64) union</text>
+   </g>
+   <g id="text_14">
+    <text style="font-weight: 700; font-size: 7.2px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #182b3a" x="392.04" y="154.238625" transform="rotate(-0 392.04 154.238625)">Same reasoning and scene-graph loss</text>
+   </g>
+   <g id="text_15">
+    <text style="font-size: 7.1px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(315.077109 173.391656)">EMA target copies the new visual projector.</text>
+    <text style="font-size: 7.1px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(321.886453 183.686656)">Frozen backbones; trainable projectors.</text>
+   </g>
+   <g id="text_16">
+    <text style="font-weight: 700; font-size: 7.5px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="12.96" y="218.472234" transform="rotate(-0 12.96 218.472234)">(b) Unchanged WorldWise core</text>
+   </g>
+   <g id="text_17">
+    <text style="font-weight: 700; font-size: 7.7px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #182b3a" x="66.42" y="244.250656" transform="rotate(-0 66.42 244.250656)">Scaffold tokenizer</text>
+   </g>
+   <g id="text_18">
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(36.7695 259.354688)">Fuse: 832 → 256</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(32.795437 269.434687)">Tokens: (T, N, 256)</text>
+   </g>
+   <g id="text_19">
+    <text style="font-weight: 700; font-size: 7.7px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #182b3a" x="199.26" y="244.132148" transform="rotate(-0 199.26 244.132148)">Recover + reason</text>
+   </g>
+   <g id="text_20">
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(158.832562 258.72075)">Retriever / spatial attn</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(154.385437 269.16075)">(T, N, 256) at each stage</text>
+   </g>
+   <g id="text_21">
+    <text style="font-weight: 700; font-size: 7.7px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #182b3a" x="335.34" y="243.504719" transform="rotate(-0 335.34 243.504719)">Relation prediction</text>
+   </g>
+   <g id="text_22">
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(302.42025 259.41825)">Fusion: 896 → 256</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(290.1375 269.16075)">Spatial / time: (T, K, 256)</text>
+   </g>
+   <g id="text_23">
+    <text style="font-weight: 700; font-size: 7.7px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #182b3a" x="460.08" y="243.474641" transform="rotate(-0 460.08 243.474641)">World graph</text>
+   </g>
+   <g id="text_24">
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(431.659688 258.994687)">Nodes: (T, N, C)</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(423.25425 269.16075)">Edges: (T, K, 3/6/17)</text>
+   </g>
+   <g id="text_25">
+    <text style="font-weight: 700; font-size: 7.7px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #182b3a" x="259.2" y="311.514641" transform="rotate(-0 259.2 311.514641)">(c) Inherited training recipe</text>
+   </g>
+   <g id="text_26">
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(119.516625 322.71075)">30% artificial masking + simulated-unseen supervision + EMA reconstruction</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans'; fill: #182b3a" transform="translate(98.975812 333.050625)">Train-time τ = 0.5 logit adjustment; λ_vlm = 0; same slots, pairs and evaluation protocol</text>
+   </g>
+   <g id="text_27">
+    <text style="font-weight: 700; font-size: 7.5px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="12.96" y="355.141641" transform="rotate(-0 12.96 355.141641)">Token dimensions | main configurations</text>
+   </g>
+   <g id="text_28">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="12.96" y="370.643563" transform="rotate(-0 12.96 370.643563)">T: frames; N: padded slots; K: padded pairs/frame; C: object classes (37).</text>
+   </g>
+   <g id="text_29">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="12.96" y="383.603563" transform="rotate(-0 12.96 383.603563)">Q = 30 free queries; P = HₚWₚ grid cells; L = 4 decoder layers; h = 8 heads (WorldWise++).</text>
+   </g>
+   <g id="text_30">
+    <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="16.2" y="400.424219" transform="rotate(-0 16.2 400.424219)">Backbone / ROI pooling</text>
+   </g>
+   <g id="text_31">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="150.66" y="400.451563" transform="rotate(-0 150.66 400.451563)">Each layer: 1024-d; ROIAlign (7, 7, 1024) → mean (1024); 3 layers → 3072</text>
+   </g>
+   <g id="text_32">
+    <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="16.2" y="414.383563" transform="rotate(-0 16.2 414.383563)">Optional two-stream fusion</text>
+   </g>
+   <g id="text_33">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="150.66" y="414.383563" transform="rotate(-0 150.66 414.383563)">3072 + 3072 = 6144 input; object gates (T, N, 2, 256), union (T, K, 2, 64)</text>
+   </g>
+   <g id="text_34">
+    <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="16.2" y="428.288219" transform="rotate(-0 16.2 428.288219)">Geometry / camera inputs</text>
+   </g>
+   <g id="text_35">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="150.66" y="428.315563" transform="rotate(-0 150.66 428.315563)">Corners (T, N, 8, 3); camera poses (T, 4, 4); velocity / acceleration (T, N, 3)</text>
+   </g>
+   <g id="text_36">
+    <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="16.2" y="442.925688" transform="rotate(-0 16.2 442.925688)">Scaffold encoders</text>
+   </g>
+   <g id="text_37">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="150.66" y="442.513891" transform="rotate(-0 150.66 442.513891)">Structure (T, N, 256); camera (T, N, 128); motion (T, N, 64)</text>
+   </g>
+   <g id="text_38">
+    <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="16.2" y="456.152219" transform="rotate(-0 16.2 456.152219)">Ego-motion encoder</text>
+   </g>
+   <g id="text_39">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="150.66" y="456.445891" transform="rotate(-0 150.66 456.445891)">(T, 128) → broadcast (T, N, 128)</text>
+   </g>
+   <g id="text_40">
+    <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="16.2" y="470.084219" transform="rotate(-0 16.2 470.084219)">Visual projector / mask</text>
+   </g>
+   <g id="text_41">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="150.66" y="470.377891" transform="rotate(-0 150.66 470.377891)">ROI (T, N, 3072) → (T, N, 256); learned mask (256)</text>
+   </g>
+   <g id="text_42">
+    <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="16.2" y="484.721688" transform="rotate(-0 16.2 484.721688)">Scaffold concatenation</text>
+   </g>
+   <g id="text_43">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="150.66" y="484.043563" transform="rotate(-0 150.66 484.043563)">256 structure + 256 visual + 128 camera + 64 motion + 128 ego = 832 → 256</text>
+   </g>
+   <g id="text_44">
+    <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="16.2" y="497.948219" transform="rotate(-0 16.2 497.948219)">Union projector</text>
+   </g>
+   <g id="text_45">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="150.66" y="497.975563" transform="rotate(-0 150.66 497.975563)">(T, K, 3072) → (T, K, 64); fused WorldWise+ input width is 6144</text>
+   </g>
+   <g id="text_46">
+    <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="16.2" y="511.880219" transform="rotate(-0 16.2 511.880219)">Retrieve / visibility / spatial</text>
+   </g>
+   <g id="text_47">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="150.66" y="511.907562" transform="rotate(-0 150.66 511.907562)">Each output: (T, N, 256); the inherited object-token width is unchanged</text>
+   </g>
+   <g id="text_48">
+    <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="16.2" y="526.242609" transform="rotate(-0 16.2 526.242609)">Node / reconstruction heads</text>
+   </g>
+   <g id="text_49">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="150.66" y="525.839563" transform="rotate(-0 150.66 525.839563)">Node: 256 → 256 → C; reconstruction: 256 → 256; EMA target (T, N, 256)</text>
+   </g>
+   <g id="text_50">
+    <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="16.2" y="539.744219" transform="rotate(-0 16.2 539.744219)">Text / pair geometry</text>
+   </g>
+   <g id="text_51">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="150.66" y="539.771562" transform="rotate(-0 150.66 539.771562)">Each label: CLIP 512 → 128; pair geometry: 8 → 64</text>
+   </g>
+   <g id="text_52">
+    <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="16.2" y="554.381687" transform="rotate(-0 16.2 554.381687)">Relation concatenation</text>
+   </g>
+   <g id="text_53">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="150.66" y="553.703562" transform="rotate(-0 150.66 553.703562)">256 person + 256 object + 64 union/readout + 128 + 128 text + 64 geometry = 896</text>
+   </g>
+   <g id="text_54">
+    <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="16.2" y="567.635562" transform="rotate(-0 16.2 567.635562)">Relation / temporal attention</text>
+   </g>
+   <g id="text_55">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="150.66" y="567.635562" transform="rotate(-0 150.66 567.635562)">896 → 256; relation self-attention and temporal edge attention each keep (T, K, 256)</text>
+   </g>
+   <g id="text_56">
+    <text style="font-weight: 700; font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="16.2" y="582.245688" transform="rotate(-0 16.2 582.245688)">Predicate heads</text>
+   </g>
+   <g id="text_57">
+    <text style="font-size: 7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #182b3a" x="150.66" y="581.563734" transform="rotate(-0 150.66 581.563734)">256 → 128 → 3 / 6 / 17; outputs (T, K, 3), (T, K, 6), (T, K, 17)</text>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="pa3dba7225f">
+   <rect x="0" y="0" width="518.4" height="598.428"/>
+  </clipPath>
+ </defs>
+</svg>
