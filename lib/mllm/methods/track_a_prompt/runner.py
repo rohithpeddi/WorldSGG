@@ -177,6 +177,44 @@ def build_payload(ctx: TrackAContext, fr, n_context: int, ctx_side: int = 320,
 # response parsing
 # ---------------------------------------------------------------------------
 
+def salvage_objects(text: str) -> Optional[dict]:
+    """Recover the COMPLETE entries of a truncated ``{"objects": [{...}, {...}, ...``
+    response.  The models answer with one JSON array, so a response cut off at
+    ``max_new_tokens`` is unparseable and the whole frame would be dropped even
+    though every entry before the cut is valid."""
+    i = text.find('"objects"')
+    if i == -1:
+        return None
+    i = text.find("[", i)
+    if i == -1:
+        return None
+    items, j, n = [], i + 1, len(text)
+    while j < n:
+        if text[j] != "{":
+            if text[j] == "]":
+                break
+            j += 1
+            continue
+        depth, k, closed = 0, j, False
+        while k < n:
+            if text[k] == "{":
+                depth += 1
+            elif text[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    closed = True
+                    break
+            k += 1
+        if not closed:
+            break                      # the truncated tail entry
+        try:
+            items.append(json.loads(text[j:k + 1]))
+        except Exception:
+            pass
+        j = k + 1
+    return {"objects": items, "truncated": True} if items else None
+
+
 def extract_json(text: str) -> Optional[dict]:
     if not text:
         return None
@@ -204,6 +242,10 @@ def extract_json(text: str) -> Optional[dict]:
                             pass
                         break
             i = c.find("{", i + 1)
+    for c in cands:                    # truncated response -> keep what is complete
+        d = salvage_objects(c)
+        if d is not None:
+            return d
     return None
 
 
