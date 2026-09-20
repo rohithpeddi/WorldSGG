@@ -42,20 +42,27 @@ class TestWSGGBase(WSGGBase):
     # ------------------------------------------------------------------
     # Dataset
     # ------------------------------------------------------------------
-    def _init_dataset(self):
-        """Initialize WorldAG test dataset and dataloader."""
-        from dataloader.world_ag_dataset import WorldAG, world_collate_fn
-
-        logger.info("Initializing WorldAG test dataset...")
-
-        self._test_dataset = WorldAG(
+    def _make_test_dataset(self):
+        """Test dataset; methods with extra per-video inputs override this."""
+        from dataloader.world_ag_dataset import WorldAG
+        from wsgg_base import annot_dir_for
+        return WorldAG(
             phase="test",
             data_path=self._conf.data_path,
             mode=self._conf.mode,
             feature_model=getattr(self._conf, 'feature_model', 'dinov2b'),
             include_invisible=getattr(self._conf, 'include_invisible', True),
             max_objects=getattr(self._conf, 'max_objects', 64),
+            annot_dir_name=annot_dir_for(self._conf, "test"),
         )
+
+    def _init_dataset(self):
+        """Initialize WorldAG test dataset and dataloader."""
+        from dataloader.world_ag_dataset import world_collate_fn
+
+        logger.info("Initializing WorldAG test dataset...")
+
+        self._test_dataset = self._make_test_dataset()
 
         self._dataloader_test = DataLoader(
             self._test_dataset, batch_size=1, shuffle=False, num_workers=0,

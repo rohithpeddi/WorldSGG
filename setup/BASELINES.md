@@ -20,14 +20,65 @@ loss keeps the original noisy-label recipe (λ_vlm = 0.2 on unseen pairs),
 which WorldWise-v2e deliberately abandons — that asymmetry is a *finding*
 (the noisy supervision hurts; see `docs/DECISION_LOG.md`), not an oversight.
 
-**Where the baselines remain competitive.** On PredCls they are clearly below
-WorldWise on every metric (wc R@20 ≈ 66.9 vs 68.9, wc mR@20 ≈ 38 vs 50). On
-**SGDet, however, the baselines win with-constraint R@K** (wc R@20 ≈ 59.8 vs
-WorldWise's ~55) — the LKS zero-order-hold memory is a strong, low-variance
-prior when the detector already drives localization. WorldWise's SGDet
-advantage is on mean-recall and the no-constraint protocol, not wc-R. Report
-SGDet with all four column groups so this trade is visible (see the tables in
-`results_tables/` and [WORLDWISE.md](WORLDWISE.md#measured-results)).
+**Where the baselines remain competitive.** On PredCls they sit clearly below
+the WorldWise family on every metric. On **SGDet they win with-constraint
+R@K** — the LKS zero-order-hold memory is a strong, low-variance prior when
+the detector already drives localization. The WorldWise family's SGDet
+advantage is on mean-recall, the no-constraint protocol and the occluded
+buckets, not wc-R. Report SGDet with all column groups so this trade is
+visible. Final numbers below.
+
+## Measured results — WorldBBox test set
+
+Full table (all methods, all backbones, both modes, visibility buckets):
+[analysis/worldbbox_lineage_2026-09-19.md](../analysis/worldbbox_lineage_2026-09-19.md).
+1,511 videos, **all frames**, best epoch, identical
+`dump_predictions -> reeval_test -> bucketed_breakdown` chain for every row.
+Values in %.
+
+**PredCls**
+
+| Method | wc R@20 | wc mR@20 | nc R@20 | nc mR@20 | OU-nt R@20 | OU-nt mR@20 |
+|---|---|---|---|---|---|---|
+| W-STTran | 68.2 | 37.6 | 92.6 | 70.0 | 56.9 | 30.7 |
+| W-STTran++ | 66.9 | 34.0 | 92.4 | 63.6 | 67.0 | 29.1 |
+| W-DSGDetr | 67.5 | 33.4 | 92.2 | 65.6 | 62.7 | 27.0 |
+| W-DSGDetr++ | **68.5** | **38.9** | **92.7** | **71.0** | 55.3 | 26.1 |
+| W-USG | 67.3 | 33.4 | 92.6 | 64.0 | 67.5 | 29.1 |
+| *WorldWise @ dinov3l* | *69.0* | *49.6* | *92.6* | *82.4* | *72.9* | *41.1* |
+| *WorldWise++ (best)* | *74.8* | *54.4* | *94.6* | *86.2* | *76.6* | *48.1* |
+
+**SGDet**
+
+| Method | wc R@20 | wc mR@20 | wc mR@50 | nc R@20 | nc mR@20 | OU-nt R@20 | OU-nt mR@20 |
+|---|---|---|---|---|---|---|---|
+| W-STTran | 56.3 | 19.2 | 33.4 | 63.1 | 27.7 | 14.6 | 7.1 |
+| W-STTran++ | **56.6** | 17.6 | 30.3 | 62.9 | 25.4 | 15.6 | 6.6 |
+| W-DSGDetr | **56.6** | 19.2 | 33.5 | 63.5 | 28.0 | 12.3 | 6.0 |
+| W-DSGDetr++ | 56.4 | **20.3** | **35.4** | **63.8** | **31.2** | 14.3 | 7.7 |
+| W-USG | 56.3 | 19.1 | 34.1 | 62.4 | 25.9 | 14.5 | 6.7 |
+| *WorldWise @ dinov3l* | *52.6* | *21.5* | *38.8* | *57.1* | *37.5* | *28.1* | *21.3* |
+| *WorldWise++ (best)* | *54.6* | *24.5* | *48.6* | *59.4* | *44.1* | *27.8* | *22.3* |
+
+Three things to read off this:
+
+1. **The four tiers are within noise of each other.** PredCls spans 66.9-68.5
+   wc R@20 and the ladder is *not* monotone (W-STTran++ is the weakest, below
+   plain W-STTran). The added encoders do not pay for themselves on this
+   dataset; only W-DSGDetr++ edges ahead on mean-recall. Do not present the
+   baseline ladder as evidence that each component helps.
+2. **Mean recall is where the family separates**: every baseline sits at
+   33-39 mR@20 in PredCls, versus 49.6-54.7 for WorldWise and its variants.
+   That gap comes from the loss recipe, not from architecture.
+3. **The occluded buckets are the real gap.** SGDet OU-non-trivial: baselines
+   reach 12-16 R@20 and 6-8 mR@20; the WorldWise family reaches 27-28 and
+   21-22, i.e. 2-3x. This is the capability the baselines structurally lack,
+   and the reason the LKS buffer is the thing WorldWise replaces.
+
+**Backbone caveat:** the baselines are scored at **resnet50** only. This is
+the conservative direction - in the earlier campaign their best DINOv3-L
+PredCls result (66.9 / 38.4) was slightly *worse* than these resnet50
+numbers, so the comparison does not flatter the proposed methods.
 
 ## Task & I/O contract
 

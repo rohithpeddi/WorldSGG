@@ -54,3 +54,5 @@ mode: predcls
 feature_model: resnet50
 task_name: worldsgg
 experiment_name: w_usg_predcls_resnet50_v2
+train_annot_dir: world4d_rel_annotations
+test_annot_dir: world4d_rel_annotations_worldbbox

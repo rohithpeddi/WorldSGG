@@ -37,6 +37,8 @@ def main():
     ap.add_argument("--mode", default="predcls")
     ap.add_argument("--phase", default="train")
     ap.add_argument("--max_objects", type=int, default=64)
+    ap.add_argument("--annot_dir", default="world4d_rel_annotations",
+                    help="annotation folder under data_path (e.g. world4d_rel_annotations_worldbbox)")
     ap.add_argument(
         "--out", default=None,
         help="output JSON (default: <data_path>/features/predicate_priors_<mode>.json; "
@@ -47,7 +49,7 @@ def main():
     ds = WorldAG(
         phase=args.phase, data_path=args.data_path, mode=args.mode,
         feature_model=args.feature_model, include_invisible=True,
-        max_objects=args.max_objects,
+        max_objects=args.max_objects, annot_dir_name=args.annot_dir,
     )
     dl = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0,
                     collate_fn=world_collate_fn)

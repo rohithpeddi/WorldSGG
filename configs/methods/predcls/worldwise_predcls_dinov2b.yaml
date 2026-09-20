@@ -75,3 +75,5 @@ mode: predcls
 feature_model: dinov2b
 task_name: worldsgg
 experiment_name: worldwise_v2e_predcls_dinov2b_v2
+train_annot_dir: world4d_rel_annotations
+test_annot_dir: world4d_rel_annotations_worldbbox

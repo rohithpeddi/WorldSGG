@@ -36,7 +36,7 @@ if REPO not in sys.path:
 
 from wsgg_base import load_wsgg_config                     # noqa: E402
 from tools.reeval_test import (                            # noqa: E402
-    build_model, forward_all_frames, load_checkpoint, build_pred_pkl,
+    build_model, forward_all_frames, load_checkpoint, build_pred_pkl, make_test_dataset,
 )
 
 
@@ -63,12 +63,9 @@ def main():
     conf = load_wsgg_config(args.config)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    from dataloader.world_ag_dataset import WorldAG, world_collate_fn
+    from dataloader.world_ag_dataset import world_collate_fn
     from torch.utils.data import DataLoader
-    ds = WorldAG(phase="test", data_path=conf.data_path, mode=conf.mode,
-                 feature_model=getattr(conf, "feature_model", "dinov2b"),
-                 include_invisible=getattr(conf, "include_invisible", True),
-                 max_objects=getattr(conf, "max_objects", 64))
+    ds = make_test_dataset(conf)
     dl = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0,
                     collate_fn=world_collate_fn)
     print(f"[dump] {conf.experiment_name} | mode={conf.mode} | "
