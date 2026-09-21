@@ -15,10 +15,25 @@
 #       > /data3/rohith/ag/logs/b3.queue.log 2>&1 < /dev/null &
 set -u
 WORKER="$1"; JOBS="$2"
-ROOT="$HOME/CODE/Scene4Cast_mllm"
-LOGDIR=/data3/rohith/ag/logs
-PY="$HOME/anaconda3/envs/wsg/bin/python"
-GPU="${MLLM_GPU:-0}"
+# Site-overridable so the same worker serves CS93371 (persistent per-GPU
+# workers) and pragya (one worker per PBS job).  Defaults = CS93371.
+ROOT="${MLLM_ROOT:-$HOME/CODE/Scene4Cast_mllm}"
+LOGDIR="${MLLM_LOGDIR:-/data3/rohith/ag/logs}"
+PY="${MLLM_PY:-$HOME/anaconda3/envs/wsg/bin/python}"
+# PBS hands the job its own device in CUDA_VISIBLE_DEVICES (a PHYSICAL index,
+# e.g. 3); forcing 0 here would grab a GPU this job was not given.  CS93371
+# always sets MLLM_GPU explicitly, so that site is unchanged.
+GPU="${MLLM_GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
+# Identity of this worker's execution slot.  One worker per GPU (CS93371) ->
+# the GPU index is unique; one worker per PBS job -> two jobs on different
+# nodes can both hold device 3, so the job id is the unique key.
+SLOT="${MLLM_SLOT:-$GPU}"
+# How to find a leaked VLLM::EngineCore after a job ends:
+#   nvidia-smi = ask the driver which pids hold GPU $GPU (one worker per GPU)
+#   pbs        = kill only EngineCores tagged with THIS $PBS_JOBID; under PBS
+#                nvidia-smi ignores CUDA_VISIBLE_DEVICES, so "-i 0" would name
+#                the node's physical GPU 0, not the one this job was given.
+REAP="${MLLM_REAP:-nvidia-smi}"
 cd "$ROOT" || exit 1
 export CUDA_VISIBLE_DEVICES=$GPU PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false VLLM_LOGGING_LEVEL=WARNING
 echo "[$WORKER] start $(date -Is) gpu=$GPU commit=$(git rev-parse --short HEAD)"
@@ -38,8 +53,11 @@ while :; do
       if [ "$ST" = "running" ] && [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then
         # live job: if it runs on THIS GPU (e.g. an orphan of a previous worker) we
         # must wait for it -- one vLLM engine per GPU; jobs on other GPUs are skipped
-        JG=$(sed -n 's/.*"gpu": *"\([^"]*\)".*/\1/p' "$STATUS")
-        if [ "$JG" = "$GPU" ]; then NEXT="__WAIT__"; break; fi
+        JG=$(sed -n 's/.*"slot": *"\([^"]*\)".*/\1/p' "$STATUS")
+        # status.json written before the slot field existed only has "gpu"; fall back to it
+        # so a worker never double-books a GPU whose job predates this change.
+        [ -n "$JG" ] || JG=$(sed -n 's/.*"gpu": *"\([^"]*\)".*/\1/p' "$STATUS")
+        if [ "$JG" = "$SLOT" ]; then NEXT="__WAIT__"; break; fi
         BUSY=1; continue
       fi
       # claimed but its worker died (or it never started): release the stale lock
@@ -60,8 +78,8 @@ while :; do
   LINES0=$(wc -l < "$LOG" 2>/dev/null || echo 0)
   $PY -m $MOD $ARGS >> "$LOG" 2>&1 &
   P=$!
-  printf '{"state": "running", "pid": %d, "started": "%s", "gpu": "%s", "worker": "%s", "cmd": "%s"}\n' \
-    "$P" "$START" "$GPU" "$WORKER" "$MOD $ARGS" > "$STATUS"
+  printf '{"state": "running", "pid": %d, "started": "%s", "gpu": "%s", "slot": "%s", "worker": "%s", "cmd": "%s"}\n' \
+    "$P" "$START" "$GPU" "$SLOT" "$WORKER" "$MOD $ARGS" > "$STATUS"
   wait $P; RC=$?
   STATE=done; [ $RC -eq 0 ] || STATE=failed
   # a dead vLLM EngineCore (e.g. OOM) makes the vendored runners swallow one
@@ -71,8 +89,8 @@ while :; do
     STATE=failed; RC=97
     echo "[$WORKER] $JOB exited 0 but its engine died (EngineDeadError) -> marking failed"
   fi
-  printf '{"state": "%s", "pid": %d, "started": "%s", "ended": "%s", "exit_code": %d, "gpu": "%s", "worker": "%s", "cmd": "%s"}\n' \
-    "$STATE" "$P" "$START" "$(date -Is)" $RC "$GPU" "$WORKER" "$MOD $ARGS" > "$STATUS"
+  printf '{"state": "%s", "pid": %d, "started": "%s", "ended": "%s", "exit_code": %d, "gpu": "%s", "slot": "%s", "worker": "%s", "cmd": "%s"}\n' \
+    "$STATE" "$P" "$START" "$(date -Is)" $RC "$GPU" "$SLOT" "$WORKER" "$MOD $ARGS" > "$STATUS"
   rmdir "$LOCK" 2>/dev/null
   echo "[$WORKER] $STATE $JOB rc=$RC $(date -Is)"
   # vLLM's EngineCore child survives its parent (e.g. after a kill) and keeps
@@ -83,14 +101,22 @@ while :; do
   # (verified 2026-09-20: the env check never matched, so a killed job leaked
   # its whole 40 GB and the next job on that GPU OOMed 14 s in).  Ask the
   # driver which pids still hold this GPU instead.
-  GPUPIDS=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i $GPU 2>/dev/null | tr -d ' ')
-  for EP in $(pgrep -f "^VLLM::EngineCor[e]"); do
-    for GP in $GPUPIDS; do
-      [ "$EP" = "$GP" ] || continue
-      kill $EP 2>/dev/null && echo "[$WORKER] killed leftover VLLM::EngineCore $EP (gpu $GPU)"
+  if [ "$REAP" = pbs ]; then
+    for EP in $(pgrep -u "$USER" -f "^VLLM::EngineCor[e]"); do
+      tr '\0' '\n' < /proc/$EP/environ 2>/dev/null | grep -qx "PBS_JOBID=$PBS_JOBID" || continue
+      kill $EP 2>/dev/null && echo "[$WORKER] killed leftover VLLM::EngineCore $EP (job $PBS_JOBID)"
       sleep 5
     done
-  done
+  else
+    GPUPIDS=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i $GPU 2>/dev/null | tr -d ' ')
+    for EP in $(pgrep -f "^VLLM::EngineCor[e]"); do
+      for GP in $GPUPIDS; do
+        [ "$EP" = "$GP" ] || continue
+        kill $EP 2>/dev/null && echo "[$WORKER] killed leftover VLLM::EngineCore $EP (gpu $GPU)"
+        sleep 5
+      done
+    done
+  fi
   [ "$STATE" = failed ] && sleep 120
 done
 echo "[$WORKER] end $(date -Is) (no runnable jobs left)"
