@@ -375,9 +375,16 @@ class ActionGenomeBaseProcessor(ABC):
 
         try:
             response = self.vgent.model.mllm_response(
-                prompt, video_inputs, max_new_tokens=256,
+                prompt, video_inputs,
+                max_new_tokens=getattr(self, "gen_max_tokens", None) or 256,
             )
             response = response.strip()
+            # A thinking model spends the budget on its trace before answering:
+            # at 256 tokens it never reaches the JSON list and every video is
+            # skipped for "no objects after mode=sgdet filtering" (13/150 on
+            # 2026-09-20).  Drop the trace, keep the answer.
+            if "</think>" in response:
+                response = response.rsplit("</think>", 1)[1].strip()
         except Exception as e:
             logger.error(f"Object estimation LLM error: {e}")
             return set()

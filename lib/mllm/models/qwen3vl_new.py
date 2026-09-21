@@ -144,7 +144,10 @@ class Qwen3VLModel(BaseVideoModel):
         if video_inputs is None:
             return self._vllm_text_only(text, max_new_tokens)
         from vllm import SamplingParams
-        sampling_params = SamplingParams(temperature=0.2, max_tokens=max_new_tokens)
+        sampling_params = SamplingParams(
+            temperature=getattr(self.args, 'temperature', 0.2),
+            top_p=getattr(self.args, 'top_p', 1.0),
+            max_tokens=max_new_tokens)
         prompt_input = self._prepare_video_prompt(text, video_inputs)
         outputs = self.model.generate(prompt_input, sampling_params=sampling_params)
         return outputs[0].outputs[0].text
