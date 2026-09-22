@@ -56,49 +56,64 @@ Training and scoring finished 2026-09-19. Table artifact:
 
 ---
 
-## Track 2 — MLLM  (10 / 19 scored, 2 running, 3 queued, 4 generated-but-unscored)
+## Track 2 — MLLM  (21 / 24 scored, 3 sgdet baselines still generating)
 
 Outputs under `/data3/rohith/ag/runs/mllm/<method>/<mode>/<model>/`.
 `think150` = the fixed 150-video subset `splits/test_worldbbox_thinking150.txt`.
+Full table: `analysis/mllm_tracks_status_2026-09-22.md`.
 
-### predcls (10 cells)
+### predcls (14 cells — all scored)
 
-| # | method | model | split | videos | run state | scoring | wc R@20 | wc mR@20 |
-|---|---|---|---|---:|---|---|---:|---:|
-| 29 | zero_shot (Graph-RAG, unlocalized) | qwen25vl_7b | full | 1511/1511 | done | scored | 46.9 | 25.1 |
-| 30 | caption_all | qwen25vl_7b | full | 1511/1511 | done | scored | 45.3 | 26.1 |
-| 31 | rag_all | qwen25vl_7b | full | 1511/1511 | done | scored | 46.9 | 26.0 |
-| 32 | wsg_agent | qwen25vl_7b | full | **1442/1511** | done, 69 short | **NOT scored** | – | – |
-| 33 | **Track A** (marked frames + BEV) | qwen3vl_8b | full | 1511/1511 | done | scored | **51.7** | **30.5** |
-| 34 | Track A (same run, subset score) | qwen3vl_8b | think150 | 150/150 | done | scored | 51.4 | 29.9 |
-| 35 | **Track B** (tool loop + geometric critic) | qwen3vl_8b | full | 1511/1511 | **done 2026-09-22 03:27** | **NOT scored** | – | – |
-| 36 | rag_all (2×2: RAG × standard) | qwen3vl_8b | think150 | 150/150 | done | scored | 47.4 | 28.8 |
-| 37 | rag_all (2×2: RAG × thinking) | qwen3vl_8b_thinking | think150 | 150/150 | done | **NOT scored** | – | – |
-| 38 | Track A × thinking | qwen3vl_8b_thinking | think150 | 150/150 | done | scored | 30.5 | 19.3 |
+| # | method | model | split | videos | wc R@20 | wc mR@20 | nc mR@50 | OU-nt nc mR@50 |
+|---|---|---|---|---:|---:|---:|---:|---:|
+| 29 | zero_shot (Graph-RAG, unlocalized) | qwen25vl_7b | full | 1511/1511 | 46.9 | 25.1 | 43.1 | 42.8 |
+| 30 | caption_all | qwen25vl_7b | full | 1511/1511 | 45.3 | 26.1 | 43.6 | 44.1 |
+| 31 | rag_all | qwen25vl_7b | full | 1511/1511 | 46.9 | 26.0 | 43.8 | 44.6 |
+| 32 | wsg_agent | qwen25vl_7b | full | 1458/1511 | 46.3 | 25.8 | 43.5 | 43.6 |
+| 33 | Track A (marked frames + BEV) | qwen3vl_8b | full | 1511/1511 | 51.7 | 30.5 | 47.2 | 40.0 |
+| 34 | Track A, subset score | qwen3vl_8b | think150 | 150/150 | 51.4 | 29.9 | 46.7 | 42.7 |
+| 35 | **Track B (tool loop + geometric critic)** | qwen3vl_8b | full | 1511/1511 | **52.4** | **31.7** | 48.4 | 40.8 |
+| 36 | Track B without the critic | qwen3vl_8b | full | 1511/1511 | 52.1 | 31.1 | 47.9 | 40.0 |
+| 37 | rag_all (2×2: RAG × standard) | qwen3vl_8b | think150 | 150/150 | 47.4 | 28.8 | 48.5 | 51.8 |
+| 38 | **rag_all (2×2: RAG × thinking)** | qwen3vl_8b_thinking | think150 | 150/150 | **50.4** | **30.3** | 49.9 | 53.8 |
+| 39 | Track A × thinking | qwen3vl_8b_thinking | think150 | 150/150 | 30.5 | 19.3 | 40.4 | 39.9 |
+| 40 | Track B × thinking | qwen3vl_8b_thinking | think150 | 150/150 | 27.2 | 16.4 | 38.2 | 38.2 |
+| 41 | Track B × thinking, no critic | qwen3vl_8b_thinking | think150 | 150/150 | 27.3 | 16.2 | 38.1 | 37.6 |
+| 42 | Track A × standard, subset of row 33 | qwen3vl_8b | think150 | 150/150 | 51.4 | 29.9 | 46.7 | 42.7 |
 
-Row 38 is **invalid, not a result**: the reasoning trace eats the shared
-`max_new_tokens` budget, only 46.2 % of responses close `</think>`, pair coverage
-10,090/25,673. Report it as a budget failure or re-run per-object, never as a
-thinking-vs-standard comparison.
+### sgdet (10 cells — 7 scored, 3 generating)
 
-### sgdet (9 cells)
+| # | method | model | split | videos | run state | unloc nc R@50 | unloc nc mR@50 | IoU.15 R@50 | IoU.15 mR@50 | slots w/ 3D |
+|---|---|---|---|---:|---|---:|---:|---:|---:|---:|
+| 43 | Track A | qwen3vl_8b | full | 1511/1511 | scored | 33.3 | 20.2 | 11.0 | 6.6 | 80.8 |
+| 44 | **Track B** | qwen3vl_8b | full | 1511/1511 | scored | **33.5** | **23.8** | 10.7 | 7.7 | 79.5 |
+| 45 | Track B without the critic | qwen3vl_8b | full | 1511/1511 | scored | 33.4 | 23.2 | **11.2** | 7.8 | 79.4 |
+| 46 | rag_all (2×2 standard) | qwen3vl_8b | think150 | 145/150 | scored | 22.7 | 18.5 | 0.0 | 0.0 | 0.0 |
+| 47 | rag_all (2×2 thinking) | qwen3vl_8b_thinking | think150 | 150/150 | scored | 22.3 | 20.6 | 0.0 | 0.0 | 0.0 |
+| 48 | Track A × thinking | qwen3vl_8b_thinking | think150 | 150/150 | scored | 0.6 | 0.4 | 0.2 | 0.1 | 0.4 |
+| 49 | Track B × thinking (± critic) | qwen3vl_8b_thinking | think150 | 150/150 | scored | 0.3 | 0.2 | 0.1 | 0.1 | 0.2 |
+| 50 | zero_shot | qwen25vl_7b | full | 477/1511 | **RUNNING** GPU 0 | – | – | – | – | – |
+| 51 | rag_all | qwen25vl_7b | full | generating | **RUNNING** GPU 1 | – | – | – | – | – |
+| 52 | caption_all | qwen25vl_7b | full | generating | **RUNNING** GPU 2 | – | – | – | – | – |
+| 53 | wsg_agent | qwen25vl_7b | full | 0/1511 | QUEUED | – | – | – | – | – |
 
-| # | method | model | split | videos | run state | scoring | unloc nc R@50 | IoU.15 nc R@50 | slots w/ 3D |
-|---|---|---|---|---:|---|---|---:|---:|---:|
-| 39 | **Track A** | qwen3vl_8b | full | 1511/1511 | done | scored | 33.3 | 11.0 | 80.8 |
-| 40 | Track A (subset score) | qwen3vl_8b | think150 | 150/150 | done | scored | 33.4 | 10.5 | 80.2 |
-| 41 | **Track B** | qwen3vl_8b | full | **1440/1511** | **RUNNING** (2 workers, ~71 left) | pending | – | – | – |
-| 42 | rag_all (2×2 std) | qwen3vl_8b | think150 | 145/150 | done | scored | 22.7 | 0.0 | 0.0 |
-| 43 | rag_all (2×2 thinking) | qwen3vl_8b_thinking | think150 | 143/150 | done | **NOT scored** | – | – | – |
-| 44 | Track A × thinking | qwen3vl_8b_thinking | think150 | 150/150 | done | scored | 0.6 | 0.2 | 0.4 |
-| 45 | zero_shot | qwen25vl_7b | full | **38/1511** | **RUNNING** (GPU 0, from 11:05) | pending | – | – | – |
-| 46 | caption_all | qwen25vl_7b | full | 0/1511 | **QUEUED** | pending | – | – | – |
-| 47 | rag_all | qwen25vl_7b | full | 0/1511 | **QUEUED** | pending | – | – | – |
-| 48 | wsg_agent | qwen25vl_7b | full | 0/1511 | **QUEUED** | pending | – | – | – |
+### What these rows settle
 
-Row 44 is invalid for the same reason as row 38 (0.7 % trace closure; 114 predicted
-pairs out of 25,673). Rows 42/43: `rag_all` emits no oriented boxes at all, so RAG
-sgdet rows are class-only and can never be a localization comparison.
+1. **Track B is the best MLLM method in both modes.** predcls 52.4 / 31.7 against Track A's
+   51.7 / 30.5; sgdet mean recall 23.8 against 20.2. The tool loop beats one-shot prompting.
+2. **The geometric critic helps relations and does not help placement.** It is worth
+   +0.3 R@20 / +0.6 mR@20 in predcls and +0.6 unlocalized mR@50 in sgdet, but at IoU 0.15 the
+   ablation is *better* (11.2 vs 10.7 R@50). Despite cutting geometric violations by 36 %, the
+   critic does not convert that into metric accuracy. Report the ablation honestly.
+3. **Thinking helps, but only with per-object prompts.** RAG × thinking is the one valid
+   thinking cell: 50.4 / 30.3 against 47.4 / 28.8 standard, i.e. +3.0 R@20, and it lands within
+   a point of localized Track A. Every array-style prompt collapses instead — Track A 30.5,
+   Track B 27.2 in predcls, and 0.6 / 0.3 in sgdet — because the reasoning trace exhausts the
+   shared token budget before the answer. This is a prompt-format result, not a model result.
+4. **wsg_agent is redundant.** 46.3 / 25.8 puts it inside the 45.3–46.9 band of the other three
+   unlocalized baselines. Track B supersedes it; cut it if space is short.
+5. **All four unlocalized baselines agree within 1.6 pt of R@20**, so neither captioning nor
+   Graph-RAG retrieval buys anything over a plain per-object prompt. Localization does.
 
 ---
 
@@ -119,13 +134,13 @@ sgdet rows are class-only and can never be a localization comparison.
 
 | # | work | where | estimate |
 |---|---|---|---|
-| 1 | Track B sgdet — last ~71 videos | UTD GPU 1 + GPU 2 | ~1 h |
-| 2 | zero_shot / caption_all / rag_all / wsg_agent sgdet | UTD queue, 3 GPUs | ~12 h wall (~35 GPU-h) |
-| 3 | wsg_agent predcls — recover the 69 missing videos | UTD | ~30 min |
-| 4 | Score rows 32, 35, 37, 41, 43 and then rows 45–48 | CPU, `eval/score_all` | ~20 min per run |
-| 5 | Decide on rows 38 and 44 (thinking budget defect) | – | re-run per-object, or report as a negative result |
-| 6 | Merge `exp/mllm-tracks` and `exp/worldformer` into `methods` | local | – |
+| 1 | zero_shot / rag_all / caption_all sgdet — generating now | UTD GPUs 0–2 | ~7 h (to ~22:00 today) |
+| 2 | wsg_agent sgdet — last queued generation job | UTD | ~9 h after a GPU frees |
+| 3 | Score rows 50–53 once they finish | UTD CPU, 4 workers | ~10 min per row |
+| 4 | wsg_agent predcls is 1458/1511 — recover the last 53 videos, or report n=1458 | UTD | ~30 min |
+| 5 | Decide how to present the collapsed thinking cells (rows 39–41, 48–49) | – | re-run per-object, or report as a prompt-format negative |
 
-The jobs file notes a split with the IITD pragya cluster (thinking jobs,
-`wsg_agent` predcls, the scorers). Pragya is not resolvable from this machine
-right now, so its side could not be verified in this pass.
+Pragya carries a prepared but unsubmitted CPU scoring job
+(`scripts/remote/pbs/score_mllm_cpu.pbs`, project `neuro.symbolic.utd.colab.spons`).
+It is no longer needed — the cells it targeted were copied to UTD and scored there —
+but it is validated and ready if pragya should take future scoring load.

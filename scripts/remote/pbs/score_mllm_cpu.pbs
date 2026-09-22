@@ -1,0 +1,51 @@
+#!/bin/bash
+# CPU-only scoring of the MLLM runs that exist on pragya (IITD).
+#
+# Scores the four Track B thinking-model rows -- predcls and sgdet, each with
+# and without the geometric critic (objects_pre) -- on the 150-video subset.
+# These pkls were generated here and exist nowhere else, so scoring them here
+# avoids moving 154 MB over the proxy.
+#
+# Four single-threaded workers on four cores: utilisation stays near 100 %, so
+# this cannot read as an over-request.  No GPU is requested because scoring
+# never touches one.  Walltime is sized from the measured CS93371 rate for a
+# 150-video cell (a few minutes each) with headroom for a cold Lustre cache.
+#
+# Submit from $HOME/CODE/WorldSGG:
+#   qsub -P neuro.symbolic.utd.colab.spons scripts/remote/pbs/score_mllm_cpu.pbs
+#
+#PBS -N mllm_score
+#PBS -q standard
+#PBS -l select=1:ncpus=4
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -r n
+set -u
+
+ROOT="${MLLM_ROOT:-$HOME/CODE/WorldSGG}"
+LOGDIR="$HOME/DATA/ag/logs/score22"
+OUTDIR="$HOME/DATA/ag/runs/mllm/score22"
+PY="${MLLM_PY:-$HOME/.conda/envs/vgent/bin/python}"
+
+export WSGG_MLLM_CONFIG="${WSGG_MLLM_CONFIG:-$ROOT/configs/mllm/pragya.yaml}"
+export CUDA_VISIBLE_DEVICES=""
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+
+mkdir -p "$LOGDIR" "$OUTDIR"
+cd "$ROOT" || exit 1
+echo "[pbs] job=${PBS_JOBID:-none} node=$(hostname) start=$(date -Is)"
+
+for W in p1 p2 p3 p4; do
+  "$PY" -m lib.mllm.eval.score_all \
+      --runs "$LOGDIR/$W.json" \
+      --out_prefix "$OUTDIR/$W" \
+      --subset "$HOME/DATA/ag/splits/test_worldbbox_thinking150.txt" \
+      --no_legacy > "$LOGDIR/$W.log" 2>&1 &
+done
+wait
+echo "[pbs] all workers exited $(date -Is)"
+for W in p1 p2 p3 p4; do
+  echo "=== $W ==="; tail -3 "$LOGDIR/$W.log"
+done
