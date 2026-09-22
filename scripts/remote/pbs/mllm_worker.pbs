@@ -1,21 +1,27 @@
 #!/bin/bash
-# One MLLM queue worker, as a PBS job (pragya / IITD).
+# MLLM queue workers for one PBS allocation (pragya / IITD).
 #
 # The worker itself is scripts/remote/run_mllm_sequence.sh, unchanged: it claims
 # a job from the shared jobs file with an atomic mkdir lock, runs it, writes
 # status.json and moves on, exiting when nothing is runnable.  On CS93371 one
-# worker is pinned per GPU for the machine's lifetime; here each worker lives
-# for one PBS allocation instead.  Every runner is resumable per video, so a
-# worker killed at the walltime wall loses only the video in flight.
+# worker is pinned per GPU for the machine's lifetime; here the workers live for
+# one allocation instead.  Every runner is resumable per video, so a worker
+# killed at the walltime wall loses only the video in flight.
 #
-# Submit (see submit_workers.sh for the usual case):
-#   qsub -v JOBS=$HOME/DATA/ag/logs/mllm.jobs scripts/remote/pbs/mllm_worker.pbs
+# One vLLM engine fills a GPU, so an allocation with N GPUs gets N workers --
+# asking for 2 GPUs and running one worker would sit at 50% utilisation, which
+# the facility counts as over-requesting.
+#
+# Submit:
+#   qsub -P <project> -v JOBS=$HOME/DATA/ag/logs/mllm.jobs \
+#        scripts/remote/pbs/mllm_worker.pbs
 #
 #PBS -N mllm_worker
 #PBS -q standard
-#PBS -l select=1:ncpus=8:ngpus=1:mem=96gb
+#PBS -l select=1:ncpus=8:ngpus=1
 #PBS -l walltime=24:00:00
 #PBS -j oe
+#PBS -r n
 set -u
 
 ROOT="${MLLM_ROOT:-$HOME/CODE/WorldSGG}"
@@ -28,14 +34,23 @@ export WSGG_MLLM_CONFIG="${WSGG_MLLM_CONFIG:-$ROOT/configs/mllm/pragya.yaml}"
 # Reap leaked vLLM EngineCores by PBS job id: inside the allocation nvidia-smi
 # still reports the node's physical GPUs, so "-i 0" would name someone else's.
 export MLLM_REAP=pbs
-# Unique across the cluster; two workers on different nodes can both hold the
-# node-local device 3, and the queue must not treat that as one busy slot.
-export MLLM_SLOT="$PBS_JOBID"
-# Take the device PBS assigned us -- never force index 0.
-unset MLLM_GPU
 
-echo "[pbs] job=$PBS_JOBID node=$(hostname) cuda=${CUDA_VISIBLE_DEVICES:-unset} jobs=$JOBS"
-nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2>/dev/null
-
+mkdir -p "$MLLM_LOGDIR"
 cd "$ROOT" || exit 1
-exec sh scripts/remote/run_mllm_sequence.sh "pbs${PBS_JOBID%%.*}" "$JOBS"
+
+DEVS="${CUDA_VISIBLE_DEVICES:-0}"
+SHORT="${PBS_JOBID%%.*}"
+echo "[pbs] job=$PBS_JOBID node=$(hostname) devices=$DEVS jobs=$JOBS"
+
+# One worker per device in the allocation.  MLLM_SLOT must be unique across the
+# cluster: two allocations on different nodes can both be handed device 3.
+i=0
+for D in $(echo "$DEVS" | tr ',' ' '); do
+  MLLM_GPU="$D" MLLM_SLOT="$SHORT:$D" \
+    sh scripts/remote/run_mllm_sequence.sh "pbs$SHORT-$D" "$JOBS" \
+    > "$MLLM_LOGDIR/pbs$SHORT-$D.queue.log" 2>&1 &
+  i=$((i + 1))
+done
+echo "[pbs] started $i worker(s); waiting"
+wait
+echo "[pbs] all workers exited $(date -Is)"

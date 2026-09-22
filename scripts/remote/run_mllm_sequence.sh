@@ -40,6 +40,7 @@ echo "[$WORKER] start $(date -Is) gpu=$GPU commit=$(git rev-parse --short HEAD)"
 
 state_of() { sed -n 's/.*"state": *"\([a-z]*\)".*/\1/p' "$1" 2>/dev/null; }
 pid_of()   { sed -n 's/.*"pid": *\([0-9]*\).*/\1/p' "$1" 2>/dev/null; }
+host_of()  { sed -n 's/.*"host": *"\([^"]*\)".*/\1/p' "$1" 2>/dev/null; }
 
 while :; do
   NEXT=""; BUSY=0
@@ -49,8 +50,25 @@ while :; do
     ST=$(state_of "$STATUS")
     [ "$ST" = "done" ] && continue
     if [ -d "$LOCK" ]; then
-      P=$(pid_of "$STATUS")
-      if [ "$ST" = "running" ] && [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then
+      P=$(pid_of "$STATUS"); JH=$(host_of "$STATUS"); ME=$(hostname)
+      # Is the owner still alive?  A pid only means something on the node that
+      # wrote it: under PBS the workers sit on different hosts, so the old
+      # "kill -0 $P" test failed for every remote job and each worker happily
+      # stole the one another was running (2026-09-22: two nodes both ran
+      # b8_rag_think150_predcls).  Prefer the heartbeat the owner touches every
+      # 60 s; fall back to the pid only on the same host; otherwise assume alive.
+      ALIVE=0
+      if [ "$ST" = "running" ]; then
+        if [ -f "$LOCK/hb" ]; then
+          NOW=$(date +%s); HB=$(date -r "$LOCK/hb" +%s 2>/dev/null || echo 0)
+          [ $((NOW - HB)) -lt 600 ] && ALIVE=1
+        elif [ -n "$JH" ] && [ "$ME" != "$JH" ]; then
+          ALIVE=1
+        elif [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then
+          ALIVE=1
+        fi
+      fi
+      if [ "$ALIVE" = 1 ]; then
         # live job: if it runs on THIS GPU (e.g. an orphan of a previous worker) we
         # must wait for it -- one vLLM engine per GPU; jobs on other GPUs are skipped
         JG=$(sed -n 's/.*"slot": *"\([^"]*\)".*/\1/p' "$STATUS")
@@ -61,7 +79,7 @@ while :; do
         BUSY=1; continue
       fi
       # claimed but its worker died (or it never started): release the stale lock
-      echo "[$WORKER] stale lock for $JOB (state=$ST pid=$P) -> unlocking"; rmdir "$LOCK" 2>/dev/null
+      echo "[$WORKER] stale lock for $JOB (state=$ST pid=$P) -> unlocking"; rm -rf "$LOCK" 2>/dev/null
     fi
     if mkdir "$LOCK" 2>/dev/null; then NEXT="$JOB $MOD $ARGS"; break; fi
     BUSY=1
@@ -78,9 +96,13 @@ while :; do
   LINES0=$(wc -l < "$LOG" 2>/dev/null || echo 0)
   $PY -m $MOD $ARGS >> "$LOG" 2>&1 &
   P=$!
-  printf '{"state": "running", "pid": %d, "started": "%s", "gpu": "%s", "slot": "%s", "worker": "%s", "cmd": "%s"}\n' \
-    "$P" "$START" "$GPU" "$SLOT" "$WORKER" "$MOD $ARGS" > "$STATUS"
+  printf '{"state": "running", "pid": %d, "started": "%s", "gpu": "%s", "slot": "%s", "host": "%s", "worker": "%s", "cmd": "%s"}\n' \
+    "$P" "$START" "$GPU" "$SLOT" "$(hostname)" "$WORKER" "$MOD $ARGS" > "$STATUS"
+  # Heartbeat: proves to workers on OTHER nodes that this job is alive.
+  ( while kill -0 "$P" 2>/dev/null; do touch "$LOCK/hb"; sleep 60; done ) &
+  HBPID=$!
   wait $P; RC=$?
+  kill $HBPID 2>/dev/null
   STATE=done; [ $RC -eq 0 ] || STATE=failed
   # a dead vLLM EngineCore (e.g. OOM) makes the vendored runners swallow one
   # exception per video and still exit 0 -> the job would be marked done with
@@ -89,9 +111,9 @@ while :; do
     STATE=failed; RC=97
     echo "[$WORKER] $JOB exited 0 but its engine died (EngineDeadError) -> marking failed"
   fi
-  printf '{"state": "%s", "pid": %d, "started": "%s", "ended": "%s", "exit_code": %d, "gpu": "%s", "slot": "%s", "worker": "%s", "cmd": "%s"}\n' \
-    "$STATE" "$P" "$START" "$(date -Is)" $RC "$GPU" "$SLOT" "$WORKER" "$MOD $ARGS" > "$STATUS"
-  rmdir "$LOCK" 2>/dev/null
+  printf '{"state": "%s", "pid": %d, "started": "%s", "ended": "%s", "exit_code": %d, "gpu": "%s", "slot": "%s", "host": "%s", "worker": "%s", "cmd": "%s"}\n' \
+    "$STATE" "$P" "$START" "$(date -Is)" $RC "$GPU" "$SLOT" "$(hostname)" "$WORKER" "$MOD $ARGS" > "$STATUS"
+  rm -rf "$LOCK" 2>/dev/null
   echo "[$WORKER] $STATE $JOB rc=$RC $(date -Is)"
   # vLLM's EngineCore child survives its parent (e.g. after a kill) and keeps
   # the whole GPU; kill any that belongs to THIS GPU's job (children of $P are
