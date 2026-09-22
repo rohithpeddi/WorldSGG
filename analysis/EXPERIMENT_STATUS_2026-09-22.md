@@ -97,6 +97,38 @@ Full table: `analysis/mllm_tracks_status_2026-09-22.md`.
 | 52 | caption_all | qwen25vl_7b | full | generating | **RUNNING** GPU 2 | – | – | – | – | – |
 | 53 | wsg_agent | qwen25vl_7b | full | 0/1511 | QUEUED | – | – | – | – | – |
 
+### The matched comparison (same 150 videos, same Qwen3-VL-8B backbone, predcls)
+
+The full-split `rag_all` runs on Qwen2.5-VL-7B while Track A and Track B run on
+Qwen3-VL-8B, so at 1,511 videos any retrieval-versus-localization comparison is
+confounded by backbone. This block removes that confound: one backbone, one set of
+150 videos, every arm scored by the same pass.
+
+| method | decode | wc R@20 | wc mR@20 | nc R@50 | nc mR@50 | OO nc mR@50 | OU-nt nc mR@50 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Track B (tool loop) | standard | **52.2** | **31.4** | 62.1 | 49.5 | **48.4** | 45.3 |
+| Track A (marked frames + BEV) | standard | 51.4 | 29.9 | 61.5 | 46.7 | 46.0 | 42.7 |
+| RAG | thinking | 50.4 | 30.3 | **63.8** | **49.9** | 47.7 | **53.8** |
+| RAG | standard | 47.4 | 28.8 | 60.0 | 48.5 | 46.1 | 51.8 |
+| Track A | thinking | 30.5 | 19.3 | 45.9 | 40.4 | 41.2 | 39.9 |
+| Track B | thinking | 27.2 | 16.4 | 43.2 | 38.2 | 37.8 | 38.2 |
+
+**The two families are complementary, not ranked.** Track B wins headline recall and
+observed objects; RAG with thinking wins no-constraint recall, mean recall, and the
+unobserved-non-trivial bucket by 8.5 points. Localization helps what the camera can
+see; retrieval carries object permanence, and thinking recovers most of what
+retrieval gave up on observed objects without surrendering permanence.
+
+That is a real routing headroom on the one axis where the arms disagree, and it is
+now testable with no GPU: merge the existing Track B and RAG predictions at slot
+level (observed → Track B, unobserved → RAG) and score the oracle. Rows 39–41 also
+confirm that the thinking collapse is a property of the prompt format, since it hits
+Track A and Track B identically while leaving per-object RAG untouched.
+
+**Caveat for the write-up:** these six rows are 150 videos. Making the retrieval arm
+backbone-matched at full scale costs ~12 GPU-hours (RAG, standard decode,
+Qwen3-VL-8B, 1,511 videos). Making the thinking arm full-scale costs ~300.
+
 ### What these rows settle
 
 1. **Track B is the best MLLM method in both modes.** predcls 52.4 / 31.7 against Track A's
