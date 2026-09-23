@@ -127,81 +127,115 @@ thinking cell in the project — see section 5.
 | rag_all | qwen25vl_7b | full | 578/1511 | generating | | |
 | wsg_agent | qwen25vl_7b | full | 0/1511 | queued | | |
 
-### 2d. Backbone breadth study (pragya, legacy protocol) — DIFFERENT TEST SET
+### 2d. Legacy-protocol table — backbone breadth, combined
 
-> **These tables do not share an axis with anything else in this document.**
-> Different test set (legacy AG test, 1,734 of 1,750 videos, not the 1,511-video
-> WorldBBox split), different annotation basis (annotation-tool GT + corrections,
-> not `world4d_rel_annotations_worldbbox`), and a different metric family
-> (per-predicate-group precision / recall / F1 with micro and macro F1, not R@K
-> or mR@K). Never place a number from here in a table from sections 2a–2c.
-> Generated on pragya in May 2026; source of truth is
-> `WorldSceneGraphAnnotationTool/assets/tex_files/tables/*_detailed.tex`.
-> "Caption" is the `subtitle_all` method; "RAG" is `rag_all`.
+Same Action Genome test split as the rest of this document, same annotation basis
+(GT + corrections), same three predicate groups. The pragya rows evaluate 1,734
+videos and the WorldBBox rows evaluate 1,511; **the 1,511 are a strict subset of the
+1,734** (verified: zero WorldBBox videos are absent from the pragya set), so these
+rows sit on one axis and the tables combine.
 
-This is the breadth axis the rest of the document lacks: the same two unlocalized
-methods across six MLLM backbones, rather than one backbone in depth.
+What they do **not** share with sections 2a–2c and 3–4 is the metric family. Here it
+is per-predicate-group precision / recall / F1 with micro-F1 and macro-F1; there it
+is R@K and mR@K. Legacy micro-F1 already appears as the `legacy uF1` column in
+section 2a, which is how these two bodies of work connect.
 
-#### PredCls — all annotations (GT + corrections)
+Sources: pragya rows from
+`WorldSceneGraphAnnotationTool/assets/tex_files/tables/*_gt_plus_corrections_detailed.tex`
+(generated May 2026, "Caption" = the `subtitle_all` pipeline, "RAG" = `rag_all`);
+WorldBBox rows from `results/mllm_worldbbox_*.json`, `legacy.gt_plus_corrections`.
 
-| Model | Method | Att P | Att R | Att F1 | Con P | Con R | Con F1 | Spa P | Spa R | Spa F1 | μF1 | MF1 |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| InternVL2.5 | RAG | 41.8 | 41.8 | 41.8 | 35.6 | 33.8 | 34.7 | 26.3 | 21.0 | 23.4 | **32.9** | **18.8** |
-| InternVL2.5 | Caption | 38.9 | 38.9 | 38.9 | 35.4 | 31.3 | 33.2 | 19.3 | 15.2 | 17.0 | 29.3 | 17.7 |
-| KeyeVL | RAG | 40.5 | 36.3 | 38.3 | 39.0 | 31.1 | 34.6 | 57.9 | 42.8 | 49.2 | **41.0** | **24.4** |
-| KeyeVL | Caption | 43.7 | 18.5 | 26.0 | 37.6 | 15.0 | 21.5 | 55.8 | 19.5 | 28.9 | 25.5 | 16.9 |
-| MiniCPM-V4.5 | RAG | 42.9 | 41.2 | 42.0 | 35.3 | 49.0 | 41.0 | 37.2 | 28.9 | 32.6 | **38.6** | **24.5** |
-| MiniCPM-V4.5 | Caption | 41.1 | 40.0 | 40.6 | 35.7 | 48.4 | 41.1 | 36.9 | 28.7 | 32.3 | 38.1 | 24.4 |
-| Ovis2.5 | RAG | 44.0 | 43.9 | 43.9 | 47.4 | 45.4 | 46.3 | 63.2 | 50.3 | 56.0 | **48.9** | 27.9 |
-| Ovis2.5 | Caption | 43.4 | 43.4 | 43.4 | 47.5 | 45.2 | 46.4 | 63.0 | 50.0 | 55.8 | 48.7 | **28.3** |
-| Qwen2.5-VL | RAG | 52.8 | 52.8 | 52.8 | 51.4 | 44.6 | 47.8 | 55.5 | 43.8 | 49.0 | **49.8** | **23.3** |
-| Qwen2.5-VL | Caption | 49.4 | 49.1 | 49.3 | 48.3 | 42.3 | 45.1 | 53.7 | 42.4 | 47.4 | 47.2 | 21.8 |
-| Qwen3-VL | RAG | 55.8 | 55.6 | 55.7 | 43.0 | 47.8 | 45.3 | 34.0 | 36.4 | 35.1 | 44.5 | 28.6 |
-| Qwen3-VL | Caption | 62.2 | 62.0 | 62.1 | 49.9 | 52.6 | 51.2 | 33.9 | 31.8 | 32.8 | **47.8** | **29.2** |
+#### PredCls — F1 per predicate group, micro-F1, macro-F1
 
-#### SGDet — all annotations (GT + corrections)
+| Model | Method | videos | Attention F1 | Contacting F1 | Spatial F1 | μF1 | MF1 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| InternVL2.5-8B | RAG | 1734 | 41.8 | 34.7 | 23.4 | 32.9 | 18.8 |
+| InternVL2.5-8B | Caption | 1734 | 38.9 | 33.2 | 17.0 | 29.3 | 17.7 |
+| KeyeVL-1.5-8B | RAG | 1734 | 38.3 | 34.6 | 49.2 | 41.0 | 24.4 |
+| KeyeVL-1.5-8B | Caption | 1734 | 26.0 | 21.5 | 28.9 | 25.5 | 16.9 |
+| MiniCPM-V4.5 | RAG | 1734 | 42.0 | 41.0 | 32.6 | 38.6 | 24.5 |
+| MiniCPM-V4.5 | Caption | 1734 | 40.6 | 41.1 | 32.3 | 38.1 | 24.4 |
+| Ovis2.5-9B | RAG | 1734 | 43.9 | 46.3 | **56.0** | 48.9 | 27.9 |
+| Ovis2.5-9B | Caption | 1734 | 43.4 | 46.4 | 55.8 | 48.7 | 28.3 |
+| Qwen2.5-VL-7B | RAG | 1734 | 52.8 | 47.8 | 49.0 | 49.8 | 23.3 |
+| Qwen2.5-VL-7B | Caption | 1734 | 49.3 | 45.1 | 47.4 | 47.2 | 21.8 |
+| Qwen3-VL-30B-A3B | RAG | 1734 | 55.7 | 45.3 | 35.1 | 44.5 | 28.6 |
+| Qwen3-VL-30B-A3B | Caption | 1734 | **62.1** | **51.2** | 32.8 | 47.8 | **29.2** |
+| Qwen2.5-VL-7B | Graph-RAG (zero_shot) | 1511 | 55.8 | 48.3 | 45.9 | 49.8 | 23.2 |
+| Qwen2.5-VL-7B | rag_all | 1511 | 53.6 | 49.7 | 46.7 | **49.9** | 24.2 |
+| Qwen2.5-VL-7B | caption_all | 1511 | 53.2 | 47.3 | 44.7 | 48.3 | 23.2 |
+| Qwen3-VL-8B | rag_all | 150 | 63.0 | 46.0 | 45.9 | 51.4 | 28.4 |
 
-| Model | Method | Att P | Att R | Att F1 | Con P | Con R | Con F1 | Spa P | Spa R | Spa F1 | μF1 | MF1 |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| InternVL2.5 | RAG | 38.5 | 23.2 | 29.0 | 39.0 | 24.6 | 30.2 | 21.1 | 10.6 | 14.1 | **24.2** | **11.0** |
-| InternVL2.5 | Caption | 39.9 | 23.5 | 29.6 | 39.2 | 22.4 | 28.5 | 21.5 | 10.5 | 14.1 | 23.8 | 9.8 |
-| KeyeVL | RAG | 54.5 | 32.4 | 40.6 | 45.3 | 27.2 | 34.0 | 51.0 | 29.3 | 37.2 | **37.2** | **18.1** |
-| KeyeVL | Caption | 41.5 | 13.5 | 20.4 | 26.3 | 10.2 | 14.7 | 46.9 | 14.9 | 22.7 | 19.2 | 9.9 |
-| MiniCPM-V4.5 | RAG | 42.4 | 27.1 | 33.1 | 26.6 | 29.0 | 27.8 | 39.8 | 22.5 | 28.8 | **29.6** | **16.4** |
-| MiniCPM-V4.5 | Caption | 40.6 | 25.6 | 31.4 | 24.6 | 25.9 | 25.3 | 36.8 | 20.6 | 26.4 | 27.4 | 15.4 |
-| Ovis2.5 | RAG | 48.1 | 24.3 | 32.3 | 58.4 | 27.4 | 37.3 | 57.2 | 24.0 | 33.8 | 34.5 | 13.5 |
-| Ovis2.5 | Caption | 47.8 | 25.5 | 33.2 | 61.3 | 30.1 | 40.3 | 54.0 | 23.9 | 33.1 | **35.6** | **13.9** |
-| Qwen2.5-VL | RAG | 42.3 | 30.6 | 35.5 | 63.4 | 41.7 | 50.3 | 59.3 | 35.7 | 44.6 | **43.7** | 19.9 |
-| Qwen2.5-VL | Caption | 41.0 | 29.3 | 34.2 | 53.7 | 35.0 | 42.4 | 67.4 | 40.3 | 50.4 | 42.7 | **20.5** |
+#### SGDet — F1 per predicate group, micro-F1, macro-F1
 
-#### What the breadth study adds
+| Model | Method | videos | Attention F1 | Contacting F1 | Spatial F1 | μF1 | MF1 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| InternVL2.5-8B | RAG | 1734 | 29.0 | 30.2 | 14.1 | 24.2 | 11.0 |
+| InternVL2.5-8B | Caption | 1734 | 29.6 | 28.5 | 14.1 | 23.8 | 9.8 |
+| KeyeVL-1.5-8B | RAG | 1734 | **40.6** | 34.0 | 37.2 | 37.2 | 18.1 |
+| KeyeVL-1.5-8B | Caption | 1734 | 20.4 | 14.7 | 22.7 | 19.2 | 9.9 |
+| MiniCPM-V4.5 | RAG | 1734 | 33.1 | 27.8 | 28.8 | 29.6 | 16.4 |
+| MiniCPM-V4.5 | Caption | 1734 | 31.4 | 25.3 | 26.4 | 27.4 | 15.4 |
+| Ovis2.5-9B | RAG | 1734 | 32.3 | 37.3 | 33.8 | 34.5 | 13.5 |
+| Ovis2.5-9B | Caption | 1734 | 33.2 | 40.3 | 33.1 | 35.6 | 13.9 |
+| Qwen2.5-VL-7B | RAG | 1734 | 35.5 | **50.3** | 44.6 | **43.7** | 19.9 |
+| Qwen2.5-VL-7B | Caption | 1734 | 34.2 | 42.4 | **50.4** | 42.7 | **20.5** |
+| Qwen3-VL-8B | rag_all | 145 | 32.2 | 25.7 | 24.2 | 27.1 | 17.0 |
+
+#### Full precision and recall for the pragya rows
+
+The per-group precision and recall behind the F1 columns above are in
+`assets/tex_files/tables/{predcls,sgdet}_gt_plus_corrections_detailed.tex`. They are
+worth quoting for one row in particular: KeyeVL Caption holds precision of 43.7 /
+37.6 / 55.8 against recall of 18.5 / 15.0 / 19.5 in predcls. Its captioning path is
+not inaccurate, it is silent.
+
+#### How much the 223 extra videos matter
+
+Qwen2.5-VL-7B with retrieval is the one cell measured on both video sets, which
+makes it the calibration point:
+
+| metric | 1,734 videos | 1,511 videos | delta |
+|---|---:|---:|---:|
+| μF1 | 49.8 | 49.9 | +0.1 |
+| MF1 | 23.3 | 24.2 | +0.9 |
+| Attention F1 | 52.8 | 53.6 | +0.8 |
+| Contacting F1 | 47.8 | 49.7 | +1.9 |
+| Spatial F1 | 49.0 | 46.7 | −2.3 |
+
+**Micro-F1 is stable to 0.1 across the two video sets; per-group F1 moves by up to
+2.3.** Compare backbones on μF1 across the whole table without qualification. Treat a
+per-group comparison between a 1,734-video row and a 1,511-video row as approximate
+until the pragya cells are re-scored on the 1,511 list (section 6, item 7).
+
+#### What the breadth adds
 
 1. **Retrieval beats captioning, but the margin is small and model-dependent.**
-   RAG wins μF1 for five of six backbones in predcls and four of five in sgdet,
-   yet the typical margin is 0.5 to 3.6 points. This is consistent with the
-   WorldBBox finding in section 2a that retrieval buys little: it is a real but
-   minor effect, not a mechanism.
-2. **The one large gain is a captioning failure, not a retrieval success.**
-   KeyeVL gains 15.5 μF1 in predcls and 18.0 in sgdet, entirely because its
-   captioning path collapses on recall (18.5 / 15.0 / 19.5 against precision in the
-   37–56 band). Quote this as a robustness result for RAG, not as evidence that
-   retrieval carries information.
-3. **Two backbones invert the ordering**, and both are worth a sentence.
-   Qwen3-VL prefers captioning in predcls (47.8 against 44.5 μF1) and Ovis2.5
-   prefers it in sgdet (35.6 against 34.5). No method dominates across backbones.
+   RAG wins μF1 for five of six backbones in predcls and four of five in sgdet, and
+   the typical margin is 0.5 to 3.6 points. That matches section 2a, where retrieval
+   and a plain per-object prompt tie at 46.9 R@20.
+2. **The one large gain is a captioning failure, not a retrieval success.** KeyeVL
+   gains 15.5 μF1 in predcls and 18.0 in sgdet purely because its captioning recall
+   collapses. Quote it as robustness for RAG, not as evidence retrieval carries
+   information.
+3. **Two backbones invert the ordering.** Qwen3-VL prefers captioning in predcls,
+   48.7 against 44.5 μF1, and Ovis2.5 prefers it in sgdet, 35.6 against 34.5. No
+   method dominates across backbones.
 4. **Spatial predicates separate the backbones far more than attention does.**
-   Spatial F1 spans 23.4 to 56.0 under RAG in predcls while attention spans only
-   38.3 to 55.7. Whatever the unlocalized setting is measuring, it is mostly
-   spatial competence — which is exactly what the localized track in section 3
-   attacks, and exactly where it collapses at IoU 0.15.
-5. **Rank order is not preserved between modes.** Ovis2.5 leads predcls μF1 among
-   the non-Qwen backbones at 48.9 but falls to 34.5 in sgdet, while Qwen2.5-VL
-   leads both. Single-mode backbone claims will not survive review.
+   Spatial F1 spans 23.4 to 56.0 under RAG in predcls while attention spans 38.3 to
+   55.7. The unlocalized setting is mostly measuring spatial competence, which is
+   what the localized track attacks and where it collapses at IoU 0.15.
+5. **Rank order is not preserved between modes.** Ovis2.5 leads predcls μF1 among the
+   non-Qwen backbones at 48.9 and falls to 34.5 in sgdet; Qwen2.5-VL leads both.
+   Single-mode backbone claims will not survive review.
+6. **Backbone scale is not the story.** Qwen3-VL-30B-A3B, the largest model here,
+   wins attention F1 by a wide margin (62.1) yet lands mid-table on μF1 (47.8) because
+   its spatial F1 is among the worst (32.8). Spatial competence does not track size.
 
-**Incomplete cells not tabulated:** Qwen3-VL-30B-A3B has predcls only (1,542
-videos, no sgdet), and LLaVA-OneVision-7B never finished (19 predcls / 147 sgdet).
-A `corrections only` variant of both tables also exists in the same directory and
-tells the same story with uniformly lower absolute numbers.
+**Incomplete cells, not tabulated:** Qwen3-VL-30B-A3B has predcls only (1,542 videos,
+no sgdet) and LLaVA-OneVision-7B never finished (19 predcls / 147 sgdet). A
+corrections-only variant of both tables exists in the same directory and tells the
+same story at uniformly lower absolute values.
 
 ---
 
@@ -296,11 +330,16 @@ the oracle.
    150 videos because thinking costs 255 s per video for Track A and 715 s for RAG,
    against 30 s for standard decode.
 
-7. **Section 2d is a different experiment entirely.** It uses the legacy AG test
-   set (1,734 videos), annotation-tool GT + corrections, and per-predicate-group
-   P/R/F1 with micro and macro F1. It shares no test set, no annotation basis and
-   no metric with sections 0-2c and 3-4. It answers a question none of them do,
-   namely whether the unlocalized result holds across backbones.
+7. **Section 2d shares the test split but not the metric.** Its rows sit on the
+   same Action Genome test videos and the same GT + corrections annotation basis,
+   and the 1,511-video WorldBBox set is a strict subset of the 1,734 evaluated on
+   pragya, so its rows combine with each other. What it does not share with
+   sections 0-2c and 3-4 is the metric family: per-predicate-group P/R/F1 with
+   micro and macro F1, rather than R@K. The bridge between the two is the
+   `legacy uF1` column in section 2a, which is the same micro-F1. Compare
+   backbones there on micro-F1 freely; treat a per-group comparison across
+   different video counts as approximate, since micro-F1 moves 0.1 between the two
+   sets but per-group F1 moves up to 2.3.
 
 ---
 
@@ -314,3 +353,4 @@ the oracle.
 | 4 | Oracle router over Track B and RAG slot predictions | 2 + 3 | **no GPU** |
 | 5 | `wsg_agent` predcls last 53 videos, or report n=1458 | 2 | ~30 min |
 | 6 | Thinking at full split | 2 | ~300 h GPU, not worth it before the deadline |
+| 7 | Re-score the pragya backbone cells on the 1,511-video list so section 2d is exact rather than approximate at the per-group level | 2 | CPU only, PBS job on pragya |
