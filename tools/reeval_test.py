@@ -155,8 +155,39 @@ def make_evaluator(conf, test_dataset, constraint):
     )
 
 
+def _cam_to_world(corners, cam_pose_t):
+    """(M,8,3) camera-frame corners -> the canonical ("final") frame.
+
+    ``camera_poses[t]`` is the 4x4 camera->final pose, so this is R @ c + t,
+    the same transform ``build_pred_pkl`` applies to the detector input corners
+    when it writes ``bboxes_3d``.  ``None`` pose leaves the corners untouched.
+    """
+    if cam_pose_t is None:
+        return corners
+    Tm = cam_pose_t.numpy() if hasattr(cam_pose_t, "numpy") else np.asarray(cam_pose_t)
+    return np.einsum('ij,nkj->nki', Tm[:3, :3], corners) + Tm[:3, 3]
+
+
 def build_pred_pkl(batch, pred, t, mode):
-    """Per-frame prediction dict for evaluate_wsgg_video (frame index t)."""
+    """Per-frame prediction dict for evaluate_wsgg_video (frame index t).
+
+    Two 3-D fields are written and they must never be confused:
+
+    ``bboxes_3d``          the *input* corners of frame t (in sgdet the detector's
+                           ``boxes_3d``, in predcls the annotation ``corners_final``),
+                           mapped to the canonical frame.  This is what the model was
+                           handed, not what it said.
+    ``pred_corners_slot``  WorldWise++'s per-slot 3-D refinement, i.e. those same
+                           input corners plus the learned ``slot_corner_head`` delta,
+                           in the same canonical frame.
+    ``pred_corners_free``  WorldWise++'s free-query (DETR) 3-D detections, which are
+                           produced in the camera frame by pinhole back-projection and
+                           are therefore always mapped to canonical here.
+
+    Only WorldWise++ returns a ``det`` block; WorldWise and WorldWise+ have no 3-D
+    head at all, so the two ``pred_corners_*`` keys are simply absent for them and no
+    caller may fall back to ``bboxes_3d`` in their place.
+    """
     pkl = {
         "video_id": batch["video_id"],
         "attention_distribution": pred["attention_distribution"][t].cpu().numpy(),
@@ -172,20 +203,36 @@ def build_pred_pkl(batch, pred, t, mode):
         "bboxes_2d": batch["bboxes_2d"][t].numpy(),
         "valid_mask": batch["valid_mask"][t].numpy(),
     }
+    cam_pose = batch.get("camera_poses")
+    cam_pose_t = cam_pose[t] if cam_pose is not None else None
     if mode == "sgdet":
         pkl["pred_labels"] = batch["object_classes"][t].numpy()
         pkl["pred_scores"] = np.ones(batch["object_classes"][t].shape[0], dtype=np.float32)
         pkl["gt_bboxes_2d"] = batch["gt_bboxes_2d"][t].numpy()
         pkl["gt_corners"] = batch["gt_corners"][t].numpy()
         corners_raw = batch.get("corners")
-        cam_pose = batch.get("camera_poses")
         if corners_raw is not None:
-            corners_cam = corners_raw[t].numpy()
-            if cam_pose is not None:
-                Tm = cam_pose[t].numpy()
-                R, tr = Tm[:3, :3], Tm[:3, 3]
-                corners_cam = np.einsum('ij,nkj->nki', R, corners_cam) + tr
-            pkl["bboxes_3d"] = corners_cam
+            # input corners (detector boxes_3d) live in the camera frame in sgdet
+            pkl["bboxes_3d"] = _cam_to_world(corners_raw[t].numpy(), cam_pose_t)
+
+    # --- model-predicted 3-D, WorldWise++ only -------------------------------
+    det = pred.get("det") if isinstance(pred, dict) else None
+    if det is not None:
+        # slot_corners = the input corners_seq + slot_corner_head delta, so they
+        # sit in whatever frame corners_seq is in: camera in sgdet (map it, exactly
+        # as bboxes_3d above), already canonical in predcls (leave it).
+        slot = det["slot_corners"][t].detach().cpu().numpy().astype(np.float32)
+        pkl["pred_corners_slot"] = _cam_to_world(slot, cam_pose_t) if mode == "sgdet" else slot
+        # free-query corners come out of _compute_3d_corners in the camera frame
+        # in both modes, so they are always mapped.
+        free = det["corners"][t].detach().cpu().numpy().astype(np.float32)
+        pkl["pred_corners_free"] = _cam_to_world(free, cam_pose_t)
+        pkl["pred_free_logits"] = det["logits"][t].detach().cpu().float().numpy()
+        pkl["pred_boxes_2d_free"] = det["boxes_xyxy"][t].detach().cpu().float().numpy()
+        pkl["pred_boxes_2d_slot"] = det["slot_boxes"][t].detach().cpu().float().numpy()
+        pkl["pred_3d_frame"] = "canonical" if cam_pose_t is not None else "camera"
+        pkl["pred_3d_source"] = ("slot_corners = input corners + slot_corner_head delta; "
+                                 "free = free-query detections")
     return pkl
 
 

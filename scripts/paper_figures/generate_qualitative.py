@@ -18,8 +18,11 @@ Three figure families per video (see ``FIGURES`` below):
 ``<vid>_scene3d_f*``   the Pi-3 dynamic scene as a coloured point cloud in the
                        canonical floor frame, with ground-truth and predicted
                        oriented 3-D boxes, from two oblique viewpoints and a
-                       bird's-eye view.  Only the localized MLLM track emits
-                       3-D boxes, so only it appears here.
+                       bird's-eye view.  Track A, Track B and WorldWise++ have a
+                       3-D head and are drawn; every other method in the run is
+                       named on the figure as having **no 3-D output**, so an
+                       absent box is never read as a failed detection.  No
+                       method's *input* corners are ever drawn as a prediction.
 ``<vid>_scenegraph``   the scene graph itself, ground truth beside each
                        method, with every predicate coloured by outcome.
 
@@ -89,7 +92,8 @@ OUTCOME_LABEL = {"hit": "every GT predicate recalled", "partial": "partly recall
 GT_OBSERVED = "#20558A"
 GT_UNOBSERVED = "#78609A"
 PERSON = "#182B3A"
-BOX3D = {"gt": "#182B3A", "track_a": "#1F77B4", "track_b": "#D1611F"}
+BOX3D = {"gt": "#182B3A", "track_a": "#1F77B4", "track_b": "#D1611F",
+         "worldwise_pp": "#2E8B57"}
 
 
 # ---------------------------------------------------------------------------
@@ -106,12 +110,25 @@ class MethodSpec:
     method_dir: str = ""  # config key under paths.outputs, for kind="mllm"
     model: str = ""       # model sub-directory, for kind="mllm"
     emits_3d: bool = False
+    # kind="dump" only: a second, 3-D-carrying dump of the same checkpoint written
+    # with ``tools/dump_predictions.py --keep-3d``.  It holds the *predicted* corners
+    # (``pred_corners_slot``), which the monolithic dumps drop.  When it covers the
+    # video at hand it replaces ``dump`` outright, so relations and boxes always come
+    # from one forward pass.
+    dump3d: str = ""
+    # what the 3-D box of this method actually is, printed in the 3-D legend so a
+    # reader never mistakes a refinement for a from-scratch prediction
+    box3d_note: str = ""
 
 
 METHODS: Dict[str, MethodSpec] = {s.key: s for s in [
     # --- track 1: training-based (dumps from tools/dump_predictions.py) ------
     MethodSpec("worldwise_pp", "WorldWise++", "1 training-based", "dump", "dinov3",
-               dump="runs/worldwise_pp/score/dumps/worldwise_pp_dinov3_{mode}__all.pkl"),
+               dump="runs/worldwise_pp/score/dumps/worldwise_pp_dinov3_{mode}__all.pkl",
+               dump3d="runs/worldwise_pp/score/dumps/qualitative/"
+                      "worldwise_pp_dinov3_{mode}_3d__all.pkl",
+               emits_3d=True,
+               box3d_note="slot refinement of the detector's input corners"),
     MethodSpec("worldwise_pp_nodet", "WorldWise++ (no det.)", "1 training-based", "dump", "dinov3",
                dump="runs/worldwise_pp/score/dumps/worldwise_pp_dinov3_nodet_{mode}__all.pkl"),
     MethodSpec("worldwise_plus", "WorldWise+", "1 training-based", "dump", "dinov3tok",
@@ -169,25 +186,51 @@ def load_mllm_records(spec: MethodSpec, video: WorldBBoxVideo, mode: str, cfg: d
     return build_records(video, preds, mode=mode), str(path)
 
 
+def _slice_dump(path: Path, video_id: str) -> List[Dict[str, Any]]:
+    with open(path, "rb") as f:
+        blob = pickle.load(f)
+    records = [r for r in (blob["records"] if isinstance(blob, dict) else blob)
+               if r.get("video_id") == video_id or
+               str(r.get("video_id", "")).replace(".mp4", "") == video_id]
+    del blob
+    return records
+
+
 def load_dump_records(spec: MethodSpec, video_id: str, mode: str, cfg: dict, cache_dir: Path
                       ) -> Tuple[Optional[List[Dict[str, Any]]], str]:
     """Slice one video out of a monolithic ``*__all.pkl``, caching the slice.
 
     The dumps are 70-310 MB each; the per-video cache makes re-runs cheap and
     keeps the figure script usable without re-running any model.
+
+    When the method has a ``dump3d`` (a small re-run of the *same* checkpoint
+    written with ``--keep-3d``) and that dump covers this video, it is used
+    instead of the monolithic one: it carries the same relation distributions
+    plus the model's predicted 3-D corners, so the 3-D panel and the relation
+    panels never disagree about which forward pass they describe.
     """
-    path = Path(get_path(cfg, "cache_root")) / spec.dump.format(mode=mode)
+    root = Path(get_path(cfg, "cache_root"))
+    if spec.dump3d:
+        p3 = root / spec.dump3d.format(mode=mode)
+        cache3 = cache_dir / f"{video_id}__{spec.key}__{mode}__3d.pkl"
+        if cache3.exists():
+            with open(cache3, "rb") as f:
+                return pickle.load(f), str(p3)
+        if p3.exists():
+            records = _slice_dump(p3, video_id)
+            if records:
+                cache3.parent.mkdir(parents=True, exist_ok=True)
+                with open(cache3, "wb") as f:
+                    pickle.dump(records, f)
+                return records, str(p3)
+    path = root / spec.dump.format(mode=mode)
     if not path.exists():
         return None, str(path)
     cache = cache_dir / f"{video_id}__{spec.key}__{mode}.pkl"
     if cache.exists():
         with open(cache, "rb") as f:
             return pickle.load(f), str(path)
-    with open(path, "rb") as f:
-        blob = pickle.load(f)
-    records = [r for r in (blob["records"] if isinstance(blob, dict) else blob)
-               if r.get("video_id") == video_id]
-    del blob
+    records = _slice_dump(path, video_id)
     cache.parent.mkdir(parents=True, exist_ok=True)
     with open(cache, "wb") as f:
         pickle.dump(records, f)
@@ -589,13 +632,68 @@ def _equal_3d(ax, pts):
     ax.set_zlim(ctr[2] - rad, ctr[2] + rad)
 
 
+def predicted_corners(spec: MethodSpec, view: MethodView, frame_file: str
+                      ) -> Dict[str, np.ndarray]:
+    """``{object label: (8,3) predicted corners}`` in the canonical frame.
+
+    Two record layouts carry a 3-D box and they are read differently:
+
+    * localized MLLM dumps -- ``has_pred_3d`` / ``pred_corners``, one row per slot;
+    * WorldWise++ supervised dumps -- ``pred_corners_slot``, written by
+      ``tools/reeval_test.build_pred_pkl`` from the model's ``det.slot_corners``
+      and already mapped to the canonical frame there.
+
+    ``bboxes_3d`` is deliberately **not** consulted: it is the detector's input
+    corner set, not a prediction, and a method with no 3-D head returns ``{}``.
+    """
+    rec = view.records.get(frame_file)
+    if rec is None:
+        return {}
+    labels = view.labels.get(frame_file, [])
+    out: Dict[str, np.ndarray] = {}
+    if spec.kind == "mllm":
+        if "pred_corners" not in rec:
+            return {}
+        for i, lab in enumerate(labels):
+            if rec["has_pred_3d"][i] and np.any(rec["pred_corners"][i]):
+                out[lab] = np.asarray(rec["pred_corners"][i])
+        return out
+    corners = rec.get("pred_corners_slot")
+    if corners is None:
+        return {}
+    valid = rec.get("valid_mask")
+    for i, lab in enumerate(labels):
+        if lab == "__pad__" or i >= len(corners):
+            continue
+        if valid is not None and i < len(valid) and not bool(valid[i]):
+            continue
+        if np.any(corners[i]):
+            out.setdefault(lab, np.asarray(corners[i]))
+    return out
+
+
 def figure_scene3d(video: WorldBBoxVideo, views: Dict[str, MethodView], specs: Sequence[MethodSpec],
                    t: int, cloud: Dict[str, np.ndarray], max_points: int, iou_thr: float,
                    mode: str) -> Tuple[plt.Figure, Dict[str, Any]]:
     from lib.mllm.eval.iou3d import compute_iou_3d_obb
 
     fr = video.frames[t]
-    loc = [s for s in specs if s.emits_3d and views[s.key].available]
+
+    def carries_3d(spec: MethodSpec) -> bool:
+        """True only if the loaded records actually hold predicted corners.
+
+        A method with a 3-D head whose 3-D-carrying dump is missing must not be
+        drawn as though it predicted nothing, so it is reported separately.
+        """
+        key = "pred_corners" if spec.kind == "mllm" else "pred_corners_slot"
+        return any(key in rec for rec in views[spec.key].records.values())
+
+    loc = [s for s in specs if s.emits_3d and views[s.key].available and carries_3d(s)]
+    # methods in this run that have no 3-D head at all -- named on the figure so the
+    # absence of a box is read as "no 3-D output", never as a missed detection
+    no3d = [s for s in specs if not s.emits_3d]
+    # a 3-D head whose predictions are not in the dump at hand: neither of the above
+    missing3d = [s for s in specs if s.emits_3d and s not in loc]
     xyz, rgb = cloud["xyz"], cloud["rgb"]
     if len(xyz) > max_points:
         sel = np.random.default_rng(0).choice(len(xyz), max_points, replace=False)
@@ -611,23 +709,13 @@ def figure_scene3d(video: WorldBBoxVideo, views: Dict[str, MethodView], specs: S
         seen.add(o.label)
         gt_boxes.append((o.label, np.asarray(o.corners_final), o.observed))
 
-    pred_boxes: Dict[str, Dict[str, np.ndarray]] = {}
-    for s in loc:
-        rec = views[s.key].records.get(fr.file)
-        if rec is None:
-            continue
-        labels = views[s.key].labels[fr.file]
-        got: Dict[str, np.ndarray] = {}
-        for i, lab in enumerate(labels):
-            if rec["has_pred_3d"][i] and np.any(rec["pred_corners"][i]):
-                got[lab] = np.asarray(rec["pred_corners"][i])
-        pred_boxes[s.key] = got
+    pred_boxes: Dict[str, Dict[str, np.ndarray]] = {
+        s.key: predicted_corners(s, views[s.key], fr.file) for s in loc}
 
-    ious: Dict[str, Dict[str, float]] = {}
-    for s in loc:
+    def iou_row(boxes: Dict[str, np.ndarray]) -> Dict[str, float]:
         row = {}
         for lab, c, _ in gt_boxes:
-            p = pred_boxes.get(s.key, {}).get(lab)
+            p = boxes.get(lab)
             if p is None:
                 row[lab] = float("nan")
             else:
@@ -635,10 +723,43 @@ def figure_scene3d(video: WorldBBoxVideo, views: Dict[str, MethodView], specs: S
                     row[lab] = float(compute_iou_3d_obb(np.asarray(c), p))
                 except Exception:
                     row[lab] = 0.0
-        ious[s.key] = row
+        return row
+
+    ious: Dict[str, Dict[str, float]] = {s.key: iou_row(pred_boxes[s.key]) for s in loc}
+
+    # For a method whose 3-D box is a refinement of an input box, also score the
+    # *input* corners, so the meta says how far the learned delta moved them.  This
+    # is provenance only -- the input boxes are never drawn and never labelled as a
+    # prediction on the figure.
+    input_ious: Dict[str, Dict[str, float]] = {}
+    for s in loc:
+        rec = views[s.key].records.get(fr.file)
+        if rec is None or rec.get("bboxes_3d") is None:
+            continue
+        labels = views[s.key].labels.get(fr.file, [])
+        valid = rec.get("valid_mask")
+        raw: Dict[str, np.ndarray] = {}
+        for i, lab in enumerate(labels):
+            if lab == "__pad__" or i >= len(rec["bboxes_3d"]):
+                continue
+            if valid is not None and i < len(valid) and not bool(valid[i]):
+                continue
+            if np.any(rec["bboxes_3d"][i]):
+                raw.setdefault(lab, np.asarray(rec["bboxes_3d"][i]))
+        input_ious[s.key] = iou_row(raw)
 
     views3d = [("oblique view A", 22, -62), ("oblique view B", 22, 34), ("bird's-eye view", 89, -90)]
-    fig = plt.figure(figsize=(10.8, 4.6), facecolor="white")
+    # The caption block (one 3-D IoU line per method, including the methods that have
+    # no 3-D head) and the legend both grow with the number of methods, so the canvas
+    # grows with them instead of letting them land on the point cloud.
+    n_handles = 3 + len(loc) + len(no3d)
+    ncol = min(3, max(n_handles, 1))
+    legend_rows = int(np.ceil(n_handles / ncol))
+    n_lines = max(len(loc) + len(no3d) + len(missing3d), 1)
+    PANEL_IN, LINE_IN, LEG_IN, PAD_IN = 3.95, 0.155, 0.175, 0.10
+    foot_in = n_lines * LINE_IN + legend_rows * LEG_IN + 3 * PAD_IN
+    fig_h = PANEL_IN + foot_in
+    fig = plt.figure(figsize=(10.8, fig_h), facecolor="white")
     all_pts = [xyz] + [c for _, c, _ in gt_boxes] + \
               [p for d in pred_boxes.values() for p in d.values()]
     all_pts = np.concatenate([np.asarray(a).reshape(-1, 3) for a in all_pts], 0)
@@ -679,26 +800,48 @@ def figure_scene3d(video: WorldBBoxVideo, views: Dict[str, MethodView], specs: S
     handles = [Line2D([], [], color=BOX3D["gt"], lw=1.6, label="GT 3-D box (observed)"),
                Line2D([], [], color=BOX3D["gt"], lw=1.6, ls=(0, (3, 2)), label="GT 3-D box (unobserved)")]
     handles += [Line2D([], [], color=BOX3D.get(s.key, "#7F7F7F"), lw=1.6, ls=(0, (4, 2)),
-                       label=f"{s.label} — predicted") for s in loc]
+                       label=f"{s.label} — predicted"
+                             + (f" ({s.box3d_note})" if s.box3d_note else ""))
+                for s in loc]
     handles.append(Line2D([], [], color="#C0392B", lw=1.6, label="camera at this frame"))
-    fig.legend(handles=handles, loc="lower center", ncol=min(5, len(handles)), frameon=False,
-               fontsize=6.8, bbox_to_anchor=(0.5, 0.005))
+    for s in no3d:
+        handles.append(Line2D([], [], color="none", lw=0,
+                              label=f"{s.label} — no 3-D output (no 3-D head)"))
     lines = []
     for s in loc:
         parts = [f"{lab} {ious[s.key][lab]:.2f}" if np.isfinite(ious[s.key][lab]) else f"{lab} —"
                  for lab, _, _ in gt_boxes]
         lines.append(f"{s.label} 3-D IoU:  " + "   ".join(parts))
-    fig.text(0.5, 0.075, "\n".join(lines) if lines else
-             "no localized-track output for this video", fontsize=6.6, color=INK, ha="center")
+    for s in no3d:
+        lines.append(f"{s.label} 3-D IoU:  no 3-D head — this method predicts no box")
+    for s in missing3d:
+        lines.append(f"{s.label} 3-D IoU:  has a 3-D head, but this dump carries no "
+                     f"predicted corners")
+    if not lines:
+        lines = ["no method in this figure emits a 3-D box"]
+    fig.legend(handles=handles, loc="lower center", ncol=ncol, frameon=False,
+               fontsize=6.8, bbox_to_anchor=(0.5, PAD_IN / fig_h))
+    fig.text(0.5, (2 * PAD_IN + legend_rows * LEG_IN) / fig_h, "\n".join(lines),
+             fontsize=6.6, color=INK, ha="center", va="bottom", linespacing=1.55)
     fig.suptitle(f"{video.video_id}  •  frame {fr.frame_num:06d}  •  {mode}  •  "
                  f"Pi-3 dynamic scene, canonical floor frame  •  match at 3-D IoU {iou_thr:g}",
-                 fontsize=9.6, fontweight="bold", color=INK, y=0.985)
-    fig.subplots_adjust(left=0.005, right=0.995, top=0.9, bottom=0.17, wspace=0.0)
+                 fontsize=9.6, fontweight="bold", color=INK, y=1 - 0.07 / fig_h)
+    fig.subplots_adjust(left=0.005, right=0.995, top=1 - 0.46 / fig_h,
+                        bottom=foot_in / fig_h, wspace=0.0)
+    def _round(row):
+        return {lab: (None if not np.isfinite(v) else round(float(v), 4)) for lab, v in row.items()}
+
     meta = {"frame": fr.frame_num, "frame_file": fr.file, "pi3_index": fr.pi3_index,
             "n_cloud_points": int(len(xyz)),
             "gt_boxes": [lab for lab, _, _ in gt_boxes],
-            "iou3d": {k: {lab: (None if not np.isfinite(v) else round(float(v), 4))
-                          for lab, v in row.items()} for k, row in ious.items()}}
+            "iou3d": {k: _round(row) for k, row in ious.items()},
+            # provenance for the "refinement, not a from-scratch prediction" claim:
+            # the same IoU computed against the detector's *input* corners, which the
+            # figure never draws
+            "iou3d_input_corners": {k: _round(row) for k, row in input_ious.items()},
+            "no_3d_head": [s.key for s in no3d],
+            "3d_head_but_no_predictions_in_dump": [s.key for s in missing3d],
+            "box3d_note": {s.key: s.box3d_note for s in loc if s.box3d_note}}
     return fig, meta
 
 

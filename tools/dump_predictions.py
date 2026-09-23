@@ -58,6 +58,14 @@ def main():
     ap.add_argument("--frames", default="all", choices=["all", "last"])
     ap.add_argument("--out", default=None)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--videos", nargs="*", default=[],
+                    help="restrict the dump to these video ids (with or without the "
+                         "'.mp4' suffix); default is the whole test split")
+    ap.add_argument("--keep-3d", action="store_true",
+                    help="keep the 3-D arrays: the input corners (bboxes_3d, gt_corners) "
+                         "and, for a model with a 3-D head, its predicted corners "
+                         "(pred_corners_slot / pred_corners_free).  Off by default "
+                         "because the full-split dumps only need 2-D bucket recall")
     args = ap.parse_args()
 
     conf = load_wsgg_config(args.config)
@@ -66,6 +74,14 @@ def main():
     from dataloader.world_ag_dataset import world_collate_fn
     from torch.utils.data import DataLoader
     ds = make_test_dataset(conf)
+    if args.videos:
+        wanted = {v for x in args.videos for v in (x, f"{x}.mp4", x.replace(".mp4", ""))}
+        keep = [v for v in ds.video_list if v in wanted or v.replace(".mp4", "") in wanted]
+        missing = {x.replace(".mp4", "") for x in args.videos} - {v.replace(".mp4", "") for v in keep}
+        if missing:
+            raise SystemExit(f"[dump] videos not in the test split: {sorted(missing)}")
+        ds.video_list = keep
+        print(f"[dump] restricted to {len(keep)} video(s): {keep}")
     dl = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0,
                     collate_fn=world_collate_fn)
     print(f"[dump] {conf.experiment_name} | mode={conf.mode} | "
@@ -94,9 +110,12 @@ def main():
                 pkl["visibility_mask"] = batch["visibility_mask"][t].numpy()
                 pkl["frame_t"] = int(t)
                 pkl["is_last"] = bool(t == T - 1)
-                # drop heavy 3D arrays we don't need for 2D bucket recall
-                pkl.pop("bboxes_3d", None)
-                pkl.pop("gt_corners", None)
+                if not args.keep_3d:
+                    # drop heavy 3D arrays we don't need for 2D bucket recall
+                    for key in ("bboxes_3d", "gt_corners", "pred_corners_slot",
+                                "pred_corners_free", "pred_free_logits",
+                                "pred_boxes_2d_free", "pred_boxes_2d_slot"):
+                        pkl.pop(key, None)
                 records.append(_slim(pkl))
 
     out = args.out or os.path.join(
