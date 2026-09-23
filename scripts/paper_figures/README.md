@@ -4,6 +4,16 @@ Three deterministic Matplotlib diagrams, one for each design document. These
 are architecture illustrations, not empirical plots. They require no dataset,
 checkpoint, GPU, network request, external artwork, or LaTeX installation.
 
+> **`generate_qualitative.py` is the exception.** It is the one *empirical*
+> generator in this directory: 2-D frame overlays, Pi-3 point-cloud renders with
+> ground-truth and predicted 3-D boxes, and rendered scene graphs, all read from
+> the worldbbox test annotations and from existing prediction dumps. It needs
+> the dataset, so it runs on the CS93371 box (CPU only, no checkpoint is
+> loaded), resolves paths through `lib/mllm/core/config_loader.py`, and shares
+> this directory's `--output-dir` / `--formats` / `--dpi` conventions. See
+> `assets/figures/qualitative/README.md` for the rendered output, the choice of
+> videos and the regeneration commands.
+
 ## Compact paper figures
 
 The separate `generate_publication.py` entry point produces three compact
