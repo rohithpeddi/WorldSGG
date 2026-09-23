@@ -9,7 +9,7 @@ Three tracks:
 | track | what it is | localization | sgdet matching |
 |---|---|---|---|
 | **1 — Training-based** | WorldWise lineage and the supervised baselines | learned 3D boxes | 2D IoU 0.5 |
-| **2 — Unlocalized MLLM** | Graph-RAG, captions, per-object prompting, thinking | none — emits no 3D boxes | class-only |
+| **2 — Unlocalized MLLM** | Graph-RAG (rag_all), captions, frames-only prompting, thinking | none — emits no 3D boxes | class-only |
 | **3 — Localized MLLM** | marked frames + BEV, tool loop with geometric critic | predicted oriented boxes | 3D IoU 0.15 / 0.25 |
 
 > **Read the protocol note in section 5 before putting any two tracks in one table.**
@@ -31,7 +31,7 @@ The one table where the tracks may be compared directly.
 | 1 — best prior baseline | W-DSGDetr++ @ resnet50 | 68.5 | 38.9 |
 | 3 — Localized MLLM | Track B (tool loop + critic) | 52.4 | 31.7 |
 | 3 — Localized MLLM | Track A (marked frames + BEV) | 51.7 | 30.5 |
-| 2 — Unlocalized MLLM | Graph-RAG (zero_shot) | 46.9 | 25.1 |
+| 2 — Unlocalized MLLM | zero_shot (frames only) | 46.9 | 25.1 |
 
 The supervised ceiling sits **22.4 points of R@20 above the best MLLM**, and the
 localized MLLM sits **5.5 points above the unlocalized one**. Both gaps carry the
@@ -97,7 +97,7 @@ the task at all.
 
 | method | wc R@20 | wc mR@20 | nc R@50 | nc mR@50 | OO nc mR@50 | OU-nt nc mR@50 | legacy uF1 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Graph-RAG (zero_shot) | **46.9** | 25.1 | 60.9 | 43.1 | 40.3 | 42.8 | – |
+| zero_shot (frames only) | **46.9** | 25.1 | 60.9 | 43.1 | 40.3 | 42.8 | – |
 | caption_all | 45.3 | **26.1** | 59.9 | 43.6 | 40.6 | 44.1 | 48.2 |
 | rag_all | 46.9 | 26.0 | **61.1** | **43.8** | **40.8** | **44.6** | **49.9** |
 | wsg_agent (n=1458) | 46.3 | 25.8 | 60.7 | 43.5 | 40.7 | 43.6 | – |
@@ -122,7 +122,7 @@ thinking cell in the project — see section 5.
 |---|---|---|---:|---:|---:|---:|
 | RAG, standard | qwen3vl_8b | think150 | 145/150 | 22.7 | 18.5 | 0.0 |
 | RAG, thinking | qwen3vl_8b_thinking | think150 | 150/150 | 22.3 | **20.6** | 0.0 |
-| Graph-RAG (zero_shot) | qwen25vl_7b | full | 1298/1511 | generating | | |
+| zero_shot (frames only) | qwen25vl_7b | full | 1298/1511 | generating | | |
 | caption_all | qwen25vl_7b | full | 634/1511 | generating | | |
 | rag_all | qwen25vl_7b | full | 578/1511 | generating | | |
 | wsg_agent | qwen25vl_7b | full | 0/1511 | queued | | |
@@ -161,7 +161,7 @@ WorldBBox rows from `results/mllm_worldbbox_*.json`, `legacy.gt_plus_corrections
 | Qwen2.5-VL-7B | Caption | 1734 | 49.3 | 45.1 | 47.4 | 47.2 | 21.8 |
 | Qwen3-VL-30B-A3B | RAG | 1734 | 55.7 | 45.3 | 35.1 | 44.5 | 28.6 |
 | Qwen3-VL-30B-A3B | Caption | 1734 | **62.1** | **51.2** | 32.8 | 47.8 | **29.2** |
-| Qwen2.5-VL-7B | Graph-RAG (zero_shot) | 1511 | 55.8 | 48.3 | 45.9 | 49.8 | 23.2 |
+| Qwen2.5-VL-7B | zero_shot (frames only) | 1511 | 55.8 | 48.3 | 45.9 | 49.8 | 23.2 |
 | Qwen2.5-VL-7B | rag_all | 1511 | 53.6 | 49.7 | 46.7 | **49.9** | 24.2 |
 | Qwen2.5-VL-7B | caption_all | 1511 | 53.2 | 47.3 | 44.7 | 48.3 | 23.2 |
 | Qwen3-VL-8B | rag_all | 150 | 63.0 | 46.0 | 45.9 | 51.4 | 28.4 |

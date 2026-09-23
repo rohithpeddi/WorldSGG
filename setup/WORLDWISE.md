@@ -1,5 +1,7 @@
 # WorldWise Architecture — MWAE-based World Scene Graph Generation (v2e)
 
+Track: [TRACK1_TRAINING.md](TRACK1_TRAINING.md) · index: [README.md](README.md)
+
 WorldWise is the proposed method: the top tier of the method ladder (see
 [BASELINES.md](BASELINES.md)). It replaces the baselines' passive LKS buffer
 with a fully differentiable **Masked World Auto-Encoder (MWAE)** — occlusion

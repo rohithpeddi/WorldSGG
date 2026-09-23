@@ -1,5 +1,7 @@
 # WorldWise++ — an image-grounded entity decoder with joint detection
 
+Track: [TRACK1_TRAINING.md](TRACK1_TRAINING.md) · index: [README.md](README.md)
+
 WorldWise++ is the architectural step of the lineage. WorldWise and
 WorldWise+ never see an image: they reason over a fixed set of object slots
 whose appearance was pooled by someone else, and object permanence lives in a

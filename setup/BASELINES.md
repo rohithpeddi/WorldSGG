@@ -1,6 +1,8 @@
-# Baseline Architectures — W-STTran / W-STTran++ / W-DSGDetr / W-DSGDetr++
+# Baseline Architectures — W-STTran / W-STTran++ / W-DSGDetr / W-DSGDetr++ / W-USG
 
-The four baselines form a **strict nested capability ladder**: each tier is an
+Track: [TRACK1_TRAINING.md](TRACK1_TRAINING.md) · index: [README.md](README.md)
+
+The four ladder baselines form a **strict nested capability ladder**: each tier is an
 architectural superset of the one below, realised in separate model files (not
 flags), so every performance delta is attributable to exactly one added
 component. All baselines run at the **resnet50** backbone only (the common
@@ -12,6 +14,9 @@ W-STTran++    = + ObjectSpatialEncoder          (camera-frame position)
 W-DSGDetr     = + TemporalObjectEncoder         (per-slot temporal self-attention)
 W-DSGDetr++   = + ObjectMotionEncoder           (world-frame velocity/acceleration)
 WorldWise(v2e)= + ego-motion + MWAE + pair geometry + tuned loss  → see WORLDWISE.md
+
+W-USG         = external method (USG-Par relation stack) on the shared substrate
+                — sits BESIDE the ladder, neither superset nor subset  → §"W-USG"
 ```
 
 **The baselines are frozen** — they are the unchanged controls of the final
@@ -144,7 +149,57 @@ the memory pieces from [lib/supervised/baselines/lks_buffer/](../lib/supervised/
 | **W-DSGDetr** ([w_dsgdetr.py](../lib/supervised/baselines/w_dsgdetr/w_dsgdetr.py)) | `TemporalObjectEncoder` ([object_encoder.py](../lib/supervised/baselines/w_dsgdetr/object_encoder.py)) | Per-slot temporal self-attention over each object's T-frame sequence (learnable temporal PE) — the world-slot analogue of DSGDetr's tracking-based object encoding, applied *before* the inter-object transformer. |
 | **W-DSGDetr++** ([w_dsgdetr_pp.py](../lib/supervised/baselines/w_dsgdetr/w_dsgdetr_pp.py)) | `MotionFeatureEncoder` | World-frame finite-difference velocity (+ camera-relative velocity via Rᵀv) from OBB centers, gated by `valid[t] & valid[t-1]` so slot gaps produce no garbage; fused into tokens via a small MLP. |
 
-## Loss — `LKSLoss` (shared by all four)
+## W-USG — the external baseline beside the ladder
+
+[lib/supervised/baselines/w_usg/w_usg.py](../lib/supervised/baselines/w_usg/w_usg.py) ·
+loss [lib/supervised/baselines/w_usg/loss.py](../lib/supervised/baselines/w_usg/loss.py) ·
+config `configs/methods/{predcls,sgdet}/w_usg_*_resnet50.yaml`
+
+The relation machinery of **USG-Par** (Universal Scene Graph Generation, Wu et
+al., CVPR 2025) transplanted onto the WSGG substrate. It is *not* a rung: it is
+neither a superset nor a subset of any tier, and it exists to show that the
+WorldWise result is not an artefact of comparing against one family of
+temporal-SGG designs.
+
+**Kept from the shared substrate (identical to W-STTran)** so the comparison is
+about the relation stack and nothing else: `vectorized_lks_buffer`,
+`GlobalStructuralEncoder` over world-frame OBB corners, `LKSTokenizer` fusion
+with `d_camera = 0`, `NodePredictor`, and the pair-token forming of
+`RelationshipPredictor` (person ⊕ object ⊕ union-ROI ⊕ CLIP text — USG-Par
+likewise fuses visual queries with text embeddings).
+
+The LKS buffer in particular is kept **because USG-Par cannot run without it
+here**: USG-Par is pixels-only and has no mechanism for emitting predictions on
+unobserved slots, so without the buffer it would score 0 on the occluded-pair
+buckets by construction rather than by performance.
+
+**Replaced, following USG-Par's design:**
+
+| Ladder component | W-USG replacement | USG-Par analogue |
+|---|---|---|
+| `SpatialGNN` (3D positional encoding) | `ObjectContextEncoder` — plain per-frame transformer over object tokens, **no 3D PE** | the shared mask decoder refining object queries (USG-Par's 2D pipeline has no 3D PE) |
+| `TemporalEdgeAttention` | *nothing* — no per-pair temporal attention | USG-Par predicts video relations per-frame after object association; slot identity is given in WSGG, so its object associator collapses to the identity map |
+| — | `USGRelationDecoder` — pair queries self-attend and cross-attend to the frame's object-token memory | relation proposal constructor + relation decoder |
+| — | text-centric alignment logits: cosine similarity between projected object tokens and the frozen CLIP class embeddings | text-centric scene contrastive learning |
+
+**Loss — `WUSGLoss`.** `LKSLoss` unchanged (so relation supervision matches the
+ladder baselines exactly: clean visible-pair labels at full weight, unseen
+buckets at `lambda_vlm = 0.2`) plus one term: a cross-entropy over the alignment
+logits, one per valid object slot, weighted by `lambda_align` (default 0.1).
+Relation-level text contrast is deliberately **not** included — the repo ships
+CLIP embeddings for object classes only, and inventing predicate text embeddings
+would add a data dependency the other baselines do not have.
+
+**Results** (in the tables above): PredCls 67.3 wc R@20 / 33.4 wc mR@20, SGDet
+56.3 / 19.1. It lands inside the baseline band on both modes and is tied with
+W-DSGDetr for the worst PredCls mean recall (33.4). Its one distinguishing
+column is PredCls OU-non-trivial R@20 at **67.5, the best of any baseline** —
+ahead of W-STTran++ (67.0) and well ahead of W-DSGDetr++ (55.3), which wins the
+headline. That is the LKS buffer doing the work, not the USG relation stack, and
+it is a useful reminder that the occluded-bucket R column and the mean-recall
+column disagree across the baselines.
+
+## Loss — `LKSLoss` (shared by the four ladder tiers)
 
 [baselines/lks_buffer/loss.py](../lib/supervised/baselines/lks_buffer/loss.py),
 aliased per method as `WSTTranLoss` / `WDSGDetrLoss`. Bucketed noisy-label

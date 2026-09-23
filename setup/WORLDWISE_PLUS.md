@@ -1,5 +1,7 @@
 # WorldWise+ — WorldWise over frozen foundation-model latents
 
+Track: [TRACK1_TRAINING.md](TRACK1_TRAINING.md) · index: [README.md](README.md)
+
 WorldWise+ is WorldWise ([WORLDWISE.md](WORLDWISE.md)) with **one seam
 re-plumbed**: the appearance input. Instead of the *decoded* output of the
 perception stack (the 1024-d FRCNN `box_head` vector of the monocular-3D
