@@ -127,6 +127,82 @@ thinking cell in the project — see section 5.
 | rag_all | qwen25vl_7b | full | 578/1511 | generating | | |
 | wsg_agent | qwen25vl_7b | full | 0/1511 | queued | | |
 
+### 2d. Backbone breadth study (pragya, legacy protocol) — DIFFERENT TEST SET
+
+> **These tables do not share an axis with anything else in this document.**
+> Different test set (legacy AG test, 1,734 of 1,750 videos, not the 1,511-video
+> WorldBBox split), different annotation basis (annotation-tool GT + corrections,
+> not `world4d_rel_annotations_worldbbox`), and a different metric family
+> (per-predicate-group precision / recall / F1 with micro and macro F1, not R@K
+> or mR@K). Never place a number from here in a table from sections 2a–2c.
+> Generated on pragya in May 2026; source of truth is
+> `WorldSceneGraphAnnotationTool/assets/tex_files/tables/*_detailed.tex`.
+> "Caption" is the `subtitle_all` method; "RAG" is `rag_all`.
+
+This is the breadth axis the rest of the document lacks: the same two unlocalized
+methods across six MLLM backbones, rather than one backbone in depth.
+
+#### PredCls — all annotations (GT + corrections)
+
+| Model | Method | Att P | Att R | Att F1 | Con P | Con R | Con F1 | Spa P | Spa R | Spa F1 | μF1 | MF1 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| InternVL2.5 | RAG | 41.8 | 41.8 | 41.8 | 35.6 | 33.8 | 34.7 | 26.3 | 21.0 | 23.4 | **32.9** | **18.8** |
+| InternVL2.5 | Caption | 38.9 | 38.9 | 38.9 | 35.4 | 31.3 | 33.2 | 19.3 | 15.2 | 17.0 | 29.3 | 17.7 |
+| KeyeVL | RAG | 40.5 | 36.3 | 38.3 | 39.0 | 31.1 | 34.6 | 57.9 | 42.8 | 49.2 | **41.0** | **24.4** |
+| KeyeVL | Caption | 43.7 | 18.5 | 26.0 | 37.6 | 15.0 | 21.5 | 55.8 | 19.5 | 28.9 | 25.5 | 16.9 |
+| MiniCPM-V4.5 | RAG | 42.9 | 41.2 | 42.0 | 35.3 | 49.0 | 41.0 | 37.2 | 28.9 | 32.6 | **38.6** | **24.5** |
+| MiniCPM-V4.5 | Caption | 41.1 | 40.0 | 40.6 | 35.7 | 48.4 | 41.1 | 36.9 | 28.7 | 32.3 | 38.1 | 24.4 |
+| Ovis2.5 | RAG | 44.0 | 43.9 | 43.9 | 47.4 | 45.4 | 46.3 | 63.2 | 50.3 | 56.0 | **48.9** | 27.9 |
+| Ovis2.5 | Caption | 43.4 | 43.4 | 43.4 | 47.5 | 45.2 | 46.4 | 63.0 | 50.0 | 55.8 | 48.7 | **28.3** |
+| Qwen2.5-VL | RAG | 52.8 | 52.8 | 52.8 | 51.4 | 44.6 | 47.8 | 55.5 | 43.8 | 49.0 | **49.8** | **23.3** |
+| Qwen2.5-VL | Caption | 49.4 | 49.1 | 49.3 | 48.3 | 42.3 | 45.1 | 53.7 | 42.4 | 47.4 | 47.2 | 21.8 |
+| Qwen3-VL | RAG | 55.8 | 55.6 | 55.7 | 43.0 | 47.8 | 45.3 | 34.0 | 36.4 | 35.1 | 44.5 | 28.6 |
+| Qwen3-VL | Caption | 62.2 | 62.0 | 62.1 | 49.9 | 52.6 | 51.2 | 33.9 | 31.8 | 32.8 | **47.8** | **29.2** |
+
+#### SGDet — all annotations (GT + corrections)
+
+| Model | Method | Att P | Att R | Att F1 | Con P | Con R | Con F1 | Spa P | Spa R | Spa F1 | μF1 | MF1 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| InternVL2.5 | RAG | 38.5 | 23.2 | 29.0 | 39.0 | 24.6 | 30.2 | 21.1 | 10.6 | 14.1 | **24.2** | **11.0** |
+| InternVL2.5 | Caption | 39.9 | 23.5 | 29.6 | 39.2 | 22.4 | 28.5 | 21.5 | 10.5 | 14.1 | 23.8 | 9.8 |
+| KeyeVL | RAG | 54.5 | 32.4 | 40.6 | 45.3 | 27.2 | 34.0 | 51.0 | 29.3 | 37.2 | **37.2** | **18.1** |
+| KeyeVL | Caption | 41.5 | 13.5 | 20.4 | 26.3 | 10.2 | 14.7 | 46.9 | 14.9 | 22.7 | 19.2 | 9.9 |
+| MiniCPM-V4.5 | RAG | 42.4 | 27.1 | 33.1 | 26.6 | 29.0 | 27.8 | 39.8 | 22.5 | 28.8 | **29.6** | **16.4** |
+| MiniCPM-V4.5 | Caption | 40.6 | 25.6 | 31.4 | 24.6 | 25.9 | 25.3 | 36.8 | 20.6 | 26.4 | 27.4 | 15.4 |
+| Ovis2.5 | RAG | 48.1 | 24.3 | 32.3 | 58.4 | 27.4 | 37.3 | 57.2 | 24.0 | 33.8 | 34.5 | 13.5 |
+| Ovis2.5 | Caption | 47.8 | 25.5 | 33.2 | 61.3 | 30.1 | 40.3 | 54.0 | 23.9 | 33.1 | **35.6** | **13.9** |
+| Qwen2.5-VL | RAG | 42.3 | 30.6 | 35.5 | 63.4 | 41.7 | 50.3 | 59.3 | 35.7 | 44.6 | **43.7** | 19.9 |
+| Qwen2.5-VL | Caption | 41.0 | 29.3 | 34.2 | 53.7 | 35.0 | 42.4 | 67.4 | 40.3 | 50.4 | 42.7 | **20.5** |
+
+#### What the breadth study adds
+
+1. **Retrieval beats captioning, but the margin is small and model-dependent.**
+   RAG wins μF1 for five of six backbones in predcls and four of five in sgdet,
+   yet the typical margin is 0.5 to 3.6 points. This is consistent with the
+   WorldBBox finding in section 2a that retrieval buys little: it is a real but
+   minor effect, not a mechanism.
+2. **The one large gain is a captioning failure, not a retrieval success.**
+   KeyeVL gains 15.5 μF1 in predcls and 18.0 in sgdet, entirely because its
+   captioning path collapses on recall (18.5 / 15.0 / 19.5 against precision in the
+   37–56 band). Quote this as a robustness result for RAG, not as evidence that
+   retrieval carries information.
+3. **Two backbones invert the ordering**, and both are worth a sentence.
+   Qwen3-VL prefers captioning in predcls (47.8 against 44.5 μF1) and Ovis2.5
+   prefers it in sgdet (35.6 against 34.5). No method dominates across backbones.
+4. **Spatial predicates separate the backbones far more than attention does.**
+   Spatial F1 spans 23.4 to 56.0 under RAG in predcls while attention spans only
+   38.3 to 55.7. Whatever the unlocalized setting is measuring, it is mostly
+   spatial competence — which is exactly what the localized track in section 3
+   attacks, and exactly where it collapses at IoU 0.15.
+5. **Rank order is not preserved between modes.** Ovis2.5 leads predcls μF1 among
+   the non-Qwen backbones at 48.9 but falls to 34.5 in sgdet, while Qwen2.5-VL
+   leads both. Single-mode backbone claims will not survive review.
+
+**Incomplete cells not tabulated:** Qwen3-VL-30B-A3B has predcls only (1,542
+videos, no sgdet), and LLaVA-OneVision-7B never finished (19 predcls / 147 sgdet).
+A `corrections only` variant of both tables also exists in the same directory and
+tells the same story with uniformly lower absolute numbers.
+
 ---
 
 ## 3. Localized MLLM track
@@ -219,6 +295,12 @@ the oracle.
 6. **Video counts differ by row** — check the videos column. The thinking cells are
    150 videos because thinking costs 255 s per video for Track A and 715 s for RAG,
    against 30 s for standard decode.
+
+7. **Section 2d is a different experiment entirely.** It uses the legacy AG test
+   set (1,734 videos), annotation-tool GT + corrections, and per-predicate-group
+   P/R/F1 with micro and macro F1. It shares no test set, no annotation basis and
+   no metric with sections 0-2c and 3-4. It answers a question none of them do,
+   namely whether the unlocalized result holds across backbones.
 
 ---
 
