@@ -35,9 +35,6 @@ run — `frames[f]["objects"]` is post-repair (+critic) and
 adapter. Keeping the tracks distinct by *what the model may call*, not by what
 it sees, is the design rule from [docs/ICLR_PLAN.md](../docs/ICLR_PLAN.md) WS2.
 
-`wsg_agent` is **not** in this track. It has "agent" in the name but emits no
-boxes, so it is scored in [TRACK2_UNLOCALIZED.md](TRACK2_UNLOCALIZED.md).
-
 ### Shared tool cache layer
 
 Both methods build their payload from the same annotation-independent caches

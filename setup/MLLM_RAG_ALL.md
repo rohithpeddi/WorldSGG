@@ -163,15 +163,15 @@ Identical to [`zero_shot`](MLLM_ZERO_SHOT.md) §3 and
 
 ([ICLR_THREE_TRACKS](../analysis/ICLR_THREE_TRACKS.md) §2a)
 
-| metric | `rag_all` | `zero_shot` | `caption_all` | `wsg_agent` (n=1458) |
-|---|---:|---:|---:|---:|
-| wc R@20 | **46.9** | **46.9** | 45.3 | 46.3 |
-| wc mR@20 | 26.0 | 25.1 | **26.1** | 25.8 |
-| nc R@50 | **61.1** | 60.9 | 59.9 | 60.7 |
-| nc mR@50 | **43.8** | 43.1 | 43.6 | 43.5 |
-| OO nc mR@50 | **40.8** | 40.3 | 40.6 | 40.7 |
-| OU-nt nc mR@50 | **44.6** | 42.8 | 44.1 | 43.6 |
-| legacy uF1 | **49.9** | not scored | 48.2 | not scored |
+| metric | `rag_all` | `zero_shot` | `caption_all` |
+|---|---:|---:|---:|
+| wc R@20 | **46.9** | **46.9** | 45.3 |
+| wc mR@20 | 26.0 | 25.1 | **26.1** |
+| nc R@50 | **61.1** | 60.9 | 59.9 |
+| nc mR@50 | **43.8** | 43.1 | 43.6 |
+| OO nc mR@50 | **40.8** | 40.3 | 40.6 |
+| OU-nt nc mR@50 | **44.6** | 42.8 | 44.1 |
+| legacy uF1 | **49.9** | not scored | 48.2 |
 
 `rag_all` takes five of the seven columns. It is the best method in the
 unlocalized track — by margins between 0.1 and 1.8 points.
@@ -276,8 +276,7 @@ Graphs are registered in the cache manifest by
 1. **`scenes` is double-counted in the node-content embedding.**
    `Vgent.precompute_graph_embeddings` concatenates `data.get("scenes", [])`
    twice when building the text a node is embedded from, double-weighting scene
-   terms in retrieval ranking. This affects `rag_all` and the `RAG` branch of
-   [`wsg_agent`](MLLM_WSG_AGENT.md). Harmless to correctness, but it means the
+   terms in retrieval ranking. Harmless to correctness, but it means the
    retrieval ranking reported here is not the ranking a clean implementation
    would produce.
 2. **Only the top-1 node reaches the prompt**, and only its `entities`,

@@ -27,7 +27,6 @@ the same per-object relationship prompt.
 zero_shot     frames only                                  (no context)
 caption_all   + per-clip video captions                    (text context)
 rag_all       + retrieved scene-graph nodes per query       (Graph-RAG)
-wsg_agent     + per-object strategy routing over rag_all
 ```
 
 | Method key | Document | What it adds | Runner |
@@ -35,16 +34,15 @@ wsg_agent     + per-object strategy routing over rag_all
 | `zero_shot` | [MLLM_ZERO_SHOT.md](MLLM_ZERO_SHOT.md) | nothing — frames + prompt | [lib/mllm/methods/zero_shot/runner.py](../lib/mllm/methods/zero_shot/runner.py) |
 | `caption_all` | [MLLM_CAPTION_ALL.md](MLLM_CAPTION_ALL.md) | Stage-1 clip captions in the prompt prefix | [lib/mllm/methods/caption_all/runner.py](../lib/mllm/methods/caption_all/runner.py) |
 | `rag_all` | [MLLM_RAG_ALL.md](MLLM_RAG_ALL.md) | Graph-RAG: embedding retrieval over the Stage-1 video graph | [lib/mllm/methods/rag_all/runner.py](../lib/mllm/methods/rag_all/runner.py) |
-| `wsg_agent` | [MLLM_WSG_AGENT.md](MLLM_WSG_AGENT.md) | a one-call strategy router in front of `rag_all` | [lib/mllm/methods/wsg_agent/runner.py](../lib/mllm/methods/wsg_agent/runner.py) |
 
 Shared prerequisite: the **Stage-1 graph/caption build**
 ([lib/mllm/methods/graphs/runner.py](../lib/mllm/methods/graphs/runner.py)),
 which segments a video into clips and asks the VLM for a per-clip caption plus a
-JSON `{entities, actions, scenes}` graph. `caption_all`, `rag_all` and
-`wsg_agent` all read its per-video pickle; `zero_shot` does not. It is
-documented in [MLLM_RAG_ALL.md](MLLM_RAG_ALL.md) §2.
+JSON `{entities, actions, scenes}` graph. `caption_all` and `rag_all` read its
+per-video pickle; `zero_shot` does not. It is documented in
+[MLLM_RAG_ALL.md](MLLM_RAG_ALL.md) §2.
 
-All four share one base class,
+All three share one base class,
 [lib/mllm/base_processor.py](../lib/mllm/base_processor.py), which owns the
 frame/clip loading, the SGDet object-estimation step, the response parser and
 the Yes/No verification pass that turns categorical generations into the scored
@@ -103,7 +101,6 @@ only under `unloc`.
 | `zero_shot` | **46.9** | 25.1 | 60.9 | 43.1 | 40.3 | 42.8 | – |
 | `caption_all` | 45.3 | **26.1** | 59.9 | 43.6 | 40.6 | 44.1 | 48.2 |
 | `rag_all` | 46.9 | 26.0 | **61.1** | **43.8** | **40.8** | **44.6** | **49.9** |
-| `wsg_agent` (n = 1458) | 46.3 | 25.8 | 60.7 | 43.5 | 40.7 | 43.6 | – |
 
 ### 3b. PredCls — thinking cells, 150-video subset, Qwen3-VL-8B
 
@@ -121,9 +118,8 @@ only under `unloc`.
 | `zero_shot` | qwen25vl_7b | full | 1298/1511 | **not scored — generating** | | |
 | `caption_all` | qwen25vl_7b | full | 634/1511 | **not scored — generating** | | |
 | `rag_all` | qwen25vl_7b | full | 578/1511 | **not scored — generating** | | |
-| `wsg_agent` | qwen25vl_7b | full | 0/1511 | **not scored — queued** | | |
 
-The four full-split unlocalized SGDet cells were still generating when
+The three full-split unlocalized SGDet cells were still generating when
 [analysis/ICLR_THREE_TRACKS.md](../analysis/ICLR_THREE_TRACKS.md) was written
 (2026-09-22). Those cells have **no number**; write "not run" rather than
 interpolating from the 150-video rows.
@@ -232,8 +228,6 @@ video counts as approximate.
 8. **Backbone scale is not the story.** Qwen3-VL-30B-A3B, the largest model
    here, wins attention F1 by a wide margin (62.1) yet lands mid-table on μF1
    (47.8) because its spatial F1 is among the worst (32.8).
-9. **`wsg_agent` is redundant with Track B** and is the cell to cut if space is
-   short. It lands inside the 1.6-point band with a strictly larger call budget.
 
 ---
 
@@ -253,18 +247,15 @@ video counts as approximate.
    because it prompts per object** — each answer is a three-field JSON object,
    not an array. This is why §3b is the only valid thinking cell in the
    project: it is a prompt-format result, not a model result.
-3. **`wsg_agent` PredCls is n = 1458, not 1,511.** Report the count. The 53
-   missing videos trace to an unguarded tensor concatenation in the TEMPORAL
-   branch — [MLLM_WSG_AGENT.md](MLLM_WSG_AGENT.md) §6.
-4. **Video counts differ by row.** Always print the videos column. Thinking
+3. **Video counts differ by row.** Always print the videos column. Thinking
    cells are 150 videos because thinking costs 255 s per video for Track A and
    715 s for RAG, against 30 s for standard decode.
-5. **The metric-family split.** §3d is per-predicate-group P/R/F1 with micro
+4. **The metric-family split.** §3d is per-predicate-group P/R/F1 with micro
    and macro F1; §3a–3c are R@K and mR@K. They share the test videos and the
    annotation basis but **not the metric**. The bridge is the `legacy uF1`
    column in §3a, which is the same micro-F1. Never merge a μF1 column and an
    R@K column into one table.
-6. **Completion must be measured by PKL count against the split, never by exit
+5. **Completion must be measured by PKL count against the split, never by exit
    code.** `ActionGenomeBaseProcessor.run()` wraps each video in try/except and
    continues, so a run can exit `rc = 0` having written fewer PKLs than
    requested. This has recurred across methods.
@@ -275,9 +266,7 @@ video counts as approximate.
 
 | gap | cost |
 |---|---|
-| Four unlocalized SGDet baselines at full split | ~7 h GPU, scored automatically |
-| `wsg_agent` SGDet (last queued generation job) | ~9 h GPU |
+| Three unlocalized SGDet baselines at full split | ~7 h GPU, scored automatically |
 | RAG, standard decode, Qwen3-VL-8B, full split — makes the track-2 vs track-3 comparison backbone-matched at 1,511 instead of 150 | ~12 h GPU |
-| `wsg_agent` PredCls last 53 videos, or report n = 1458 | ~30 min |
 | Thinking at full split | ~300 h GPU — not worth it before the deadline |
 | Re-score the pragya backbone cells on the 1,511-video list so §3d is exact at the per-group level | CPU only, PBS job on pragya |

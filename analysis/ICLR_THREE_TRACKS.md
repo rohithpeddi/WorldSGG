@@ -100,11 +100,9 @@ the task at all.
 | zero_shot (frames only) | **46.9** | 25.1 | 60.9 | 43.1 | 40.3 | 42.8 | – |
 | caption_all | 45.3 | **26.1** | 59.9 | 43.6 | 40.6 | 44.1 | 48.2 |
 | rag_all | 46.9 | 26.0 | **61.1** | **43.8** | **40.8** | **44.6** | **49.9** |
-| wsg_agent (n=1458) | 46.3 | 25.8 | 60.7 | 43.5 | 40.7 | 43.6 | – |
 
-**All four agree within 1.6 points of R@20.** Neither captioning nor Graph-RAG
-retrieval buys anything over a plain per-object prompt. The `wsg_agent` row is
-redundant with Track B and is the cell to cut if space is short.
+**All three agree within 1.6 points of R@20.** Neither captioning nor Graph-RAG
+retrieval buys anything over a plain frames-only per-object prompt.
 
 ### 2b. PredCls — thinking cells, 150-video subset (Qwen3-VL-8B)
 
@@ -125,7 +123,6 @@ thinking cell in the project — see section 5.
 | zero_shot (frames only) | qwen25vl_7b | full | 1298/1511 | generating | | |
 | caption_all | qwen25vl_7b | full | 634/1511 | generating | | |
 | rag_all | qwen25vl_7b | full | 578/1511 | generating | | |
-| wsg_agent | qwen25vl_7b | full | 0/1511 | queued | | |
 
 ### 2d. Legacy-protocol table — backbone breadth, combined
 
@@ -324,13 +321,11 @@ the oracle.
 4. **About 37 % of annotation objects have no feature slot** (never detected by
    GDino) in the old and the new annotation sets alike, so they are never evaluated
    by any row here. The paper should state this.
-5. **`wsg_agent` predcls is n=1458, not 1,511.** Report the n or recover the 53
-   missing videos.
-6. **Video counts differ by row** — check the videos column. The thinking cells are
+5. **Video counts differ by row** — check the videos column. The thinking cells are
    150 videos because thinking costs 255 s per video for Track A and 715 s for RAG,
    against 30 s for standard decode.
 
-7. **Section 2d shares the test split but not the metric.** Its rows sit on the
+6. **Section 2d shares the test split but not the metric.** Its rows sit on the
    same Action Genome test videos and the same GT + corrections annotation basis,
    and the 1,511-video WorldBBox set is a strict subset of the 1,734 evaluated on
    pragya, so its rows combine with each other. What it does not share with
@@ -347,10 +342,8 @@ the oracle.
 
 | # | gap | track | cost |
 |---|---|---|---|
-| 1 | Four unlocalized sgdet baselines, generating now | 2 | ~7 h GPU, then scored automatically |
-| 2 | `wsg_agent` sgdet, last queued generation job | 2 | ~9 h GPU |
-| 3 | RAG, standard decode, Qwen3-VL-8B, full split — makes the track-2 versus track-3 comparison backbone-matched at 1,511 instead of 150 | 2 | **~12 h GPU, the cheapest high-value run left** |
-| 4 | Oracle router over Track B and RAG slot predictions | 2 + 3 | **no GPU** |
-| 5 | `wsg_agent` predcls last 53 videos, or report n=1458 | 2 | ~30 min |
-| 6 | Thinking at full split | 2 | ~300 h GPU, not worth it before the deadline |
-| 7 | Re-score the pragya backbone cells on the 1,511-video list so section 2d is exact rather than approximate at the per-group level | 2 | CPU only, PBS job on pragya |
+| 1 | Three unlocalized sgdet baselines, generating now | 2 | ~7 h GPU, then scored automatically |
+| 2 | RAG, standard decode, Qwen3-VL-8B, full split — makes the track-2 versus track-3 comparison backbone-matched at 1,511 instead of 150 | 2 | **~12 h GPU, the cheapest high-value run left** |
+| 3 | Oracle router over Track B and RAG slot predictions | 2 + 3 | **no GPU** |
+| 4 | Thinking at full split | 2 | ~300 h GPU, not worth it before the deadline |
+| 5 | Re-score the pragya backbone cells on the 1,511-video list so section 2d is exact rather than approximate at the per-group level | 2 | CPU only, PBS job on pragya |

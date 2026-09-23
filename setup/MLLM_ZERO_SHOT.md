@@ -47,8 +47,8 @@ buckets at all — a method that only answered about visible objects would score
 `[target_frame] ++ annotated_context`, and the prompt says so: "The first frame
 is the specific moment to analyze. The remaining frames provide surrounding
 context." That convention is load-bearing and is shared verbatim by
-`caption_all`, `rag_all` and `wsg_agent`, so the four rungs differ only in the
-text prefix, never in the visual construction.
+`caption_all` and `rag_all`, so the three rungs differ only in the text prefix,
+never in the visual construction.
 
 The three predicate heads are asked in one call with different cardinalities —
 attention exactly one, contacting one-or-more, spatial one-or-more — matching the

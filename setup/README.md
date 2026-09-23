@@ -48,11 +48,9 @@ A nested ladder; each rung adds one context source to the same per-object prompt
 | `zero_shot` | [MLLM_ZERO_SHOT.md](MLLM_ZERO_SHOT.md) | nothing — frames + prompt |
 | `caption_all` | [MLLM_CAPTION_ALL.md](MLLM_CAPTION_ALL.md) | Stage-1 clip captions |
 | `rag_all` | [MLLM_RAG_ALL.md](MLLM_RAG_ALL.md) | **Graph-RAG** retrieval over the Stage-1 video graph |
-| `wsg_agent` | [MLLM_WSG_AGENT.md](MLLM_WSG_AGENT.md) | a per-object strategy router over `rag_all` |
 
 The shared Stage-1 graph/caption build is documented in
-[MLLM_RAG_ALL.md](MLLM_RAG_ALL.md) §2. Full `wsg_agent` architecture:
-[docs/WSG_AGENT.md](../docs/WSG_AGENT.md).
+[MLLM_RAG_ALL.md](MLLM_RAG_ALL.md) §2.
 
 ## Track 3 — localized MLLM
 
@@ -79,10 +77,9 @@ The shared Stage-1 graph/caption build is documented in
 3. **Metric-family split.** The backbone-breadth tables are per-predicate-group
    P/R/F1 with micro/macro F1; everything else is R@K / mR@K. They share the
    test videos, not the metric. The bridge is the `legacy uF1` column.
-4. **Incomplete cells are incomplete.** `wsg_agent` PredCls is n = 1458 of
-   1,511; the four unlocalized full-split SGDet cells and `wsg_agent` SGDet were
-   still generating or queued as of 2026-09-22. Write "not run" / "not scored",
-   never a plausible number.
+4. **Incomplete cells are incomplete.** The three unlocalized full-split SGDet
+   cells were still generating as of 2026-09-22. Write "not run" / "not
+   scored", never a plausible number.
 
 Two further ones that apply to every row: **~37 % of annotation objects have no
 feature slot** (never detected by GDino) and are therefore never evaluated by
