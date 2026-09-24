@@ -40,9 +40,8 @@ The headline MLLM-localization result: relations survive class-only matching
 | Stage-1 graph fill (1,069 videos) + register | — | done |
 | Track A | predcls | done, repaired, scored |
 | Track A | sgdet | done, repaired, scored |
-| wsg_agent | predcls | re-running after an OOM (see below) |
 | Track B | predcls / sgdet | running, ETA Sep 21 ~02:00 / ~15:00 |
-| zero_shot, caption_all, rag_all, wsg_agent | sgdet | queued |
+| zero_shot, caption_all, rag_all | sgdet | queued |
 | Track A + B, Thinking-150 | both | queued last |
 
 ## Two defects found while scoring
@@ -57,7 +56,7 @@ The headline MLLM-localization result: relations survive class-only matching
    wc R@20. sgdet: 8,389 -> 48,785 frames with predictions, 36,295 -> 344,216
    object predictions. Any run generated before `92e1441` must go through the
    repair tool before scoring.
-2. **Silent engine death** (fixed, `c1195d8`). `wsg_agent predcls` OOMed at
+2. **Silent engine death** (fixed, `c1195d8`). One unlocalized predcls run OOMed at
    `gpu_memory_utilization: 0.90`; the vendored runner swallowed one
    `EngineDeadError` per remaining video and exited 0, so the queue recorded
    "done" with 77/1,511 videos written. The budget is now 0.85 and the queue

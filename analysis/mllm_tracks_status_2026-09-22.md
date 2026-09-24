@@ -10,7 +10,6 @@ protocol: lib/mllm/eval/README.md (stock WorldSGG evaluator for predcls, 3D-IoU 
 | method | model | videos | wc R@20 | wc mR@20 | nc R@50 | nc mR@50 | OO nc mR@50 | OU nc mR@50 | OU-nt nc mR@50 | legacy uF1 | legacy corr-only uF1 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | rag_all | qwen3vl_8b_thinking_think150 | 150/1511 |  50.4 |  30.3 |  63.8 |  49.9 |  47.7 |  55.5 |  53.8 |   -   |   -   |
-| wsg_agent | qwen25vl_7b | 1458/1511 |  46.3 |  25.8 |  60.7 |  43.5 |  40.7 |  46.3 |  43.6 |   -   |   -   |
 | track_b | qwen3vl_8b | 1511/1511 |  52.4 |  31.7 |  63.4 |  48.4 |  47.6 |  45.2 |  40.8 |   -   |   -   |
 | track_b(-critic) | qwen3vl_8b | 1511/1511 |  52.1 |  31.1 |  63.2 |  47.9 |  47.3 |  44.5 |  40.0 |   -   |   -   |
 | track_b | qwen3vl_8b_thinking_think150 | 150/1511 |  27.2 |  16.4 |  43.2 |  38.2 |  37.8 |  39.6 |  38.2 |   -   |   -   |
@@ -34,7 +33,6 @@ protocol: lib/mllm/eval/README.md (stock WorldSGG evaluator for predcls, 3D-IoU 
 | method | model | videos | wc R@20 | wc mR@20 | nc R@50 | nc mR@50 | OO nc mR@50 | OU nc mR@50 | OU-nt nc mR@50 | legacy uF1 | legacy corr-only uF1 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | rag_all | qwen3vl_8b_thinking_think150 | 150/442 |  50.4 |  30.3 |  63.8 |  49.9 |  47.7 |  55.5 |  53.8 |   -   |   -   |
-| wsg_agent | qwen25vl_7b | 442/442 |  46.1 |  24.9 |  59.5 |  42.3 |  38.4 |  48.5 |  45.7 |   -   |   -   |
 | track_b | qwen3vl_8b | 442/442 |  51.9 |  30.4 |  62.1 |  47.8 |  45.8 |  47.1 |  42.8 |   -   |   -   |
 | track_b(-critic) | qwen3vl_8b | 442/442 |  51.6 |  29.6 |  61.9 |  47.1 |  45.2 |  46.3 |  41.8 |   -   |   -   |
 | track_b | qwen3vl_8b_thinking_think150 | 150/442 |  27.2 |  16.4 |  43.2 |  38.2 |  37.8 |  39.6 |  38.2 |   -   |   -   |

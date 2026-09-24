@@ -69,7 +69,6 @@ Full table: `analysis/mllm_tracks_status_2026-09-22.md`.
 | 29 | zero_shot (Graph-RAG, unlocalized) | qwen25vl_7b | full | 1511/1511 | 46.9 | 25.1 | 43.1 | 42.8 |
 | 30 | caption_all | qwen25vl_7b | full | 1511/1511 | 45.3 | 26.1 | 43.6 | 44.1 |
 | 31 | rag_all | qwen25vl_7b | full | 1511/1511 | 46.9 | 26.0 | 43.8 | 44.6 |
-| 32 | wsg_agent | qwen25vl_7b | full | 1458/1511 | 46.3 | 25.8 | 43.5 | 43.6 |
 | 33 | Track A (marked frames + BEV) | qwen3vl_8b | full | 1511/1511 | 51.7 | 30.5 | 47.2 | 40.0 |
 | 34 | Track A, subset score | qwen3vl_8b | think150 | 150/150 | 51.4 | 29.9 | 46.7 | 42.7 |
 | 35 | **Track B (tool loop + geometric critic)** | qwen3vl_8b | full | 1511/1511 | **52.4** | **31.7** | 48.4 | 40.8 |
@@ -95,7 +94,6 @@ Full table: `analysis/mllm_tracks_status_2026-09-22.md`.
 | 50 | zero_shot | qwen25vl_7b | full | 477/1511 | **RUNNING** GPU 0 | – | – | – | – | – |
 | 51 | rag_all | qwen25vl_7b | full | generating | **RUNNING** GPU 1 | – | – | – | – | – |
 | 52 | caption_all | qwen25vl_7b | full | generating | **RUNNING** GPU 2 | – | – | – | – | – |
-| 53 | wsg_agent | qwen25vl_7b | full | 0/1511 | QUEUED | – | – | – | – | – |
 
 ### The matched comparison (same 150 videos, same Qwen3-VL-8B backbone, predcls)
 
@@ -142,10 +140,8 @@ Qwen3-VL-8B, 1,511 videos). Making the thinking arm full-scale costs ~300.
    a point of localized Track A. Every array-style prompt collapses instead — Track A 30.5,
    Track B 27.2 in predcls, and 0.6 / 0.3 in sgdet — because the reasoning trace exhausts the
    shared token budget before the answer. This is a prompt-format result, not a model result.
-4. **wsg_agent is redundant.** 46.3 / 25.8 puts it inside the 45.3–46.9 band of the other three
-   unlocalized baselines. Track B supersedes it; cut it if space is short.
-5. **All four unlocalized baselines agree within 1.6 pt of R@20**, so neither captioning nor
-   Graph-RAG retrieval buys anything over a plain per-object prompt. Localization does.
+4. **All three unlocalized baselines agree within 1.6 pt of R@20**, so neither captioning nor
+   Graph-RAG retrieval buys anything over a plain frames-only per-object prompt. Localization does.
 
 ---
 
@@ -167,10 +163,8 @@ Qwen3-VL-8B, 1,511 videos). Making the thinking arm full-scale costs ~300.
 | # | work | where | estimate |
 |---|---|---|---|
 | 1 | zero_shot / rag_all / caption_all sgdet — generating now | UTD GPUs 0–2 | ~7 h (to ~22:00 today) |
-| 2 | wsg_agent sgdet — last queued generation job | UTD | ~9 h after a GPU frees |
-| 3 | Score rows 50–53 once they finish | UTD CPU, 4 workers | ~10 min per row |
-| 4 | wsg_agent predcls is 1458/1511 — recover the last 53 videos, or report n=1458 | UTD | ~30 min |
-| 5 | Decide how to present the collapsed thinking cells (rows 39–41, 48–49) | – | re-run per-object, or report as a prompt-format negative |
+| 2 | Score rows 50–52 once they finish | UTD CPU, 4 workers | ~10 min per row |
+| 3 | Decide how to present the collapsed thinking cells (rows 39–41, 48–49) | – | re-run per-object, or report as a prompt-format negative |
 
 Pragya carries a prepared but unsubmitted CPU scoring job
 (`scripts/remote/pbs/score_mllm_cpu.pbs`, project `neuro.symbolic.utd.colab.spons`).

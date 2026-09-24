@@ -8,7 +8,7 @@ Vendored from **`WorldSceneGraphAnnotationTool@c686be1`** (`backend/pseudo` and
 | `core/` | `pseudo/core/{ag_data,config_loader,logger_utils,prompts,retrieval,vgent}.py` | package-relative imports; `config_loader` defaults to `configs/mllm/server.yaml` (`$WSGG_MLLM_CONFIG` / `--config` override); `ag_data` no longer `mkdir`s under `/data` |
 | `models/` | `pseudo/models/*.py` | unchanged (already relative imports) |
 | `base_processor.py` | `pseudo/process_ag_base.py` | imports; `run(video_list=…)` filter |
-| `methods/{zero_shot,caption_all,rag_all,wsg_agent}/runner.py` | `pseudo/process_ag_{zero_shot,caption_all,rag_all,wsg_agent}.py` | imports; `--video_list` |
+| `methods/{zero_shot,caption_all,rag_all}/runner.py` | `pseudo/process_ag_{zero_shot,caption_all,rag_all}.py` | imports; `--video_list` |
 | `methods/graphs/runner.py` | `pseudo/process_ag_graphs.py` | imports; `--video_list`; sorted order |
 | `eval/legacy/` | `evaluation/{evaluate_relationships,load_method_outputs,label_constants}.py` | imports; log file no longer written into the repo |
 | `video_splits.json`, `LICENSE`, `requirements.vendored.txt` | `pseudo/` | copied |
