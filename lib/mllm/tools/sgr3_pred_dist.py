@@ -25,9 +25,10 @@ def dist(run_dir):
             for p in fr["predictions"]:
                 n += 1
                 for c in cnt:
-                    for lab, s in (p.get(c) or {}).items():
-                        if s and s > 0:
-                            cnt[c][lab] += 1
+                    v = p.get(c) or []
+                    for e in ([v] if isinstance(v, dict) else v):
+                        if isinstance(e, dict) and e.get("label"):
+                            cnt[c][e["label"]] += 1
     out = {"run": os.path.basename(run_dir.rstrip("/")), "pairs": n}
     for c, ct in cnt.items():
         tot = sum(ct.values())
