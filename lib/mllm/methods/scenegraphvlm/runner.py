@@ -278,7 +278,10 @@ def cmd_infer(args):
            # ms-swift 4.5 matches both qwen3_5 and qwen3_8 templates; the checkpoint is qwen3_5
            "--template-type", "qwen3_5"]
     env = dict(os.environ)
-    env.setdefault("IMAGE_MAX_TOKEN_NUM", "1024")
+    env.setdefault("IMAGE_MAX_TOKEN_NUM", "1024")       # authors' setting (640x480 needs ~300 tokens anyway)
+    # CS93371's system nvcc (12.4) cannot JIT-build FlashInfer 0.6 sampling kernels; decoding is
+    # greedy, so vLLM's PyTorch sampler gives identical tokens
+    env.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
     logger.info("running: " + " ".join(cmd))
     t0 = time.time()
     rc = subprocess.call(cmd, env=env)
