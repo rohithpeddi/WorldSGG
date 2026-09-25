@@ -25,6 +25,7 @@ files ``{sampled_idx[k]:06d}.png`` listed in ``refined_stems``.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -33,8 +34,26 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
-BUNDLE_DIR = REPO / "outputs" / "scene_pipeline" / "00T1E"
-PANEL_DIR = REPO / "outputs" / "scene_pipeline" / "panels"
+# The video is chosen with the SCENE_VIDEO environment variable (default 00T1E, the first figure).
+VIDEO = os.environ.get("SCENE_VIDEO", "00T1E")
+_arch = REPO / "assets" / "figures" / "architecture" / "scene_pipeline"
+if (_arch / VIDEO).exists():
+    BUNDLE_DIR = _arch / VIDEO
+    PANEL_DIR = _arch / ("panels" if VIDEO == "00T1E" else f"panels_{VIDEO}")
+else:
+    BUNDLE_DIR = REPO / "outputs" / "scene_pipeline" / VIDEO
+    PANEL_DIR = REPO / "outputs" / "scene_pipeline" / ("panels" if VIDEO == "00T1E" else f"panels_{VIDEO}")
+
+# Per-video frame choices (raw-frame indices for 2-D panels, annotated stems for box panels).
+# Anything missing falls back to a spread over the video in scene_common.cfg().
+_VIDEO_CFG = {
+    "00T1E": dict(sift=(1, 5), homog=(1, 98, 5), thumbs=(1, 86, 187, 243, 271, 318), ticks=(1, 100, 200, 318),
+                  dyn_frames=(38, 137, 243), time_frames=("000010.png", "000163.png", "000240.png"),
+                  obb_frame="000010.png", obb_label="laptop", pf_frame="000010.png"),
+    "0DJ6R": dict(sift=(1, 5), homog=(1, 75, 5), thumbs=(1, 124, 312, 410, 531, 993), ticks=(1, 250, 500, 750, 1011),
+                  dyn_frames=(124, 385, 441), time_frames=("000210.png", "000413.png", "000742.png"),
+                  obb_frame="000413.png", obb_label="phone", pf_frame="000413.png"),
+}
 PANEL_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---- style ------------------------------------------------------------------
@@ -53,7 +72,13 @@ COL = {
     "text":     "#1f2933",
     "muted":    "#6b7280",
 }
-LABEL_COL = {"person": "#57c75a", "bed": "#4a7fd6", "laptop": "#e07a2f", "doorway": "#b16be3", "shoe": "#d62f8a"}
+class _LabelCol(dict):
+    _extra = ["#4a7fd6", "#e07a2f", "#b16be3", "#d62f8a", "#5aa9c9", "#f2b632"]
+    def __missing__(self, k):
+        self[k] = self._extra[len(self) % len(self._extra)]
+        return self[k]
+LABEL_COL = _LabelCol({"person": "#57c75a", "bed": "#4a7fd6", "laptop": "#e07a2f", "doorway": "#b16be3",
+                       "shoe": "#d62f8a", "phone": "#b16be3"})
 FONT = "DejaVu Sans"
 plt.rcParams.update({"font.family": FONT, "font.size": 9, "axes.titlesize": 10, "savefig.dpi": DPI})
 
@@ -73,6 +98,20 @@ def bbox_meshes():
     return json.load(open(BUNDLE_DIR / "frame_bbox_meshes.json"))
 
 
+def view_ids() -> list[int]:
+    return [int(k) for k in bundle()["pi3_view_ids"]]
+
+def cfg(key: str):
+    """Per-video setting; view-derived defaults (for 00T1E these equal the original hand-picked values)."""
+    c = _VIDEO_CFG.get(VIDEO, {})
+    if key in c:
+        return c[key]
+    v = view_ids()
+    default = {"views4": [v[0], v[2], v[4], v[6]], "view_mid": v[4], "views3": [v[0], v[4], v[6]],
+               "smpl_k": v[4], "smpl_k_unposed": v[6]}
+    return default[key]
+
+
 # ---- transforms -------------------------------------------------------------
 def to_final(P: np.ndarray) -> np.ndarray:
     b = bundle()
@@ -87,14 +126,18 @@ def pose_to_final(T: np.ndarray) -> np.ndarray:
     return M @ T
 
 def to_floorsim(P: np.ndarray) -> np.ndarray:
-    b = bundle()
-    s, R, t = float(b["global_floor_sim_s"]), b["global_floor_sim_R"], b["global_floor_sim_t"]
-    return (s * (R @ np.asarray(P, np.float64).T)).T + t
-
-def floorsim_to_world(P: np.ndarray) -> np.ndarray:
+    """world -> floorsim (metric, y-up, floor at y=0).  VERIFIED 2026-09-25: the stored
+    similarity (s, R, t) maps floorsim -> world, so world -> floorsim is the inverse:
+    p_fs = R^T (p_w - t) / s   (gives floor at y~0, ceiling ~2.2 m, matching the SMPL height)."""
     b = bundle()
     s, R, t = float(b["global_floor_sim_s"]), b["global_floor_sim_R"], b["global_floor_sim_t"]
     return (R.T @ ((np.asarray(P, np.float64) - t) / s).T).T
+
+def floorsim_to_world(P: np.ndarray) -> np.ndarray:
+    """floorsim -> world: p_w = s R p_fs + t (the stored direction)."""
+    b = bundle()
+    s, R, t = float(b["global_floor_sim_s"]), b["global_floor_sim_R"], b["global_floor_sim_t"]
+    return (s * (R @ np.asarray(P, np.float64).T)).T + t
 
 def floorsim_to_final(P: np.ndarray) -> np.ndarray:
     return to_final(floorsim_to_world(P))
@@ -114,15 +157,23 @@ def fig3d(size=(3.2, 2.6), view=VIEW):
     ax.patch.set_alpha(0)
     return fig, ax
 
-def set_equal(ax, P: np.ndarray, pad=0.05):
-    """Equal aspect box around the points P (N,3)."""
-    lo, hi = np.percentile(P, 1, axis=0), np.percentile(P, 99, axis=0)
-    c = (lo + hi) / 2; r = (hi - lo).max() / 2 * (1 + pad)
-    ax.set_xlim(c[0] - r, c[0] + r); ax.set_ylim(c[1] - r, c[1] + r); ax.set_zlim(c[2] - r, c[2] + r)
+def set_equal(ax, P: np.ndarray, pad=0.04, zoom=1.35, pct=(1, 99)):
+    """Equal *scale* axes fitted tightly to the points P (N,3).
+
+    The axes box takes the data's own proportions (non-cubic), so an elongated scene
+    fills the canvas instead of shrinking inside a cube; ``zoom`` enlarges further
+    (matplotlib >= 3.7 ``set_box_aspect(..., zoom=)``)."""
+    P = np.asarray(P, float)
+    lo, hi = np.percentile(P, pct[0], axis=0), np.percentile(P, pct[1], axis=0)
+    ext = np.maximum(hi - lo, 1e-6) * (1 + pad)
+    c = (lo + hi) / 2
+    ax.set_xlim(c[0] - ext[0] / 2, c[0] + ext[0] / 2)
+    ax.set_ylim(c[1] - ext[1] / 2, c[1] + ext[1] / 2)
+    ax.set_zlim(c[2] - ext[2] / 2, c[2] + ext[2] / 2)
     try:
-        ax.set_box_aspect((1, 1, 1))
-    except Exception:
-        pass
+        ax.set_box_aspect(tuple(ext / ext.max()), zoom=zoom)
+    except TypeError:
+        ax.set_box_aspect(tuple(ext / ext.max()))
 
 def scatter(ax, P, C=None, s=0.35, alpha=0.9, color=None, **kw):
     if C is not None:

@@ -52,6 +52,10 @@ A nested ladder; each rung adds one context source to the same per-object prompt
 The shared Stage-1 graph/caption build is documented in
 [MLLM_RAG_ALL.md](MLLM_RAG_ALL.md) §2.
 
+Architecture of the Graph-RAG pipeline — module map, prompt ledger P0–P6, visual
+tensors, calls per video, notes for the paper figure:
+[UNLOCALIZED_GRAPH_RAG.md](UNLOCALIZED_GRAPH_RAG.md).
+
 ## Track 3 — localized MLLM
 
 | Method key | Document | What it is |
@@ -59,6 +63,9 @@ The shared Stage-1 graph/caption build is documented in
 | `track_a` | [MLLM_TRACK_A.md](MLLM_TRACK_A.md) | marked frames (set-of-mark) + marked BEV, one call per frame |
 | `track_b` | [MLLM_TRACK_B.md](MLLM_TRACK_B.md) | fixed tool loop + retrieval + **geometric critic** + repair |
 | `track_b --objects_key objects_pre` | [MLLM_TRACK_B.md](MLLM_TRACK_B.md) §5 | the critic ablation, scored from the same run |
+
+Architecture of the localized family — perception layer, Track A payload, Track B
+loop and critic, notes for the paper figure: [LOCALIZED_MLLM.md](LOCALIZED_MLLM.md).
 
 ---
 

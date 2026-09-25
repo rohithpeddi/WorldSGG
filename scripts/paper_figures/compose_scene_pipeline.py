@@ -7,7 +7,7 @@ Layout mirrors the existing schematic: four stage bands
 but every picture is a real intermediate of 00T1E.  Missing panels render as grey
 placeholders so the layout can be iterated before all renders exist.
 
-    python scripts/paper_figures/compose_scene_pipeline.py [--out outputs/scene_pipeline/figure]
+    python scripts/paper_figures/compose_scene_pipeline.py [--out outputs/scene_pipeline/figure/...]
 """
 from __future__ import annotations
 
@@ -19,15 +19,20 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
 from PIL import Image
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scene_common as SC  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
-PANELS = REPO / "outputs" / "scene_pipeline" / "panels"
+PANELS = SC.PANEL_DIR
 
-W, H = 15.0, 10.6         # inches; \textwidth-scaled in LaTeX
+W, H = 15.0, 11.0          # inches; scaled to \textwidth in LaTeX
 INK = "#1f2933"; MUTED = "#6b7280"; HEAD_BG = "#e5e7eb"
 BAND = {"i": "#eef1f5", "ii": "#e8f0fb", "iii": "#fbeee4", "iv": "#e6f4ee", "out": "#f6f0e2"}
 ARROW = dict(arrowstyle="-|>,head_length=5,head_width=3", color="#374151", lw=1.6,
              shrinkA=0, shrinkB=0, mutation_scale=1)
+PI3 = "π³"       # π³
+HEAD = 0.72                # header + subtitle height inside a band (inches)
 
 fig = None
 
@@ -48,7 +53,7 @@ def band(x, y, w, h, color, title, sub=None):
 def panel(name, x, ytop, w, h=None, caption=None, cap_size=7.5, frame=False):
     """Place PANELS/<name>.png with its top-left corner at (x, ytop) inches and width w.
     If h is None the height follows the image aspect; otherwise the image is fitted into (w, h).
-    Returns the height actually used (so callers can stack panels)."""
+    Returns the height actually used (including the caption) so callers can stack panels."""
     p = PANELS / f"{name}.png"
     if p.exists():
         im = Image.open(p); iw, ih = im.size; img = iw / ih
@@ -56,7 +61,8 @@ def panel(name, x, ytop, w, h=None, caption=None, cap_size=7.5, frame=False):
             hh, ww = w / img, w
         else:
             hh, ww = (w / img, w) if img > w / h else (h, h * img)
-        x0 = x + (w - ww) / 2; y0 = ytop - (h if h else hh) + ((h - hh) / 2 if h else 0)
+        x0 = x + (w - ww) / 2
+        y0 = ytop - (h if h else hh) + ((h - hh) / 2 if h else 0)
         ax = fig.add_axes([fx(x0), fy(y0), fx(ww), fy(hh)]); ax.set_axis_off()
         ax.imshow(im, interpolation="lanczos")
         if frame:
@@ -92,53 +98,57 @@ def build():
     global fig
     fig = plt.figure(figsize=(W, H)); fig.patch.set_facecolor("white")
 
-    # ───────────────────────── row 1 (top-anchored) ─────────────────────────
-    r1y, r1h = 5.55, 4.9
-    top = r1y + r1h - 0.5                  # first panel top, below the band header
+    # ───────────────────────── row 1 ─────────────────────────
+    r1y, r1h = 5.95, 4.9
+    top = r1y + r1h - HEAD
     # Stage (i)
-    band(0.15, r1y, 4.55, r1h, BAND["i"], "Stage (i): Adaptive Frame Sampling", "318 raw frames → 80 keyframes by visual overlap")
-    y = top - 0.02
-    y -= panel("s1_timeline", 0.30, y, 4.25) + 0.12
-    hl = panel("s1_sift_matches", 0.30, y, 2.05, caption="SIFT + Lowe ratio test", cap_size=7)
-    hr = panel("s1_homography_overlap", 2.48, y, 2.07, caption="RANSAC homography → overlap α", cap_size=7)
+    band(0.15, r1y, 4.55, r1h, BAND["i"], "Stage (i): Adaptive Frame Sampling", f"{int(SC.bundle()['n_raw_frames'])} raw frames → {len(SC.bundle()['sampled_idx'])} keyframes by visual overlap")
+    y = top
+    y -= panel("s1_timeline", 0.42, y, 4.0) + 0.10
+    panel("s1_sift_matches", 0.30, y, 2.0, caption="SIFT + Lowe ratio test", cap_size=7)
+    panel("s1_homography_overlap", 2.50, y, 2.05, caption="RANSAC homography → overlap α", cap_size=7)
     # Stage (ii)
-    band(4.95, r1y, 5.0, r1h, BAND["ii"], "Stage (ii): Feed-Forward π³ Inference", "one pass → per-view point maps, confidence, camera poses")
-    y = top - 0.02
-    hs = panel("s1_static_vs_dynamic", 5.08, y, 1.75, caption="Static / dynamic input frames", cap_size=7)
-    node(6.98, top - 1.05, 0.95, 0.75, "π³
-DINOv2-L enc.
-+ transformer dec.", fc="#dbe7fb", ec="#4a7fd6", size=7)
-    arrow(6.83, top - 0.68, 6.98, top - 0.68)
-    arrow(7.93, top - 0.68, 8.08, top - 0.68)
-    panel("s2_local_pointmaps", 8.10, y, 1.75, 1.45, caption="Per-view point maps", cap_size=7)
-    y2 = top - 2.55
-    panel("s2_confidence", 7.00, y2, 1.40, 1.15, caption="Confidence threshold", cap_size=7)
-    panel("s2_world_cloud_initial", 8.45, y2, 1.40, 1.15, caption="World points + initial T_t", cap_size=7)
+    band(4.95, r1y, 5.0, r1h, BAND["ii"], f"Stage (ii): Feed-Forward {PI3} Inference", "one pass → per-view point maps, confidence, camera poses")
+    y = top
+    hs = panel("s1_static_vs_dynamic", 5.08, y, 1.72, caption="Static / dynamic input frames", cap_size=7)
+    node(6.95, top - 1.05, 0.95, 0.75, f"{PI3}\nDINOv2-L enc.\n+ transformer dec.", fc="#dbe7fb", ec="#4a7fd6", size=7)
+    arrow(6.80, top - 0.68, 6.95, top - 0.68)
+    arrow(7.90, top - 0.68, 8.05, top - 0.68)
+    panel("s2_local_pointmaps", 8.05, y + 0.05, 1.85)
+    y2 = top - hs - 0.12
+    floor_y = r1y + 0.06                  # keep both 3-D panels inside the band
+    panel("s2_confidence", 5.08, y2 - 0.1, 2.3, h=min(2.3, y2 - 0.1 - floor_y))
+    wy = top - 0.72                       # directly under the local point-map strip
+    panel("s2_world_cloud_initial", 7.50, wy, 2.4, h=min(2.9, wy - floor_y))
     # Stage (iii)
-    band(10.15, r1y, 4.7, r1h, BAND["iii"], "Stage (iii): Static–Dynamic Decomposition", "mask-guided split of every frame's points")
-    panel("s2_static_dynamic_split", 10.28, top - 0.02, 4.45, 2.3)
-    panel("s2_dynamic_frames", 10.28, top - 2.5, 4.45, 1.5, caption="Per-frame dynamic clouds D_t (person) over the static background S", cap_size=7)
+    band(10.15, r1y, 4.7, r1h, BAND["iii"], "Stage (iii): Static–Dynamic Decomposition", "static pass on inpainted frames + masked dynamic foreground")
+    y = top
+    y -= panel("s2_static_dynamic_split", 10.28, y, 4.45) + 0.15
+    panel("s2_dynamic_frames", 10.28, y, 4.45, caption="per-frame dynamic foreground (person) over the static background S", cap_size=7)
 
-    # ───────────────────────── row 2 (y 0.15 .. 4.65) ─────────────────────────
-    r2y, r2h = 0.15, 5.2
+    # ───────────────────────── row 2 ─────────────────────────
+    r2y, r2h = 0.15, 5.6
+    t2 = r2y + r2h - HEAD
     band(0.15, r2y, 9.8, r2h, BAND["iv"], "Stage (iv): Per-Frame Alignment via Trimmed ICP", "source D_t → target S: correspondences → keep closest 80 % → weighted Kabsch, iterated")
-    # ICP loop nodes
-    ny = r2y + r2h - 1.25
+    ny = t2 - 0.72
     node(0.35, ny, 1.75, 0.62, "Find\ncorrespondences", size=7.5)
     node(2.35, ny, 1.75, 0.62, "Trimming\n(closest 80 %)", size=7.5)
     node(4.35, ny, 1.75, 0.62, "Weighted\nKabsch fit", size=7.5)
     arrow(2.10, ny + 0.31, 2.35, ny + 0.31); arrow(4.10, ny + 0.31, 4.35, ny + 0.31)
     arrow(5.22, ny, 5.22, ny - 0.18, lw=1.2); arrow(5.22, ny - 0.18, 1.22, ny - 0.18, lw=1.2, arrowstyle="-"); arrow(1.22, ny - 0.18, 1.22, ny, lw=1.2)
     label(3.22, ny - 0.30, "iterate until convergence", size=7, color=MUTED)
-    panel("s3_icp_before_after", 0.30, ny - 0.45, 6.05, 3.2)
-    panel("s3_floor_smpl", 6.50, r2y + r2h - 0.5, 3.30, 4.2, caption="Metric scale + floor from PromptHMR SMPL alignment", cap_size=7)
+    panel("s3_icp_before_after", 0.30, ny - 0.45, 6.05)
+    panel("s3_floor_smpl_posed", 6.50, t2 - 0.05, 3.30)
     # Output
     band(10.15, r2y, 4.7, r2h, BAND["out"], "Final Output: 4D Scene", "(S, {(F_t, T_t)}_{t=1..T}) → 3-D boxes + world scene graphs")
-    panel("s1_masks",               10.28, r2y + 3.05, 1.60, 0.95, "Pre-computed masks", 7)
-    node(12.05, r2y + 3.15, 1.05, 0.72, "Mask-aware\nscene merging", fc="#fdf3d0", ec="#f2b632", size=7.2)
-    panel("s3_scene_4d",            10.28, r2y + 0.65, 4.45, 2.35, None)
-    panel("s3_boxes_over_time",     13.20, r2y + 3.05, 1.55, 0.95, "3-D boxes over time", 7)
-    label(12.50, r2y + 0.45, "4D scene of 00T1E: static background S, refined poses T_t, per-frame person geometry", size=7.5, color=MUTED)
+    # left column: masks -> merging node; right: the hero 4D scene
+    hm = panel("s1_masks", 10.28, t2, 1.45, caption="pre-computed masks", cap_size=7)
+    node(10.45, t2 - hm - 0.78, 1.1, 0.6, "Mask-aware\nscene merging", fc="#fdf3d0", ec="#f2b632", size=7)
+    arrow(11.0, t2 - hm - 0.02, 11.0, t2 - hm - 0.18, lw=1.2)
+    arrow(11.55, t2 - hm - 0.48, 11.85, t2 - hm - 0.48)
+    hero = panel("s3_scene_4d", 11.85, t2 + 0.05, 2.9)
+    y = t2 - max(hero - 0.05, hm + 0.8) - 0.12
+    panel("s3_boxes_over_time", 10.28, y, 4.45, caption="use case: corrected 3-D object boxes over time in the 4D scene", cap_size=7)
 
     # ───────────────────────── inter-stage arrows ─────────────────────────
     mid = r1y + r1h / 2 - 0.3
@@ -152,8 +162,10 @@ DINOv2-L enc.
 
 
 def main():
+    _arch_fig = REPO / "assets" / "figures" / "architecture" / "scene_pipeline" / "figure"
+    _def_out = (_arch_fig if _arch_fig.parent.exists() else (REPO / "outputs" / "scene_pipeline" / "figure")) / f"WorldSGG4DScenePipeline_{SC.VIDEO}"
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=str(REPO / "outputs" / "scene_pipeline" / "figure" / "WorldSGG4DScenePipeline_00T1E"))
+    ap.add_argument("--out", default=str(_def_out))
     ap.add_argument("--formats", nargs="+", default=["pdf", "png"])
     ap.add_argument("--dpi", type=int, default=250)
     a = ap.parse_args()

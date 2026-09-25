@@ -1,5 +1,10 @@
-"""Shared drawing primitives for the dark "stage band + numbered cards" method
+"""Shared drawing primitives for the "stage band + numbered cards" method
 figures (``fig_worldwise.py``, ``fig_worldwise_plus.py``, ``fig_worldwise_pp.py``).
+
+Two palettes: ``light`` (white background, the default) and ``dark`` (the hero
+palette the figures were designed in).  ``--theme dark|light`` on any figure
+script, or ``FIG_THEME``, selects one; ``--caps title|upper|none`` (``FIG_CAPS``)
+sets how every text is capitalised (Title Case by default).
 
 The visual grammar follows the reference hero figure: a serif band title on a
 horizontal rule, left-to-right data flow, three module kinds (frozen with a
@@ -18,38 +23,123 @@ from __future__ import annotations
 import base64
 import html
 import math
+import os
+import re
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------------
-# palette
+# palette: one dict per theme; the chosen one is bound to the module names below
 # ---------------------------------------------------------------------------
-BG = "#0f1114"
-RULE = "#3a3f47"
-TXT = "#e6e8ec"
-MUTED = "#9aa3b2"
-DIM = "#6b7280"
-PURPLE_F, PURPLE_S = "#2b2344", "#7c6bd6"     # learnable, inherited
-FROZ_F, FROZ_S = "#262b33", "#5b6470"         # frozen
-NEW_F, NEW_S = "#3a2415", "#ff8a3d"           # introduced by this variant
-GHOST_F, GHOST_S = "#171a1f", "#2f343c"       # unchanged, de-emphasised
-BLUE = "#5aa2f2"      # decoded FRCNN tokens
-VIOLET = "#a78bfa"    # DINOv3 semantics
-TEAL = "#2dd4bf"      # pi3 geometry
-LAT = ["#fdba74", "#fb923c", "#f9a8d4", "#e879f9", "#c084fc"]   # recovered world token
-MASKC = "#64748b"
-ORANGE = "#ff8a3d"
-RED = "#f87171"
-GREEN = "#4ade80"
+PALETTES = {
+    "dark": dict(
+        BG="#0f1114", RULE="#3a3f47", TXT="#e6e8ec", MUTED="#9aa3b2", DIM="#6b7280",
+        PURPLE_F="#2b2344", PURPLE_S="#7c6bd6",       # learnable, inherited
+        FROZ_F="#262b33", FROZ_S="#5b6470",           # frozen
+        NEW_F="#3a2415", NEW_S="#ff8a3d",             # introduced by this variant
+        GHOST_F="#171a1f", GHOST_S="#2f343c",         # unchanged, de-emphasised
+        TOOL_F="#0f2226", TOOL_S="#2dd4bf",           # deterministic program (MLLM figures)
+        BLUE="#5aa2f2",       # decoded FRCNN tokens
+        VIOLET="#a78bfa",     # DINOv3 semantics
+        TEAL="#2dd4bf",       # pi3 geometry
+        LAT=["#fdba74", "#fb923c", "#f9a8d4", "#e879f9", "#c084fc"],   # recovered world token
+        MASKC="#64748b", ORANGE="#ff8a3d", RED="#f87171", GREEN="#4ade80",
+        SNOW="#dfe7f3",                               # snowflake strokes
+        CARD_F="#171a1f", CARD_S="#262b33",           # numbered cards
+        LOSS_F="#1a1417",                             # loss-node fill
+        PH_F="#171a1f", FRAME_B="#3a4048",            # placeholder fill, frame border
+        NODE_F="#1c2027", LINE="#5b6470", GRIDLINE="#2f343c", FILM_F="#0b0d10", SPROCKET="#2a2f37",
+        RED_TXT="#fca5a5", BAR_OFF="#3a3f47", CARD="#12151a",
+    ),
+    "light": dict(
+        BG="#ffffff", RULE="#c5cad3", TXT="#151a22", MUTED="#4b5563", DIM="#8b93a1",
+        PURPLE_F="#ece8fb", PURPLE_S="#6a58d4",
+        FROZ_F="#eef1f5", FROZ_S="#7d8797",
+        NEW_F="#fff0e3", NEW_S="#ef6c1a",
+        GHOST_F="#f7f8fa", GHOST_S="#d3d8e0",
+        TOOL_F="#e6f7f5", TOOL_S="#0f9f93",
+        BLUE="#2c7be5",
+        VIOLET="#7c4dff",
+        TEAL="#0f9f93",
+        LAT=["#f59e0b", "#ea580c", "#db2777", "#c026d3", "#7c3aed"],
+        MASKC="#6b7280", ORANGE="#ef6c1a", RED="#dc2626", GREEN="#16a34a",
+        SNOW="#3b82f6",
+        CARD_F="#f5f6f8", CARD_S="#dde2e9",
+        LOSS_F="#fff5f5",
+        PH_F="#f3f4f6", FRAME_B="#c5cad3",
+        NODE_F="#f3f4f6", LINE="#9aa3b2", GRIDLINE="#dfe3e8", FILM_F="#e9ecf0", SPROCKET="#ffffff",
+        RED_TXT="#b91c1c", BAR_OFF="#d1d5db", CARD="#f4f5f7",
+    ),
+}
+
+
+def _pick(flag: str, env: str, default: str, choices) -> str:
+    """A setting from ``--flag value`` on the command line, else ``$ENV``, else the default."""
+    v = os.environ.get(env, default)
+    argv = sys.argv
+    if flag in argv and argv.index(flag) + 1 < len(argv):
+        v = argv[argv.index(flag) + 1]
+    for a in argv:
+        if a.startswith(flag + "="):
+            v = a.split("=", 1)[1]
+    if v not in choices:
+        raise SystemExit(f"{flag}: expected one of {sorted(choices)}, got {v!r}")
+    return v
+
+
+THEME = _pick("--theme", "FIG_THEME", "light", PALETTES)
+CAPS = _pick("--caps", "FIG_CAPS", "title", ("title", "upper", "none"))
+globals().update(PALETTES[THEME])
 
 SERIF = "Georgia, 'Times New Roman', serif"
 SANS = "Inter, 'Segoe UI', Helvetica, Arial, sans-serif"
 KINDS = {"learn": (PURPLE_F, PURPLE_S), "frozen": (FROZ_F, FROZ_S),
-         "new": (NEW_F, NEW_S), "ghost": (GHOST_F, GHOST_S)}
+         "new": (NEW_F, NEW_S), "ghost": (GHOST_F, GHOST_S), "tool": (TOOL_F, TOOL_S)}
 
 
 def esc(s: str) -> str:
     return html.escape(s, quote=False)
+
+
+# ---------------------------------------------------------------------------
+# capitalisation: every text drawn through Canvas.text / Canvas.rich passes here
+# ---------------------------------------------------------------------------
+_WORD = re.compile(r"^[A-Za-z][A-Za-z\-'\u2019/]*$")
+_LEAD = "([{\"'\u201c\u2018"
+_TRAIL = ")]}\"'\u201d\u2019,.:;!?"
+_UNITS = {"px", "cm", "mm", "m", "ms"}
+
+
+def cap(s: str, mode: Optional[str] = None) -> str:
+    """Capitalise the first letter of every word (``title``) or upper-case the
+    whole string (``upper``).  Tokens that are not plain words (formulas,
+    subscripts, numbers, units, single-letter variables) are left alone, so
+    ``t = 12``, ``p(class)``, ``sₜ,ₙ``, ``IoU`` and ``DINOv3-L`` survive."""
+    mode = CAPS if mode is None else mode
+    if not s or mode == "none":
+        return s
+    if mode == "upper":
+        return s.upper()
+    out = []
+    for tok in re.split(r"(\s+)", s):
+        if not tok or tok.isspace():
+            out.append(tok)
+            continue
+        i = 0
+        while i < len(tok) and tok[i] in _LEAD:
+            i += 1
+        core = tok[i:].rstrip(_TRAIL)
+        # A token with an upper-case letter after its first is an identifier or
+        # an abbreviation (mR, IoU, PredCls, ReLU) and is left as written.
+        if (_WORD.match(core) and core not in _UNITS and not any(ch.isupper() for ch in core[1:])
+                and (len(core) > 1 or (core in ("a", "i") and tok == core))):
+            # Title Case every part of a hyphenated / slashed compound
+            # ("tail-aware" → "Tail-Aware", as the hand-written "Ego-Motion").
+            new = re.sub(r"(^|[-/])([a-z])", lambda m: m.group(1) + m.group(2).upper(), core)
+            tok = tok[:i] + new + tok[i + len(core):]
+        out.append(tok)
+    return "".join(out)
 
 
 class Canvas:
@@ -65,14 +155,14 @@ class Canvas:
         self.parts.append(
             f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
             f'viewBox="0 0 {self.w} {self.h}" width="{self.w}" height="{self.h}">')
-        self.parts.append('''<defs>
-  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#9aa3b2"/></marker>
-  <marker id="ahO" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#ff8a3d"/></marker>
-  <marker id="ahR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#f87171"/></marker>
-  <marker id="ahB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#5aa2f2"/></marker>
-  <marker id="ahV" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#a78bfa"/></marker>
-  <marker id="ahT" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#2dd4bf"/></marker>
-  <pattern id="hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="5" stroke="#ff8a3d" stroke-width="1.6"/></pattern>
+        self.parts.append(f'''<defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="{MUTED}"/></marker>
+  <marker id="ahO" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="{ORANGE}"/></marker>
+  <marker id="ahR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="{RED}"/></marker>
+  <marker id="ahB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="{BLUE}"/></marker>
+  <marker id="ahV" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="{VIOLET}"/></marker>
+  <marker id="ahT" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="{TEAL}"/></marker>
+  <pattern id="hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="5" stroke="{ORANGE}" stroke-width="1.6"/></pattern>
   <linearGradient id="photo0" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6b5a4a"/><stop offset="1" stop-color="#2f3a4c"/></linearGradient>
   <linearGradient id="photo1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4a5a6b"/><stop offset="1" stop-color="#4c3a2f"/></linearGradient>
   <linearGradient id="photo2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5a6b4a"/><stop offset="1" stop-color="#3a2f4c"/></linearGradient>
@@ -89,7 +179,11 @@ class Canvas:
         return path
 
     # -- text -----------------------------------------------------------------
-    def text(self, x, y, s, size=12, fill=TXT, anchor="start", weight="normal", font=SANS, style="normal"):
+    def text(self, x, y, s, size=12, fill=None, anchor="start", weight="normal", font=SANS, style="normal",
+             capitalise: bool = True):
+        fill = TXT if fill is None else fill
+        if capitalise and "mono" not in font.lower():
+            s = cap(s)
         self.a(f'<text x="{x}" y="{y}" font-family="{font}" font-size="{size}" fill="{fill}" '
                f'text-anchor="{anchor}" font-weight="{weight}" font-style="{style}">{esc(s)}</text>')
 
@@ -102,6 +196,8 @@ class Canvas:
             if o.get("italic"): attrs.append('font-style="italic"')
             if o.get("bold"): attrs.append('font-weight="700"')
             if o.get("serif"): attrs.append(f'font-family="{SERIF}"')
+            if not (o.get("sub") or o.get("verbatim")):
+                s = cap(s)
             t.append(f'<tspan {" ".join(attrs)}>{esc(s)}</tspan>')
         t.append("</text>")
         self.a("".join(t))
@@ -110,12 +206,14 @@ class Canvas:
         self.rich(x, y, [("ℒ", {"fill": col, "serif": True, "italic": True}),
                          (sub, {"fill": col, "sub": True, "serif": True})], size=size)
 
-    def wrap(self, x, y, lines: Sequence[str], size=11.5, fill=MUTED, lh=17):
+    def wrap(self, x, y, lines: Sequence[str], size=11.5, fill=None, lh=17):
+        fill = MUTED if fill is None else fill
         for i, ln in enumerate(lines):
             self.text(x, y + i * lh, ln, size=size, fill=fill)
 
     # -- shapes ---------------------------------------------------------------
-    def snow(self, x, y, r=7, col="#dfe7f3"):
+    def snow(self, x, y, r=7, col=None):
+        col = SNOW if col is None else col
         p = []
         for k in range(3):
             ang = math.radians(k * 60)
@@ -177,6 +275,7 @@ class Canvas:
                            f'stroke="{ORANGE}" stroke-width="1"/>')
 
     def band_title(self, y, label, x0=30, x1=1290, size=20):
+        label = cap(label)
         self.a(f'<line x1="{x0}" y1="{y}" x2="{x1}" y2="{y}" stroke="{RULE}" stroke-width="1.5"/>')
         tw = len(label) * size * 0.53 + 40
         cx = (x0 + x1) / 2
@@ -184,7 +283,7 @@ class Canvas:
         self.text(cx, y + 6, label, size=size, fill=TXT, anchor="middle", weight="700", font=SERIF)
 
     def card(self, x, y, w, h, n, title, body_lines, size=11.5):
-        self.a(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="14" fill="#171a1f" stroke="#262b33" stroke-width="1.5"/>')
+        self.a(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="14" fill="{CARD_F}" stroke="{CARD_S}" stroke-width="1.5"/>')
         cx, cy = x + 34, y + h / 2 - 8 * len(body_lines) + 14
         self.a(f'<circle cx="{cx}" cy="{cy}" r="13" fill="{ORANGE}"/>')
         self.text(cx, cy + 4.5, str(n), size=13, fill="#1a0f05", anchor="middle", weight="700")
@@ -246,10 +345,12 @@ class Canvas:
                 h = max_h
         return (w, h)
 
-    def image_slot(self, x, y, w, h, key: str, caption: Optional[str] = None, border=RULE, placeholder=None,
-                   caption_col=MUTED, caption_size=9.5):
+    def image_slot(self, x, y, w, h, key: str, caption: Optional[str] = None, border=None, placeholder=None,
+                   caption_col=None, caption_size=9.5):
         """Embed ``self.images[key]`` (a PNG) fitted inside (x, y, w, h), or draw a
         placeholder naming the missing panel.  Returns the drawn rectangle."""
+        border = RULE if border is None else border
+        caption_col = MUTED if caption_col is None else caption_col
         p = self.images.get(key)
         if p is not None and Path(p).exists():
             data = base64.b64encode(Path(p).read_bytes()).decode("ascii")
@@ -258,7 +359,7 @@ class Canvas:
             self.a(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="3" fill="none" stroke="{border}" stroke-width="1"/>')
         else:
             self.missing.append(key)
-            self.a(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="4" fill="#171a1f" stroke="{border}" '
+            self.a(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="4" fill="{PH_F}" stroke="{border}" '
                    f'stroke-width="1" stroke-dasharray="4 3"/>')
             if placeholder:
                 placeholder(self, x, y, w, h)
@@ -282,7 +383,7 @@ class Canvas:
             def ph(c, x0, y0, w0, h0, i=i):
                 c.a(f'<rect x="{x0 + 4}" y="{y0 + 4}" width="{w0 - 8}" height="{h0 - 8}" rx="2" fill="url(#photo{i % 3})"/>')
                 c.text(x0 + w0 / 2, y0 + h0 - 8, labels[i], size=9, fill="#c8cdd6", anchor="middle")
-            self.image_slot(x, yy, w, hs[i], key, placeholder=ph, border="#3a4048")
+            self.image_slot(x, yy, w, hs[i], key, placeholder=ph, border=FRAME_B)
             yy += hs[i] + gapy
         return yy - gapy
 
@@ -324,7 +425,7 @@ class Canvas:
 
     def loss_node(self, x, y, w, name: str, formula: str, col=RED, note: Optional[str] = None):
         """A loss: script-L with subscript, its formula, and an optional note."""
-        self.a(f'<rect x="{x}" y="{y}" width="{w}" height="{46 if note else 34}" rx="8" fill="#1a1417" stroke="{col}" '
+        self.a(f'<rect x="{x}" y="{y}" width="{w}" height="{46 if note else 34}" rx="8" fill="{LOSS_F}" stroke="{col}" '
                f'stroke-width="1.4" stroke-dasharray="5 3"/>')
         self.loss(x + 10, y + 22, name, col, size=15)
         self.text(x + 44, y + 21, formula, size=9.5, fill=col)

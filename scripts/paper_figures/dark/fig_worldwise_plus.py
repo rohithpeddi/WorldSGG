@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (BLUE, DIM, GREEN, LAT, MUTED, ORANGE, RED, TEAL, TXT, VIOLET,  # noqa: E402
+from common import (BLUE, DIM, FRAME_B, GREEN, LAT, MUTED, ORANGE, RED, TEAL, TXT, VIOLET,  # noqa: E402
                     Canvas, GEOMETRY_IMAGES, image_map)
 
 IMAGES = GEOMETRY_IMAGES + [
@@ -38,7 +38,7 @@ def build(images, video: str) -> Canvas:
     fy = y + 20
     for i, key in enumerate(["frame_0", "frame_1", "frame_2"]):
         w, h = c.fit(key, w=62, default=(62, 44), max_h=110)
-        c.image_slot(30 + i * 68, fy, w, h, key, border="#3a4048")
+        c.image_slot(30 + i * 68, fy, w, h, key, border=FRAME_B)
     c.text(130, fy + 126, "T Frames (672 × 378)", size=10.5, fill=MUTED, anchor="middle")
     c.flow(236, fy + 40, 262, fy + 30, "", col=VIOLET)
     c.flow(236, fy + 70, 262, fy + 100, "", col=TEAL)
@@ -58,13 +58,14 @@ def build(images, video: str) -> Canvas:
     c.tensor(810, fy + 44, 160, 72, "Tier-1 Tokens", "3072-d Per Stream", col=VIOLET)
     c.text(890, fy + 108, "Object: T × N · Union: T × K", size=8.5, fill=MUTED, anchor="middle")
     c.flow(970, fy + 80, 1006, fy + 80, "")
-    c.box(1008, fy + 30, 200, 60, "Gated Fusion Projector", "Per-Stream Linear; Per-Dimension", kind="new",
-          sub2="Softmax Gate; ReLU → LN", tsize=11.5, ssize=8.5)
-    c.rich(1108, fy + 12, [("g", {"fill": ORANGE, "serif": True, "italic": True}), (" = softmax", {"fill": ORANGE}),
-                            ("k", {"fill": ORANGE, "sub": True, "italic": True}), (" W[h₁;h₂]   h = LN(ReLU(Σ", {"fill": ORANGE}),
-                            ("k", {"fill": ORANGE, "sub": True, "italic": True}), (" g", {"fill": ORANGE}),
-                            ("k", {"fill": ORANGE, "sub": True, "italic": True}), (" ⊙ h", {"fill": ORANGE}),
-                            ("k", {"fill": ORANGE, "sub": True, "italic": True}), ("))", {"fill": ORANGE})], size=9, anchor="middle")
+    # one projector per seam (visual_projector and union_proj), same form
+    c.box(1008, fy + 30, 200, 60, "Gated Fusion Projector × 2", "Per-Stream Linear; Per-Dimension", kind="new",
+          sub2="Softmax Gate; ReLU → LN; One Per Seam", tsize=11.5, ssize=8.5)
+    c.rich(1108, fy + 12, [("g", {"fill": ORANGE, "serif": True, "italic": True}), (" = softmax", {"fill": ORANGE, "verbatim": True}),
+                            ("k", {"fill": ORANGE, "sub": True, "italic": True}), (" W[h₁;h₂]   h = LN(ReLU(Σ", {"fill": ORANGE, "verbatim": True}),
+                            ("k", {"fill": ORANGE, "sub": True, "italic": True}), (" g", {"fill": ORANGE, "verbatim": True}),
+                            ("k", {"fill": ORANGE, "sub": True, "italic": True}), (" ⊙ h", {"fill": ORANGE, "verbatim": True}),
+                            ("k", {"fill": ORANGE, "sub": True, "italic": True}), ("))", {"fill": ORANGE, "verbatim": True})], size=9, anchor="middle")
     c.text(1108, fy + 24, "Single Stream (Headline dinov3tok) = Linear → ReLU → LN", size=8.5, fill=MUTED, anchor="middle")
     c.tensor(1008, fy + 124, 96, 40, "Appearance Tokens", "T × N × 256", col=ORANGE)
     c.tensor(1112, fy + 124, 96, 40, "Union Tokens", "T × K × 64", col=ORANGE)
@@ -91,11 +92,12 @@ def build(images, video: str) -> Canvas:
            ("Motion Encoder", ry + 84)]
     for t, yy in enc:
         c.box(ex, yy, ew, eh, t, kind="learn", tsize=10)
-    c.flow(160, ry + 16, 198, ry + 6, "")
-    c.flow(160, ry + 18, 198, ry + 36, "")
-    c.flow(160, ry + 62, 198, ry + 40, "")
-    c.flow(160, ry + 64, 198, ry + 66, "")
-    c.flow(160, ry + 20, 198, ry + 96, "")
+    c.flow(160, ry + 16, 198, ry + 6, "")          # corners -> structural
+    c.flow(160, ry + 18, 198, ry + 36, "")         # corners -> spatial
+    c.flow(160, ry + 62, 198, ry + 40, "")         # poses -> spatial
+    c.flow(160, ry + 64, 198, ry + 66, "")         # poses -> ego-motion
+    c.flow(160, ry + 20, 198, ry + 96, "")         # corners (centres) -> motion
+    c.flow(160, ry + 70, 198, ry + 102, "")        # poses (rotation) -> motion: camera-frame velocity
     c.box(376, ry + 12, 130, 92, "Scaffold Tokenizer", "Fuse Geometry + Appearance;", kind="learn",
           sub2="[MASK] If Unseen", tsize=11, ssize=8.5)
     for _, yy in enc:
@@ -103,17 +105,21 @@ def build(images, video: str) -> Canvas:
     c.flow(160, ry + 110, 374, ry + 90, "", col=ORANGE, width=1.2)
     c.flow(506, ry + 58, 542, ry + 58, "")
     c.tensor(544, ry + 38, 120, 40, "Object Tokens", "T × N × 256", col=BLUE)
+    c.tensor(544, ry + 92, 130, 36, "Camera Features", "Spatial Encoder → Q / K Bias", col=MUTED)
     c.flow(664, ry + 58, 700, ry + 58, "")
+    c.flow(674, ry + 110, 700, ry + 92, "")        # per-object camera features -> view-aware bias
     c.box(702, ry + 14, 160, 88, "Associative Retriever", "Per-Object Cross-Attention", kind="learn",
           sub2="Masked ← Own Visible Frames", tsize=11, ssize=8.5)
-    c.flow(862, ry + 58, 898, ry + 58, "")
+    c.flow(862, ry + 58, 898, ry + 58, "Retrieved", lsize=7.5, loff=(0, -5))
     c.box(900, ry + 43, 120, 30, "+ Visibility Embedding", kind="learn", tsize=9)
     c.flow(1020, ry + 58, 1056, ry + 58, "")
     c.box(1058, ry + 14, 150, 88, "Inter-Object Transformer", "Self-Attention Over", kind="learn",
           sub2="Objects Per Frame", tsize=10.5, ssize=8.5)
     c.tensor(1058, ry + 116, 150, 36, "Enriched Tokens", "→ Stage 3", col=LAT[2])
     c.flow(1133, ry + 102, 1133, ry + 114, "")
-    c.text(702, ry + 116, "Completed Tokens → Stage 3 (Reconstruction)", size=8.5, fill=LAT[0])
+    # the tokens after the visibility embedding feed both the transformer and the reconstruction head
+    c.flow(960, ry + 73, 960, ry + 94, "")
+    c.tensor(890, ry + 96, 140, 36, "Completed Tokens", "→ Stage 3 (Reconstruction)", col=LAT[0])
     c.text(376, ry + 118, "Byte-Identical To WorldWise", size=8.5, fill=DIM)
     py = ry + 166
     c.strip(30, py, 135, [
@@ -126,13 +132,15 @@ def build(images, video: str) -> Canvas:
     hy = y + 24
     c.tensor(30, hy + 20, 130, 40, "Enriched Tokens", "From Stage 2", col=LAT[2])
     c.tensor(30, hy + 72, 130, 40, "Union Tokens", "From Stage 1 (Frozen Latents)", col=ORANGE)
-    c.tensor(30, hy + 124, 130, 40, "Pair Geometry", "8-D Relative 3-D", col=MUTED)
+    c.tensor(30, hy + 124, 130, 40, "Pair Geometry", "8-D From OBB Corners", col=MUTED)
     c.tensor(30, hy + 176, 130, 40, "Completed Tokens", "From Stage 2", col=LAT[0])
+    c.tensor(30, hy + 228, 130, 36, "Tier-1 Tokens", "From Stage 1 (Object Boxes)", col=VIOLET)
     c.flow(160, hy + 32, 196, hy + 20, "")
     c.box(198, hy + 4, 120, 32, "Node Head", kind="learn", tsize=11)
     c.flow(318, hy + 20, 352, hy + 20, "")
     c.tensor(354, hy + 4, 130, 32, "Object Classes", None, col=MUTED)
-    c.text(354, hy + 48, "GT Override In PredCls", size=8, fill=DIM)
+    c.text(404, hy + 48, "GT Override In PredCls; CE Loss In SGDet", size=8, fill=DIM)
+    c.flow(372, hy + 36, 348, hy + 56, "Text", lsize=7.5, loff=(12, 4), anchor="start")   # class -> CLIP text
     c.flow(160, hy + 44, 196, hy + 78, "")
     c.flow(160, hy + 92, 196, hy + 92, "", col=ORANGE)
     c.flow(160, hy + 144, 196, hy + 106, "")
@@ -144,27 +152,28 @@ def build(images, video: str) -> Canvas:
     c.tensor(584, hy + 66, 170, 56, "Predicate Distributions", "Attention 3 · Spatial 6 · Contacting 17", col=RED)
     c.flow(160, hy + 196, 196, hy + 196, "")
     c.box(198, hy + 180, 160, 32, "Reconstruction Projector", kind="learn", tsize=10.5)
-    c.box(396, hy + 180, 150, 32, "EMA Target Projector", kind="frozen", frozen=True, tsize=10.5)
-    c.text(396, hy + 226, "EMA Copy Of The Gated Projector,", size=8, fill=DIM)
-    c.text(396, hy + 238, "Applied To The Tier-1 Tokens", size=8, fill=DIM)
-    lx = 790
-    c.loss_node(lx, hy + 4, 470, "sg", "BCE / CE On Visible Pairs; Logits + τ·log πⲜ, τ = 0.5",
+    c.box(396, hy + 176, 150, 40, "EMA Target Projector", "EMA Copy Of The Gated Projector", kind="frozen", frozen=True,
+          tsize=10.5, ssize=8)
+    c.arrow(160, hy + 246, 471, hy + 218, col=VIOLET, curve=f"M160 {hy + 246} H471 V{hy + 218}")   # tier-1 -> ema target
+    lx, lw = 790, 372
+    c.loss_node(lx, hy + 4, lw, "sg", "BCE / CE On Visible Pairs; Logits + τ·log π_c, τ = 0.5",
                 note="Truly Unseen Pairs Receive No Edge Supervision (λ_vlm = 0)")
-    c.loss_node(lx, hy + 60, 470, "sim", "Same Loss On Artificially Masked Pairs (p_mask = 0.3), Clean GT",
+    c.loss_node(lx, hy + 60, lw, "sim", "Same Loss On Artificially Masked Pairs (p_mask = 0.3), Clean GT",
                 note="Simulated Occlusion Teaches Recovery Instead Of Noisy VLM Labels")
-    c.loss_node(lx, hy + 116, 470, "rec", "MSE( Reconstruction Projector(Completed), EMA Target )", col=ORANGE,
-                note="Masked Cells; λ_rec = 0.5")
-    c.tensor(lx + 300, hy + 176, 170, 40, "Ground-Truth Predicates", "Visible Pairs Only", col=GREEN)
+    c.loss_node(lx, hy + 116, lw, "rec", "MSE( Reconstruction Projector(Completed), EMA Target )", col=ORANGE,
+                note="Artificially Masked Cells; λ_rec = 0.5 × 0.1 (Dominance) = 0.05")
+    c.tensor(lx + lw + 22, hy + 34, 106, 44, "GT Predicates", "Visible Pairs Only", col=GREEN)
     c.flow(754, hy + 84, lx - 2, hy + 24, "", col=RED)
     c.flow(754, hy + 94, lx - 2, hy + 80, "", col=RED)
-    c.flow(lx + 385, hy + 176, lx + 385, hy + 52, "", col=GREEN)
+    c.flow(lx + lw + 22, hy + 50, lx + lw + 2, hy + 36, "", col=GREEN)
+    c.flow(lx + lw + 22, hy + 62, lx + lw + 2, hy + 76, "", col=GREEN)
     c.flow(358, hy + 196, lx - 2, hy + 140, "Prediction", col=ORANGE, lsize=8, loff=(0, -6), lpos=0.75)
     c.flow(546, hy + 196, lx - 2, hy + 150, "Target", col=ORANGE, lsize=8, loff=(0, 10), lpos=0.8)
     c.rich(lx, hy + 240, [("Total:  ℒ = ℒ", {"fill": TXT, "serif": True}), ("sg", {"fill": RED, "sub": True}),
                           (" + ℒ", {"fill": TXT, "serif": True}), ("sim", {"fill": RED, "sub": True}),
-                          (" + 0.5 ℒ", {"fill": TXT, "serif": True}), ("rec", {"fill": ORANGE, "sub": True}),
+                          (" + 0.05 ℒ", {"fill": TXT, "serif": True}), ("rec", {"fill": ORANGE, "sub": True}),
                           ("      Identical Recipe To WorldWise: A Clean A/B On The Representation", {"fill": DIM})], size=11)
-    py = hy + 262
+    py = hy + 274
     c.strip(30, py, 130, [
         ("train_mask", "Training-Mode Pass: Artificial Masks", 300), ("recon_sim", "Reconstruction vs EMA Target (Cosine)", 300),
         ("loss_pairs_0", "Which Loss Each Pair Receives", 300), ("preds_1", "Inference: Predicates At The Unseen Frame", 300),
@@ -198,6 +207,10 @@ def main():
     ap.add_argument("--grid-images", default=None, help="dump_intermediates.py output dir for worldwise_pp (token grids)")
     ap.add_argument("--video", default="12XD3")
     ap.add_argument("--out", default=str(Path(__file__).resolve().parents[3] / "outputs/paper_figures/dark/worldwise_plus.svg"))
+    ap.add_argument("--theme", default="light", choices=["light", "dark"],
+                    help="white background (light) or the dark hero palette; read by common.py at import")
+    ap.add_argument("--caps", default="title", choices=["title", "upper", "none"],
+                    help="capitalise every text: Title Case, UPPER CASE or as written; read by common.py at import")
     args = ap.parse_args()
     imgs = image_map(args.images, IMAGES)
     imgs.update(image_map(args.grid_images, GRID_IMAGES))

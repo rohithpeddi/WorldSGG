@@ -31,7 +31,7 @@ import numpy as np
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from scene_common import bundle, BUNDLE_DIR, PANEL_DIR, save, COL, DPI  # noqa: E402
+from scene_common import bundle, BUNDLE_DIR, PANEL_DIR, save, COL, DPI, cfg  # noqa: E402
 
 import matplotlib  # noqa: E402
 matplotlib.use("Agg")
@@ -183,7 +183,7 @@ def _img_axes(fig, rect, img, border=True):
 
 
 # ---- panel 1: SIFT matches ---------------------------------------------------------
-def panel_sift_matches(ref_idx=1, cand_idx=5, max_lines=60, seed=0):
+def panel_sift_matches(ref_idx=cfg("sift")[0], cand_idx=cfg("sift")[1], max_lines=60, seed=0):
     ref, cand = raw_frame(ref_idx), raw_frame(cand_idx)
     r = sift_overlap(ref, cand)
     h, w = ref.shape[:2]
@@ -220,8 +220,16 @@ def panel_sift_matches(ref_idx=1, cand_idx=5, max_lines=60, seed=0):
     return r
 
 
+
+def _fmt_alpha(a: float, tau: float = 0.95) -> str:
+    """Two decimals, but truncate to five when alpha sits within 1e-3 of the threshold, where
+    rounding would print e.g. 0.95 for a value that is actually just below tau."""
+    import math
+    return f"{math.floor(a * 1e5) / 1e5:.5f}" if abs(a - tau) < 1e-3 else f"{a:.2f}"
+
+
 # ---- panel 2: homography overlap --------------------------------------------------
-def panel_homography_overlap(ref_idx=1, kept_idx=98, disc_idx=5):
+def panel_homography_overlap(ref_idx=cfg("homog")[0], kept_idx=cfg("homog")[1], disc_idx=cfg("homog")[2]):
     ref = raw_frame(ref_idx)
     h, w = ref.shape[:2]
     cases = [(kept_idx, "kept"), (disc_idx, "discarded")]
@@ -262,7 +270,7 @@ def panel_homography_overlap(ref_idx=1, kept_idx=98, disc_idx=5):
         cx = (left_in + aw_in / 2) / fw
         fig.text(cx, 1 - 0.02 / fh, f"candidate frame {ci}", ha="center", va="top",
                  fontsize=SMALL, color=COL["text"])
-        fig.text(cx, 0.26 / fh, f"overlap α = {r['alpha']:.2f}", ha="center", va="bottom",
+        fig.text(cx, 0.26 / fh, f"overlap α = {_fmt_alpha(r['alpha'])}", ha="center", va="bottom",
                  fontsize=SMALL, color=COL["text"], fontweight="bold")
         verdict = "α < τ  →  keep" if tag == "kept" else "α ≥ τ  →  discard"
         fig.text(cx, 0.14 / fh, verdict, ha="center", va="bottom", fontsize=TINY,
@@ -275,7 +283,7 @@ def panel_homography_overlap(ref_idx=1, kept_idx=98, disc_idx=5):
 
 
 # ---- panel 3: timeline --------------------------------------------------------------
-def panel_timeline(thumb_frames=(1, 86, 187, 243, 271, 318)):
+def panel_timeline(thumb_frames=cfg("thumbs")):
     fw, fh = 3.6, 1.65
     fig = _fig(fw, fh)
     # timeline axis
@@ -285,7 +293,7 @@ def panel_timeline(thumb_frames=(1, 86, 187, 243, 271, 318)):
     ax.vlines(SAMPLED_IDX, 0, 1.0, color=COL["dynamic"], lw=0.7)
     ax.set_xlim(0, N_RAW + 1); ax.set_ylim(0, 1.05)
     ax.set_yticks([])
-    ax.set_xticks([1, 100, 200, 318])
+    ax.set_xticks(list(cfg("ticks")))
     ax.tick_params(axis="x", labelsize=TINY, colors=COL["muted"], length=1.5, width=0.4, pad=1.5)
     for sp in ax.spines.values():
         sp.set_visible(False)
@@ -342,7 +350,7 @@ def panel_selected_frames(n=5):
 
 
 # ---- panel 5: static vs dynamic --------------------------------------------------
-def panel_static_vs_dynamic(frames=(38, 137, 243)):
+def panel_static_vs_dynamic(frames=cfg("dyn_frames")):
     n = len(frames)
     fw = 3.4
     left0, gap = 0.13, 0.02
@@ -370,7 +378,7 @@ def panel_static_vs_dynamic(frames=(38, 137, 243)):
 
 
 # ---- panel 6: masks ---------------------------------------------------------------
-def panel_masks(frames=(38, 137, 243), col="#e07a2f", alpha=0.55):
+def panel_masks(frames=cfg("dyn_frames"), col="#e07a2f", alpha=0.55):
     n = len(frames)
     fw = 3.4
     gap = 0.02
@@ -407,11 +415,11 @@ def panel_masks(frames=(38, 137, 243), col="#e07a2f", alpha=0.55):
 
 
 if __name__ == "__main__":
-    r1 = panel_sift_matches(ref_idx=1, cand_idx=5)
-    print(f"sift_matches: ref 1 vs cand 5 -> {r1['n_good']} good, {r1['n_inl']} inliers, alpha={r1['alpha']:.3f}")
-    res = panel_homography_overlap(ref_idx=1, kept_idx=98, disc_idx=5)
+    r1 = panel_sift_matches()
+    print(f"sift_matches: {cfg('sift')} -> {r1['n_good']} good, {r1['n_inl']} inliers, alpha={r1['alpha']:.3f}")
+    res = panel_homography_overlap()
     for ci, r in res.items():
-        print(f"overlap: ref 1 vs cand {ci}: alpha={r['alpha']:.3f} ({r['n_inl']} inliers)")
+        print(f"overlap: ref {cfg('homog')[0]} vs cand {ci}: alpha={r['alpha']:.3f} ({r['n_inl']} inliers)")
     panel_timeline()
     print("filmstrip frames:", panel_selected_frames())
     panel_static_vs_dynamic()
