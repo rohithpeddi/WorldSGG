@@ -361,7 +361,10 @@ def cmd_build(args):
     for f in PCA_FILES.values():
         if not (root / f).exists():
             sys.exit(f"missing {root / f}: run fit-pca first")
-    videos = shard_videos(list_videos(args.split), args.shard, args.n_shards)
+    if getattr(args, "videos", None):
+        videos = list(args.videos)                      # explicit ids, e.g. a video outside the split
+    else:
+        videos = shard_videos(list_videos(args.split), args.shard, args.n_shards)
     if args.limit:
         videos = videos[: args.limit]
     tag = "" if args.n_shards == 1 else f"_shard{args.shard}of{args.n_shards}"
@@ -581,6 +584,7 @@ def main():
     b.add_argument("--n-shards", type=int, default=1)
     b.add_argument("--workers", type=int, default=4)
     b.add_argument("--limit", type=int, default=None)
+    b.add_argument("--videos", nargs="*", default=None, help="explicit video ids instead of the split list")
     b.add_argument("--overwrite", action="store_true")
     v = sub.add_parser("verify")
     v.add_argument("--split", required=True, choices=["train", "test"])

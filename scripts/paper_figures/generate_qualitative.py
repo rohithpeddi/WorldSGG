@@ -10,12 +10,15 @@ It runs where the data is (the CS93371 box), CPU only, and reads every path
 through ``lib/mllm/core/config_loader`` exactly as the rest of ``lib/mllm``
 does, so it makes no assumption about the host operating system.
 
-Three figure families per video (see ``FIGURES`` below):
+Three figure families per video and category (``<cat>`` is ``training`` or
+``mllm``, see ``CATEGORIES`` below):
 
-``<vid>_overlay2d``    ground-truth boxes and relations on real frames, one row
+``<vid>_<cat>_<mode>_overlay2d``
+                       ground-truth boxes and relations on real frames, one row
                        per method, colour-coded correct / partial / missed /
                        absent, at a handful of keyframes.
-``<vid>_scene3d_f*``   the Pi-3 dynamic scene as a coloured point cloud in the
+``<vid>_<cat>_<mode>_scene3d_f*``
+                       the Pi-3 dynamic scene as a coloured point cloud in the
                        canonical floor frame, with ground-truth and predicted
                        oriented 3-D boxes, from two oblique viewpoints and a
                        bird's-eye view.  Track A, Track B and WorldWise++ have a
@@ -23,18 +26,32 @@ Three figure families per video (see ``FIGURES`` below):
                        named on the figure as having **no 3-D output**, so an
                        absent box is never read as a failed detection.  No
                        method's *input* corners are ever drawn as a prediction.
-``<vid>_scenegraph``   the scene graph itself, ground truth beside each
+``<vid>_<cat>_<mode>_scenegraph_f*``
+                       the scene graph itself, ground truth beside each
                        method, with every predicate coloured by outcome.
+
+The paper runs two different styles of experiment, so each video gets **two**
+complete sets of figures rather than one mixed set (``--category``):
+
+``training``   the supervised lineage -- WorldWise++, WorldWise+, WorldWise,
+               W-DSGDetr++.  Only WorldWise++ has a 3-D head, so it is the only
+               predicted box in that category's 3-D panel.
+``mllm``       the MLLM tracks -- ``zero_shot``, ``caption_all``, ``rag_all``
+               (unlocalized) and Track A, Track B (localized).  The two
+               localized tracks are the predicted boxes in its 3-D panel.
+
+Ground truth is drawn in both categories, so either figure stands on its own,
+and the category key goes into every filename so the two sets never collide.
 
 Usage (on the server, from the repository root)::
 
-    python scripts/paper_figures/generate_qualitative.py --video 12XD3
-    python scripts/paper_figures/generate_qualitative.py --video AQQQ5 \\
-        --methods worldwise_pp rag_all track_a track_b --frames 4 \\
-        --formats pdf png --dpi 300
+    python scripts/paper_figures/generate_qualitative.py --video 12XD3 --category training
+    python scripts/paper_figures/generate_qualitative.py --video AQQQ5 --category mllm \\
+        --frames 4 --formats pdf png --dpi 300
 
-``--output-dir`` defaults to ``outputs/paper_figures/qualitative`` inside the
-repository.  Each run replaces only the files it writes.
+``--methods`` still overrides the category's method list when a one-off figure
+is wanted.  ``--output-dir`` defaults to ``outputs/paper_figures/qualitative``
+inside the repository.  Each run replaces only the files it writes.
 """
 from __future__ import annotations
 
@@ -53,8 +70,10 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.font_manager import FontProperties
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyBboxPatch, Rectangle
+from matplotlib.textpath import TextPath
 
 REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
@@ -159,6 +178,34 @@ METHODS: Dict[str, MethodSpec] = {s.key: s for s in [
 
 DEFAULT_METHODS = ["worldwise_pp", "worldwise", "w_dsgdetr_pp",
                    "rag_all", "zero_shot", "track_a", "track_b"]
+
+
+# ---------------------------------------------------------------------------
+# Categories -- the paper runs two different styles of experiment, and mixing
+# them into one figure asks the reader to compare rows that were never measured
+# the same way (different supervision, different backbones, different sgdet
+# matcher).  Each category therefore gets its own complete set of figures, and
+# ground truth is drawn in both so either figure stands on its own.
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class CategorySpec:
+    key: str              # short, stable, goes in every filename
+    label: str            # printed on the figure
+    blurb: str            # one line under the title
+    methods: Tuple[str, ...]
+
+
+CATEGORIES: Dict[str, CategorySpec] = {c.key: c for c in [
+    CategorySpec(
+        "training", "training-based",
+        "supervised lineage; GT shown for reference",
+        ("worldwise_pp", "worldwise_plus", "worldwise", "w_dsgdetr_pp")),
+    CategorySpec(
+        "mllm", "MLLM tracks",
+        "unlocalized (zero_shot / caption_all / rag_all) and localized (Track A / Track B); "
+        "GT shown for reference",
+        ("zero_shot", "caption_all", "rag_all", "track_a", "track_b")),
+]}
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +523,46 @@ def pick_frames(video: WorldBBoxVideo, n: int, explicit: Sequence[int]) -> List[
 # ---------------------------------------------------------------------------
 # Figure 1 -- 2-D overlays
 # ---------------------------------------------------------------------------
+_TEXT_W_CACHE: Dict[Tuple[str, float, bool], float] = {}
+
+
+def text_width_in(s: str, size: float, bold: bool = False) -> float:
+    """Rendered width of ``s`` in inches, measured rather than guessed.
+
+    ``TextPath`` lays the string out with the real font metrics at ``size``
+    points, so this is what matplotlib will actually draw.  The figures use it
+    to size the row-label gutter: a label must never be allowed to run under
+    the first image column, and the method names are fixed by the paper, so the
+    canvas has to accommodate them rather than the other way round.
+    """
+    if not s:
+        return 0.0
+    key = (s, size, bold)
+    if key not in _TEXT_W_CACHE:
+        fp = FontProperties(size=size, weight="bold" if bold else "normal")
+        _TEXT_W_CACHE[key] = float(TextPath((0, 0), s, prop=fp).get_extents().width) / 72.0
+    return _TEXT_W_CACHE[key]
+
+
+def wrap_to_width(s: str, size: float, bold: bool, max_in: float) -> List[str]:
+    """Greedy word wrap at a *measured* width.  A single word wider than
+    ``max_in`` is never split -- it is returned whole and the caller's gutter
+    grows to fit it, which keeps the "no text crosses into the image" rule
+    absolute instead of best-effort."""
+    lines: List[str] = []
+    current = ""
+    for word in s.split(" "):
+        trial = f"{current} {word}".strip()
+        if current and text_width_in(trial, size, bold) > max_in:
+            lines.append(current)
+            current = word
+        else:
+            current = trial
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
 def _draw_box(ax, xyxy, colour, text, dashed=False, lw=1.4, fs=6.2):
     x0, y0, x1, y1 = [float(v) for v in xyxy]
     ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, edgecolor=colour,
@@ -518,22 +605,52 @@ def raw_frame_path(video: WorldBBoxVideo, cfg: dict, frame_file: str) -> Path:
 
 def figure_overlay2d(video: WorldBBoxVideo, views: Dict[str, MethodView], specs: Sequence[MethodSpec],
                      frame_idx: Sequence[int], mode: str, k_at: int, cfg: dict,
-                     iou_thr: float) -> plt.Figure:
+                     iou_thr: float, category: Optional[CategorySpec] = None) -> plt.Figure:
     frames = [video.frames[t] for t in frame_idx]
     n_rows, n_cols = 1 + len(specs), len(frames)
     cell_w, cell_h = 2.35, 2.35
-    fig = plt.figure(figsize=(1.55 + cell_w * n_cols, 0.85 + cell_h * n_rows), facecolor="white")
-    gs = fig.add_gridspec(n_rows, n_cols, left=1.55 / (1.55 + cell_w * n_cols), right=0.995,
-                          top=1 - 0.62 / (0.85 + cell_h * n_rows), bottom=0.22 / (0.85 + cell_h * n_rows),
+
+    # --- row labels, laid out before the canvas exists ----------------------
+    # The method names are the paper's and may not be shortened, so the left
+    # gutter is sized to the longest line that will actually be drawn: every
+    # line is first wrapped at LABEL_MAX_IN, then measured, and the gutter is
+    # the widest survivor plus padding.  Nothing can cross into the image area.
+    TITLE_FS, SUB_FS = 8.2, 6.4
+    LABEL_X_IN, LABEL_PAD_IN, LABEL_MAX_IN = 0.06, 0.20, 2.30
+    n_gt_objects = len({o.label for o in frames[0].objects})
+    row_text: List[Tuple[List[str], List[str]]] = [
+        (wrap_to_width("Ground truth", TITLE_FS, True, LABEL_MAX_IN),
+         wrap_to_width(f"worldbbox test • {n_gt_objects} objects", SUB_FS, False, LABEL_MAX_IN))]
+    for spec in specs:
+        sub_src = [f"track {spec.track} • {spec.backbone}", matcher_note(spec, mode, iou_thr)]
+        if not views[spec.key].available:
+            sub_src.append("NO OUTPUT FOR THIS VIDEO")
+        sub_lines: List[str] = []
+        for piece in sub_src:
+            sub_lines.extend(wrap_to_width(piece, SUB_FS, False, LABEL_MAX_IN))
+        row_text.append((wrap_to_width(spec.label, TITLE_FS, True, LABEL_MAX_IN), sub_lines))
+    widest = max([text_width_in(l, TITLE_FS, True) for t, _ in row_text for l in t]
+                 + [text_width_in(l, SUB_FS) for _, s in row_text for l in s] + [0.0])
+    gutter = max(1.55, LABEL_X_IN + widest + LABEL_PAD_IN)
+
+    fig_w = gutter + cell_w * n_cols
+    fig_h = 1.0 + cell_h * n_rows
+    fig = plt.figure(figsize=(fig_w, fig_h), facecolor="white")
+    gs = fig.add_gridspec(n_rows, n_cols, left=gutter / fig_w, right=0.995,
+                          top=1 - 0.76 / fig_h, bottom=0.22 / fig_h,
                           wspace=0.04, hspace=0.06)
     images = {}
     for fr in frames:
         images[fr.file] = plt.imread(str(raw_frame_path(video, cfg, fr.file)))
 
-    def row_label(y, title, sub):
-        fig.text(0.004, y, title, fontsize=8.2, fontweight="bold", color=INK, va="center", ha="left")
-        fig.text(0.004, y - 0.013, sub, fontsize=6.4, color="#516271", va="top", ha="left",
-                 linespacing=1.4)
+    def row_label(y, title_lines, sub_lines):
+        """Title block growing up from ``y``, sub-block growing down from it, so
+        a wrapped title never collides with the sub-block below it."""
+        x, gap = LABEL_X_IN / fig_w, 0.05 / fig_h
+        fig.text(x, y + gap, "\n".join(title_lines), fontsize=TITLE_FS, fontweight="bold",
+                 color=INK, va="bottom", ha="left", linespacing=1.3)
+        fig.text(x, y - gap, "\n".join(sub_lines), fontsize=SUB_FS, color="#516271",
+                 va="top", ha="left", linespacing=1.4)
 
     for r in range(n_rows):
         spec = None if r == 0 else specs[r - 1]
@@ -575,18 +692,12 @@ def figure_overlay2d(video: WorldBBoxVideo, views: Dict[str, MethodView], specs:
                 ax.set_title(f"frame {fr.frame_num:06d}", fontsize=7.2, color=INK, pad=3)
             if c == 0:
                 bbox = ax.get_position()
-                y = bbox.y0 + bbox.height / 2
-                if spec is None:
-                    row_label(y, "Ground truth", f"worldbbox test • {len(seen)} objects")
-                else:
-                    ok = views[spec.key].available
-                    row_label(y, spec.label,
-                              f"track {spec.track} • {spec.backbone}\n"
-                              f"{matcher_note(spec, mode, iou_thr)}"
-                              + ("" if ok else "\nNO OUTPUT FOR THIS VIDEO"))
-    fig.suptitle(f"{video.video_id}  •  {mode}  •  per-method relation recall at R@{k_at}; "
+                row_label(bbox.y0 + bbox.height / 2, *row_text[r])
+    cat = f"{category.label}  •  " if category else ""
+    fig.suptitle(f"{video.video_id}  •  {cat}{mode}  •  per-method relation recall at R@{k_at}\n"
                  f"the fraction on each box is (recalled / ground-truth predicates)",
-                 fontsize=9.6, fontweight="bold", color=INK, y=0.995)
+                 fontsize=9.6, fontweight="bold", color=INK, y=1 - 0.06 / fig_h,
+                 va="top", linespacing=1.45)
     handles = [Line2D([], [], color=GT_OBSERVED, lw=2, label="GT, observed"),
                Line2D([], [], color=GT_UNOBSERVED, lw=2, ls="--", label="GT, unobserved")]
     handles += [Line2D([], [], color=OUTCOME[k], lw=2, ls="--" if k == "absent" else "-",
@@ -674,7 +785,8 @@ def predicted_corners(spec: MethodSpec, view: MethodView, frame_file: str
 
 def figure_scene3d(video: WorldBBoxVideo, views: Dict[str, MethodView], specs: Sequence[MethodSpec],
                    t: int, cloud: Dict[str, np.ndarray], max_points: int, iou_thr: float,
-                   mode: str) -> Tuple[plt.Figure, Dict[str, Any]]:
+                   mode: str, category: Optional[CategorySpec] = None
+                   ) -> Tuple[plt.Figure, Dict[str, Any]]:
     from lib.mllm.eval.iou3d import compute_iou_3d_obb
 
     fr = video.frames[t]
@@ -823,7 +935,8 @@ def figure_scene3d(video: WorldBBoxVideo, views: Dict[str, MethodView], specs: S
                fontsize=6.8, bbox_to_anchor=(0.5, PAD_IN / fig_h))
     fig.text(0.5, (2 * PAD_IN + legend_rows * LEG_IN) / fig_h, "\n".join(lines),
              fontsize=6.6, color=INK, ha="center", va="bottom", linespacing=1.55)
-    fig.suptitle(f"{video.video_id}  •  frame {fr.frame_num:06d}  •  {mode}  •  "
+    cat = f"{category.label}  •  " if category else ""
+    fig.suptitle(f"{video.video_id}  •  frame {fr.frame_num:06d}  •  {cat}{mode}  •  "
                  f"Pi-3 dynamic scene, canonical floor frame  •  match at 3-D IoU {iou_thr:g}",
                  fontsize=9.6, fontweight="bold", color=INK, y=1 - 0.07 / fig_h)
     fig.subplots_adjust(left=0.005, right=0.995, top=1 - 0.46 / fig_h,
@@ -832,6 +945,7 @@ def figure_scene3d(video: WorldBBoxVideo, views: Dict[str, MethodView], specs: S
         return {lab: (None if not np.isfinite(v) else round(float(v), 4)) for lab, v in row.items()}
 
     meta = {"frame": fr.frame_num, "frame_file": fr.file, "pi3_index": fr.pi3_index,
+            "category": category.key if category else None,
             "n_cloud_points": int(len(xyz)),
             "gt_boxes": [lab for lab, _, _ in gt_boxes],
             "iou3d": {k: _round(row) for k, row in ious.items()},
@@ -905,7 +1019,8 @@ def _graph_panel(ax, title, subtitle, objects, edges, height, note=""):
 
 
 def figure_scenegraph(video: WorldBBoxVideo, views: Dict[str, MethodView], specs: Sequence[MethodSpec],
-                      t: int, mode: str, k_at: int, iou_thr: float) -> plt.Figure:
+                      t: int, mode: str, k_at: int, iou_thr: float,
+                      category: Optional[CategorySpec] = None) -> plt.Figure:
     fr = video.frames[t]
     gt_rel = gt_relations_of(fr)
     order = [o.label for o in fr.objects]
@@ -941,15 +1056,20 @@ def figure_scenegraph(video: WorldBBoxVideo, views: Dict[str, MethodView], specs
                    default=1)
     height = panel_height(len(labels), max_rows)
     unit_in = 0.43
-    fig = plt.figure(figsize=(2.55 * n_panels, 0.55 + height * unit_in), facecolor="white")
-    top = 1 - 0.42 / (0.55 + height * unit_in)
+    # The colour key rides on a second title line: a category figure has half the
+    # panels of the old mixed one, so a single line no longer fits the canvas.
+    fig_h = 0.80 + height * unit_in
+    fig = plt.figure(figsize=(2.55 * n_panels, fig_h), facecolor="white")
+    top = 1 - 0.68 / fig_h
     gs = fig.add_gridspec(1, n_panels, left=0.005, right=0.995, top=top, bottom=0.012, wspace=0.03)
     for i, (title, sub, objects, edges, note) in enumerate(panels):
         _graph_panel(fig.add_subplot(gs[0, i]), title, sub, objects, edges, height, note=note)
-    fig.suptitle(f"{video.video_id}  •  frame {fr.frame_num:06d}  •  {mode}  •  "
-                 f"scene graph, green = recalled at R@{k_at}, red = predicted but not matched, "
+    cat = f"{category.label}  •  " if category else ""
+    fig.suptitle(f"{video.video_id}  •  frame {fr.frame_num:06d}  •  {cat}{mode}  •  scene graph\n"
+                 f"green = recalled at R@{k_at}, red = predicted but not matched, "
                  f"grey italic = ground-truth predicate the method missed",
-                 fontsize=8.6, fontweight="bold", color=INK, y=0.985)
+                 fontsize=8.6, fontweight="bold", color=INK, y=1 - 0.06 / fig_h,
+                 va="top", linespacing=1.5)
     return fig
 
 
@@ -972,8 +1092,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--video", nargs="+", required=True, help="worldbbox test video id(s), e.g. 12XD3")
-    p.add_argument("--methods", nargs="+", default=DEFAULT_METHODS,
-                   help=f"method keys, any of: {', '.join(METHODS)}")
+    p.add_argument("--category", default=None, choices=tuple(CATEGORIES),
+                   help="which style of experiment this figure is about: 'training' (the "
+                        "supervised lineage) or 'mllm' (the unlocalized and localized MLLM "
+                        "tracks).  Sets the default --methods, puts the category key in every "
+                        "filename and records it in the meta, so the two sets never collide. "
+                        "Ground truth is drawn in both, so either figure stands alone.")
+    p.add_argument("--methods", nargs="+", default=None,
+                   help=f"method keys, any of: {', '.join(METHODS)}.  Defaults to the "
+                        f"--category method list, or to the mixed legacy set when no "
+                        f"category is given")
     p.add_argument("--mode", default="sgdet", choices=("predcls", "sgdet"))
     p.add_argument("--figures", nargs="+", default=["overlay2d", "scenegraph", "scene3d"],
                    choices=("overlay2d", "scenegraph", "scene3d"),
@@ -1023,6 +1151,10 @@ def scene_cloud(video: WorldBBoxVideo, cfg: dict, dense: bool) -> Tuple[Dict[str
 
 def run_video(video_id: str, args, cfg: dict, test_set: WorldBBoxTestSet) -> Dict[str, Any]:
 
+    category = CATEGORIES[args.category] if args.category else None
+    # every figure of a run carries its category in the name, so the training-based
+    # set and the MLLM set of the same video/mode never overwrite one another
+    stem = f"{video_id}_{category.key}_{args.mode}" if category else f"{video_id}_{args.mode}"
     specs = [METHODS[k] for k in args.methods]
     video = test_set.load(video_id)
     cache_dir = args.cache_dir or Path(get_path(cfg, "outputs.dumps")) / "qualitative" / "cache"
@@ -1032,6 +1164,8 @@ def run_video(video_id: str, args, cfg: dict, test_set: WorldBBoxTestSet) -> Dic
     frame_idx = pick_frames(video, args.frames, args.frame_numbers)
     meta: Dict[str, Any] = {
         "video_id": video_id, "mode": args.mode, "k": args.k, "constraint": args.constraint,
+        "category": category.key if category else None,
+        "category_label": category.label if category else None,
         "iou3d": args.iou3d, "n_annotated_frames": len(video.frames),
         "objects": video.video_objects(),
         "keyframes": [video.frames[t].frame_num for t in frame_idx],
@@ -1042,13 +1176,15 @@ def run_video(video_id: str, args, cfg: dict, test_set: WorldBBoxTestSet) -> Dic
     }
 
     if "overlay2d" in args.figures:
-        fig = figure_overlay2d(video, views, specs, frame_idx, args.mode, args.k, cfg, args.iou3d)
-        meta["figures"]["overlay2d"] = save(fig, f"{video_id}_{args.mode}_overlay2d", out_dir,
+        fig = figure_overlay2d(video, views, specs, frame_idx, args.mode, args.k, cfg, args.iou3d,
+                               category=category)
+        meta["figures"]["overlay2d"] = save(fig, f"{stem}_overlay2d", out_dir,
                                             args.formats, args.dpi)
 
     for t in (frame_idx[:args.graph_frames] if "scenegraph" in args.figures else []):
-        fig = figure_scenegraph(video, views, specs, t, args.mode, args.k, args.iou3d)
-        name = f"{video_id}_{args.mode}_scenegraph_f{video.frames[t].frame_num:06d}"
+        fig = figure_scenegraph(video, views, specs, t, args.mode, args.k, args.iou3d,
+                                category=category)
+        name = f"{stem}_scenegraph_f{video.frames[t].frame_num:06d}"
         meta["figures"].setdefault("scenegraph", []).extend(
             save(fig, name, out_dir, args.formats, args.dpi))
 
@@ -1058,8 +1194,8 @@ def run_video(video_id: str, args, cfg: dict, test_set: WorldBBoxTestSet) -> Dic
     meta["cloud_source"] = cloud_source
     for t in scene3d_idx:
         fig, m3 = figure_scene3d(video, views, specs, t, cloud, args.cloud_points,
-                                 args.iou3d, args.mode)
-        name = f"{video_id}_{args.mode}_scene3d_f{video.frames[t].frame_num:06d}"
+                                 args.iou3d, args.mode, category=category)
+        name = f"{stem}_scene3d_f{video.frames[t].frame_num:06d}"
         meta["figures"].setdefault("scene3d", []).extend(
             save(fig, name, out_dir, args.formats, args.dpi))
         meta.setdefault("scene3d_detail", []).append(m3)
@@ -1068,7 +1204,7 @@ def run_video(video_id: str, args, cfg: dict, test_set: WorldBBoxTestSet) -> Dic
     meta["figure_families"] = list(args.figures)
     # a run may write only some families (raster montage and vector panels are
     # normally two calls with different formats); keep what the other call wrote
-    previous = out_dir / f"{video_id}_{args.mode}_meta.json"
+    previous = out_dir / f"{stem}_meta.json"
     if previous.exists():
         try:
             old = json.loads(previous.read_text(encoding="utf-8"))
@@ -1081,14 +1217,16 @@ def run_video(video_id: str, args, cfg: dict, test_set: WorldBBoxTestSet) -> Dic
                 meta["scene3d_detail"] = old["scene3d_detail"]
         except Exception:
             pass
-    (out_dir / f"{video_id}_{args.mode}_meta.json").write_text(json.dumps(meta, indent=1),
-                                                               encoding="utf-8")
-    print(out_dir / f"{video_id}_{args.mode}_meta.json")
+    (out_dir / f"{stem}_meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
+    print(out_dir / f"{stem}_meta.json")
     return meta
 
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.methods is None:
+        args.methods = (list(CATEGORIES[args.category].methods) if args.category
+                        else list(DEFAULT_METHODS))
     unknown = [k for k in args.methods if k not in METHODS]
     if unknown:
         raise SystemExit(f"unknown method(s) {unknown}; choose from {sorted(METHODS)}")

@@ -139,7 +139,11 @@ class _LazyNpz:
             import zipfile
             with zipfile.ZipFile(self.path) as zf, zf.open(f"{key}.npy") as f:
                 version = np.lib.format.read_magic(f)
-                shp, _, _ = np.lib.format._read_array_header(f, version)
+                try:
+                    shp, _, _ = np.lib.format._read_array_header(f, version)
+                except AttributeError:          # numpy >= 2.3 keeps the helper in a private module
+                    from numpy.lib import _format_impl
+                    shp, _, _ = _format_impl._read_array_header(f, version)
             self._shapes[key] = tuple(int(x) for x in shp)
         return self._shapes[key]
 
