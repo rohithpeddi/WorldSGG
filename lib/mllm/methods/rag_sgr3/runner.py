@@ -69,6 +69,7 @@ class SGR3RAGProcessor(ActionGenomeRAGAllObjectsProcessor):
     k_scenes: int = 1
     frames_per_scene: int = 3
     context_only: bool = False
+    random_scenes: bool = False
     sgr3_dir: str = SGR3_CACHE
     retrieval_suffix: str = ""
     ctx_root: Optional[Path] = None
@@ -216,6 +217,14 @@ class SGR3RAGProcessor(ActionGenomeRAGAllObjectsProcessor):
         if not ent:
             return "", 0
         scenes = ent.get("scenes", [])[: self.k_scenes]
+        if self.random_scenes:
+            # control: k random bank videos per (video, frame), same serialization and budget
+            import random
+            rng = random.Random(f"{Path(video_id).stem}/{os.path.basename(frame_file)}")
+            if not hasattr(self, "_bank_ids"):
+                self._bank_ids = sorted(self.bank)
+            scenes = [{"video": v, "frames": [[fk, 0.0] for fk in sorted(self.bank[v])[:5]]}
+                      for v in rng.sample(self._bank_ids, self.k_scenes)]
         units = [self._scene_units(s, obj) for s in scenes]
         picked: List[List[Tuple[str, bool, str]]] = [[] for _ in units]
         ptr = [0] * len(units)
@@ -340,6 +349,8 @@ def main():
     ap.add_argument("--retrieval_suffix", default="")
     ap.add_argument("--out_root", default="/data3/rohith/ag/runs/mllm/rag_sgr3")
     ap.add_argument("--context_only", action="store_true")
+    ap.add_argument("--random_scenes", action="store_true",
+                    help="control for R2: k random train videos instead of the retrieved ones")
     ap.add_argument("--mode", default="predcls", choices=["predcls", "sgdet"])
     ap.add_argument("--split", default="test")
     ap.add_argument("--video_list", default=None)
@@ -374,6 +385,7 @@ def main():
     p.arm, p.budget, p.k_scenes = args.arm, args.budget, args.k
     p.frames_per_scene, p.sgr3_dir, p.retrieval_suffix = args.frames_per_scene, args.sgr3_dir, args.retrieval_suffix
     p.context_only = args.context_only
+    p.random_scenes = args.random_scenes
     p.ctx_root = out_root / "ctx" / (args.model_name + args.tag)
     p.setup_arm()
     p.run(limit=args.limit, video_id=args.video_id, video_list=args.video_list)

@@ -17,6 +17,7 @@ ARMS = [  # (label, model dir, ctx dir or None)
     ("R2-3 SGR3-style, k=3", "qwen3vl_8b_R2k3", "qwen3vl_8b_R2k3"),
     ("R2-5 SGR3-style, k=5", "qwen3vl_8b_R2k5", "qwen3vl_8b_R2k5"),
     ("R3 R1(B/2) + R2-1", "qwen3vl_8b_R3", "qwen3vl_8b_R3"),
+    ("R2-rand (control: random train video)", "qwen3vl_8b_R2rand", "qwen3vl_8b_R2rand"),
 ]
 
 
