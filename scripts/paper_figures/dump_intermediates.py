@@ -349,6 +349,9 @@ def raw_frame(video: str, frame: str) -> np.ndarray:
     return np.asarray(Image.open(p).convert("RGB"))
 
 
+KEYFRAMES: List[int] = []      # zero-based override from --keyframes (empty: automatic)
+
+
 def pick_keyframes(vis: np.ndarray, valid: np.ndarray, labels: Sequence[str]) -> Tuple[int, List[int]]:
     """Tracked slot + three key frames (visible / unseen / visible-again-or-last)."""
     T, N = vis.shape
@@ -362,6 +365,8 @@ def pick_keyframes(vis: np.ndarray, valid: np.ndarray, labels: Sequence[str]) ->
             best, best_score = n, n_unseen
     if best is None:
         best = int(np.argmax(valid.sum(0)))
+    if KEYFRAMES:
+        return best, [min(T - 1, max(0, k)) for k in KEYFRAMES]
     v = vis[:, best]
     first_vis = int(np.argmax(v)) if v.any() else 0
     unseen = np.where(valid[:, best] & ~v)[0]
@@ -2417,7 +2422,11 @@ def main():
                     help="panel palette: white background (light) or the dark hero palette")
     ap.add_argument("--caps", default="title", choices=["title", "upper", "none"],
                     help="capitalise every panel text: Title Case, UPPER CASE or as written")
+    ap.add_argument("--keyframes", nargs=3, type=int, default=None,
+                    help="three one-based key frames to show instead of the automatic visible / unseen / last pick")
     args, _ = ap.parse_known_args()
+    if args.keyframes:
+        KEYFRAMES[:] = [k - 1 for k in args.keyframes]
     apply_theme(args.theme)
     global CAPS
     CAPS = args.caps

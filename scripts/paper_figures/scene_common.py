@@ -312,7 +312,11 @@ def enable_title_case():
     orig = mtext.Text.set_text
 
     def set_text(self, s):
-        return orig(self, title_case(s) if isinstance(s, str) else s)
+        if isinstance(s, Verbatim):          # matplotlib re-sets the text as a plain str while drawing,
+            self._verbatim = True            # so remember the choice on the artist
+        if isinstance(s, str) and not getattr(self, "_verbatim", False):
+            s = title_case(s)
+        return orig(self, s)
     set_text._title_case = True
     mtext.Text.set_text = set_text
 

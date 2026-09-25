@@ -158,6 +158,43 @@ Every unit writes a `<!-- crop NAME x0 y0 x1 y1 -->` marker; `crop_stages.py`
 turns them into `<name>_overview`, `_u1` .. `_u4` (and `_u12`) pages, falling back
 to the band rules for the stage figures (MLLM methods, detector).
 
+### Compact main-paper variants
+
+`fig_main_units.py` draws a short-form diagram of each of the same eight methods
+for the main paper, as one left-to-right forward pass (2.1-2.6k x 0.7-0.87k px):
+
+* top row: video → the four units as tinted enclosures, one column per module, so
+  every arrow is long; arrows that cross into the next unit name their tensor, and
+  long-range inputs (union features, the enriched tokens read by the node head, the
+  decoder's spatial attention, free queries) run on labelled buses entering boxes
+  from the top or bottom. WorldWise++'s entity decoder sits in the overlap of units
+  1 and 2. The scene graph the method predicts at the unseen key frame (its own
+  `preds.json`; an edge shows the top-1 contacting predicate, or the top-1 spatial
+  one when that is `not_contacting`) is on the right; each unit's losses at its foot,
+  named as in the supplement's equations (ℒ_vis/ℒ_vlm/ℒ_align, ℒ_recon/ℒ_SG/ℒ_sim,
+  ℒ_det/ℒ_slot);
+* bottom row: real PredCls intermediates of the same video, each numbered with the
+  badge of the module that produced it (all 00T1E dumps are PredCls checkpoints).
+
+Specs (modules with column / lane, edges with their routes, panels with badges) are
+at the top of the script. Output goes to `assets/figures/architecture/paper_figures/main/`
+(`.svg`, `.png`, vector `.pdf`) and never touches the long-form figures in `dark/`.
+
+```sh
+python scripts/paper_figures/dark/fig_main_units.py --png --pdf        # all eight, TM0BV (default)
+cp assets/figures/architecture/paper_figures/main/*.pdf <paper>/sup_images/architectures/compact/
+```
+
+The showcase video is **TM0BV** (dumps: `run_showcase_light.sh`, key frames forced with the
+dumper's `--keyframes 13 21 23`): `find_showcase.py` / `video_detail.py` scanned the all-frame
+PredCls prediction dumps for videos where WorldWise++ is right on every unseen-object pair; on
+TM0BV it is right on all 11 unseen pair cells and on every pair at the three key frames, the only
+method that is. `--video 00T1E` still rebuilds the earlier set.
+
+The supplement's training-method subsections (`sup_methods_baselines.tex`,
+`sup_methods_worldwise.tex`) use these PDFs as their one landscape figure per
+method; their text follows the same four units.
+
 ## 3. Into the paper (vector PDFs)
 
 `svg2pdf.ps1` prints an SVG to a vector PDF with headless Edge (an HTML wrapper

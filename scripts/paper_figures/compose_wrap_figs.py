@@ -35,10 +35,14 @@ SPECS = {
     "wrap_icp": (3.0, [[(SCN / "s1_rgb_dyn_k22.png",), (SCN / "s3_icp_before_after.png", (0.0, 0.355)),
                         (SCN / "s3_icp_before_after.png", (0.355, 0.68))]]),
     "wrap_merging": (3.0, [[(SCN / "s1_masks.png",)]]),
+    # Stage (v) of the scene figure, for the floor-alignment section (regular figure, not wrapped);
+    # RGB of the posed keyframe (22 -> file 000427.png, panels_floor_rgb.py) next to its 3-D view
+    "prompthmr_0DJ6R": (6.0, [[(SCN / "s3_rgb_smpl_k22.png",), (SCN / "s3_floor_smpl_posed.png",),
+                               (SCN / "s3_smpl_over_time.png",)]], 0.15),
     # ---------------- geometric annotation (00T1E)
     "wrap_detection": (3.0, [[(BOX / "b1_detection.png",)]]),
     "wrap_sam2": (3.0, [[(BOX / "b2_sam2.png",)]]),
-    "wrap_floor": (3.0, [[(BOX / "b0_floor_body.png",)]]),
+    "wrap_floor": (3.0, [[(BOX / "b0_rgb_frame251.png",), (BOX / "b0_floor_body.png",)]], 0.08),   # RGB of frame 251
     "wrap_erosion": (3.0, [[(BOX / "b3_erosion.png",)]]),
     "wrap_obb": (3.0, [[(BOX / "b4_obb.png", (0, 1), (0.668, 1.0))]]),
     "wrap_temporal": (3.0, [[(BOX / "b5_timeline.png",)], [(BOX / "b6_final_boxes.png",)]]),
@@ -92,5 +96,5 @@ def build(name, width, rows, gap=0.05):
 if __name__ == "__main__":
     names = sys.argv[1:] or list(SPECS)
     for n in names:
-        w, rows = SPECS[n]
-        build(n, w, rows)
+        w, rows, *gap = SPECS[n]
+        build(n, w, rows, *gap)
