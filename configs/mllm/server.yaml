@@ -40,6 +40,7 @@ paths:
     wsg_agent: /data3/rohith/ag/runs/mllm/wsg_agent/
     track_a: /data3/rohith/ag/runs/mllm/track_a/
     track_b: /data3/rohith/ag/runs/mllm/track_b/
+    scenegraphvlm: /data3/rohith/ag/runs/mllm/scenegraphvlm/
     visualizations: /data3/rohith/ag/runs/mllm/visualizations/
     wsg_corrections: /data/rohith/ag/wsg_corrections/
     wsg_2d_augmentations: /data/rohith/ag/wsg_2d_augmentations/

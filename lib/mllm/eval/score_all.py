@@ -31,7 +31,7 @@ from lib.mllm.core.config_loader import get_path, load_config              # noq
 from lib.mllm.eval.score_run import collect_records, score_records         # noqa: E402
 
 logger = logging.getLogger("score_all")
-METHODS = ("zero_shot", "caption_all", "rag_all", "wsg_agent", "track_a", "track_b")
+METHODS = ("zero_shot", "caption_all", "rag_all", "wsg_agent", "track_a", "track_b", "scenegraphvlm")
 
 
 def discover_runs(cfg: dict) -> List[Dict[str, Any]]:
@@ -55,13 +55,16 @@ def discover_runs(cfg: dict) -> List[Dict[str, Any]]:
     return runs
 
 
-def score_one(run: Dict[str, Any], cfg: dict, video_list: Optional[str], legacy: bool) -> Dict[str, Any]:
+def score_one(run: Dict[str, Any], cfg: dict, video_list: Optional[str], legacy: bool,
+              sgdet2d: bool = False, halluc: bool = False) -> Dict[str, Any]:
     col = collect_records(run["model"], run["mode"], run["pred_dir"], 0, cfg, video_list=video_list,
-                          objects_key=run.get("objects_key", "objects"))
+                          objects_key=run.get("objects_key", "objects"), halluc=halluc)
     res: Dict[str, Any] = {"n_videos": col["n_videos"], "n_split": col["n_split"], "n_missing": len(col["missing"]),
                            "n_errors": len(col["errors"]), "missing": col["missing"][:20]}
     if col["records"]:
-        res.update(score_records(col["records"], run["mode"]))
+        res.update(score_records(col["records"], run["mode"], sgdet2d=sgdet2d and run["mode"] == "sgdet"))
+    if "halluc" in col:
+        res["halluc"] = col["halluc"]
     # the legacy evaluator only understands the vendored baseline PKL format
     if legacy and run["method"] in ("zero_shot", "caption_all", "rag_all", "wsg_agent"):
         try:
@@ -140,6 +143,9 @@ def main():
     ap.add_argument("--subset", default="/data3/rohith/ag/splits/test_worldbbox_graphs442.txt")
     ap.add_argument("--no_legacy", action="store_true")
     ap.add_argument("--only", default=None, help="comma list of methods to score")
+    ap.add_argument("--sgdet2d", action="store_true", help="add the observed-only 2D SGDet regime (sgdet runs)")
+    ap.add_argument("--halluc", action="store_true", help="add UOR/URR hallucination metrics")
+    ap.add_argument("--no_full", action="store_true", help="score only --subset (skip the full split)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     cfg = load_config()
@@ -159,9 +165,9 @@ def main():
         pass
     for r in runs:
         logger.info(f"scoring {r}")
-        entry = {"full": score_one(r, cfg, None, not args.no_legacy)}
+        entry = {} if args.no_full else {"full": score_one(r, cfg, None, not args.no_legacy, args.sgdet2d, args.halluc)}
         if subset_name:
-            entry[subset_name] = score_one(r, cfg, args.subset, not args.no_legacy)
+            entry[subset_name] = score_one(r, cfg, args.subset, not args.no_legacy, args.sgdet2d, args.halluc)
         results["runs"].append((r, entry))
         with open(out_prefix + ".json", "w") as f:
             json.dump(results, f, indent=1)
