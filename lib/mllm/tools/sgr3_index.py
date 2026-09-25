@@ -294,6 +294,41 @@ def cmd_index(a):
 # query
 # ---------------------------------------------------------------------------
 
+def cmd_sinks(a):
+    """SigLIP2 emits ~3 artifact ("sink"/register-like) tokens per image at near-fixed
+    positions whose embeddings are near-identical across unrelated images (cross-frame
+    max-sim ~0.999).  They are also the patches LEAST similar to the rest of their own
+    frame, so SGR3's self-similarity weighting gives them ~95% of the weight and the
+    retrieval collapses to chance.  Collect them as prototypes from bank key frames
+    (patches whose best match in 100 other random frames exceeds --sink_sim) and
+    greedily de-duplicate; query patches near a prototype are masked out."""
+    meta = json.load(open(os.path.join(a.out, f"kf_meta{a.suffix}.json")))
+    mm = np.memmap(os.path.join(a.out, f"kf_patches{a.suffix}.f16"), dtype=np.float16, mode="r",
+                   shape=(meta["rows_alloc"], N_PATCH, DIM))
+    rng = np.random.RandomState(0)
+    rows = np.sort(rng.choice(meta["kf_out"], 300, replace=False))
+    X = mm[rows].astype(np.float32)
+    A, B = X[:200].reshape(-1, DIM), X[200:].reshape(-1, DIM)
+    mx = (A @ B.T).max(1)
+    cand = A[mx > a.sink_sim]
+    protos: List[np.ndarray] = []
+    for v in cand:
+        if not protos or max(float(v @ p) for p in protos) < 0.95:
+            protos.append(v)
+    P = np.stack(protos) if protos else np.zeros((0, DIM), np.float32)
+    np.save(os.path.join(a.out, f"sink_protos{a.suffix}.npy"), P)
+    pos = np.bincount(np.where((mx > a.sink_sim).reshape(200, N_PATCH))[1], minlength=N_PATCH)
+    logger.info(f"sinks: {len(cand)} sink patches in 200 frames ({len(cand) / 200:.2f}/frame) -> "
+                f"{len(P)} prototypes; most frequent positions {np.argsort(-pos)[:8].tolist()}")
+
+
+def sink_mask(P: np.ndarray, protos: np.ndarray, thr: float = 0.9) -> np.ndarray:
+    """True for artifact tokens (near a sink prototype)."""
+    if protos is None or len(protos) == 0:
+        return np.zeros(len(P), bool)
+    return (P.astype(np.float32) @ protos.T).max(1) > thr
+
+
 def patch_weights(P: np.ndarray, tau: float) -> np.ndarray:
     """SGR3 eq.: mu_i = mean_t!=i cos(p_i,p_t); w = softmax(-mu/tau)."""
     X = P.astype(np.float32)
@@ -343,8 +378,9 @@ def cmd_query(a):
     vids = _read_list(a.video_list)
     assert not (bank_ids & set(vids)), "LEAK: query video in the bank"
     assert not (bank_ids & set(_read_list(TEST_1511))), "LEAK: test ids in the bank"
+    protos = None if a.no_sink_mask else np.load(os.path.join(a.out, f"sink_protos{a.suffix}.npy"))
     enc = Encoder()
-    out_dir = os.path.join(a.out, f"retrieval{a.suffix}")
+    out_dir = os.path.join(a.out, f"retrieval{a.suffix}{a.ret_tag}")
     os.makedirs(out_dir, exist_ok=True)
     t0 = time.time()
     for n, vid in enumerate(vids):
@@ -358,8 +394,9 @@ def cmd_query(a):
         P = np.concatenate([enc(px[i:i + 64]) for i in range(0, len(px), 64)], 0)
         per_frame: List[Dict[int, float]] = []
         for j in range(len(P)):
-            D, I = index.search(P[j].astype(np.float32), a.knn)
-            per_frame.append(frame_scores(D, I, patch_weights(P[j], a.tau)))
+            Pk = P[j][~sink_mask(P[j], protos)]
+            D, I = index.search(Pk.astype(np.float32), a.knn)
+            per_frame.append(frame_scores(D, I, patch_weights(Pk, a.tau)))
         res = {}
         for t, fk in enumerate(fkeys):
             win = [u for u in range(t - a.half_window, t + a.half_window + 1) if 0 <= u < len(fkeys)]
@@ -384,7 +421,8 @@ def cmd_query(a):
             res[os.path.basename(fk)] = {"window": [os.path.basename(fkeys[u]) for u in win],
                                          "scenes": scenes}
         json.dump({"video": vid, "params": {"knn": a.knn, "nprobe": a.nprobe, "tau": a.tau,
-                                            "half_window": a.half_window, "model": MODEL_ID},
+                                            "half_window": a.half_window, "model": MODEL_ID,
+                                            "sink_mask": not a.no_sink_mask},
                    "frames": res}, open(dst, "w"))
         if n % 10 == 0:
             el = time.time() - t0
@@ -399,7 +437,7 @@ def cmd_diag(a):
     bank = pickle.load(open(os.path.join(a.out, "bank_graphs.pkl"), "rb"))
     bank_vids = sorted(bank)
     rng = np.random.RandomState(0)
-    rdir = os.path.join(a.out, f"retrieval{a.suffix}")
+    rdir = os.path.join(a.out, f"retrieval{a.suffix}{a.ret_tag}")
     ks = (1, 3, 5)
     hit = {k: [] for k in ks}
     hit_rand = {k: [] for k in ks}
@@ -435,13 +473,47 @@ def cmd_diag(a):
                      "unseen_gt_object_in_ref": round(float(np.mean(hit_unseen[k])), 4) if hit_unseen[k] else None,
                      "n_gt_objects": len(hit[k])} for k in ks}
     res["top1_label_jaccard"] = round(float(np.mean(jac)), 4)
-    json.dump(res, open(os.path.join(a.out, f"diag{a.suffix}.json"), "w"), indent=2)
+    json.dump(res, open(os.path.join(a.out, f"diag{a.suffix}{a.ret_tag}.json"), "w"), indent=2)
+    logger.info(json.dumps(res))
+
+
+def cmd_selfcheck(a):
+    """Bug check: a train frame used as the query must retrieve its own video
+    (its own key frames are in the bank).  Reports top-1/top-5 own-video rate
+    for key-frame and non-key-frame queries, with and without the sink mask."""
+    import faiss
+    from PIL import Image
+    faiss.omp_set_num_threads(a.threads)
+    meta = json.load(open(os.path.join(a.out, f"kf_meta{a.suffix}.json")))
+    kvid = [_stem(k.split("/")[0]) for k in meta["keys"]]
+    kset = set(meta["keys"])
+    index = faiss.read_index(os.path.join(a.out, f"ivf_sq8{a.suffix}.faiss"))
+    index.nprobe = a.nprobe
+    protos = np.load(os.path.join(a.out, f"sink_protos{a.suffix}.npy"))
+    bank = pickle.load(open(os.path.join(a.out, "bank_graphs.pkl"), "rb"))
+    enc = Encoder()
+    rng = np.random.RandomState(1)
+    ranks = {(m, t): [] for m in ("mask", "nomask") for t in ("kf", "nonkf")}
+    for v in rng.choice(sorted(bank), a.limit or 30, replace=False):
+        for fk in sorted(bank[v])[:6]:
+            P = enc(enc.pixel([Image.open(os.path.join(FRAMES, fk)).convert("RGB")]))[0]
+            for m in ("mask", "nomask"):
+                Pk = P[~sink_mask(P, protos)] if m == "mask" else P
+                D, I = index.search(Pk.astype(np.float32), a.knn)
+                best: Dict[str, float] = {}
+                for f, s in frame_scores(D, I, patch_weights(Pk, a.tau)).items():
+                    best[kvid[f]] = max(best.get(kvid[f], 0.0), s)
+                order = [x for x, _ in sorted(best.items(), key=lambda x: -x[1])]
+                ranks[(m, "kf" if fk in kset else "nonkf")].append(order.index(v) if v in order else 10 ** 6)
+    res = {f"{m}/{t}": {"n": len(r), "top1": round(float(np.mean(np.array(r) == 0)), 3),
+                        "top5": round(float(np.mean(np.array(r) < 5)), 3)} for (m, t), r in ranks.items()}
+    json.dump(res, open(os.path.join(a.out, f"selfcheck{a.suffix}.json"), "w"), indent=2)
     logger.info(json.dumps(res))
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["bank", "calib", "embed", "index", "query", "diag"])
+    ap.add_argument("cmd", choices=["bank", "calib", "embed", "index", "sinks", "query", "diag", "selfcheck"])
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--suffix", default="")
     ap.add_argument("--train_ann", default=TRAIN_ANN)
@@ -461,12 +533,15 @@ def main():
     ap.add_argument("--top_scenes", type=int, default=10)
     ap.add_argument("--top_frames", type=int, default=5)
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--sink_sim", type=float, default=0.98)
+    ap.add_argument("--no_sink_mask", action="store_true", help="literal SGR3 weighting (collapses, see cmd_sinks)")
+    ap.add_argument("--ret_tag", default="", help="suffix of the retrieval output dir")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         handlers=[logging.StreamHandler(sys.stdout)])
     {"bank": cmd_bank, "calib": cmd_calib, "embed": cmd_embed, "index": cmd_index,
-     "query": cmd_query, "diag": cmd_diag}[a.cmd](a)
+     "query": cmd_query, "diag": cmd_diag, "sinks": cmd_sinks, "selfcheck": cmd_selfcheck}[a.cmd](a)
 
 
 if __name__ == "__main__":
