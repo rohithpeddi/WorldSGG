@@ -57,8 +57,11 @@ class FusionConfig:
     obj_obs_strength: float = 1.0
     # FROSS hard association
     hellinger_threshold: float = 0.85
-    # dynamic-person edge forgetting (1.0 = PUF static accumulation)
+    # dynamic-person edge forgetting of the accumulated track evidence (1.0 = PUF accumulation)
     edge_decay: float = 1.0
+    # observed-pair read-out: "frame" = the per-frame person node's edge (this frame's
+    # fused evidence); "track" = the accumulated (person track, node) Dirichlet (static PUF)
+    observed_readout: str = "frame"
     # prior
     completion_threshold: float = 0.0
     max_node_pts: int = 1500
@@ -230,6 +233,7 @@ class VideoFusion:
                 n.n_edge *= cfg.edge_decay
         prev_ids = list(range(len(self.nodes)))       # PUF: associate against pre-frame nodes only
         assoc = {}
+        self.frame_ev = {}                            # node -> this frame's fused (person_t, node) evidence
         hard = cfg.arm == "fross"
         for ob in observations:
             self.stats["obs"] += 1
@@ -251,15 +255,25 @@ class VideoFusion:
                 n.add_evidence(ev, cfg.obs_strength)
                 self.nodes.append(n)
                 j = len(self.nodes) - 1
+                self._frame_add(j, ev, cfg.obs_strength)
                 self.stats["births"] += 1
             else:
                 self.stats["assoc"] += 1
                 self.nodes[j].merge_geom(ob["geom"], cfg.max_node_pts, self.rng)
                 for jj, w in soft:
                     self.nodes[jj].add_evidence(ev, w * cfg.obs_strength)
+                    self._frame_add(jj, ev, w * cfg.obs_strength)
                 self.nodes[j].last_t = t
             assoc[ob["slot"]] = j
         return assoc
+
+    def _frame_add(self, j, ev, w):
+        if ev is None:
+            return
+        f = self.frame_ev.setdefault(j, {"att": np.zeros(3), "spa": np.zeros((6, 2)), "con": np.zeros((17, 2))})
+        f["att"] += w * ev["att"]
+        f["spa"] += w * ev["spa"]
+        f["con"] += w * ev["con"]
 
     def node_for_class(self, c) -> Optional[int]:
         """Read-out slot -> node map for a slot that is not observed now: the node
@@ -287,7 +301,13 @@ class VideoFusion:
         spa = np.zeros((6, 2))
         con = np.zeros((17, 2))
         src = SRC_NONE
-        if n is not None and n.n_edge > 0:
+        if (not unobserved and cfg.observed_readout == "frame" and j in getattr(self, "frame_ev", {})):
+            # dynamic person: the observed edge is (person_t, node), i.e. this frame's fused evidence
+            f = self.frame_ev[j]
+            att, spa, con = f["att"].copy(), f["spa"].copy(), f["con"].copy()
+            src = SRC_OBS
+        elif n is not None and n.n_edge > 0:
+            # accumulated (person track, node) Dirichlet
             att, spa, con = n.att.copy(), n.spa.copy(), n.con.copy()
             src = SRC_MEM if unobserved else SRC_OBS
         if use_prior:

@@ -191,6 +191,7 @@ def cmd_run(a):
     print(f"[run] {a.arm} {a.mode}: {len(by)} videos, {sum(len(r) for r in by.values())} frames "
           f"(load {time.time() - t0:.0f}s)", flush=True)
     cfg = FusionConfig(arm=a.arm, mode=a.mode, edge_decay=a.edge_decay, lambda_birth=a.lambda_birth,
+                       observed_readout=a.observed_readout,
                        sigma_jsd=a.sigma_jsd, l2_gate=a.l2_gate, completion_threshold=a.completion_threshold,
                        emit_boxes=(a.arm in GRAPH_ARMS and not a.no_boxes))
     _G.update(by=by, cfg=cfg, geom_dir=a.geom_dir)
@@ -343,6 +344,7 @@ def main():
     r.add_argument("--sigma-d", type=float, default=0.5)
     r.add_argument("--no-spatial-prior", action="store_true")
     r.add_argument("--edge-decay", type=float, default=1.0)
+    r.add_argument("--observed-readout", default="frame", choices=["frame", "track"])
     r.add_argument("--lambda-birth", type=float, default=0.4)
     r.add_argument("--sigma-jsd", type=float, default=0.3)
     r.add_argument("--l2-gate", type=float, default=1.5)
