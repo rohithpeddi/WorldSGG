@@ -58,6 +58,19 @@ for mode in $MODES; do
     [ -e $REF ] || ln -s $FE $REF
     VARG=""
   fi
+  # comparison rows re-scored by the same scorer on the same frames (WorldWise++ and the
+  # resnet50 WorldWise, whose sgdet slots are the same as W-DSGDetr++'s)
+  for pair in "ref_worldwisepp:/data3/rohith/ag/runs/worldwise_pp/score/dumps/worldwise_pp_dinov3_${mode}__all.pkl" \
+              "ref_worldwise_r50:$FE_DIR/worldwise_${mode}_resnet50__all.pkl"; do
+    rn=${pair%%:*}; rsrc=${pair#*:}
+    R=$OUT/dumps/${rn}_${mode}.pkl
+    [ -e $R ] && continue
+    if [ -n "$VF" ]; then
+      $PY tools/ext_puf.py subset --frontend $rsrc --videos-file $VF --name ${rn}_${mode} --out $R
+    else
+      ln -s $rsrc $R
+    fi
+  done
   echo "$VARIANTS" | while read name arm extra; do
     [ -z "$name" ] && continue
     D=$OUT/dumps/puf_${name}_${mode}.pkl
