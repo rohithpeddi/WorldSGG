@@ -2,7 +2,7 @@
 
 Each figure is built from already-rendered panels of the real intermediates (scene pipeline for
 0DJ6R, box pipeline for 00T1E), optionally cropped to a horizontal fraction of a panel, and laid out
-in rows.  Output: outputs/wrap_figs/<name>.pdf (+ .png preview).
+in rows.  Output: assets/figures/architecture/wrap_figs/<name>.pdf (+ .png preview); panels stay vector.
 
     python scripts/paper_figures/compose_wrap_figs.py [name ...]
 """
@@ -11,10 +11,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from PIL import Image
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from vcompose import Canvas, resolve  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 _arch = REPO / "assets" / "figures" / "architecture"
@@ -25,26 +23,17 @@ OUT = (_arch / "wrap_figs") if (_arch / "wrap_figs").exists() else (REPO / "outp
 OUT.mkdir(parents=True, exist_ok=True)
 
 
-def load(path, xfrac=(0.0, 1.0), yfrac=(0.0, 1.0), trim=True, pad=6):
-    im = Image.open(path).convert("RGBA")
-    w, h = im.size
-    im = im.crop((int(xfrac[0] * w), int(yfrac[0] * h), int(xfrac[1] * w), int(yfrac[1] * h)))
-    if trim:
-        box = im.getchannel("A").point(lambda v: 255 if v > 8 else 0).getbbox()
-        if box:
-            im = im.crop((max(0, box[0] - pad), max(0, box[1] - pad), min(im.size[0], box[2] + pad), min(im.size[1], box[3] + pad)))
-    bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
-    return Image.alpha_composite(bg, im).convert("RGB")
-
-
 # name -> (width in inches, rows); a row is a list of (path, xfrac)
 SPECS = {
     # ---------------- scene reconstruction (0DJ6R)
     "wrap_sampling": (3.0, [[(SCN / "s1_timeline.png",)]]),
     "wrap_pi3_inputs": (3.0, [[(SCN / "s1_static_vs_dynamic.png",)]]),
     "wrap_confidence": (3.0, [[(SCN / "s2_confidence.png",)]]),
-    "wrap_decomposition": (3.0, [[(SCN / "s2_static_dynamic_split.png",)]]),
-    "wrap_icp": (3.0, [[(SCN / "s3_icp_before_after.png", (0.0, 0.37)), (SCN / "s3_icp_before_after.png", (0.37, 0.735))]]),
+    # RGB input of view 22 next to the 3-D result it produces
+    "wrap_decomposition": (3.0, [[(SCN / "s1_rgb_static_k22.png",), (SCN / "s2_static_dynamic_split.png", (0.0, 0.5))],
+                                 [(SCN / "s1_rgb_dyn_k22.png",), (SCN / "s2_static_dynamic_split.png", (0.5, 1.0))]]),
+    "wrap_icp": (3.0, [[(SCN / "s1_rgb_dyn_k22.png",), (SCN / "s3_icp_before_after.png", (0.0, 0.355)),
+                        (SCN / "s3_icp_before_after.png", (0.355, 0.68))]]),
     "wrap_merging": (3.0, [[(SCN / "s1_masks.png",)]]),
     # ---------------- geometric annotation (00T1E)
     "wrap_detection": (3.0, [[(BOX / "b1_detection.png",)]]),
@@ -66,27 +55,37 @@ SPECS = {
 
 
 def build(name, width, rows, gap=0.05):
-    imgs = [[load(*spec) for spec in row] for row in rows]
-    # each row spans the full width; images in a row share the row height
-    heights = []
-    for row in imgs:
-        rsum = sum(im.size[0] / im.size[1] for im in row)
-        heights.append((width - gap * (len(row) - 1)) / rsum)
+    """Rows of panels, each row spanning the full width with a shared height; panels are placed as vector
+    PDFs (vcompose), cropped to (xfrac, yfrac) and trimmed of transparent margins."""
+    specs = []
+    for row in rows:
+        r = []
+        for spec in row:
+            path, xfrac, yfrac = (tuple(spec) + ((0.0, 1.0), (0.0, 1.0)))[:3]
+            stem = Path(path).with_suffix("")
+            _, win, asp = resolve(stem, crop=(xfrac[0], yfrac[0], xfrac[1], yfrac[1]), autocrop=True)
+            r.append((stem, win, asp))
+        # crops of one panel in the same row share a vertical window so they keep one scale
+        for stem in {st for st, _, _ in r}:
+            idx = [i for i, (st, _, _) in enumerate(r) if st == stem]
+            if len(idx) > 1:
+                t = min(r[i][1][1] for i in idx); b = max(r[i][1][3] for i in idx)
+                for i in idx:
+                    l, _, rr, _ = r[i][1]
+                    _, win, asp = resolve(stem, crop=(l, t, rr, b))
+                    r[i] = (stem, win, asp)
+        specs.append(r)
+    heights = [(width - gap * (len(r) - 1)) / sum(a for _, _, a in r) for r in specs]
     H = sum(heights) + gap * (len(rows) - 1)
-    fig = plt.figure(figsize=(width, H)); fig.patch.set_facecolor("white")
+    cv = Canvas(width, H)
     y = H
-    for row, rh in zip(imgs, heights):
-        y -= rh
+    for r, rh in zip(specs, heights):
         x = 0.0
-        for im in row:
-            w = rh * im.size[0] / im.size[1]
-            ax = fig.add_axes([x / width, y / H, w / width, rh / H]); ax.set_axis_off()
-            ax.imshow(im, interpolation="lanczos")
-            x += w + gap
-        y -= gap
-    for ext in ("pdf", "png"):
-        fig.savefig(OUT / f"{name}.{ext}", dpi=300, facecolor="white")
-    plt.close(fig)
+        for stem, win, asp in r:
+            cv.place(stem, x, y, rh * asp, rh, crop=win)
+            x += rh * asp + gap
+        y -= rh + gap
+    cv.save(OUT / name, png_dpi=300)
     print(f"{name}: {width:.2f} x {H:.2f} in")
 
 

@@ -23,16 +23,17 @@ PAPER = Path(r"C:\Users\rohit\LaTeXProjects\WSGG_Paper\updated_submission")
 
 # target name -> source SVG (relative to OUT)
 FIGURES = {
-    # training-based methods: adapted baselines and the detector, real panels of 12XD3
-    "w_sttran": "12XD3/w_sttran.svg",
-    "w_sttran_pp": "12XD3/w_sttran_pp.svg",
-    "w_dsgdetr": "12XD3/w_dsgdetr.svg",
-    "w_dsgdetr_pp": "12XD3/w_dsgdetr_pp.svg",
-    "w_usg": "12XD3/w_usg.svg",
+    # training-based methods, drawn as processing units with real panels of 00T1E
+    "w_sttran": "00T1E/w_sttran.svg",
+    "w_sttran_pp": "00T1E/w_sttran_pp.svg",
+    "w_dsgdetr": "00T1E/w_dsgdetr.svg",
+    "w_dsgdetr_pp": "00T1E/w_dsgdetr_pp.svg",
+    "w_usg": "00T1E/w_usg.svg",
+    "worldwise": "00T1E/worldwise.svg",
+    "worldwise_plus": "00T1E/worldwise_plus.svg",
+    "worldwise_pp": "00T1E/worldwise_pp.svg",
+    # the monocular 3-D detector (stage figure), real panels of 12XD3
     "mono3d": "12XD3/mono3d.svg",
-    "worldwise": "12XD3/worldwise.svg",
-    "worldwise_plus": "12XD3/worldwise_plus.svg",
-    "worldwise_pp": "12XD3/worldwise_pp.svg",
     # MLLM methods, real panels of 00T1E
     "zero_shot": "00T1E/zero_shot.svg",
     "caption_all": "00T1E/caption_all.svg",
@@ -48,8 +49,9 @@ def main():
     ap.add_argument("--only", nargs="*", default=None)
     ap.add_argument("--png", action="store_true")
     ap.add_argument("--stages", action="store_true",
-                    help="also cut every figure into its three stage bands (crop_stages.py) and export "
-                         "<name>_s1.pdf .. <name>_s3.pdf, the per-page figures the paper uses")
+                    help="also cut every figure into its pages (crop_stages.py) and export them: "
+                         "<name>_overview/_u1.._u4 (+ _u12 for WorldWise++) for the processing-unit "
+                         "figures, <name>_s1.._s3 for the stage figures")
     ap.add_argument("--stages-only", action="store_true", help="export only the stage crops")
     args = ap.parse_args()
     target = Path(args.paper) / "sup_images/architectures"

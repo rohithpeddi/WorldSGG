@@ -36,7 +36,7 @@ from matplotlib.lines import Line2D
 from scene_common import cfg
 from scene_common import (
     BUNDLE_DIR, COL, VIEW, bundle, to_final, pose_to_final, fig3d, set_equal, scatter,
-    draw_frustum, save,
+    draw_frustum, save, vivid, crisp,
 )
 
 RNG = np.random.default_rng(0)
@@ -163,9 +163,9 @@ def p1_input_frames():
         im = np.array(Image.open(BUNDLE_DIR / f"pi3_view_{k:02d}.jpg"))
         if im.shape[0] < im.shape[1]:          # stored landscape -> rotate to upright portrait
             im = np.rot90(im, -1)
-        ax.imshow(im)
+        ax.imshow(crisp(im), interpolation="lanczos")
         ax.set_axis_off()
-        ax.set_title(f"clip {k}  ·  frame {raw_frame_id(k):06d}", fontsize=7.5, pad=2)
+        ax.set_title(f"Clip {k}  ·  Frame {raw_frame_id(k):06d}", fontsize=7.5, pad=2)
     fig.subplots_adjust(wspace=0.04, hspace=0.08, left=0.01, right=0.99, top=0.96, bottom=0.01)
     save(fig, "s2_input_frames")
 
@@ -180,10 +180,10 @@ def p2_local_pointmaps():
         ax = ax3d(fig, (1, 4, i + 1), CAM_VIEW)
         D = cam_display(b[f"pi3_local_{k}"])
         idx = sub(len(D), 40000)
-        scatter(ax, D[idx], b[f"pi3_colors_{k}"][idx], s=0.3)
+        scatter(ax, D[idx], vivid(b[f"pi3_colors_{k}"][idx]), s=0.7, alpha=1.0)
         fit(ax, allD, zoom=1.8, cubic=True)
-        ax.set_title(f"view {k}", fontsize=8, y=-0.1)
-    fig.suptitle("Per-view local point maps (camera frame)", fontsize=9, y=0.995)
+        ax.set_title(f"View {k}", fontsize=13, y=-0.2)
+    fig.suptitle("Per-View Local Point Maps (Camera Frame)", fontsize=14, y=1.02)
     fig.subplots_adjust(wspace=0.0, left=0.0, right=1.0, top=0.95, bottom=0.07)
     save(fig, "s2_local_pointmaps")
 
@@ -210,24 +210,24 @@ def p3_confidence():
     fig = plt.figure(figsize=(5.2, 2.6))
     fig.patch.set_alpha(0)
     ax = ax3d(fig, (1, 2, 1), CAM_VIEW)
-    sc = ax.scatter(D[idx, 0], D[idx, 1], D[idx, 2], c=conf[idx], cmap="viridis", s=0.35,
+    sc = ax.scatter(D[idx, 0], D[idx, 1], D[idx, 2], c=conf[idx], cmap="viridis", s=0.8,
                     linewidths=0, depthshade=False, vmin=0.0 if cv.exists() else thr, vmax=float(np.percentile(conf, 99)))
     fit(ax, D, zoom=1.7, cubic=True)
-    tag = (" (static pass)" if str(np.load(cv).get("pass_", "dynamic")) == "static" else "") if cv.exists() else ""
-    ax.set_title(("π³ confidence" + tag + ", edges → 0") if cv.exists() else "pi3 confidence", fontsize=8.5, y=-0.1)
+    tag = (" (Static Pass)" if str(np.load(cv).get("pass_", "dynamic")) == "static" else "") if cv.exists() else ""
+    ax.set_title(("π³ Confidence" + tag + ", Edges → 0") if cv.exists() else "π³ Confidence", fontsize=9.5, y=-0.12)
     cb = fig.colorbar(sc, ax=ax, shrink=0.4, pad=0.0, fraction=0.03, aspect=25)
-    cb.ax.tick_params(labelsize=6, length=2)
+    cb.ax.tick_params(labelsize=8.5, length=2)
     cb.outline.set_linewidth(0.4)
     ax = ax3d(fig, (1, 2, 2), CAM_VIEW)
     drop = idx[~keep[idx]]
     if len(drop):
-        scatter(ax, D[drop], color="#c9ccd1", s=0.3, alpha=0.35)
+        scatter(ax, D[drop], color="#c9ccd1", s=0.6, alpha=0.35)
     kp = idx[keep[idx]]
-    scatter(ax, D[kp], colors[kp], s=0.35)
+    scatter(ax, D[kp], vivid(colors[kp]), s=0.8, alpha=1.0)
     fit(ax, D, zoom=1.7, cubic=True)
-    ax.set_title(f"kept: conf > τ = {thr:.2f}" + (f"  ({100 * (~keep).mean():.0f}% dropped)" if cv.exists() else ""), fontsize=8.5, y=-0.1)
-    fig.suptitle("Confidence thresholding", fontsize=9, y=0.995)
-    fig.subplots_adjust(wspace=0.0, left=0.0, right=1.0, top=0.95, bottom=0.07)
+    ax.set_title(f"Kept: Conf > τ = {thr:.2f}" + (f"  ({100 * (~keep).mean():.0f}% Dropped)" if cv.exists() else ""), fontsize=9.5, y=-0.12)
+    fig.suptitle("Confidence Thresholding", fontsize=12, y=1.0)
+    fig.subplots_adjust(wspace=0.12, left=0.0, right=1.0, top=0.95, bottom=0.07)
     save(fig, "s2_confidence")
 
 
@@ -237,14 +237,14 @@ def p4_world_cloud_initial():
     C = b["pi3_all_colors"]
     idx = sub(len(P), 200000)
     fig, ax = fig3d(size=(5.2, 3.0))
-    scatter(ax, P[idx], C[idx], s=0.25, alpha=0.85)
+    scatter(ax, P[idx], vivid(C[idx]), s=0.6, alpha=1.0)
     cams = []
     for k in [kept_views()[i] for i in (0, 3, 5, 7)]:      # 4 of the 8 kept views: the 8 centres overlap into one blob
         T = pose_to_final(b["pi3_poses"][k])
         draw_frustum(ax, T, COL["cam_init"], scale=0.35, lw=1.2)
         cams.append(T[:3, 3])
     fit(ax, np.concatenate([P[idx], np.array(cams)]), zoom=1.2)
-    ax.set_title("Dynamic world point clouds + initial poses", fontsize=9, y=1.0)
+    ax.set_title("Dynamic World Point Clouds + Initial Poses", fontsize=12.5, y=1.0)
     fig.subplots_adjust(left=0, right=1, top=0.9, bottom=0)
     save(fig, "s2_world_cloud_initial")
 
@@ -264,20 +264,20 @@ def p5_static_dynamic_split():
     fig.patch.set_alpha(0)
     # static
     ax = ax3d(fig, (1, 2, 1))
-    scatter(ax, SP, desaturate(SC, keep=0.45, tint=COL["static"], tint_w=0.18), s=0.25, alpha=0.85)
+    scatter(ax, SP, vivid(SC), s=0.55, alpha=1.0)
     fit(ax, box, zoom=1.25)
-    ax.set_title("Static background S" + ("" if SS is None else " (inpainted frames)"), fontsize=9, y=1.0)
+    ax.set_title(r"Static Background $\mathcal{S}$" + ("" if SS is None else " (Inpainted Frames)"), fontsize=10.5, y=1.0)
     # dynamic, coloured by view index (time)
     ax = ax3d(fig, (1, 2, 2))
     ctx = st[sub(len(st), 60000)]
-    scatter(ax, P[ctx] if SS is None else SP[sub(len(SP), 60000)], color=FAINT, s=0.15, alpha=0.18)
+    scatter(ax, P[ctx] if SS is None else SP[sub(len(SP), 60000)], color=FAINT, s=0.3, alpha=0.2)
     nv = int(view.max()) + 1
     sc = ax.scatter(P[dy_idx, 0], P[dy_idx, 1], P[dy_idx, 2], c=view[dy_idx], cmap=TIME_CMAP,
-                    vmin=0, vmax=nv - 1, s=0.4, linewidths=0, depthshade=False, alpha=0.95)
+                    vmin=0, vmax=nv - 1, s=0.9, linewidths=0, depthshade=False, alpha=1.0)
     fit(ax, box, zoom=1.25)
-    ax.set_title(r"Masked dynamic foreground $D_t^{\rm fg}$", fontsize=9, y=1.0)
+    ax.set_title(r"Masked Dynamic Foreground $\mathcal{D}_t^{\rm fg}$", fontsize=10.5, y=1.0)
     cb = fig.colorbar(sc, ax=ax, shrink=0.35, pad=0.0, fraction=0.025, aspect=22, ticks=[0, nv - 1])
-    cb.ax.set_yticklabels(["t = 0", f"t = {nv - 1}"], fontsize=6)
+    cb.ax.set_yticklabels(["t = 0", f"t = {nv - 1}"], fontsize=8.5)
     cb.ax.tick_params(length=2)
     cb.outline.set_linewidth(0.4)
     fig.subplots_adjust(wspace=0.0, left=0.0, right=1.0, top=0.9, bottom=0.0)
@@ -320,12 +320,12 @@ def p7_dynamic_frames():
     fig.patch.set_alpha(0)
     for i, k in enumerate(ks):
         ax = ax3d(fig, (1, 3, i + 1))
-        scatter(ax, CTX, color=FAINT, s=0.15, alpha=0.18)
+        scatter(ax, CTX, color=FAINT, s=0.3, alpha=0.22)
         Pm, Cm, T = per[k]
-        scatter(ax, Pm, color=COL["dynamic"], s=0.5, alpha=0.95)
+        scatter(ax, Pm, color=COL["dynamic"], s=1.1, alpha=1.0)
         draw_frustum(ax, T, COL["cam_init"], scale=0.35, lw=1.2)
         fit(ax, box, zoom=1.25)
-        ax.set_title(rf"$D_t^{{\rm fg}}$, view {k} (frame {raw_frame_id(k)})", fontsize=9, y=1.0)
+        ax.set_title(rf"$\mathcal{{D}}_t^{{\rm fg}}$, View {k} (Frame {raw_frame_id(k)})", fontsize=10.5, y=1.0)
     fig.subplots_adjust(wspace=0.0, left=0.0, right=1.0, top=0.9, bottom=0.0)
     save(fig, "s2_dynamic_frames")
 

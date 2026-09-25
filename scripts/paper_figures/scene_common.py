@@ -52,7 +52,8 @@ _VIDEO_CFG = {
                   obb_frame="000010.png", obb_label="laptop", pf_frame="000010.png"),
     "0DJ6R": dict(sift=(1, 5), homog=(1, 75, 5), thumbs=(1, 124, 312, 410, 531, 993), ticks=(1, 250, 500, 750, 1011),
                   dyn_frames=(124, 385, 441), time_frames=("000210.png", "000413.png", "000742.png"),
-                  obb_frame="000413.png", obb_label="phone", pf_frame="000413.png"),
+                  obb_frame="000413.png", obb_label="phone", pf_frame="000413.png",
+                  smpl_view=dict(elev=20, azim=-35), smpl_zoom=1.1),
 }
 PANEL_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -80,7 +81,9 @@ class _LabelCol(dict):
 LABEL_COL = _LabelCol({"person": "#57c75a", "bed": "#4a7fd6", "laptop": "#e07a2f", "doorway": "#b16be3",
                        "shoe": "#d62f8a", "phone": "#b16be3"})
 FONT = "DejaVu Sans"
-plt.rcParams.update({"font.family": FONT, "font.size": 9, "axes.titlesize": 10, "savefig.dpi": DPI})
+plt.rcParams.update({"font.family": FONT, "font.size": 9, "axes.titlesize": 10, "savefig.dpi": DPI,
+                     "pdf.fonttype": 42, "ps.fonttype": 42})
+RASTER_DPI = 400       # raster parts (point clouds, meshes, photos) of the panel PDFs
 
 
 # ---- data -------------------------------------------------------------------
@@ -108,7 +111,7 @@ def cfg(key: str):
         return c[key]
     v = view_ids()
     default = {"views4": [v[0], v[2], v[4], v[6]], "view_mid": v[4], "views3": [v[0], v[4], v[6]],
-               "smpl_k": v[4], "smpl_k_unposed": v[6]}
+               "smpl_k": v[4], "smpl_k_unposed": v[6], "smpl_view": VIEW_FLOORSIM, "smpl_zoom": 1.35}
     return default[key]
 
 
@@ -221,9 +224,122 @@ def draw_floor(ax, verts, faces, color=COL["floor"], alpha=0.25, checker=True):
         pc = Poly3DCollection(polys, facecolors=color, edgecolors="none", alpha=alpha)
     ax.add_collection3d(pc)
 
-def save(fig, name: str, transparent=True):
-    out = PANEL_DIR / f"{name}.png"
-    fig.savefig(out, dpi=DPI, transparent=transparent, bbox_inches="tight", pad_inches=0.02)
+def _enable_3d_rasterization():
+    """mplot3d's collections override ``draw`` without the ``allow_rasterization`` wrapper, so
+    ``set_rasterized`` is ignored and a 3-D cloud would be written as ~10^5 vector circles.  The
+    projection happens before ``draw``, so wrapping it is safe."""
+    from matplotlib.artist import allow_rasterization
+    from mpl_toolkits.mplot3d import art3d
+    for cls in (art3d.Path3DCollection, art3d.Poly3DCollection, art3d.Patch3DCollection, art3d.Line3DCollection):
+        if "draw" in cls.__dict__ and not getattr(cls.draw, "_supports_rasterization", False):
+            cls.draw = allow_rasterization(cls.draw)
+
+
+_enable_3d_rasterization()
+
+
+def rasterize_heavy(fig, min_items: int = 100):
+    """Rasterise the artists that are expensive as vectors (scatter clouds, dense meshes); text, box
+    edges, frusta and axes stay vector."""
+    for ax in fig.axes:
+        for c in ax.collections:
+            n = max(len(c.get_offsets()) if hasattr(c, "get_offsets") else 0, len(c.get_paths()))
+            if n >= min_items:
+                c.set_rasterized(True)
+
+
+def save_fig(fig, out_stem, transparent=True, png_dpi=DPI, pdf_dpi=RASTER_DPI, pad=0.02):
+    """Write ``out_stem.png`` (preview / alpha measurements) and ``out_stem.pdf`` (vector text, raster
+    clouds) with one shared bounding box, so crops measured on the PNG apply to the PDF."""
+    out_stem = Path(out_stem)
+    fig.canvas.draw()
+    bb = fig.get_tightbbox(fig.canvas.get_renderer()).padded(pad)
+    fig.savefig(out_stem.with_suffix(".png"), dpi=png_dpi, transparent=transparent, bbox_inches=bb)
+    rasterize_heavy(fig)
+    fig.savefig(out_stem.with_suffix(".pdf"), dpi=pdf_dpi, transparent=transparent, bbox_inches=bb)
     plt.close(fig)
-    print("saved", out)
-    return out
+    print("saved", out_stem.with_suffix(".png"), "+ .pdf")
+    return out_stem.with_suffix(".png")
+
+
+def save(fig, name: str, transparent=True):
+    return save_fig(fig, PANEL_DIR / name, transparent=transparent)
+
+
+# ---- Title Case ------------------------------------------------------------------
+_SMALL_WORDS = {"a", "an", "the", "and", "or", "nor", "but", "of", "to", "in", "on", "at", "by", "for", "from",
+                "with", "vs", "via", "per", "as", "into", "over", "if"}
+_UNITS = {"px", "m", "cm", "mm", "deg", "s", "ms", "pts"}
+_ROMAN = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
+
+
+class Verbatim(str):
+    """Text that title_case must not touch (quoted model output, identifiers)."""
+
+
+def title_case(s):
+    """Title Case for figure text.  Leaves alone: math/markup tokens ($ \\ _ { }), words that already contain
+    capitals (GT, SAM2, Qwen2.5-VL), single-letter variables (k, t), units, number-led tokens (2nd) and
+    non-ASCII words (π³).  Small words stay lower case except at the start of a line."""
+    import re
+    if not isinstance(s, str) or not s or isinstance(s, Verbatim):
+        return s
+    lines = []
+    for line in s.split("\n"):
+        out, first = [], True
+        for tok in line.split(" "):
+            m = re.match(r"^([^A-Za-z]*)([a-zA-Z][A-Za-z\-']*)(.*)$", tok)
+            if tok and m and not any(c in tok for c in "$\\_{}"):
+                pre, word, post = m.groups()
+                keep = ((pre and pre[-1].isalnum()) or (len(word) == 1 and word != "a")
+                        or word.lower() in _UNITS or word in _ROMAN
+                        or (not first and word.lower() in _SMALL_WORDS))
+                if not keep:      # capitalise the all-lower-case parts of hyphenated words (VLM-seeded -> VLM-Seeded)
+                    tok = pre + "-".join(p[:1].upper() + p[1:] if p.islower() and (len(p) > 1 or len(word.split("-")) == 1) else p
+                                         for p in word.split("-")) + post
+            if tok:
+                first = False
+            out.append(tok)
+        lines.append(" ".join(out))
+    return "\n".join(lines)
+
+
+def enable_title_case():
+    """Route every matplotlib text of this process through title_case (panel titles, labels, legends, ticks)."""
+    import matplotlib.text as mtext
+    if getattr(mtext.Text.set_text, "_title_case", False):
+        return
+    orig = mtext.Text.set_text
+
+    def set_text(self, s):
+        return orig(self, title_case(s) if isinstance(s, str) else s)
+    set_text._title_case = True
+    mtext.Text.set_text = set_text
+
+
+# ---- colour / photo enhancement --------------------------------------------------
+def vivid(C, sat=1.3, contrast=1.12, gamma=0.95):
+    """Photo colours of a point cloud (uint8 or float) -> float RGB with more saturation and contrast,
+    so the clouds do not read as washed out once scaled down in the paper."""
+    c = np.asarray(C, np.float64)
+    if c.max() > 1.0:
+        c = c / 255.0
+    luma = (0.299 * c[:, 0] + 0.587 * c[:, 1] + 0.114 * c[:, 2])[:, None]
+    c = luma + sat * (c - luma)
+    c = 0.5 + contrast * (c - 0.5)
+    return np.clip(c, 0, 1) ** gamma
+
+
+def crisp(img, scale=2, amount=0.6, sigma=1.0, sat=1.1):
+    """Low-resolution video frame -> Lanczos-upsampled, unsharp-masked, slightly more saturated uint8 RGB."""
+    import cv2
+    im = np.asarray(img)
+    if scale != 1:
+        im = cv2.resize(im, (im.shape[1] * scale, im.shape[0] * scale), interpolation=cv2.INTER_LANCZOS4)
+    f = im.astype(np.float32)
+    blur = cv2.GaussianBlur(f, (0, 0), sigma * scale)
+    f = f + amount * (f - blur)
+    if sat != 1.0 and f.ndim == 3:
+        l = (0.299 * f[..., 0] + 0.587 * f[..., 1] + 0.114 * f[..., 2])[..., None]
+        f = l + sat * (f - l)
+    return np.clip(f, 0, 255).astype(np.uint8)

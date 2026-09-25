@@ -40,7 +40,7 @@ import scene_common as SC
 from scene_common import (
     bundle, obb, to_final, pose_to_final, to_floorsim,
     fig3d, set_equal, scatter, draw_frustum, draw_floor, save,
-    COL, LABEL_COL, VIEW, VIEW_FLOORSIM,
+    COL, LABEL_COL, VIEW, VIEW_FLOORSIM, vivid,
 )
 
 # The bundle was relocated from outputs/scene_pipeline to assets/figures/architecture/scene_pipeline
@@ -92,7 +92,7 @@ def cloud_final(n: int | None = 150_000):
     if n is not None and n < len(P):
         idx = RNG.choice(len(P), n, replace=False)
         P, C = P[idx], C[idx]
-    return to_final(P), C.astype(np.float64) / 255.0
+    return to_final(P), vivid(C)
 
 
 def dim(C: np.ndarray, w: float = 0.55) -> np.ndarray:
@@ -229,35 +229,36 @@ def panel_icp_residual():
     print(f"[icp] frame {k}: median NN dist {np.median(d0):.4f} -> {np.median(d1):.4f}; all frames |tau| mean "
           f"{shift.mean():.4f}, rot mean {rot.mean():.2f} deg, iters mean {Z['iters'].mean():.1f}")
     fig = plt.figure(figsize=(7.4, 2.5)); fig.patch.set_alpha(0)
-    gs = gridspec.GridSpec(1, 3, width_ratios=[1, 1, 0.62], wspace=0.0, left=0.0, right=0.98, top=0.9, bottom=0.1)
+    # column 2 is an empty spacer so the convergence plot's y-label stays clear of the 'after' view
+    gs = gridspec.GridSpec(1, 4, width_ratios=[1, 1, 0.14, 0.62], wspace=0.0, left=0.0, right=0.98, top=0.86, bottom=0.1)
     lo, hi = np.percentile(np.vstack([before, after]), 1, 0), np.percentile(np.vstack([before, after]), 99, 0)
     ctx = in_box(Sf, lo - 0.1, hi + 0.1)
     cams = {"Before ICP": (before, d0, pose_to_final(T_dyn[k]), COL["cam_init"]),
-            "After trimmed ICP": (after, d1, pose_to_final(Ti[k] @ T_dyn[k]), COL["cam_ref"])}
+            "After Trimmed ICP": (after, d1, pose_to_final(Ti[k] @ T_dyn[k]), COL["cam_ref"])}
     for col, (title, (P, d, T, cc)) in enumerate(cams.items()):
         ax = fig.add_subplot(gs[0, col], projection="3d")
         ax.view_init(**VIEW); ax.set_axis_off(); ax.patch.set_alpha(0); manual_zorder(ax)
         set_limits(ax, lo, hi, zoom=1.3)
-        scatter(ax, Sf[ctx][::3], color="#c9ccd1", s=0.12, alpha=0.25, zorder=Z_FLOOR)
-        sc = ax.scatter(P[:, 0], P[:, 1], P[:, 2], c=d, cmap="magma_r", vmin=0, vmax=vmax, s=0.25,
+        scatter(ax, Sf[ctx][::3], color="#c9ccd1", s=0.3, alpha=0.3, zorder=Z_FLOOR)
+        sc = ax.scatter(P[:, 0], P[:, 1], P[:, 2], c=d, cmap="magma_r", vmin=0, vmax=vmax, s=0.6,
                         linewidths=0, depthshade=False, zorder=Z_CLOUD)
         draw_frustum(ax, T, cc, scale=0.25, lw=1.0); lift_lines(ax)
-        ax.set_title(f"{title}: median dist. to S {np.median(d):.3f}", pad=-2, fontsize=7.5)
-    cax = fig.add_axes([0.30, 0.07, 0.16, 0.022])
-    cb = fig.colorbar(sc, cax=cax, orientation="horizontal"); cb.ax.tick_params(labelsize=5, length=1.5); cb.outline.set_linewidth(0.3)
-    cb.set_label("distance to S", fontsize=5.5, labelpad=1.5)
-    ax = fig.add_subplot(gs[0, 2]); ax.patch.set_alpha(0)
+        ax.set_title(f"{title}\nMedian Dist. to $\\mathcal{{S}}$: {np.median(d):.3f}", pad=-2, fontsize=8)
+    cax = fig.add_axes([0.09, 0.07, 0.2, 0.022])   # inside the "before" column (the wrap figure crops columns)
+    cb = fig.colorbar(sc, cax=cax, orientation="horizontal"); cb.ax.tick_params(labelsize=6.5, length=1.5); cb.outline.set_linewidth(0.3)
+    cb.set_label(r"Distance to $\mathcal{S}$", fontsize=7, labelpad=1.5)
+    ax = fig.add_subplot(gs[0, 3]); ax.patch.set_alpha(0)
     cmap = plt.get_cmap("plasma")
     for t in range(len(mse)):
         h = mse[t][np.isfinite(mse[t])]
         ax.plot(np.arange(1, len(h) + 1), h / h[0], color=cmap(t / max(1, len(mse) - 1)), lw=0.6, alpha=0.8)
-    ax.set_xlabel("ICP iteration", fontsize=6, labelpad=1); ax.set_ylabel("trimmed MSE / initial", fontsize=6)
-    ax.tick_params(labelsize=5.5, length=2)
+    ax.set_xlabel("ICP Iteration", fontsize=7, labelpad=1); ax.set_ylabel("Trimmed MSE / Initial", fontsize=7)
+    ax.tick_params(labelsize=6.5, length=2)
     for sp_ in ("top", "right"):
         ax.spines[sp_].set_visible(False)
-    ax.set_title(f"convergence, all {len(mse)} frames", pad=2, fontsize=7.5)
-    ax.text(0.97, 0.97, f"mean translation {shift.mean():.3f}\nmean rotation {rot.mean():.1f}°", transform=ax.transAxes,
-            ha="right", va="top", fontsize=5.5, color=COL["muted"])
+    ax.set_title(f"Convergence, All {len(mse)} Frames", pad=2, fontsize=8)
+    ax.text(0.97, 0.97, f"Mean Translation {shift.mean():.3f}\nMean Rotation {rot.mean():.1f}°", transform=ax.transAxes,
+            ha="right", va="top", fontsize=6.5, color=COL["muted"])
     save(fig, "s3_icp_before_after")
 
 
@@ -284,7 +285,7 @@ def panel_scene_4d():
     ext = np.vstack([P] + [np.repeat(bx, 400, axis=0) for bx in boxes])
     set_equal(ax, ext)
     final_floor(ax, alpha=0.18)
-    scatter(ax, P, C, s=0.08, alpha=0.8, zorder=Z_CLOUD)
+    scatter(ax, P, C, s=0.22, alpha=0.95, zorder=Z_CLOUD)
     n = len(frames)
     steps = [1.0, 0.65, 0.35]
     alphas = [steps[min(2, int(3 * i / n))] for i in range(n)]
@@ -299,10 +300,10 @@ def panel_scene_4d():
     handles = [Line2D([], [], color=COL["dynamic"], lw=1.6, alpha=a, label=l)
                for a, l in zip(steps, (f"t = {t0}", "\u2192", f"t = {t1}"))]
     handles.append(Line2D([], [], color=COL["cam_ref"], lw=0.8, label="$T^t$"))
-    ax.legend(handles=handles, loc="lower left", fontsize=5.5, frameon=False, handlelength=1.2,
-              labelspacing=0.2, borderaxespad=0.0, bbox_to_anchor=(0.0, 0.02), title="person $\\mathcal{F}^t$",
-              title_fontsize=5.5)
-    ax.set_title(r"4D scene $(\mathcal{S},\{(\mathcal{F}^t, T^t)\}_{t=1}^{T})$", pad=-2)
+    ax.legend(handles=handles, loc="lower left", fontsize=7, frameon=False, handlelength=1.2,
+              labelspacing=0.2, borderaxespad=0.0, bbox_to_anchor=(0.0, 0.02), title="Person $\\mathcal{F}^t$",
+              title_fontsize=7)
+    ax.set_title(r"4D Scene $(\mathcal{S},\{(\mathcal{F}^t, T^t)\}_{t=1}^{T})$", pad=-2, fontsize=8)
     save(fig, "s3_scene_4d")
     print("[4d] frames", [stem_of(f) for f in frames])
 
@@ -331,7 +332,7 @@ def person_points_floorsim(k: int, min_conf: bool = True):
     return to_floorsim(B[f"pi3_points_{k}"][sel])
 
 
-def _floorsim_base(ax, P, C, extra, extra_col=None, extra_s=1.2, ext_pts=None):
+def _floorsim_base(ax, P, C, extra, extra_col=None, extra_s=1.2, ext_pts=None, zoom=1.35):
     """Floor + cloud in the (z, x, y) plot frame.  Points passed as ``extra`` with ``extra_col`` are
     merged into the same scatter so that mplot3d depth-sorts them per point (a second scatter
     collection would be drawn wholly before or after the cloud and get hidden).  ``ext_pts`` only
@@ -339,18 +340,18 @@ def _floorsim_base(ax, P, C, extra, extra_col=None, extra_s=1.2, ext_pts=None):
     manual_zorder(ax)
     ext = np.vstack([fs_plot(P), fs_plot(extra), fs_plot(np.array([[0, -0.02, 0]]))]
                     + ([fs_plot(ext_pts)] if ext_pts is not None else []))
-    set_equal(ax, ext)
+    set_equal(ax, ext, zoom=zoom)
     lo, hi = np.percentile(P, 1, axis=0) - 0.5, np.percentile(P, 99, axis=0) + 0.5
     v, f = crop_floor(fs_plot(B["floor_verts"]), B["floor_faces"], (lo[2], hi[2]), (lo[0], hi[0]))
     draw_floor(ax, v, f, alpha=0.45)
     ax.collections[-1].set_zorder(Z_FLOOR)
     if extra_col is None:
-        scatter(ax, fs_plot(P), C, s=0.12, alpha=0.85, zorder=Z_CLOUD)
+        scatter(ax, fs_plot(P), C, s=0.35, alpha=1.0, zorder=Z_CLOUD)
     else:
         Pm = np.vstack([fs_plot(P), fs_plot(extra)])
         Cm = np.vstack([C, np.tile(np.array(to_rgb(extra_col))[None], (len(extra), 1))])
-        sm = np.r_[np.full(len(P), 0.12), np.full(len(extra), extra_s)]
-        scatter(ax, Pm, Cm, s=sm, alpha=0.9, zorder=Z_CLOUD)
+        sm = np.r_[np.full(len(P), 0.35), np.full(len(extra), extra_s)]
+        scatter(ax, Pm, Cm, s=sm, alpha=1.0, zorder=Z_CLOUD)
 
 
 def shaded_mesh(ax, V, F, base, light=(0.6, 0.4, 1.0), alpha=1.0):
@@ -367,11 +368,11 @@ def shaded_mesh(ax, V, F, base, light=(0.6, 0.4, 1.0), alpha=1.0):
 def panel_floor_smpl(k: int = SC.cfg("smpl_k_unposed"), posed: bool = False):
     P = to_floorsim(B["pi3_all_points"])
     idx = RNG.choice(len(P), 150_000, replace=False)
-    P, C = P[idx], B["pi3_all_colors"][idx] / 255.0
+    P, C = P[idx], vivid(B["pi3_all_colors"][idx])
     stem = int(B["sampled_idx"][k])
     print(f"[smpl] floorsim cloud 1..99 pct {np.percentile(P, 1, axis=0).round(2)}..{np.percentile(P, 99, axis=0).round(2)}; "
           f"pi3 camera {to_floorsim(B['pi3_poses'][:, :3, 3]).mean(0).round(2)}; s={float(B['global_floor_sim_s']):.3f}")
-    fig, ax = fig3d(size=(3.4, 2.8), view=VIEW_FLOORSIM)
+    fig, ax = fig3d(size=(3.4, 2.8), view=SC.cfg("smpl_view"))
     if posed:
         # smpl_posed.npz: LBS-posed GLB meshes, verts (2, 77, 11307, 3); mesh 0 is the tracked person,
         # mesh 1 a spurious second track.  glb_to_floorsim (4x4 similarity) maps the GLB frame to floorsim.
@@ -381,23 +382,74 @@ def panel_floor_smpl(k: int = SC.cfg("smpl_k_unposed"), posed: bool = False):
             M = Z["glb_to_floorsim"]
             V = (M[:3, :3] @ V.T).T + M[:3, 3]
         D = person_points_floorsim(k)
-        _floorsim_base(ax, P, C, D, extra_col=COL["smpl"], ext_pts=V)
+        _floorsim_base(ax, P, C, D, extra_col=COL["smpl"], ext_pts=V, zoom=SC.cfg("smpl_zoom"))
         mesh = Poly3DCollection(fs_plot(V)[F], facecolors=COL["smpl"], edgecolors=(*to_rgb(COL["smpl"]), 0.15),
                                 linewidths=0.1, zorder=Z_BOX)
         ax.add_collection3d(mesh)
         print(f"[smpl] posed mesh 0 kf {k} (stem {stem}): feet y {V[:,1].min():.2f}, top {V[:,1].max():.2f}, "
               f"centroid {V.mean(0).round(2)}; pi3 person points centroid {D.mean(0).round(2)}, "
               f"|d| = {np.linalg.norm(D.mean(0) - V.mean(0)):.2f} m; mesh xz span {(V.max(0)-V.min(0))[[0,2]].round(2)}")
-        ax.set_title("PromptHMR human + floor alignment", pad=-2)
         name = "s3_floor_smpl_posed"
     else:
         D = person_points_floorsim(k)
         _floorsim_base(ax, P, C, D, extra_col=COL["smpl"])
-        ax.set_title("Floor + metric scale from PromptHMR alignment", pad=-2)
+        ax.set_title("Floor + Metric Scale from PromptHMR Alignment", pad=-2)
         name = "s3_floor_smpl"
-    ax.text2D(0.02, 0.04, f"metric scale $s$ = {float(B['global_floor_sim_s']):.2f} from PromptHMR \u2194 \u03c0\u00b3 similarity",
-              transform=ax.transAxes, fontsize=5.5, color=COL["muted"])
+    ax.text2D(0.02, 0.04, f"Metric Scale $s$ = {float(B['global_floor_sim_s']):.2f} from PromptHMR \u2194 \u03c0\u00b3 Similarity",
+              transform=ax.transAxes, fontsize=7, color=COL["muted"])
     save(fig, name)
+
+
+def panel_smpl_over_time(n_mesh: int = 3):
+    """Top view of the metric floor frame (floorsim, y-up): the static background S below head height,
+    the PromptHMR body trajectory over all keyframes (coloured by time) and the body footprints of
+    n_mesh keyframes, with a 1 m scale bar -- the metric, floor-aligned result of this stage."""
+    from matplotlib.patches import Polygon as MplPolygon
+    from scipy.spatial import ConvexHull
+    Z = np.load(BUNDLE_DIR / "smpl_posed.npz")
+    Vall = np.asarray(Z["verts"][0], np.float64)
+    M = Z["glb_to_floorsim"] if "glb_to_floorsim" in Z.files else np.eye(4)
+    Vs = [(M[:3, :3] @ V.T).T + M[:3, 3] for V in Vall]
+    cen = np.array([V.mean(0) for V in Vs])
+    S_f = BUNDLE_DIR / "static_icp.npz"
+    if S_f.exists():
+        S = np.load(S_f)
+        P, C = to_floorsim(S["static_points"]), vivid(S["static_colors"])
+    else:
+        P, C = to_floorsim(B["pi3_all_points"]), vivid(B["pi3_all_colors"])
+    keep = (P[:, 1] > 0.03) & (P[:, 1] < 1.6)            # furniture and walls, not floor or ceiling
+    P, C = P[keep], C[keep]
+    mid = (cen[:, [0, 2]].min(0) + cen[:, [0, 2]].max(0)) / 2
+    lo, hi = mid - np.array([1.6, 1.5]), mid + np.array([1.6, 1.5])   # a 3.2 x 3.0 m window around the person
+    sel = np.all((P[:, [0, 2]] >= lo) & (P[:, [0, 2]] <= hi), 1)
+    P, C = P[sel], C[sel]
+    order = np.argsort(P[:, 1])                            # higher points drawn last (seen from above)
+    fig = plt.figure(figsize=(3.4, 3.4 * (hi[1] - lo[1]) / (hi[0] - lo[0]) + 0.3)); fig.patch.set_alpha(0)
+    ax = fig.add_axes([0, 0, 1, 1]); ax.set_axis_off(); ax.patch.set_alpha(0)
+    ax.add_patch(plt.Rectangle(lo, *(hi - lo), fc="#e5e7eb", ec="none", zorder=0))
+    ax.scatter(P[order, 0], P[order, 2], c=dim(C[order], 0.35), s=1.2, linewidths=0, zorder=1)
+    cmap = plt.get_cmap("viridis")
+    tt = np.linspace(0, 1, len(cen))
+    ax.plot(cen[:, 0], cen[:, 2], color="white", lw=2.6, zorder=2, solid_capstyle="round")
+    ax.scatter(cen[:, 0], cen[:, 2], c=cmap(0.1 + 0.8 * tt), s=6, linewidths=0, zorder=3)
+    offs = [(-0.55, -0.1), (0.0, -0.62), (0.45, 0.33)]          # label offsets (x, z); -z is up in the plot
+    for i, k in enumerate(np.linspace(0, len(Vs) - 1, n_mesh).round().astype(int)):
+        xz = Vs[k][:, [0, 2]]
+        hull = xz[ConvexHull(xz).vertices]
+        col = cmap(0.1 + 0.8 * tt[k])
+        ax.add_patch(MplPolygon(hull, closed=True, fc=(*col[:3], 0.45), ec=col, lw=0.9, zorder=4))
+        ox, oz = offs[i % len(offs)]
+        ax.text(cen[k, 0] + ox, cen[k, 2] + oz, f"Frame {int(B['sampled_idx'][k]) + 1}", fontsize=8, ha="center",
+                va="center", color=col, fontweight="bold", zorder=5,
+                path_effects=[__import__("matplotlib.patheffects", fromlist=["x"]).withStroke(linewidth=2, foreground="white")])
+    # 1 m scale bar
+    x0, z0 = lo[0] + 0.15, lo[1] + 0.25
+    ax.plot([x0, x0 + 1.0], [z0, z0], color=COL["text"], lw=1.6, solid_capstyle="butt", zorder=5)
+    ax.text(x0 + 0.5, z0 + 0.07, "1 m", fontsize=8, ha="center", va="top", color=COL["text"], zorder=5)
+    ax.set_xlim(lo[0], hi[0]); ax.set_ylim(hi[1], lo[1]); ax.set_aspect("equal")
+    ax.text(0.98, 0.02, "Top View, Colored by Time", transform=ax.transAxes, fontsize=8, ha="right", va="bottom",
+            color=COL["muted"], zorder=5)
+    save(fig, "s3_smpl_over_time")
 
 
 # ---------------------------------------------------------------- panel 4
@@ -475,7 +527,7 @@ def panel_boxes_over_time(frames=SC.cfg("time_frames")):
         manual_zorder(ax)
         set_limits(ax, lo, hi)
         final_floor(ax, alpha=0.18)
-        scatter(ax, P, dim(C, 0.45), s=0.25, alpha=0.4, zorder=Z_CLOUD)
+        scatter(ax, P, dim(C, 0.3), s=0.45, alpha=0.75, zorder=Z_CLOUD)
         for ob in objects(f):
             bx = np.array(ob["corners_final"])
             lw = 2.0 if ob["label"] == "person" else 1.0
@@ -484,11 +536,11 @@ def panel_boxes_over_time(frames=SC.cfg("time_frames")):
                 labels.append(ob["label"])
         draw_frustum(ax, refined_pose(stem_of(f)), COL["cam_ref"], scale=0.28, lw=1.0)
         lift_lines(ax)
-        ax.set_title(f"t = {int(stem_of(f))}", pad=-2)
+        ax.set_title(f"t = {int(stem_of(f))}", pad=-2, fontsize=11)
         if i == 0:
-            handles = [Line2D([], [], color=LABEL_COL[l], lw=2.0 if l == "person" else 1.0, label=l) for l in labels]
+            handles = [Line2D([], [], color=LABEL_COL[l], lw=2.0 if l == "person" else 1.0, label=l.title()) for l in labels]
             handles.append(Line2D([], [], color=COL["cam_ref"], lw=1.0, label="$T^t$"))
-            ax.legend(handles=handles, loc="upper left", fontsize=5.5, frameon=False, handlelength=1.6,
+            ax.legend(handles=handles, loc="upper left", fontsize=8.5, frameon=False, handlelength=1.6,
                       labelspacing=0.2, borderaxespad=0.0, bbox_to_anchor=(0.0, 0.98))
     save(fig, "s3_boxes_over_time")
 
@@ -497,7 +549,7 @@ if __name__ == "__main__":
     import sys
     which = sys.argv[1:] or ["icp", "4d", "smpl", "smpl_posed", "ms", "pf", "time"]
     fns = {"icp": panel_icp_residual if (BUNDLE_DIR / "static_icp.npz").exists() else panel_icp_before_after, "4d": panel_scene_4d, "smpl": panel_floor_smpl,
-           "smpl_posed": lambda: panel_floor_smpl(k=SC.cfg("smpl_k"), posed=True),
+           "smpl_posed": lambda: panel_floor_smpl(k=SC.cfg("smpl_k"), posed=True), "smpl_time": panel_smpl_over_time,
            "ms": panel_obb_multiscale, "pf": panel_obb_proposal_vs_final, "time": panel_boxes_over_time}
     for w in which:
         fns[w]()

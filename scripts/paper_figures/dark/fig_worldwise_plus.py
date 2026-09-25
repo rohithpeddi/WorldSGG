@@ -1,14 +1,16 @@
-"""WorldWise+ method figure (dark hero style), self-contained, three stages:
+"""WorldWise+ method figure, drawn as four processing units with real panels:
 
-    Stage 1  Frozen Foundation-Model Latents
-    Stage 2  Geometry Scaffold And Masked World Auto-Encoding
-    Stage 3  Prediction Heads And Losses
+    Unit 1  Observed Objects Processing Unit     frozen DINOv3-L / π³ latents, ROI-Align, gated fusion,
+                                                 geometry scaffold, encoders, scaffold tokenizer
+    Unit 2  Unobserved Objects Processing Unit   associative retriever, visibility embedding, reconstruction
+    Unit 3  Relationship Processing Unit         inter-object transformer, pair encoder, temporal edge attention
+    Unit 4  Decoders                             node head, predicate heads, losses
 
 Usage::
 
     python scripts/paper_figures/dark/fig_worldwise_plus.py \
-        --images outputs/intermediates/12XD3/worldwise_plus \
-        --grid-images outputs/intermediates/12XD3/worldwise_pp --video 12XD3
+        --images assets/figures/architecture/intermediates/00T1E/worldwise_plus \
+        --grid-images assets/figures/architecture/intermediates/00T1E/worldwise_pp --video 00T1E
 
 ``--grid-images`` (the worldwise_pp dump) supplies only the frozen token-grid panels;
 WorldWise+ itself ROI-pools those same frozen grids and never loads them whole.
@@ -16,30 +18,45 @@ WorldWise+ itself ROI-pools those same frozen grids and never loads them whole.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (BLUE, DIM, FRAME_B, GREEN, LAT, MUTED, ORANGE, RED, TEAL, TXT, VIOLET,  # noqa: E402
+from common import (DIM, FRAME_B, LAT, MUTED, ORANGE, RED, TEAL, UNIT, VIOLET,  # noqa: E402
                     Canvas, GEOMETRY_IMAGES, image_map)
+from ww_units import Seams, unit2, unit3, unit4  # noqa: E402
 
 IMAGES = GEOMETRY_IMAGES + [
     "frame_0", "frame_1", "frame_2", "visibility", "tokens_in", "tokens_out", "tokens_enriched", "retriever_attn",
     "appearance_in", "preds_0", "preds_1", "preds_2", "train_mask", "recon_sim", "loss_pairs_0", "loss_pairs_1"]
 GRID_IMAGES = ["grid_dino_0", "grid_dino_1", "grid_dino_2", "grid_pi3_0", "grid_pi3_1", "grid_pi3_2"]
 
+SEAMS = Seams(
+    appearance="Tier-1 Tokens", appearance_sub="From Unit 1, Before Masking",
+    ema_sub="EMA (m = 0.996) Of The Gated Fusion Projector",
+    union="Union Tokens", union_sub="From Unit 1 Gated Fusion, 64-d",
+    union_projector=None, union_col=ORANGE)
 
-def build(images, video: str) -> Canvas:
-    c = Canvas(1720, 1460, images)
-    c.band_title(46, "WorldWise+ · Foundation-Model Latents At The Seam")
+OVERVIEW = [
+    ["Frozen DINOv3-L + π³ Latents", "ROI-Align → Tier-1 Tokens", "Gated Fusion Projector × 2",
+     "Structural, Spatial, Ego-Motion", "  And Motion Encoders", "Scaffold Tokenizer ([MASK])"],
+    ["Associative Retriever", "+ Visibility Embedding", "  → Completed Tokens", "Reconstruction vs EMA",
+     "  Target (Training Only)"],
+    ["Inter-Object Transformer", "  With 3-D PE", "Pair Encoder (Union, Text,", "  Pair Geometry)",
+     "Temporal Edge Attention"],
+    ["Node Head", "Predicate Heads × 3", "Logit Adjustment (τ = 0.5)", "Scene-Graph Losses"],
+]
 
-    # ======================= Stage 1: frozen foundation-model latents =======================
-    y = c.stage(88, "Stage 1 · Frozen Foundation-Model Latents")
-    fy = y + 20
+
+def unit1(c: Canvas, y0: float) -> float:
+    y = c.begin_unit(y0, 1, role="Frozen Foundation-Model Latents Replace The Detector's Decoded Vector")
+    fy = y + 18
     for i, key in enumerate(["frame_0", "frame_1", "frame_2"]):
         w, h = c.fit(key, w=62, default=(62, 44), max_h=110)
         c.image_slot(30 + i * 68, fy, w, h, key, border=FRAME_B)
     c.text(130, fy + 126, "T Frames (672 × 378)", size=10.5, fill=MUTED, anchor="middle")
+    # row A: frozen latents -> ROI-Align -> gated fusion
     c.flow(236, fy + 40, 262, fy + 30, "", col=VIOLET)
     c.flow(236, fy + 70, 262, fy + 100, "", col=TEAL)
     c.box(264, fy + 4, 140, 52, "DINOv3-L", "ViT-L/16, Frozen", kind="frozen", frozen=True, tsize=11.5, ssize=9)
@@ -58,146 +75,110 @@ def build(images, video: str) -> Canvas:
     c.tensor(810, fy + 44, 160, 72, "Tier-1 Tokens", "3072-d Per Stream", col=VIOLET)
     c.text(890, fy + 108, "Object: T × N · Union: T × K", size=8.5, fill=MUTED, anchor="middle")
     c.flow(970, fy + 80, 1006, fy + 80, "")
-    # one projector per seam (visual_projector and union_proj), same form
     c.box(1008, fy + 30, 200, 60, "Gated Fusion Projector × 2", "Per-Stream Linear; Per-Dimension", kind="new",
           sub2="Softmax Gate; ReLU → LN; One Per Seam", tsize=11.5, ssize=8.5)
-    c.rich(1108, fy + 12, [("g", {"fill": ORANGE, "serif": True, "italic": True}), (" = softmax", {"fill": ORANGE, "verbatim": True}),
-                            ("k", {"fill": ORANGE, "sub": True, "italic": True}), (" W[h₁;h₂]   h = LN(ReLU(Σ", {"fill": ORANGE, "verbatim": True}),
-                            ("k", {"fill": ORANGE, "sub": True, "italic": True}), (" g", {"fill": ORANGE, "verbatim": True}),
-                            ("k", {"fill": ORANGE, "sub": True, "italic": True}), (" ⊙ h", {"fill": ORANGE, "verbatim": True}),
-                            ("k", {"fill": ORANGE, "sub": True, "italic": True}), ("))", {"fill": ORANGE, "verbatim": True})], size=9, anchor="middle")
-    c.text(1108, fy + 24, "Single Stream (Headline dinov3tok) = Linear → ReLU → LN", size=8.5, fill=MUTED, anchor="middle")
+    c.text(1108, fy + 20, "Single Stream (Headline dinov3tok) = Linear → ReLU → LN", size=8.5, fill=MUTED,
+           anchor="middle")
     c.tensor(1008, fy + 124, 96, 40, "Appearance Tokens", "T × N × 256", col=ORANGE)
-    c.tensor(1112, fy + 124, 96, 40, "Union Tokens", "T × K × 64", col=ORANGE)
+    c.tensor(1112, fy + 124, 110, 40, "Union Tokens", "T × K × 64 → Unit 3", col=ORANGE)
     c.flow(1056, fy + 90, 1056, fy + 122, "", col=ORANGE)
-    c.flow(1160, fy + 90, 1160, fy + 122, "", col=ORANGE)
-    c.text(1008, fy + 180, "→ Stage 2 (Scaffold Tokenizer)", size=8.5, fill=ORANGE)
-    c.text(1112, fy + 192, "→ Stage 3 (Relationship Predictor)", size=8.5, fill=ORANGE)
-    c.text(642, fy + 136, "Replaces The Detector's Decoded 1024-d ROI Vector;", size=8.5, fill=DIM)
-    c.text(642, fy + 148, "Everything Downstream Is Unchanged", size=8.5, fill=DIM)
-    py = fy + 216
-    c.strip(30, py, 150, [
-        ("grid_dino_1", "DINOv3 L24n", 85), ("grid_pi3_1", "π³ G14", 85),
-        ("appearance_in", "Tier-1 Tokens Per Visible Slot (PCA)", 380), ("frame_1", "2-D Boxes", 85),
-    ], gap=14, caption_size=9, max_w=390)
+    c.flow(1167, fy + 90, 1167, fy + 122, "", col=ORANGE)
+    c.text(642, fy + 136, "Replaces The Detector's Decoded 1024-d ROI Vector", size=8.5, fill=DIM)
+    # row B: geometry scaffold -> encoders -> scaffold tokenizer
+    gy = fy + 204
+    c.arrow(130, fy + 134, 262, gy + 52, curve=f"M130 {fy + 134} V{gy + 52} H262")
+    c.box(264, gy + 22, 140, 60, "Geometry Scaffold", "π³ Camera Poses; GT OBBs", kind="frozen", frozen=True,
+          sub2="(Detector OBBs In SGDet)", tsize=11, ssize=8.5)
+    TX, TW, TH = 440, 128, 34
+    c.tensor(TX, gy, TW, TH, "OBB Corners", "T × N × 8 × 3")
+    c.tensor(TX, gy + 44, TW, TH, "Camera Poses", "T × 4 × 4")
+    c.tensor(TX, gy + 88, TW, TH, "Visibility Mask", "T × N → Units 2, 4")
+    c.flow(404, gy + 40, TX - 2, gy + 17, "")
+    c.flow(404, gy + 52, TX - 2, gy + 61, "")
+    c.flow(404, gy + 66, TX - 2, gy + 103, "")
+    ex, ew, eh = 620, 196, 30
+    enc = [("Structural Encoder", "All Corners Of A Frame", gy - 10),
+           ("Spatial Encoder", "Camera-Relative; → Unit 2 Q / K Bias", gy + 26),
+           ("Ego-Motion Encoder", "Relative Poses Over Time", gy + 62),
+           ("Motion Encoder", "Velocity / Acceleration (World + Camera)", gy + 98)]
+    for t, s, yy in enc:
+        c.box(ex, yy, ew, eh, t, s, kind="learn", tsize=10, ssize=8)
+    c.flow(568, gy + 14, 618, gy + 5, "")          # corners -> structural
+    c.flow(568, gy + 17, 618, gy + 38, "")         # corners -> spatial
+    c.flow(568, gy + 58, 618, gy + 44, "")         # poses -> spatial
+    c.flow(568, gy + 61, 618, gy + 77, "")         # poses -> ego-motion
+    c.flow(568, gy + 20, 618, gy + 108, "")        # corners (centres) -> motion
+    c.flow(568, gy + 64, 618, gy + 116, "")        # poses (rotation) -> motion
+    c.box(900, gy + 10, 150, 100, "Scaffold Tokenizer", "Concatenate + Fuse;", kind="learn", sub2="[MASK] If Unseen",
+          tsize=11.5, ssize=9)
+    for _, _, yy in enc:
+        c.flow(816, yy + 15, 898, gy + 60, "", width=1.2)
+    c.flow(1040, fy + 164, 1000, gy + 8, "Appearance", col=ORANGE, lsize=8, loff=(8, 0), anchor="start")
+    c.arrow(568, gy + 105, 975, gy + 112, curve=f"M568 {gy + 105} V{gy + 146} H975 V{gy + 112}")
+    c.text(700, gy + 142, "Visibility: Which Cells Get [MASK]", size=8, fill=MUTED)
+    c.text(985, gy + 128, "Training: 30 % Of Visible Cells Also Masked", size=8, fill=DIM)
+    c.tensor(1090, gy + 40, 150, 40, "Object Tokens sₜ,ₙ", "T × N × 256", col=ORANGE)
+    c.flow(1050, gy + 60, 1088, gy + 60, "")
+    c.flow(1165, gy + 80, 1165, gy + 108, "To Unit 2", col=UNIT[1][0], loff=(8, 4), anchor="start")
+    py = gy + 156
+    bottom = c.strip_fit(30, py, 140, [
+        ("grid_dino_1", "DINOv3 L24n Grid", 0.57), ("grid_pi3_1", "π³ G14 Grid", 0.57),
+        ("appearance_in", "Tier-1 Tokens Per Visible Slot (PCA)", 2.76), ("obb_1", "OBB Corners", 0.57),
+        ("camera_path", "Camera Poses → Ego-Motion", 1.62), ("visibility", "Object Tokens: Visible / [MASK]", 2.76),
+    ])
+    c.end_unit(bottom + 6, crop="u1")
+    return bottom + 6
 
-    # ======================= Stage 2: geometry scaffold and MWAE =======================
-    y = c.stage(py + 196, "Stage 2 · Geometry Scaffold And Masked World Auto-Encoding")
-    ry = y + 20
-    c.tensor(30, ry, 130, 36, "OBB Corners", "T × N × 8 × 3", col=MUTED)
-    c.tensor(30, ry + 46, 130, 36, "Camera Poses", "T × 4 × 4", col=MUTED)
-    c.tensor(30, ry + 92, 130, 36, "Appearance Tokens", "From Stage 1", col=ORANGE)
-    ex, ew, eh = 200, 140, 24
-    enc = [("Structural Encoder", ry - 6), ("Spatial Encoder", ry + 24), ("Ego-Motion Encoder", ry + 54),
-           ("Motion Encoder", ry + 84)]
-    for t, yy in enc:
-        c.box(ex, yy, ew, eh, t, kind="learn", tsize=10)
-    c.flow(160, ry + 16, 198, ry + 6, "")          # corners -> structural
-    c.flow(160, ry + 18, 198, ry + 36, "")         # corners -> spatial
-    c.flow(160, ry + 62, 198, ry + 40, "")         # poses -> spatial
-    c.flow(160, ry + 64, 198, ry + 66, "")         # poses -> ego-motion
-    c.flow(160, ry + 20, 198, ry + 96, "")         # corners (centres) -> motion
-    c.flow(160, ry + 70, 198, ry + 102, "")        # poses (rotation) -> motion: camera-frame velocity
-    c.box(376, ry + 12, 130, 92, "Scaffold Tokenizer", "Fuse Geometry + Appearance;", kind="learn",
-          sub2="[MASK] If Unseen", tsize=11, ssize=8.5)
-    for _, yy in enc:
-        c.flow(340, yy + 12, 374, ry + 58, "", width=1.2)
-    c.flow(160, ry + 110, 374, ry + 90, "", col=ORANGE, width=1.2)
-    c.flow(506, ry + 58, 542, ry + 58, "")
-    c.tensor(544, ry + 38, 120, 40, "Object Tokens", "T × N × 256", col=BLUE)
-    c.tensor(544, ry + 92, 130, 36, "Camera Features", "Spatial Encoder → Q / K Bias", col=MUTED)
-    c.flow(664, ry + 58, 700, ry + 58, "")
-    c.flow(674, ry + 110, 700, ry + 92, "")        # per-object camera features -> view-aware bias
-    c.box(702, ry + 14, 160, 88, "Associative Retriever", "Per-Object Cross-Attention", kind="learn",
-          sub2="Masked ← Own Visible Frames", tsize=11, ssize=8.5)
-    c.flow(862, ry + 58, 898, ry + 58, "Retrieved", lsize=7.5, loff=(0, -5))
-    c.box(900, ry + 43, 120, 30, "+ Visibility Embedding", kind="learn", tsize=9)
-    c.flow(1020, ry + 58, 1056, ry + 58, "")
-    c.box(1058, ry + 14, 150, 88, "Inter-Object Transformer", "Self-Attention Over", kind="learn",
-          sub2="Objects Per Frame", tsize=10.5, ssize=8.5)
-    c.tensor(1058, ry + 116, 150, 36, "Enriched Tokens", "→ Stage 3", col=LAT[2])
-    c.flow(1133, ry + 102, 1133, ry + 114, "")
-    # the tokens after the visibility embedding feed both the transformer and the reconstruction head
-    c.flow(960, ry + 73, 960, ry + 94, "")
-    c.tensor(890, ry + 96, 140, 36, "Completed Tokens", "→ Stage 3 (Reconstruction)", col=LAT[0])
-    c.text(376, ry + 118, "Byte-Identical To WorldWise", size=8.5, fill=DIM)
-    py = ry + 166
-    c.strip(30, py, 135, [
-        ("obb_1", "OBB Corners", 76), ("camera_path", "Camera Poses", 160), ("visibility", "Object Tokens: Visible / [MASK]", 340),
-        ("tokens_out", "After Retrieval (PCA)", 340), ("retriever_attn", "Retriever Attention", 150),
-    ], gap=14, caption_size=9, max_w=345)
 
-    # ======================= Stage 3: heads and losses =======================
-    y = c.stage(py + 180, "Stage 3 · Prediction Heads And Losses")
-    hy = y + 24
-    c.tensor(30, hy + 20, 130, 40, "Enriched Tokens", "From Stage 2", col=LAT[2])
-    c.tensor(30, hy + 72, 130, 40, "Union Tokens", "From Stage 1 (Frozen Latents)", col=ORANGE)
-    c.tensor(30, hy + 124, 130, 40, "Pair Geometry", "8-D From OBB Corners", col=MUTED)
-    c.tensor(30, hy + 176, 130, 40, "Completed Tokens", "From Stage 2", col=LAT[0])
-    c.tensor(30, hy + 228, 130, 36, "Tier-1 Tokens", "From Stage 1 (Object Boxes)", col=VIOLET)
-    c.flow(160, hy + 32, 196, hy + 20, "")
-    c.box(198, hy + 4, 120, 32, "Node Head", kind="learn", tsize=11)
-    c.flow(318, hy + 20, 352, hy + 20, "")
-    c.tensor(354, hy + 4, 130, 32, "Object Classes", None, col=MUTED)
-    c.text(404, hy + 48, "GT Override In PredCls; CE Loss In SGDet", size=8, fill=DIM)
-    c.flow(372, hy + 36, 348, hy + 56, "Text", lsize=7.5, loff=(12, 4), anchor="start")   # class -> CLIP text
-    c.flow(160, hy + 44, 196, hy + 78, "")
-    c.flow(160, hy + 92, 196, hy + 92, "", col=ORANGE)
-    c.flow(160, hy + 144, 196, hy + 106, "")
-    c.box(198, hy + 58, 160, 72, "Relationship Predictor", "Pair Tokens ⊕ Union ⊕ Text", kind="learn",
-          sub2="⊕ Pair Geometry; 2 Self-Attn Layers", tsize=11, ssize=8.5)
-    c.flow(358, hy + 94, 394, hy + 94, "")
-    c.box(396, hy + 74, 150, 40, "Temporal Edge Attention", "Same Pair Across Frames", kind="learn", tsize=10.5, ssize=8.5)
-    c.flow(546, hy + 94, 582, hy + 94, "")
-    c.tensor(584, hy + 66, 170, 56, "Predicate Distributions", "Attention 3 · Spatial 6 · Contacting 17", col=RED)
-    c.flow(160, hy + 196, 196, hy + 196, "")
-    c.box(198, hy + 180, 160, 32, "Reconstruction Projector", kind="learn", tsize=10.5)
-    c.box(396, hy + 176, 150, 40, "EMA Target Projector", "EMA Copy Of The Gated Projector", kind="frozen", frozen=True,
-          tsize=10.5, ssize=8)
-    c.arrow(160, hy + 246, 471, hy + 218, col=VIOLET, curve=f"M160 {hy + 246} H471 V{hy + 218}")   # tier-1 -> ema target
-    lx, lw = 790, 372
-    c.loss_node(lx, hy + 4, lw, "sg", "BCE / CE On Visible Pairs; Logits + τ·log π_c, τ = 0.5",
-                note="Truly Unseen Pairs Receive No Edge Supervision (λ_vlm = 0)")
-    c.loss_node(lx, hy + 60, lw, "sim", "Same Loss On Artificially Masked Pairs (p_mask = 0.3), Clean GT",
-                note="Simulated Occlusion Teaches Recovery Instead Of Noisy VLM Labels")
-    c.loss_node(lx, hy + 116, lw, "rec", "MSE( Reconstruction Projector(Completed), EMA Target )", col=ORANGE,
-                note="Artificially Masked Cells; λ_rec = 0.5 × 0.1 (Dominance) = 0.05")
-    c.tensor(lx + lw + 22, hy + 34, 106, 44, "GT Predicates", "Visible Pairs Only", col=GREEN)
-    c.flow(754, hy + 84, lx - 2, hy + 24, "", col=RED)
-    c.flow(754, hy + 94, lx - 2, hy + 80, "", col=RED)
-    c.flow(lx + lw + 22, hy + 50, lx + lw + 2, hy + 36, "", col=GREEN)
-    c.flow(lx + lw + 22, hy + 62, lx + lw + 2, hy + 76, "", col=GREEN)
-    c.flow(358, hy + 196, lx - 2, hy + 140, "Prediction", col=ORANGE, lsize=8, loff=(0, -6), lpos=0.75)
-    c.flow(546, hy + 196, lx - 2, hy + 150, "Target", col=ORANGE, lsize=8, loff=(0, 10), lpos=0.8)
-    c.rich(lx, hy + 240, [("Total:  ℒ = ℒ", {"fill": TXT, "serif": True}), ("sg", {"fill": RED, "sub": True}),
-                          (" + ℒ", {"fill": TXT, "serif": True}), ("sim", {"fill": RED, "sub": True}),
-                          (" + 0.05 ℒ", {"fill": TXT, "serif": True}), ("rec", {"fill": ORANGE, "sub": True}),
-                          ("      Identical Recipe To WorldWise: A Clean A/B On The Representation", {"fill": DIM})], size=11)
-    py = hy + 274
-    c.strip(30, py, 130, [
-        ("train_mask", "Training-Mode Pass: Artificial Masks", 300), ("recon_sim", "Reconstruction vs EMA Target (Cosine)", 300),
-        ("loss_pairs_0", "Which Loss Each Pair Receives", 300), ("preds_1", "Inference: Predicates At The Unseen Frame", 300),
-    ], gap=14, caption_size=9, max_w=300)
+def legend(c: Canvas):
+    def draw(y):
+        c.legend(y, [("frozen", "Frozen"), ("learn", "Learnable"), ("new", "Introduced By WorldWise+")],
+                 extra_swatches=[(VIOLET, "DINOv3 Semantics"), (TEAL, "π³ Geometry"), (LAT[0], "Recovered World Token"),
+                                 (LAT[2], "Enriched Token"), ("mask", "[MASK]"), (RED, "Loss")])
+    return draw
 
-    CX, CW, CH = 1320, 380, 420
-    c.card(CX, 88, CW, CH, 1, "Swap The Seam",
-           ["All appearance enters WorldWise through two projectors.",
-            "WorldWise+ feeds them frozen DINOv3 / π³ latents",
-            "pooled on the very same object and union boxes,",
-            "instead of the detector's decoded 1024-d vector."])
-    c.card(CX, 528, CW, CH, 2, "Gate, Don't Average",
-           ["With both streams a per-dimension softmax gate lets",
-            "the model pick geometry or semantics per feature.",
-            "The gate earns its parameters in SGDet, not PredCls:",
-            "there the single DINOv3 stream is the headline cell."])
-    c.card(CX, 968, CW, CH, 3, "Hold Everything Else Fixed",
-           ["Scaffold, masking, EMA target, retriever, relation",
-            "head and the loss are byte-identical to WorldWise,",
-            "so the +4.5 R / +5.1 mR in PredCls is attributable",
-            "to the representation alone: latents beat outputs."])
-    c.legend(1432, [("frozen", "Frozen"), ("learn", "Learnable"), ("new", "Introduced By This Variant")],
-             extra_swatches=[(VIOLET, "DINOv3 Semantics"), (TEAL, "π³ Geometry"), (LAT[0], "Recovered World Token"),
-                             ("mask", "[MASK]"), (ORANGE, "Tracked (Occluded) Object"), (RED, "Loss")])
+
+def build(images, video: str, meta: dict) -> Canvas:
+    c = Canvas(1720, 3200, images)
+    c.band_title(46, "WorldWise+ · Foundation-Model Latents At The Seam")
+    ov_end = c.unit_overview(80, OVERVIEW)
+    c.crop_mark("overview", 14, ov_end)
+    tops = []
+    y = ov_end + 10
+    for draw in (unit1, lambda cc, yy: unit2(cc, yy, SEAMS, meta), lambda cc, yy: unit3(cc, yy, SEAMS, meta)):
+        tops.append(y)
+        y = draw(c, y) + 18
+    tops.append(y)
+    end = unit4(c, y, SEAMS, meta, legend(c))
+    bottoms = [tops[1] - 18, tops[2] - 18, tops[3] - 18, end - 36]
+    cards = [
+        ("Swap The Seam",
+         ["All appearance enters WorldWise through two",
+          "projectors. WorldWise+ feeds them frozen DINOv3 /",
+          "π³ latents pooled on the very same object and",
+          "union boxes, instead of the detector's decoded",
+          "1024-d vector; a per-dimension gate fuses streams."]),
+        ("Mask And Retrieve, Unchanged",
+         ["Each [MASK] token attends to the same object's",
+          "naturally visible frames with camera-aware biases.",
+          "30 % of visible cells are masked at train time and",
+          "reconstructed against an EMA copy of the gated",
+          "fusion projector (weight 0.05)."]),
+        ("Reason In 3-D, Unchanged",
+         ["Completed tokens attend to one another with a 3-D",
+          "positional encoding. Each person-object pair joins",
+          "its gated union tokens, the CLIP text of both",
+          "classes and 8-D pair geometry, then attends along",
+          "its own timeline."]),
+        ("Hold Everything Else Fixed",
+         ["Heads and losses are identical to WorldWise, so the",
+          "+4.5 R / +5.1 mR in PredCls is attributable to the",
+          "representation alone: latents beat outputs. Truly",
+          "unseen pairs get no edge loss (λ_vlm = 0)."]),
+    ]
+    for k, (title, lines) in enumerate(cards):
+        c.unit_card(tops[k], bottoms[k], k + 1, title, lines)
+    c.set_height(int(end + 10))
     return c
 
 
@@ -205,8 +186,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--images", default=None, help="dump_intermediates.py output dir for the worldwise_plus cell")
     ap.add_argument("--grid-images", default=None, help="dump_intermediates.py output dir for worldwise_pp (token grids)")
-    ap.add_argument("--video", default="12XD3")
-    ap.add_argument("--out", default=str(Path(__file__).resolve().parents[3] / "outputs/paper_figures/dark/worldwise_plus.svg"))
+    ap.add_argument("--video", default="00T1E")
+    ap.add_argument("--out", default=str(Path(__file__).resolve().parents[3]
+                                         / "assets/figures/architecture/paper_figures/dark/worldwise_plus.svg"))
     ap.add_argument("--theme", default="light", choices=["light", "dark"],
                     help="white background (light) or the dark hero palette; read by common.py at import")
     ap.add_argument("--caps", default="title", choices=["title", "upper", "none"],
@@ -214,9 +196,12 @@ def main():
     args = ap.parse_args()
     imgs = image_map(args.images, IMAGES)
     imgs.update(image_map(args.grid_images, GRID_IMAGES))
-    c = build(imgs, args.video)
+    meta = {}
+    if args.images and (Path(args.images) / "meta.json").exists():
+        meta = json.loads((Path(args.images) / "meta.json").read_text(encoding="utf-8"))
+    c = build(imgs, args.video, meta)
     p = c.write(Path(args.out))
-    print(f"wrote {p}" + (f"  (placeholders for: {sorted(set(c.missing))})" if c.missing else ""))
+    print(f"wrote {p} ({c.w} x {c.h})" + (f"  (placeholders for: {sorted(set(c.missing))})" if c.missing else ""))
 
 
 if __name__ == "__main__":

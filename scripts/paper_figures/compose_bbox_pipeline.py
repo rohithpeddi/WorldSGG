@@ -13,10 +13,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
-from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scene_common as SC  # noqa: E402
+from vcompose import Canvas  # noqa: E402
+SC.enable_title_case()      # all figure text in Title Case (supplementary style)
 
 REPO = SC.REPO
 _arch_bbp = REPO / "assets" / "figures" / "architecture" / "bbox_pipeline" / f"panels_{SC.VIDEO}"
@@ -27,7 +28,8 @@ INK = "#1f2933"; MUTED = "#6b7280"; HEAD_BG = "#e5e7eb"
 BAND = {"i": "#eef1f5", "ii": "#fbeee4", "iii": "#e8f0fb", "iv": "#e6f4ee", "v": "#f3eefb", "vi": "#f6f0e2"}
 ARROW = dict(arrowstyle="-|>,head_length=5,head_width=3", color="#374151", lw=1.6, shrinkA=0, shrinkB=0, mutation_scale=1)
 HEAD = 0.72
-fig = None
+cv: Canvas = None
+fig = None      # top layer (arrows, chips, free text)
 
 
 def fx(x): return x / W
@@ -35,32 +37,21 @@ def fy(y): return y / H
 
 
 def band(x, y, w, h, color, title, sub=None):
-    ax = fig.add_axes([fx(x), fy(y), fx(w), fy(h)]); ax.set_axis_off()
+    base = cv.base
+    ax = base.add_axes([fx(x), fy(y), fx(w), fy(h)]); ax.set_axis_off()
     ax.add_patch(FancyBboxPatch((0, 0), 1, 1, boxstyle="round,pad=0,rounding_size=0.02", fc=color, ec="#cbd5e1", lw=0.8,
                                 transform=ax.transAxes, clip_on=False))
-    hb = fig.add_axes([fx(x + 0.08), fy(y + h - 0.38), fx(w - 0.16), fy(0.32)]); hb.set_axis_off()
+    hb = base.add_axes([fx(x + 0.08), fy(y + h - 0.38), fx(w - 0.16), fy(0.32)]); hb.set_axis_off()
     hb.add_patch(FancyBboxPatch((0, 0), 1, 1, boxstyle="round,pad=0,rounding_size=0.08", fc=HEAD_BG, ec="none",
                                 transform=hb.transAxes, clip_on=False))
     hb.text(0.5, 0.5, title, ha="center", va="center", fontsize=11.5, fontweight="bold", color=INK)
     if sub:
-        fig.text(fx(x + w / 2), fy(y + h - 0.5), sub, ha="center", va="top", fontsize=8, color=MUTED, style="italic")
+        base.text(fx(x + w / 2), fy(y + h - 0.5), sub, ha="center", va="top", fontsize=8, color=MUTED, style="italic")
 
 
 def panel(path, x, ytop, w, h=None, caption=None, cap_size=7.5):
-    im = Image.open(path).convert("RGBA")
-    box = im.getchannel("A").point(lambda v: 255 if v > 8 else 0).getbbox()   # trim empty 3-D axes margins
-    if box:
-        pad = 8
-        im = im.crop((max(0, box[0] - pad), max(0, box[1] - pad), min(im.size[0], box[2] + pad), min(im.size[1], box[3] + pad)))
-    iw, ih = im.size; r = iw / ih
-    if h is None:
-        hh, ww = w / r, w
-    else:
-        hh, ww = (w / r, w) if r > w / h else (h, h * r)
-    x0 = x + (w - ww) / 2
-    y0 = ytop - (h if h else hh) + ((h - hh) / 2 if h else 0)
-    ax = fig.add_axes([fx(x0), fy(y0), fx(ww), fy(hh)]); ax.set_axis_off()
-    ax.imshow(im, interpolation="lanczos")
+    # vector panel PDF, transparent margins trimmed (measured on the PNG)
+    _, _, _, hh = cv.place(Path(path).with_suffix(""), x, ytop, w, h, autocrop=True)
     used = h if h else hh
     if caption:
         fig.text(fx(x + w / 2), fy(ytop - used - 0.04), caption, ha="center", va="top", fontsize=cap_size, color=INK)
@@ -78,8 +69,8 @@ def chip(x, y, text, fc, ec, size=7.2, bold=False):
 
 
 def build():
-    global fig
-    fig = plt.figure(figsize=(W, H)); fig.patch.set_facecolor("white")
+    global cv, fig
+    cv = Canvas(W, H); fig = cv.top
     L = SC.LABEL_COL
     # ------------------------------------------------------------ row 1
     r1y, r1h = 5.05, 4.45
@@ -137,7 +128,7 @@ def build():
     arrow(2.75, gy, 2.75, r2y + r2h)
     fig.text(fx(7.7), fy(gy), "  masks + floor frame → 3D points  ", ha="center", va="center", fontsize=7, color=MUTED,
              style="italic", bbox=dict(boxstyle="square,pad=0.05", fc="white", ec="none"))
-    return fig
+    return cv
 
 
 def main():
@@ -148,10 +139,7 @@ def main():
     ap.add_argument("--dpi", type=int, default=250)
     a = ap.parse_args()
     out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
-    f = build()
-    for ext in ("pdf", "png"):
-        f.savefig(f"{out}.{ext}", dpi=a.dpi, facecolor="white")
-        print("wrote", f"{out}.{ext}")
+    build().save(out, png_dpi=a.dpi)
 
 
 if __name__ == "__main__":

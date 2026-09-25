@@ -30,6 +30,7 @@ from matplotlib.lines import Line2D
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scene_common as SC  # noqa: E402
 from scene_common import COL, LABEL_COL, save  # noqa: E402
+SC.enable_title_case()      # all figure text in Title Case (supplementary style)
 
 REPO = SC.REPO
 _arch_bb = REPO / "assets" / "figures" / "architecture" / "bbox_pipeline"
@@ -87,7 +88,13 @@ def _fig(w, h):
 
 
 def _img_ax(fig, rect, img):
-    ax = fig.add_axes(rect); ax.imshow(img, interpolation="lanczos"); ax.set_xticks([]); ax.set_yticks([])
+    a = np.asarray(img)
+    if a.dtype != np.uint8:
+        a = (np.clip(a, 0, 1) * 255).astype(np.uint8)
+    h, w = a.shape[:2]
+    ax = fig.add_axes(rect)   # sharpened 2x copy, drawn in the original pixel coordinates of the overlays
+    ax.imshow(SC.crisp(a[..., :3]), interpolation="lanczos", extent=(-0.5, w - 0.5, h - 0.5, -0.5))
+    ax.set_xticks([]); ax.set_yticks([])
     for sp in ax.spines.values():
         sp.set_linewidth(0.5); sp.set_edgecolor(COL["muted"])
     return ax

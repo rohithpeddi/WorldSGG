@@ -31,7 +31,7 @@ import numpy as np
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from scene_common import bundle, BUNDLE_DIR, PANEL_DIR, save, COL, DPI, cfg  # noqa: E402
+from scene_common import bundle, BUNDLE_DIR, PANEL_DIR, save, COL, DPI, cfg, crisp  # noqa: E402
 
 import matplotlib  # noqa: E402
 matplotlib.use("Agg")
@@ -45,8 +45,8 @@ RANSAC_REPROJ = 4.0
 RANSAC_ITERS = 2000
 RANSAC_CONF = 0.995
 
-SMALL = 7          # pt, captions
-TINY = 6           # pt, tick / index labels
+SMALL = 8.5        # pt, captions
+TINY = 7.5         # pt, tick / index labels
 FRAME_LW = 0.5     # frame border line width
 
 RAW_DIR = BUNDLE_DIR / "frames_raw"
@@ -193,8 +193,8 @@ def panel_sift_matches(ref_idx=cfg("sift")[0], cand_idx=cfg("sift")[1], max_line
     fh = fw * h / (2 * w + gap) + 0.28
     fig = _fig(fw, fh)
     ax = fig.add_axes([0, 0.16 / fh, 1, 1 - 0.28 / fh])
-    ax.imshow(ref, interpolation="lanczos", extent=(-0.5, w - 0.5, h - 0.5, -0.5))
-    ax.imshow(cand, interpolation="lanczos", extent=(w + gap - 0.5, 2 * w + gap - 0.5, h - 0.5, -0.5))
+    ax.imshow(crisp(ref), interpolation="lanczos", extent=(-0.5, w - 0.5, h - 0.5, -0.5))
+    ax.imshow(crisp(cand), interpolation="lanczos", extent=(w + gap - 0.5, 2 * w + gap - 0.5, h - 0.5, -0.5))
     ax.set_axis_off()
 
     rng = np.random.default_rng(seed)
@@ -208,13 +208,13 @@ def panel_sift_matches(ref_idx=cfg("sift")[0], cand_idx=cfg("sift")[1], max_line
         ax.plot([x2 + w + gap], [y2], "o", ms=1.3, mfc=c, mec="none")
     ax.set_xlim(-0.5, 2 * w + gap - 0.5); ax.set_ylim(h - 0.5, -0.5)
 
-    fig.text(0.25, 1 - 0.09 / fh, f"reference (frame {ref_idx})", ha="center", va="top",
+    fig.text(0.25, 1 - 0.09 / fh, f"Reference (Frame {ref_idx})", ha="center", va="top",
              fontsize=SMALL, color=COL["text"])
-    fig.text(0.75, 1 - 0.09 / fh, f"candidate (frame {cand_idx})", ha="center", va="top",
+    fig.text(0.75, 1 - 0.09 / fh, f"Candidate (Frame {cand_idx})", ha="center", va="top",
              fontsize=SMALL, color=COL["text"])
     fig.text(0.5, 0.02 / fh,
-             f"SIFT + Lowe ratio {LOWE_RATIO}: {r['n_good']} matches, "
-             f"{r['n_inl']} RANSAC inliers ({len(show)} shown)",
+             f"SIFT + Lowe Ratio {LOWE_RATIO}: {r['n_good']} Matches, "
+             f"{r['n_inl']} RANSAC Inliers ({len(show)} Shown)",
              ha="center", va="bottom", fontsize=TINY, color=COL["muted"])
     save(fig, "s1_sift_matches")
     return r
@@ -260,7 +260,7 @@ def panel_homography_overlap(ref_idx=cfg("homog")[0], kept_idx=cfg("homog")[1], 
         aw_in, ah_in = (x1 - x0) * s, (y1 - y0) * s
         rect = [left_in / fw, (fh - top_in - ah_in) / fh, aw_in / fw, ah_in / fh]   # top-aligned
         ax = fig.add_axes(rect)
-        ax.imshow(ref, interpolation="lanczos", extent=(0, w, h, 0), alpha=0.95)
+        ax.imshow(crisp(ref), interpolation="lanczos", extent=(0, w, h, 0))
         ax.add_patch(plt.Rectangle((0, 0), w, h, fill=False, ec=COL["text"], lw=0.7))
         if len(r["poly"]) >= 3:
             ax.add_patch(MplPolygon(r["poly"], closed=True, fc=COL["static"], ec="none", alpha=0.35))
@@ -268,15 +268,15 @@ def panel_homography_overlap(ref_idx=cfg("homog")[0], kept_idx=cfg("homog")[1], 
         ax.set_xlim(x0, x1); ax.set_ylim(y1, y0)
         ax.set_axis_off()
         cx = (left_in + aw_in / 2) / fw
-        fig.text(cx, 1 - 0.02 / fh, f"candidate frame {ci}", ha="center", va="top",
+        fig.text(cx, 1 - 0.02 / fh, f"Candidate Frame {ci}", ha="center", va="top",
                  fontsize=SMALL, color=COL["text"])
-        fig.text(cx, 0.26 / fh, f"overlap α = {_fmt_alpha(r['alpha'])}", ha="center", va="bottom",
+        fig.text(cx, 0.26 / fh, f"Overlap α = {_fmt_alpha(r['alpha'])}", ha="center", va="bottom",
                  fontsize=SMALL, color=COL["text"], fontweight="bold")
-        verdict = "α < τ  →  keep" if tag == "kept" else "α ≥ τ  →  discard"
+        verdict = "α < τ  →  Keep" if tag == "kept" else "α ≥ τ  →  Discard"
         fig.text(cx, 0.14 / fh, verdict, ha="center", va="bottom", fontsize=TINY,
                  color=COL["dynamic"] if tag == "kept" else COL["muted"])
         left_in += aw_in + hgap_in
-    fig.text(0.5, 0.01 / fh, f"reference: frame {ref_idx}    ■ intersection    - - warped candidate",
+    fig.text(0.5, 0.01 / fh, f"Reference: Frame {ref_idx}    ■ Intersection    - - Warped Candidate",
              ha="center", va="bottom", fontsize=TINY - 0.5, color=COL["muted"])
     save(fig, "s1_homography_overlap")
     return results
@@ -301,8 +301,8 @@ def panel_timeline(thumb_frames=cfg("thumbs")):
     ax.spines["bottom"].set_edgecolor(COL["muted"])
     ax.patch.set_alpha(0)
 
-    fig.text(0.03, 0.005, f"{N_RAW} raw frames", ha="left", va="bottom", fontsize=SMALL, color=COL["muted"])
-    fig.text(0.97, 0.005, f"→ {len(SAMPLED_IDX)} kept (adaptive)", ha="right", va="bottom",
+    fig.text(0.03, 0.005, f"{N_RAW} Raw Frames", ha="left", va="bottom", fontsize=SMALL, color=COL["muted"])
+    fig.text(0.97, 0.005, f"→ {len(SAMPLED_IDX)} Kept (Adaptive)", ha="right", va="bottom",
              fontsize=SMALL, color=COL["dynamic"], fontweight="bold")
 
     # thumbnails, evenly spaced, with leader lines to their tick positions
@@ -312,7 +312,7 @@ def panel_timeline(thumb_frames=cfg("thumbs")):
     slots = np.linspace(0.03 + th_w / 2, 0.97 - th_w / 2, n)
     for cx, s in zip(slots, thumb_frames):
         axi = fig.add_axes([cx - th_w / 2, 0.46, th_w, th_h])
-        axi.imshow(raw_frame(s), interpolation="lanczos")
+        axi.imshow(crisp(raw_frame(s)), interpolation="lanczos")
         axi.set_xticks([]); axi.set_yticks([])
         for sp in axi.spines.values():
             sp.set_linewidth(FRAME_LW); sp.set_edgecolor(COL["dynamic"])
@@ -337,13 +337,13 @@ def panel_selected_frames(n=5):
     for j, (k, s) in enumerate(zip(ks, frames)):
         left = 0.02 + j * (tw + gap)
         ax = fig.add_axes([left, 0.2 / fh, tw, th_in / fh])
-        ax.imshow(raw_frame(s), interpolation="lanczos")
+        ax.imshow(crisp(raw_frame(s)), interpolation="lanczos")
         ax.set_xticks([]); ax.set_yticks([])
         for sp in ax.spines.values():
             sp.set_linewidth(FRAME_LW); sp.set_edgecolor(COL["muted"])
-        ax.text(0.5, -0.03, f"raw frame {s}", transform=ax.transAxes, ha="center", va="top",
+        ax.text(0.5, -0.03, f"Raw Frame {s}", transform=ax.transAxes, ha="center", va="top",
                 fontsize=TINY, color=COL["text"])
-        ax.text(0.5, -0.14, f"kept #{k + 1}/{len(SAMPLED_IDX)}", transform=ax.transAxes, ha="center", va="top",
+        ax.text(0.5, -0.14, f"Kept #{k + 1}/{len(SAMPLED_IDX)}", transform=ax.transAxes, ha="center", va="top",
                 fontsize=TINY - 0.5, color=COL["muted"])
     save(fig, "s1_selected_frames")
     return frames
@@ -359,8 +359,8 @@ def panel_static_vs_dynamic(frames=cfg("dyn_frames")):
     rgap_in = 0.06
     fh = 2 * th_in + rgap_in + 0.16
     fig = _fig(fw, fh)
-    rows = [("Dynamic\n(original)", lambda s: raw_frame(s), COL["dynamic"]),
-            ("Static\n(person removed)", lambda s: static_frame(s), COL["static"])]
+    rows = [("Dynamic\n(Original)", lambda s: crisp(raw_frame(s)), COL["dynamic"]),
+            ("Static\n(Person Removed)", lambda s: crisp(static_frame(s)), COL["static"])]
     for i, (label, fn, col) in enumerate(rows):
         bottom = (0.02 + (1 - i) * (th_in + rgap_in)) / fh
         for j, s in enumerate(frames):
@@ -371,7 +371,7 @@ def panel_static_vs_dynamic(frames=cfg("dyn_frames")):
             for sp in ax.spines.values():
                 sp.set_linewidth(FRAME_LW); sp.set_edgecolor(col)
             if i == 0:
-                ax.set_title(f"frame {s}", fontsize=TINY, color=COL["text"], pad=1.5)
+                ax.set_title(f"Frame {s}", fontsize=TINY, color=COL["text"], pad=1.5)
         fig.text(left0 - 0.02, bottom + th_in / fh / 2, label, ha="right", va="center",
                  fontsize=SMALL, color=col, rotation=90, linespacing=1.1)
     save(fig, "s1_static_vs_dynamic")
@@ -388,7 +388,7 @@ def panel_masks(frames=cfg("dyn_frames"), col="#e07a2f", alpha=0.55):
     fig = _fig(fw, fh)
     rgb = np.array(matplotlib.colors.to_rgb(col))
     for j, s in enumerate(frames):
-        img = raw_frame(s).astype(float) / 255.0
+        img = crisp(raw_frame(s), scale=1).astype(float) / 255.0
         m = mask_of(s)
         blend = img.copy()
         blend[m] = (1 - alpha) * img[m] + alpha * rgb
@@ -406,15 +406,50 @@ def panel_masks(frames=cfg("dyn_frames"), col="#e07a2f", alpha=0.55):
         ax.set_xticks([]); ax.set_yticks([])
         for sp in ax.spines.values():
             sp.set_linewidth(FRAME_LW); sp.set_edgecolor(COL["muted"])
-        ax.set_title(f"frame {s}", fontsize=TINY, color=COL["text"], pad=1.5)
-        ax.text(0.5, -0.03, f"mask area {100 * m.mean():.0f}%", transform=ax.transAxes, ha="center",
+        ax.set_title(f"Frame {s}", fontsize=TINY, color=COL["text"], pad=1.5)
+        ax.text(0.5, -0.03, f"Mask Area {100 * m.mean():.0f}%", transform=ax.transAxes, ha="center",
                 va="top", fontsize=TINY - 0.5, color=COL["muted"])
-    fig.text(0.5, 0.005, "SAM2 combined dynamic mask (person + carried objects)", ha="center",
+    fig.text(0.5, 0.005, "SAM2 Combined Dynamic Mask (Person + Carried Objects)", ha="center",
              va="bottom", fontsize=TINY, color=COL["muted"])
     save(fig, "s1_masks")
 
 
+# ---- panel 7: RGB inputs of one pi3 view -----------------------------------------
+def panel_rgb_view(k=None, col="#e07a2f", alpha=0.5):
+    """The two RGB inputs of pi3 clip k: the original frame with its SAM2 person mask, and the inpainted
+    (person-removed) frame of the static pass.  The mask belongs to raw frame sampled_idx[k], so that frame
+    is shown (pi3 saw its neighbour sampled_idx[k] + 1, where the moving person no longer fits the mask).  Written as two
+    panels, s1_rgb_dyn_k{k} and s1_rgb_static_k{k}, so wrap figures can place them next to 3-D views."""
+    k = int(cfg("view_mid")) if k is None else int(k)
+    s = SAMPLED_IDX[k]
+    dyn = raw_frame(s)
+    H, W = dyn.shape[:2]
+    m = np.asarray(Image.open(MASK_DIR / f"{s:06d}.png").convert("L").resize((W, H), Image.NEAREST)) > 0
+    img = crisp(dyn).astype(float) / 255.0
+    m = cv2.resize(m.astype(np.uint8), (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST) > 0
+    H, W = m.shape
+    rgb = np.array(matplotlib.colors.to_rgb(col))
+    img[m] = (1 - alpha) * img[m] + alpha * rgb
+    for name, im, title, edge in ((f"s1_rgb_dyn_k{k}", img, "Original + SAM2 Mask", COL["dynamic"]),
+                                  (f"s1_rgb_static_k{k}", crisp(static_frame(s)), "Inpainted (Static Pass)", COL["static"])):
+        fw = 1.25
+        fig = _fig(fw, fw * H / W + 0.22)
+        ax = _img_axes(fig, [0.0, 0.0, 1.0, 1 - 0.22 / (fw * H / W + 0.22)], im)
+        for sp in ax.spines.values():
+            sp.set_edgecolor(edge); sp.set_linewidth(0.8)
+        if name.startswith("s1_rgb_dyn"):
+            cnts, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in cnts:
+                if cv2.contourArea(c) >= 30:
+                    c = c.reshape(-1, 2)
+                    ax.plot(np.r_[c[:, 0], c[0, 0]], np.r_[c[:, 1], c[0, 1]], color=col, lw=0.6)
+            ax.set_xlim(-0.5, W - 0.5); ax.set_ylim(H - 0.5, -0.5)
+        ax.set_title(title, fontsize=SMALL, color=COL["text"], pad=2)
+        save(fig, name)
+
+
 if __name__ == "__main__":
+    panel_rgb_view()
     r1 = panel_sift_matches()
     print(f"sift_matches: {cfg('sift')} -> {r1['n_good']} good, {r1['n_inl']} inliers, alpha={r1['alpha']:.3f}")
     res = panel_homography_overlap()

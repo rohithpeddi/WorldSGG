@@ -28,6 +28,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Rectangle, FancyBboxPatch  # noqa: E402
 from PIL import Image  # noqa: E402
+import numpy as np  # noqa: E402
+import sys  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scene_common import save_fig, crisp, enable_title_case, Verbatim  # noqa: E402
+enable_title_case()         # all figure text in Title Case (supplementary style)
 
 _repo = Path(__file__).resolve().parents[2]
 _arch_sem = _repo / "assets" / "figures" / "architecture" / "semantic_pipeline"
@@ -59,10 +64,14 @@ def pretty(lbl):
 
 
 def save(fig, out, name):
-    p = out / f"{name}.png"
-    fig.savefig(p, dpi=DPI, transparent=True, bbox_inches="tight", pad_inches=0.02)
-    plt.close(fig)
-    print("wrote", p)
+    save_fig(fig, out / name, png_dpi=DPI)      # .png preview + .pdf with vector text
+
+
+def show_frame(ax, path):
+    """Sharpened 2x copy of a video frame, kept in the original pixel coordinates of the overlays."""
+    a = np.asarray(Image.open(path).convert("RGB"))
+    h, w = a.shape[:2]
+    ax.imshow(crisp(a), interpolation="lanczos", extent=(-0.5, w - 0.5, h - 0.5, -0.5))
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +87,7 @@ def m1_clip_input(b, fdir, out, target):
     fig = plt.figure(figsize=(3.1, 2.3))
     # left: target frame, big
     axT = fig.add_axes([0.0, 0.10, 0.36, 0.78])
-    axT.imshow(Image.open(fdir / f"{target}.png"))
+    show_frame(axT, fdir / f"{target}.png")
     x0, y0, x1, y1 = fin["person_bbox"][0]
     axT.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, lw=1.1, ec=OBJ_COL["person"]))
     axT.text(x0 + 4, y1 - 6, "person", color="white", fontsize=TN, fontweight="bold", va="bottom",
@@ -110,7 +119,7 @@ def m1_clip_input(b, fdir, out, target):
     for i, f in enumerate(others):
         r, c = divmod(i, ncol)
         ax = fig.add_axes([left + c * cw + 0.006, top - (r + 1) * rh + 0.035, cw - 0.012, rh - 0.05])
-        ax.imshow(Image.open(fdir / f"{f}.png"))
+        show_frame(ax, fdir / f"{f}.png")
         ax.set_xticks([]); ax.set_yticks([])
         for s in ax.spines.values():
             s.set_edgecolor(GRID); s.set_linewidth(0.6)
@@ -188,7 +197,8 @@ def m2_event_graph(b, out, target, model="internvl", min_deg=7):
     nd = tclip["nodes"][0]
     act = nd["actions"][0].split(",", 1)[-1].strip() if nd.get("actions") else ""
     txt = f"“{tclip['subtitle']}”"
-    fig.text(0.02, 0.06, f"subtitle @ {tgt}: {txt}\naction: {act[:62]}{'…' if len(act) > 62 else ''}",
+    # the subtitle and action are the VLM's own words: keep them verbatim (no Title Case)
+    fig.text(0.02, 0.06, Verbatim(f"Subtitle @ {tgt}: {txt}\nAction: {act[:62]}{'…' if len(act) > 62 else ''}"),
              ha="left", va="bottom", fontsize=TN, color=TEXT, linespacing=1.3,
              bbox=dict(fc="#f5f6f8", ec=GRID, lw=0.5, boxstyle="round,pad=0.3"))
     save(fig, out, "m2_event_graph")

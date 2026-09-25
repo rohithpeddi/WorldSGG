@@ -51,6 +51,8 @@ PALETTES = {
         PH_F="#171a1f", FRAME_B="#3a4048",            # placeholder fill, frame border
         NODE_F="#1c2027", LINE="#5b6470", GRIDLINE="#2f343c", FILM_F="#0b0d10", SPROCKET="#2a2f37",
         RED_TXT="#fca5a5", BAR_OFF="#3a3f47", CARD="#12151a",
+        # the four processing units: (stroke, tint fill)
+        UNIT=[("#60a5fa", "#111b2b"), ("#fbbf24", "#231c0d"), ("#a78bfa", "#1b1630"), ("#34d399", "#0e231c")],
     ),
     "light": dict(
         BG="#ffffff", RULE="#c5cad3", TXT="#151a22", MUTED="#4b5563", DIM="#8b93a1",
@@ -70,6 +72,7 @@ PALETTES = {
         PH_F="#f3f4f6", FRAME_B="#c5cad3",
         NODE_F="#f3f4f6", LINE="#9aa3b2", GRIDLINE="#dfe3e8", FILM_F="#e9ecf0", SPROCKET="#ffffff",
         RED_TXT="#b91c1c", BAR_OFF="#d1d5db", CARD="#f4f5f7",
+        UNIT=[("#2563eb", "#f4f8ff"), ("#b45309", "#fffaf0"), ("#7c3aed", "#f8f5ff"), ("#047857", "#f1fbf6")],
     ),
 }
 
@@ -140,6 +143,10 @@ def cap(s: str, mode: Optional[str] = None) -> str:
             tok = tok[:i] + new + tok[i + len(core):]
         out.append(tok)
     return "".join(out)
+
+
+UNIT_NAMES = ["Observed Objects Processing Unit", "Unobserved Objects Processing Unit",
+              "Relationship Processing Unit", "Decoders"]
 
 
 class Canvas:
@@ -436,6 +443,194 @@ class Canvas:
         """A stage band title on a rule; returns the y where content starts."""
         self.band_title(y, title, x0=x0, x1=x1, size=17)
         return y + 24
+
+    def strip_fit(self, x, y, h, items: Sequence[Tuple[str, str, float]], gap=14, limit=1290, max_aspect=3.4,
+                  caption_size=9) -> float:
+        """A row of image slots of common height that always fits in [x, limit].
+        ``items`` are (key, caption, default_aspect); a real PNG supplies its own
+        aspect (capped at ``max_aspect``).  When the row would overflow, the height
+        is reduced so that it fits.  Returns the y below the captions."""
+        def widths(hh):
+            ws = []
+            for key, _, asp in items:
+                size = self.img_size(key)
+                a = min(size[0] / size[1], max_aspect) if size else asp
+                ws.append(a * hh)
+            return ws
+        ws = widths(h)
+        gaps = gap * (len(items) - 1)
+        if sum(ws) + gaps > limit - x:
+            h = (limit - x - gaps) / (sum(ws) / h)
+            ws = widths(h)
+        xx = x
+        for (key, cap_, _), w in zip(items, ws):
+            self.image_slot(xx, y, w, h, key, caption=cap_, caption_size=caption_size)
+            xx += w + gap
+        return y + h + 16
+
+    def set_height(self, height: int) -> None:
+        """Shrink a scratch canvas to the placed content: rewrite the root element and the background."""
+        self.parts[0] = (f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+                         f'viewBox="0 0 {self.w} {height}" width="{self.w}" height="{height}">')
+        self.parts[2] = f'<rect width="{self.w}" height="{height}" fill="{BG}"/>'
+        self.h = height
+
+    # -- processing units ------------------------------------------------------------
+    # Every training-based method is drawn as four processing units, top to bottom:
+    #   1 Observed Objects Processing Unit    2 Unobserved Objects Processing Unit
+    #   3 Relationship Processing Unit        4 Decoders
+    # A unit is a tinted, rounded enclosure with a numbered header; ``n = (1, 2)``
+    # marks a region shared by units 1 and 2 (the WorldWise++ entity decoder).  Each
+    # unit also writes a ``<!-- crop name x0 y0 x1 y1 -->`` marker that
+    # crop_stages.py turns into one page of the paper.
+    def _unit_cols(self, n):
+        ns = n if isinstance(n, tuple) else (n,)
+        return [UNIT[k - 1] for k in ns]
+
+    def begin_unit(self, y, n, role: str = "", x0=22, x1=1298) -> float:
+        """Open unit ``n`` whose enclosure starts at ``y``; returns the y where content starts."""
+        self._unit = dict(idx=len(self.parts), y=y, n=n, x0=x0, x1=x1)
+        cols = self._unit_cols(n)
+        ns = n if isinstance(n, tuple) else (n,)
+        px, py = x0 + 16, y + 12
+        pw = 58 if len(ns) == 1 else 92
+        if len(ns) == 1:
+            self.a(f'<rect x="{px}" y="{py}" width="{pw}" height="24" rx="12" fill="{cols[0][0]}"/>')
+        else:
+            half = pw / 2
+            self.a(f'<rect x="{px}" y="{py}" width="{pw}" height="24" rx="12" fill="{cols[1][0]}"/>')
+            self.a(f'<path d="M{px + 12} {py} H{px + half} V{py + 24} H{px + 12} A12 12 0 0 1 {px + 12} {py}" '
+                   f'fill="{cols[0][0]}"/>')
+        tag = f"Unit {ns[0]}" if len(ns) == 1 else f"Units {ns[0]} + {ns[1]}"
+        self.text(px + pw / 2, py + 16.5, tag, size=11.5, fill=BG, anchor="middle", weight="700")
+        if len(ns) == 1:
+            name = UNIT_NAMES[ns[0] - 1]
+        else:
+            name = "Shared By The " + " And ".join(UNIT_NAMES[k - 1].replace(" Processing Unit", "") for k in ns) \
+                   + " Processing Units"
+        self.text(px + pw + 12, py + 18, name, size=18, fill=cols[0][0] if len(ns) == 1 else TXT, weight="700",
+                  font=SERIF)
+        if role:
+            self.text(px + pw + 12 + len(cap(name)) * 18 * 0.6 + 20, py + 17, role, size=11, fill=MUTED)
+        return y + 50
+
+    def end_unit(self, y1, crop: Optional[str] = None, crop_y0: Optional[float] = None,
+                 crop_y1: Optional[float] = None):
+        """Close the open unit at ``y1``: its enclosure is inserted behind the content."""
+        u = self._unit
+        x0, x1, y0 = u["x0"], u["x1"], u["y"]
+        cols = self._unit_cols(u["n"])
+        if len(cols) == 1:
+            enc = (f'<rect x="{x0}" y="{y0}" width="{x1 - x0}" height="{y1 - y0}" rx="16" fill="{cols[0][1]}" '
+                   f'stroke="{cols[0][0]}" stroke-width="1.8"/>')
+        else:
+            gid = f"ovl{len(self.parts)}"
+            enc = (f'<defs><linearGradient id="{gid}" x1="0" y1="0" x2="1" y2="0">'
+                   f'<stop offset="0" stop-color="{cols[0][1]}"/><stop offset="1" stop-color="{cols[1][1]}"/>'
+                   f'</linearGradient></defs>'
+                   f'<rect x="{x0}" y="{y0}" width="{x1 - x0}" height="{y1 - y0}" rx="16" fill="url(#{gid})" '
+                   f'stroke="{cols[0][0]}" stroke-width="1.8"/>'
+                   f'<rect x="{x0 + 5}" y="{y0 + 5}" width="{x1 - x0 - 10}" height="{y1 - y0 - 10}" rx="12" '
+                   f'fill="none" stroke="{cols[1][0]}" stroke-width="1.8" stroke-dasharray="7 4"/>')
+        self.parts.insert(u["idx"], enc)
+        if crop:
+            self.crop_mark(crop, y0 - 10 if crop_y0 is None else crop_y0, y1 + 10 if crop_y1 is None else crop_y1)
+        self._unit = None
+
+    def crop_mark(self, name: str, y0: float, y1: float, x0: float = 12, x1: float = 1308):
+        """Mark a page region for crop_stages.py."""
+        self.a(f"<!-- crop {name} {x0:.0f} {y0:.0f} {x1:.0f} {y1:.0f} -->")
+
+    def unit_port(self, x, y, w, n, title, sub=None, h=38):
+        """An input tensor that arrives from unit ``n`` (outlined in that unit's colour)."""
+        self.tensor(x, y, w, h, title, sub if sub is not None else f"From Unit {n}", col=UNIT[n - 1][0])
+
+    def unit_card(self, y0, y1, n, title, body_lines, x=1320, w=380, size=11.5, tsize=18):
+        """A card beside unit ``n`` spanning its height, numbered in the unit's colour."""
+        cols = self._unit_cols(n)
+        ns = n if isinstance(n, tuple) else (n,)
+        h = y1 - y0
+        self.a(f'<rect x="{x}" y="{y0}" width="{w}" height="{h}" rx="14" fill="{CARD_F}" stroke="{CARD_S}" '
+               f'stroke-width="1.5"/>')
+        if len(cols) == 1:
+            self.a(f'<rect x="{x}" y="{y0 + 14}" width="5" height="{h - 28}" rx="2.5" fill="{cols[0][0]}"/>')
+        else:
+            self.a(f'<rect x="{x}" y="{y0 + 14}" width="5" height="{h / 2 - 14}" rx="2.5" fill="{cols[0][0]}"/>')
+            self.a(f'<rect x="{x}" y="{y0 + h / 2}" width="5" height="{h / 2 - 14}" rx="2.5" fill="{cols[1][0]}"/>')
+        cx, cy = x + 34, y0 + h / 2 - 8 * len(body_lines) + 4
+        if len(cols) == 1:
+            self.a(f'<circle cx="{cx}" cy="{cy}" r="14" fill="{cols[0][0]}"/>')
+        else:
+            self.a(f'<path d="M{cx} {cy - 14} A14 14 0 0 0 {cx} {cy + 14} Z" fill="{cols[0][0]}"/>')
+            self.a(f'<path d="M{cx} {cy - 14} A14 14 0 0 1 {cx} {cy + 14} Z" fill="{cols[1][0]}"/>')
+        self.text(cx, cy + 4.5, "+".join(str(k) for k in ns), size=12 if len(ns) == 1 else 10, fill=BG,
+                  anchor="middle", weight="700")
+        self.text(x + 62, cy + 6, title, size=tsize, fill=TXT, weight="700")
+        self.wrap(x + 62, cy + 30, body_lines, size=size)
+
+    def unit_overview(self, y, modules: Sequence[Sequence[str]], left_key: str = "frame_1",
+                      right_key: str = "preds_1", right_caption: str = "Output: Predicates At The Unseen Frame",
+                      overlap: Optional[Tuple[str, str]] = None, h: float = 150, x0: float = 30,
+                      x1: float = 1290) -> float:
+        """The one-line architecture summary under the title: video -> the four units -> scene graph.
+        ``modules[k]`` lists the modules of unit k+1 in this method; ``overlap`` = (title, subtitle)
+        of a module drawn straddling units 1 and 2.  Returns the y below the strip."""
+        wl, _ = self.fit(left_key, h=h - 22, default=(64, h - 22), max_w=110)
+        self.image_slot(x0, y + 4, wl, h - 22, left_key, border=FRAME_B)
+        self.text(x0 + wl / 2, y + h + 2, "Video", size=10, fill=MUTED, anchor="middle")
+        wr, _ = self.fit(right_key, h=h - 22, default=(260, h - 22), max_w=260)
+        xr = x1 - wr
+        self.image_slot(xr, y + 4, wr, h - 22, right_key)
+        self.text(xr + wr / 2, y + h + 2, right_caption, size=10, fill=MUTED, anchor="middle")
+        aw = 34
+        xa, xb = x0 + wl + aw, xr - aw
+        n = 4
+        bw = (xb - xa - (n - 1) * aw) / n
+        yc = y + h / 2
+
+        def block_arrow(xs):
+            x2 = xs + aw - 5
+            self.a(f'<path d="M{xs + 5} {yc - 7} H{x2 - 10} V{yc - 14} L{x2} {yc} L{x2 - 10} {yc + 14} '
+                   f'V{yc + 7} H{xs + 5} Z" fill="{GHOST_F}" stroke="{LINE}" stroke-width="1.3"/>')
+        block_arrow(x0 + wl)
+        block_arrow(xb)
+        names = [("Observed Objects", "Processing Unit"), ("Unobserved Objects", "Processing Unit"),
+                 ("Relationship", "Processing Unit"), ("Decoders",)]
+        for k in range(n):
+            bx = xa + k * (bw + aw)
+            col, fill = UNIT[k]
+            self.a(f'<rect x="{bx}" y="{y}" width="{bw}" height="{h}" rx="12" fill="{fill}" stroke="{col}" '
+                   f'stroke-width="2"/>')
+            self.a(f'<circle cx="{bx + 20}" cy="{y + 21}" r="11" fill="{col}"/>')
+            self.text(bx + 20, y + 25.5, str(k + 1), size=11.5, fill=BG, anchor="middle", weight="700")
+            for i, ln in enumerate(names[k]):
+                self.text(bx + 36, y + 26 + i * 16, ln, size=12.5, fill=col, weight="700", font=SERIF)
+            yy = y + 26 + len(names[k]) * 16 + 8
+            for ln in modules[k]:
+                # a line starting with two spaces continues the bullet above it
+                if ln.startswith("  "):
+                    self.text(bx + 23, yy, ln.strip(), size=9.5, fill=TXT)
+                else:
+                    self.text(bx + 14, yy, "• " + ln, size=9.5, fill=TXT)
+                yy += 13.5
+            if k < n - 1:
+                block_arrow(bx + bw)
+        if overlap:
+            cw = bw * 0.95
+            cx = xa + bw + aw / 2 - cw / 2
+            cy = y + h - 26
+            gid = f"ovl{len(self.parts)}"
+            self.a(f'<defs><linearGradient id="{gid}" x1="0" y1="0" x2="1" y2="0">'
+                   f'<stop offset="0" stop-color="{UNIT[0][1]}"/><stop offset="1" stop-color="{UNIT[1][1]}"/>'
+                   f'</linearGradient></defs>')
+            self.a(f'<rect x="{cx}" y="{cy}" width="{cw}" height="42" rx="10" fill="url(#{gid})" '
+                   f'stroke="{UNIT[0][0]}" stroke-width="1.8"/>')
+            self.a(f'<rect x="{cx + 3}" y="{cy + 3}" width="{cw - 6}" height="36" rx="8" fill="none" '
+                   f'stroke="{UNIT[1][0]}" stroke-width="1.5" stroke-dasharray="6 3"/>')
+            self.text(cx + cw / 2, cy + 19, overlap[0], size=11, fill=TXT, anchor="middle", weight="700")
+            self.text(cx + cw / 2, cy + 32, overlap[1], size=9, fill=MUTED, anchor="middle")
+            return y + h + 36
+        return y + h + 20
 
 
 GEOMETRY_IMAGES = ["obb_0", "obb_1", "obb_2", "scene3d_1", "camera_path", "motion"]

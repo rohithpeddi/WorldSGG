@@ -124,13 +124,47 @@ to exit: a lingering instance adopts the next launch and exits 0 without writing
 the screenshot. (Its parameters are named-only; `$args` / `$profile` are reserved
 PowerShell names and must not be reused in such a script.)
 
+## Processing-unit layout (training-based methods)
+
+The WorldWise family (`fig_worldwise*.py`, units 2-4 of WorldWise / WorldWise+
+shared through `ww_units.py`) and the adapted baselines (`baseline_common.py`)
+are drawn as four processing units, top to bottom, each a tinted enclosure with a
+numbered header (`Canvas.begin_unit` / `end_unit` in `common.py`) and a card
+beside it (`Canvas.unit_card`):
+
+| Unit | WorldWise / WorldWise+ | WorldWise++ | Baselines |
+|---|---|---|---|
+| 1 Observed Objects | detector (WW) or frozen DINOv3 / π³ latents + gated fusion (WW+), scaffold, encoders, scaffold tokenizer | token grids + memory, scaffold, encoders, tokenizer, world slots + free queries | detector, world-frame scaffold, structural / spatial / motion encoders |
+| 1 + 2 shared | – | entity decoder × 4 (`u12`) | – |
+| 2 Unobserved Objects | associative retriever, visibility embedding, reconstruction vs EMA target | visibility embedding, completed slots, reconstruction | LKS buffer + staleness, LKS tokenizer, motion fusion, temporal object encoder |
+| 3 Relationship | inter-object transformer + 3-D PE, pair encoder, temporal edge attention | pair readout from the decoder's spatial attention, pair encoder, temporal edge attention | inter-object transformer + 3-D PE (object context encoder in W-USG), pair former, temporal edge attention (USG relation decoder) |
+| 4 Decoders | node head, predicate heads, losses | + detection heads, box / corner refinement | node predictor, predicate heads, bucketed loss (+ alignment head in W-USG) |
+
+Arrows that cross units carry a port outlined in the source unit's colour
+("From Unit 1"); the one backward arrow (object classes, Unit 4 → the CLIP text
+pathway of Unit 3) is labelled as such. An overview strip under the title
+(`Canvas.unit_overview`) summarises the units with the video on the left and the
+predicted graph on the right. Captions and card numbers (key frames, tracked
+object, LKS copies, bucket counts) come from the dump's `meta.json`.
+
+These figures are drawn for **00T1E** (baseline dumps: `run_baselines_light.sh`):
+
+```sh
+python scripts/paper_figures/dark/build_all.py --videos 00T1E --png
+python scripts/paper_figures/dark/crop_stages.py assets/figures/architecture/paper_figures/dark/00T1E/{worldwise,worldwise_plus,worldwise_pp,w_sttran,w_sttran_pp,w_dsgdetr,w_dsgdetr_pp,w_usg}.svg --out-dir assets/figures/architecture/paper_figures/dark/units
+```
+
+Every unit writes a `<!-- crop NAME x0 y0 x1 y1 -->` marker; `crop_stages.py`
+turns them into `<name>_overview`, `_u1` .. `_u4` (and `_u12`) pages, falling back
+to the band rules for the stage figures (MLLM methods, detector).
+
 ## 3. Into the paper (vector PDFs)
 
 `svg2pdf.ps1` prints an SVG to a vector PDF with headless Edge (an HTML wrapper
 with `@page { size: <w>px <h>px }`; text stays text, panels stay raster; the
 1720-px canvas becomes a 1290-pt page). `export_paper.py` maps every figure to
-its canonical source (12XD3 for the training methods, 00T1E for the MLLM
-methods) and writes `<paper>/sup_images/architectures/<name>.pdf`;
+its canonical source (00T1E for the WorldWise family, the baselines and the
+MLLM methods; 12XD3 for the detector) and writes `<paper>/sup_images/architectures/<name>.pdf`;
 `--stages` / `--stages-only` also cuts each figure into its three stage bands
 with `crop_stages.py` (`<name>_s1..3.pdf`, 1280 px wide, cards column dropped)
 because a whole canvas at text width is unreadable in print; the supplementary
