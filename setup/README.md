@@ -60,6 +60,13 @@ The shared Stage-1 graph/caption build is documented in
 | `track_b` | [MLLM_TRACK_B.md](MLLM_TRACK_B.md) | fixed tool loop + retrieval + **geometric critic** + repair |
 | `track_b --objects_key objects_pre` | [MLLM_TRACK_B.md](MLLM_TRACK_B.md) §5 | the critic ablation, scored from the same run |
 
+## External MLLM baselines
+
+| Method key | Document | What it is |
+|---|---|---|
+| `scenegraphvlm` | [EXT_SCENEGRAPHVLM.md](EXT_SCENEGRAPHVLM.md) | released SceneGraphVLM AG checkpoint (Qwen3.5-0.8B, SFT+GRPO), own previous graph in the prompt, 2D boxes; sgdet-style only, scored unloc + `sgdet2d` (OO) + UOR/URR |
+| `prev_graph` | [EXT_SCENEGRAPHVLM.md](EXT_SCENEGRAPHVLM.md) §6 | backbone-controlled ablation: previous-frame predicted graph added to the Qwen3-VL-8B zero_shot prompt |
+
 ---
 
 ## The four caveats that must survive into the paper
