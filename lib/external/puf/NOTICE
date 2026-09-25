@@ -1,0 +1,31 @@
+This directory adapts parts of PUF (Plug-and-Play Uncertainty-Aware Fusion for
+Online 3D Scene Graph Generation), https://github.com/yyyyangyi/PUF,
+Copyright (c) the PUF authors (Yi Yang, Myrna Castillo, Bodo Rosenhahn,
+Michael Ying Yang), licensed under the Apache License, Version 2.0.
+
+  You may obtain a copy of the License at
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
+Vendored / adapted (see the per-function notes in puf_core.py):
+  Merging/puf_utils.py   PUF_SG._batched_hellinger_distance,
+                         PUF_SG._compute_likelihood_row,
+                         PUF_SG._jpda_marginals_row,
+                         PUF_SG.fuse (association + soft Dirichlet transfer)
+  Merging/utils.py       GaussianSG.merge / _merge_gaussians (FROSS hard merge)
+  Merging/spatial_prior.py SpatialPrior.compute (class prior x spatial decay x
+                         existence gate); the ScanNet-specific spatial scores
+                         are replaced by AG-predicate scores in prior.py.
+  Scripts/dataset/compute_relation_prior.py  (P_class / P_exist estimation),
+                         re-implemented over the Action Genome training
+                         annotations in prior.py.
+
+Modifications: the code was restructured into free functions and a per-video
+graph class, the person is kept as a per-frame (dynamic) node, relation
+evidence is kept per person->object edge with one categorical Dirichlet
+(attention) and per-predicate Beta evidence (multi-label spatial /
+contacting heads), and a causal per-timestamp read-out was added.  See
+setup/EXT_PUF.md for the full list of deviations.
