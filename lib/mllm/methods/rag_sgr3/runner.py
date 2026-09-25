@@ -148,23 +148,49 @@ class SGR3RAGProcessor(ActionGenomeRAGAllObjectsProcessor):
         return self._ret_cache[stem]
 
     def _scene_units(self, scene: Dict[str, Any], obj: str) -> List[Tuple[str, bool, str]]:
-        """Merged (deduplicated) edges of the scene's top frames, query object first."""
+        """Merged (deduplicated) edges of one reference scene, query object first.
+
+        Primary block: the scene's ``frames_per_scene`` top-ranked retrieved frames
+        (SGR3's merged E_ref).  Padding block (only reached when the primary
+        block is shorter than the budget): the scene's remaining retrieved
+        frames, then its other annotated frames, nearest in time to the top
+        frame first.  Both blocks stay inside the same reference video."""
         frames = self.bank.get(scene["video"], {})
-        merged: Dict[str, Dict[str, Any]] = {}
-        order: List[str] = []
-        for fk, _ in scene["frames"][: self.frames_per_scene]:
-            for o in frames.get(fk, []):
-                lab = o["label"]
-                if lab not in merged:
-                    merged[lab] = {"visible": o["visible"], "rels": []}
-                    order.append(lab)
-                merged[lab]["visible"] = merged[lab]["visible"] or o["visible"]
-                for r in o["rels"]:
-                    if r not in merged[lab]["rels"]:
-                        merged[lab]["rels"].append(r)
+        ranked = [fk for fk, _ in scene["frames"]]
+        top = ranked[: self.frames_per_scene]
+        anchor = ranked[0] if ranked else None
+
+        def _idx(fk):
+            m = re.search(r"(\d+)\.png$", fk)
+            return int(m.group(1)) if m else 0
+
+        rest = ranked[self.frames_per_scene:]
+        others = [fk for fk in frames if fk not in set(ranked)]
+        if anchor is not None:
+            others.sort(key=lambda fk: abs(_idx(fk) - _idx(anchor)))
         q = _norm(obj)
-        order.sort(key=lambda lab: 0 if _norm(lab) == q else 1)      # stable
-        return [(lab, merged[lab]["visible"], r) for lab in order for r in merged[lab]["rels"]]
+        seen = set()
+        units: List[Tuple[str, bool, str]] = []
+        for block in (top, rest + others):
+            merged: Dict[str, Dict[str, Any]] = {}
+            order: List[str] = []
+            for fk in block:
+                for o in frames.get(fk, []):
+                    lab = o["label"]
+                    if lab not in merged:
+                        merged[lab] = {"visible": o["visible"], "rels": []}
+                        order.append(lab)
+                    merged[lab]["visible"] = merged[lab]["visible"] or o["visible"]
+                    for r in o["rels"]:
+                        if r not in merged[lab]["rels"]:
+                            merged[lab]["rels"].append(r)
+            order.sort(key=lambda lab: 0 if _norm(lab) == q else 1)      # stable
+            for lab in order:
+                for r in merged[lab]["rels"]:
+                    if (lab, r) not in seen:
+                        seen.add((lab, r))
+                        units.append((lab, merged[lab]["visible"], r))
+        return units
 
     @staticmethod
     def _serialize(header: str, picked: List[List[Tuple[str, bool, str]]]) -> str:
@@ -176,7 +202,7 @@ class SGR3RAGProcessor(ActionGenomeRAGAllObjectsProcessor):
             vis: Dict[str, bool] = {}
             for lab, v, r in units:
                 by_obj.setdefault(lab, []).append(r)
-                vis[lab] = v
+                vis[lab] = vis.get(lab, False) or v
             body = "; ".join(f"{lab}{'' if vis[lab] else ' (unseen)'}: {', '.join(rs)}"
                              for lab, rs in by_obj.items())
             lines.append(f"Reference {si + 1}: person -> {body}")
