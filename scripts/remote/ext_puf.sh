@@ -31,6 +31,20 @@ fross fross
 puf puf
 puf_prior puf_prior
 puf_prior_vis puf_prior_vis"
+# sensitivity variants (declared before any 150-set number was seen; run on s150 only
+# unless SENS=1): observed read-out, prior on observed edges, PUF's completion
+# threshold, spatial factor, forgetting of the accumulated edge evidence
+SENS_VARIANTS="puf_track puf --observed-readout track
+puf_slot puf --observed-readout slot
+puf_prior_slot puf_prior --observed-readout slot
+puf_prior_noobs puf_prior --no-prior-on-observed
+puf_prior_ct08 puf_prior --completion-threshold 0.8
+puf_prior_nospatial puf_prior --no-spatial-prior
+puf_decay09 puf --edge-decay 0.9"
+if [ "$STAGE" = "s150" ] || [ "${SENS:-0}" = "1" ]; then
+  DEFAULT_VARIANTS="$DEFAULT_VARIANTS
+$SENS_VARIANTS"
+fi
 VARIANTS=${VARIANTS:-$DEFAULT_VARIANTS}
 
 for mode in $MODES; do

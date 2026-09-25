@@ -60,8 +60,12 @@ class FusionConfig:
     # dynamic-person edge forgetting of the accumulated track evidence (1.0 = PUF accumulation)
     edge_decay: float = 1.0
     # observed-pair read-out: "frame" = the per-frame person node's edge (this frame's
-    # fused evidence); "track" = the accumulated (person track, node) Dirichlet (static PUF)
+    # fused evidence); "track" = the accumulated (person track, node) Dirichlet (static PUF);
+    # "slot" = the observation's own evidence (= the front-end, or its
+    # one-hot votes for fross), isolating memory from association blending
     observed_readout: str = "frame"
+    # PUF complete_relations also adds the prior to observed edges (literal = True)
+    prior_on_observed: bool = True
     # prior
     completion_threshold: float = 0.0
     max_node_pts: int = 1500
@@ -234,6 +238,7 @@ class VideoFusion:
         prev_ids = list(range(len(self.nodes)))       # PUF: associate against pre-frame nodes only
         assoc = {}
         self.frame_ev = {}                            # node -> this frame's fused (person_t, node) evidence
+        self.slot_ev = {}                             # slot -> the observation's own evidence
         hard = cfg.arm == "fross"
         for ob in observations:
             self.stats["obs"] += 1
@@ -241,6 +246,8 @@ class VideoFusion:
                 self.stats["obs_nogeom"] += 1
             alpha = _class_alpha(ob["cls"], ob["score"], cfg.mode, cfg.obj_obs_strength)
             ev = None if ob["ev"] is None else _evidence(*ob["ev"], hard=hard)
+            if ev is not None:
+                self.slot_ev[ob["slot"]] = {k: cfg.obs_strength * v for k, v in ev.items()}
             if hard:
                 j = self._associate_fross(ob["cls"], ob["geom"], prev_ids)
                 soft = [(j, 1.0)] if j is not None else []
@@ -292,16 +299,23 @@ class VideoFusion:
                 best, key = j, k
         return best
 
-    def edge_output(self, j, c, person_geom, unobserved):
+    def edge_output(self, j, c, person_geom, unobserved, slot=None):
         """Relation distributions for (person, node j | class c).  -> (att, spa, con, src)."""
         cfg = self.cfg
         use_prior = cfg.arm in ("puf_prior", "puf_prior_vis") and self.prior is not None
+        if use_prior and not unobserved and not cfg.prior_on_observed:
+            use_prior = False
         n = self.nodes[j] if j is not None else None
         att = np.zeros(3)
         spa = np.zeros((6, 2))
         con = np.zeros((17, 2))
         src = SRC_NONE
-        if (not unobserved and cfg.observed_readout == "frame" and j in getattr(self, "frame_ev", {})):
+        if (not unobserved and cfg.observed_readout == "slot" and slot in getattr(self, "slot_ev", {})):
+            # the observation's own (person_t, obs) edge, before it is absorbed into a node
+            f = self.slot_ev[slot]
+            att, spa, con = f["att"].copy(), f["spa"].copy(), f["con"].copy()
+            src = SRC_OBS
+        elif (not unobserved and cfg.observed_readout == "frame" and j in getattr(self, "frame_ev", {})):
             # dynamic person: the observed edge is (person_t, node), i.e. this frame's fused evidence
             f = self.frame_ev[j]
             att, spa, con = f["att"].copy(), f["spa"].copy(), f["con"].copy()
@@ -385,7 +399,7 @@ def run_video_graph(records: List[dict], geom_mode: Optional[dict], cfg: FusionC
                     j, unobs = assoc[o], False
                 else:
                     j, unobs = vf.node_for_class(c), True
-                cache[o] = vf.edge_output(j, c, pg, unobs) + (j,)
+                cache[o] = vf.edge_output(j, c, pg, unobs, slot=o) + (j,)
             a, s, cc, sr, _ = cache[o]
             att[k], spa[k], con[k], src[k] = a, s, cc, sr
         new["attention_distribution"] = att
