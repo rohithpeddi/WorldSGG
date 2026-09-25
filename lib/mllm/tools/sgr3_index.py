@@ -392,9 +392,56 @@ def cmd_query(a):
     logger.info(f"query done: {len(vids)} videos -> {out_dir} ({time.time() - t0:.0f}s)")
 
 
+def cmd_diag(a):
+    """Retrieval sanity check against the test GT (never used by any arm):
+    per (test frame, GT object), is the object's class present in the merged
+    graph of the top-k retrieved scenes?  Compared with k random bank scenes."""
+    bank = pickle.load(open(os.path.join(a.out, "bank_graphs.pkl"), "rb"))
+    bank_vids = sorted(bank)
+    rng = np.random.RandomState(0)
+    rdir = os.path.join(a.out, f"retrieval{a.suffix}")
+    ks = (1, 3, 5)
+    hit = {k: [] for k in ks}
+    hit_rand = {k: [] for k in ks}
+    hit_unseen = {k: [] for k in ks}
+    jac = []
+    for vid in _read_list(a.video_list):
+        r = json.load(open(os.path.join(rdir, f"{vid}.json")))["frames"]
+        d = pickle.load(open(os.path.join(TEST_ANN, f"{vid}.mp4.pkl"), "rb"))
+        for fk, fr in d["frames"].items():
+            ent = r.get(os.path.basename(fk))
+            if not ent:
+                continue
+            gt = frame_graph(fr)
+            gt_labels = {o["label"] for o in gt}
+            for k in ks:
+                labs = set()
+                for s in ent["scenes"][:k]:
+                    for rk, _ in s["frames"][:3]:
+                        labs |= {o["label"] for o in bank[s["video"]].get(rk, [])}
+                rl = set()
+                for v in rng.choice(bank_vids, size=k, replace=False):
+                    for rk in list(bank[v])[:3]:
+                        rl |= {o["label"] for o in bank[v][rk]}
+                for o in gt:
+                    hit[k].append(o["label"] in labs)
+                    hit_rand[k].append(o["label"] in rl)
+                    if not o["visible"]:
+                        hit_unseen[k].append(o["label"] in labs)
+                if k == 1:
+                    jac.append(len(gt_labels & labs) / max(len(gt_labels | labs), 1))
+    res = {f"k{k}": {"gt_object_in_ref": round(float(np.mean(hit[k])), 4),
+                     "random_scenes": round(float(np.mean(hit_rand[k])), 4),
+                     "unseen_gt_object_in_ref": round(float(np.mean(hit_unseen[k])), 4) if hit_unseen[k] else None,
+                     "n_gt_objects": len(hit[k])} for k in ks}
+    res["top1_label_jaccard"] = round(float(np.mean(jac)), 4)
+    json.dump(res, open(os.path.join(a.out, f"diag{a.suffix}.json"), "w"), indent=2)
+    logger.info(json.dumps(res))
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["bank", "calib", "embed", "index", "query"])
+    ap.add_argument("cmd", choices=["bank", "calib", "embed", "index", "query", "diag"])
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--suffix", default="")
     ap.add_argument("--train_ann", default=TRAIN_ANN)
@@ -419,7 +466,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         handlers=[logging.StreamHandler(sys.stdout)])
     {"bank": cmd_bank, "calib": cmd_calib, "embed": cmd_embed, "index": cmd_index,
-     "query": cmd_query}[a.cmd](a)
+     "query": cmd_query, "diag": cmd_diag}[a.cmd](a)
 
 
 if __name__ == "__main__":
