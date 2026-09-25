@@ -105,6 +105,13 @@ class SGR3RAGProcessor(ActionGenomeRAGAllObjectsProcessor):
             out = out[:-1].rstrip()
         return out + "\n\n" if out else ""
 
+    def load_precomputed_graphs(self, video_id: str):
+        """Parent loader, minus the clip intervals: the per-annotation clips only
+        feed Step-3 node checks and verification, both unused here (skipping
+        them saves ~45 s of frame I/O per video and changes no prompt)."""
+        video_graph, entity_graph, captions, _ = super().load_precomputed_graphs(video_id)
+        return video_graph, entity_graph, captions, []
+
     # ------------------------------------------------------------- R1 (BGE)
     def r1_contexts(self, objects: List[str], prompts: List[str], video_graph, entity_graph,
                     captions, video_inputs, embedding_cache) -> Dict[str, str]:
