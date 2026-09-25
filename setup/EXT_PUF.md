@@ -72,7 +72,7 @@ We never use WorldWise outputs. W-DSGDetr++'s own predictions for unobserved slo
    - the L2 gate is `1.5 · scale` (PUF: 3 m);
    - the spatial prior `sigma_d` is `0.5 · scale` (PUF: 1 m);
    - the covariance floor is `0.03 · scale`.
-3. **Depth-less observations.** PUF drops them. We keep them and use the semantic likelihood only. In practice this never triggered: Pi3 lifted every observed slot.
+3. **Depth-less observations.** PUF drops them. We keep them and use the semantic likelihood only. This almost never triggers: 7 of the roughly 48k predcls observations and none of the sgdet observations lacked geometry.
 4. **Class evidence.**
    - predcls: a one-hot class vector (PUF's GT-SG mode).
    - sgdet: the dump has no class softmax, so the detector score `s` goes on the predicted label and `(1 - s)` is spread uniformly over the other 34 object classes.
@@ -107,7 +107,9 @@ We never use WorldWise outputs. W-DSGDetr++'s own predictions for unobserved slo
    The spatial factor needs the object node's centroid and the person's centroid at t. It is dropped for objects that were never observed. As in PUF, the prior is also added to observed edges (`prior_on_observed`). The `puf_prior_noobs` row switches that off.
 9. **Completion threshold.** PUF completes an unobserved edge only if `max P > 0.8`, a precision guard for graph-level edge existence. In AG every person–object slot carries attention, spatial and contacting labels, and the metric is recall. The headline therefore uses 0 (always complete). The `puf_prior_ct08` row applies 0.8 to the attention head.
 10. **Keyframes.** PUF can subsample keyframes. We fuse every annotated frame: all frames are scored, and AG frames are already sparse.
-11. **Boxes.** For each node, we accumulate up to 1,500 foreground points from its boxes, trim them to the 5–95 percentile per axis, and fit an oriented floor-parallel box (`obb_floor_parallel_from_points`). The box is emitted as `pred_corners` for every slot mapped to a node. The run JSON reports the 3D IoU against the slot's GT `corners_final` (matched by label) as a side statistic. It is not a Phase-0 `sgdet3d` score.
+11. **Boxes.** For each node, we accumulate up to 1,500 foreground points from its boxes, trim them to the 5–95 percentile per axis, and fit an oriented floor-parallel box (`obb_floor_parallel_from_points`). The box is emitted as `pred_corners` for every slot mapped to a node. The run JSON reports the 3D IoU against the slot's GT `corners_final` (matched by label) as a side statistic. It is not a Phase-0 `sgdet3d` score. Two caveats apply:
+- only slots that appear in a pair are read out, so unpaired sgdet detections count as "no box";
+- in sgdet, a detection's GT is the same-label annotation object, whether or not the detection really is that object.
 
 ## Arms
 
