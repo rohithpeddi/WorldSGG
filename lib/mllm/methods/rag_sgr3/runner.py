@@ -47,8 +47,7 @@ logger = logging.getLogger(__name__)
 
 SGR3_CACHE = "/data3/rohith/ag/cache/sgr3"
 R1_HEADER = "Relevant scene context from video analysis:\n"
-R2_HEADER = ("Reference scene graphs retrieved from visually similar training videos "
-             "(person-object relations; objects marked (unseen) were not visible):\n")
+R2_HEADER = "Reference scene graphs from visually similar videos ((unseen) = object not visible):\n"
 _NORM = {"closet/cabinet": "closet", "cup/glass/bottle": "cup", "paper/notebook": "paper",
          "sofa/couch": "sofa", "phone/camera": "phone"}
 
