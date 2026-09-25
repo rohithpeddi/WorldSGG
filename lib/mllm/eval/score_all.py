@@ -133,6 +133,22 @@ def md_tables(results: Dict[str, Any], subset_name: str) -> str:
                         e=_pct(_g(l3, "iou0.25", "nc", "R", "50")), f=_pct(_g(l3, "iou0.25", "nc", "mR", "50")),
                         g=_pct(frac), h=_pct(_g(s, "legacy", "gt_plus_corrections", "micro_F1")),
                         i=_pct(_g(s, "legacy", "object_detection", "f1"))))
+        extra = [(r, s) for r, s in rows if s.get("sgdet2d") or s.get("halluc")]
+        if extra:
+            lines.append("\n**sgdet2d (OO, class + 2D IoU>=0.5) and hallucination** (%; UOR/URR are upper bounds)\n")
+            lines.append("| method | mode | model | 2D wc R@20 | 2D wc mR@20 | 2D nc R@50 | 2D nc mR@50 | UOR | UOR(frame) "
+                         "| URR | URR obs | URR unobs | obj/frame | trip/frame |")
+            lines.append("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+            num = lambda x: "  -  " if x is None else f"{x:5.2f}"  # noqa: E731
+            for r, s in extra:
+                d2, hl = s.get("sgdet2d", {}), s.get("halluc", {})
+                lines.append("| " + " | ".join([
+                    r["method"] + ("(-critic)" if r.get("objects_key") == "objects_pre" else ""), r["mode"], r["model"],
+                    _pct(_g(d2, "wc", "R", "20")), _pct(_g(d2, "wc", "mR", "20")),
+                    _pct(_g(d2, "nc", "R", "50")), _pct(_g(d2, "nc", "mR", "50")),
+                    _pct(hl.get("uor")), _pct(hl.get("uor_frame")), _pct(hl.get("urr")),
+                    _pct(hl.get("urr_observed")), _pct(hl.get("urr_unobserved")),
+                    num(hl.get("pred_objects_per_frame")), num(hl.get("triplets_per_frame"))]) + " |")
     return "\n".join(lines)
 
 
