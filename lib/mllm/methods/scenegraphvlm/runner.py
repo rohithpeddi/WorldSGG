@@ -268,7 +268,7 @@ def cmd_infer(args):
     if (out_dir / f"{args.tag}.jsonl").exists() and not args.force:
         logger.info(f"exists: {out_dir / (args.tag + '.jsonl')}")
         return
-    cmd = [args.python, str(VENDORED / "infer_swift_gen_prompt.py"),
+    cmd = [args.python, str(VENDORED / "launch.py"),   # = infer_swift_gen_prompt.py + model_type shim
            "--model", args.ckpt, "--test-jsonl", str(jl), "--output-dir", str(out_dir),
            "--run-name", args.tag, "--infer-backend", "vllm", "--batch-size", str(args.batch_size),
            "--max-new-tokens", str(args.max_new_tokens), "--temperature", "0.0",
