@@ -11,6 +11,7 @@ from lib.mllm.tools.sgr3_ctx_stats import stats
 
 ARMS = [  # (label, model dir, ctx dir or None)
     ("R0 none", "qwen3vl_8b_R0", "qwen3vl_8b_R0"),
+    ("R0 none, 2nd draw (noise floor)", "qwen3vl_8b_R0b", "qwen3vl_8b_R0b"),
     ("R1 BGE top-1 (existing, uncapped)", "qwen3vl_8b_150", "qwen3vl_8b_R1ctx"),
     ("R1@B BGE top-1, capped", "qwen3vl_8b_R1B", "qwen3vl_8b_R1B"),
     ("R2-1 SGR3-style, k=1", "qwen3vl_8b_R2k1", "qwen3vl_8b_R2k1"),
