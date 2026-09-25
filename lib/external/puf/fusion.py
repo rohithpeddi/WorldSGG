@@ -262,11 +262,18 @@ class VideoFusion:
         return assoc
 
     def node_for_class(self, c) -> Optional[int]:
+        """Read-out slot -> node map for a slot that is not observed now: the node
+        carrying class-c evidence, preferring nodes whose argmax is c (or that hold
+        at least half an observation of c), then nodes with relation evidence,
+        then the most class-c mass.  Under PUF's soft class updates a node's argmax
+        can drift to a neighbour's class, so argmax == c is not required.  The 0.1
+        floor excludes the confidence mass an sgdet detection spreads over the
+        other classes ((1 - score) / 34 < 0.03)."""
         best, key = None, None
         for j, n in enumerate(self.nodes):
-            if n.label != c:
+            if n.cls[c] < 0.1:
                 continue
-            k = (n.n_edge > 0, n.cls.sum(), n.last_t)
+            k = (n.label == c or n.cls[c] >= 0.5, n.n_edge > 0, n.cls[c], n.last_t)
             if key is None or k > key:
                 best, key = j, k
         return best
