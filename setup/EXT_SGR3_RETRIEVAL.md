@@ -31,9 +31,14 @@ prompt, the same visual input (target frame + annotated context frames), the sam
 | R1@B | `bge` | R1's retrieval (Steps 1–2 of `rag_all`) truncated to the budget |
 | R2-k | `sgr3 --k k` | SGR3-style visual retrieval of top-k **train** reference scenes, k ∈ {1, 3, 5} |
 | R3 | `hybrid --k 1` | R1 context truncated to B/2, then R2-1 fills the rest of B |
+| R2-rand | `sgr3 --k 1 --random_scenes` | control: R2-1 with a random train video per (video, frame) instead of the retrieved one |
+| R0b | `none` | a second R0 draw, to measure the T=0.2 sampling noise |
 
 R2 = R2-1 (SGR3 uses only the top-1 scene). R3's k was fixed to 1 *a priori*, not chosen on
-test results.
+test results. R2-rand and R0b were added after R2-1's first result, to tell a retrieval effect apart
+from a "reference graph in the prompt" effect and from sampling noise.
+
+Results: [analysis/ext_sgr3_2026-09-25.md](../analysis/ext_sgr3_2026-09-25.md).
 
 **R0 is new.** No Qwen3-VL-8B zero-shot run existed on the 150 set (only `zero_shot/qwen25vl_7b`, a
 different model and prompt), so R0 is the `rag_all` prompt with an empty context: the cleanest
