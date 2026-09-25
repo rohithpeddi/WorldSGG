@@ -87,7 +87,7 @@ def cmd_bank(a):
         for k in ("test", "Test", "val"):
             if isinstance(sp.get(k), list):
                 ag_test |= {_stem(v) for v in sp[k]}
-    train_files = sorted(os.listdir(a.train_ann))
+    train_files = sorted(f for f in os.listdir(a.train_ann) if f.endswith(".mp4.pkl"))
     train_ids = [_stem(f.replace(".pkl", "")) for f in train_files]
     overlap_1511 = sorted(set(train_ids) & test_ids)
     overlap_ag = sorted(set(train_ids) & ag_test)
