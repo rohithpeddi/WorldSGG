@@ -274,7 +274,9 @@ def cmd_infer(args):
            "--max-new-tokens", str(args.max_new_tokens), "--temperature", "0.0",
            "--max-model-len", "8192", "--gpu-memory-utilization", str(args.gpu_memory_utilization),
            "--dataset-tag", "ag_worldbbox_test", "--checkpoint-step", "released",
-           "--response-prefix", "<answer>\n", "--prev-source", args.prev_source, "--force"]
+           "--response-prefix", "<answer>\n", "--prev-source", args.prev_source, "--force",
+           # ms-swift 4.5 matches both qwen3_5 and qwen3_8 templates; the checkpoint is qwen3_5
+           "--template-type", "qwen3_5"]
     env = dict(os.environ)
     env.setdefault("IMAGE_MAX_TOKEN_NUM", "1024")
     logger.info("running: " + " ".join(cmd))
