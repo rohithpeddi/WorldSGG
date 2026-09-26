@@ -168,13 +168,12 @@ for the main paper, as one left-to-right forward pass (2.1-2.6k x 0.7-0.87k px):
   long-range inputs (union features, the enriched tokens read by the node head, the
   decoder's spatial attention, free queries) run on labelled buses entering boxes
   from the top or bottom. WorldWise++'s entity decoder sits in the overlap of units
-  1 and 2. The scene graph the method predicts at the unseen key frame (its own
-  `preds.json`; an edge shows the top-1 contacting predicate, or the top-1 spatial
-  one when that is `not_contacting`) is on the right; each unit's losses at its foot,
-  named as in the supplement's equations (ℒ_vis/ℒ_vlm/ℒ_align, ℒ_recon/ℒ_SG/ℒ_sim,
-  ℒ_det/ℒ_slot);
+  1 and 2. The node and predicate heads feed a plain "World Scene Graph" output box on
+  the right (user request: no predicted graph and no predicate panel; `output_graph`
+  is kept but unused); each unit's losses at its foot, named as in the supplement's
+  equations (ℒ_vis/ℒ_vlm/ℒ_align, ℒ_recon/ℒ_SG/ℒ_sim, ℒ_det/ℒ_slot);
 * bottom row: real PredCls intermediates of the same video, each numbered with the
-  badge of the module that produced it (all 00T1E dumps are PredCls checkpoints).
+  badge of the module that produced it (all dumps are PredCls checkpoints).
 
 Specs (modules with column / lane, edges with their routes, panels with badges) are
 at the top of the script. Output goes to `assets/figures/architecture/paper_figures/main/`
@@ -190,6 +189,13 @@ dumper's `--keyframes 13 21 23`): `find_showcase.py` / `video_detail.py` scanned
 PredCls prediction dumps for videos where WorldWise++ is right on every unseen-object pair; on
 TM0BV it is right on all 11 unseen pair cells and on every pair at the three key frames, the only
 method that is. `--video 00T1E` still rebuilds the earlier set.
+
+`--portrait` folds each diagram into two tiers for portrait pages (units 1-2 on top,
+units 3-4 and the scene graph below; top-to-bottom edges run down a channel right of
+unit 2 or straight down, then along their own corridor lane, drawn with a white halo so
+crossings read as bridges; intermediates in two rows) and writes
+`paper_figures/main_portrait/`. The supplement uses these portrait PDFs
+(`<paper>/sup_images/architectures/portrait/`); the one-row versions stay for the main paper.
 
 The supplement's training-method subsections (`sup_methods_baselines.tex`,
 `sup_methods_worldwise.tex`) use these PDFs as their one landscape figure per

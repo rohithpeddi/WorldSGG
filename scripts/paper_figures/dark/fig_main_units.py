@@ -1,6 +1,7 @@
 """Compact processing-unit diagrams for the main paper, one per training-based method.
 
     python scripts/paper_figures/dark/fig_main_units.py [--only worldwise ...] [--video TM0BV] [--png] [--pdf]
+    python scripts/paper_figures/dark/fig_main_units.py --portrait --png --pdf      # two-tier, portrait pages
 
 The long-form supplementary figures (``fig_worldwise*.py``, ``baseline_common.py``)
 draw every module with its tensors and real panels.  These are their summaries for
@@ -17,6 +18,12 @@ the main paper, laid out as one left-to-right forward pass:
 * bottom row: real PredCls intermediates of the same video (the dumps of
   ``dump_intermediates.py``), each numbered with the badge of the module that
   produced it.
+
+``--portrait`` folds the same diagram into two tiers for a portrait page: units 1-2 on
+top, units 3-4 and the scene graph below.  An edge from the top tier into the bottom
+one leaves through a channel right of unit 2 (or straight down) and runs along a
+corridor between the tiers, each edge on its own lane; the intermediates take two rows.
+Output of that variant: ``paper_figures/main_portrait/<name>.*``.
 
 Output: ``assets/figures/architecture/paper_figures/main/<name>.svg`` (+ ``.png`` with
 ``--png`` via rasterize.ps1, + a vector ``.pdf`` with ``--pdf`` via svg2pdf.ps1).
@@ -47,6 +54,8 @@ CG, UG, PAD = 44, 96, 18  # gap between columns, extra gap between units, unit p
 LP = 78                   # lane pitch
 MOD_FONT = 17.5
 X_UNITS = 150             # first unit column starts here (video to the left)
+XB, UG_B = 90, 130
+OUT_W, OUT_H = 170, 70     # the "World Scene Graph" output box        # portrait: bottom-tier origin and unit gap (room for the entry drops and labels)
 
 
 @dataclass
@@ -163,8 +172,7 @@ def baseline(name, title, tagline, spatial=False, motion=False, temporal=False, 
         panels.append(Panel("temporal_obj_attn", "Temporal Object Attn.", 5, 1.27))
     panels += [Panel("inter_object_attn_1", ("Context" if usg else "Inter-Object") + " Attn., t = {t}", 6, 1.6),
                Panel("usg_rel_cross_attn_1" if usg else "temporal_edge_attn",
-                     "Pair × Object Cross-Attn." if usg else "Edge Attn., Person → {obj}", 7, 1.9 if usg else 1.19),
-               Panel("preds_1", "Predicates, t = {t}", 8, 3.15)]
+                     "Pair × Object Cross-Attn." if usg else "Edge Attn., Person → {obj}", 7, 1.9 if usg else 1.19)]
     return Method(name, title, tagline, units, mods, edges, panels, losses, tool=True,
                   new_label="USG-Par Relation Stack" if usg else "New Over The Tier Below")
 
@@ -212,8 +220,7 @@ def worldwise_family(name) -> Method:
                Panel("retriever_attn", "Retriever Attn., {obj}", 5, 1.06),
                Panel("tokens_out", "Completed Tokens (PCA)", 6, 2.76),
                Panel("recon_sim", "Reconstruction vs Target", 7, 2.67),
-               Panel("tokens_enriched", "Enriched Tokens (PCA)", 8, 2.76),
-               Panel("preds_1", "Predicates, t = {t}", 9, 3.15)]
+               Panel("tokens_enriched", "Enriched Tokens (PCA)", 8, 2.76)]
     return Method(name, title, tagline, [(0, 2), (3, 4), (5, 7), (8, 8)], mods, edges, panels,
                   {1: [("recon", ORANGE)], 3: [("SG", RED), ("sim", RED)]}, new_label=new_label)
 
@@ -246,8 +253,7 @@ def worldwise_pp() -> Method:
     panels = [Panel("memory_1", "Memory Mₜ", 2, 0.57), Panel("visibility", "Slots: Visible / [MASK]", 4, 2.76),
               Panel("temporal_attn", "(a) Temporal Attn.", 5, 1.15), Panel("spatial_attn", "(b) Spatial Attn.", 5, 1.24),
               Panel("cross_attn_1", "(c) Cross-Attn.", 5, 0.57), Panel("tokens_out", "Decoded Slots (PCA)", 6, 2.76),
-              Panel("recon_sim", "Reconstruction vs Target", 7, 2.67), Panel("det_1", "Refined Slot Boxes", 10, 0.57),
-              Panel("preds_1", "Predicates, t = {t}", 9, 3.15)]
+              Panel("recon_sim", "Reconstruction vs Target", 7, 2.67), Panel("det_1", "Refined Slot Boxes", 10, 0.57)]
     return Method("worldwise_pp", "WorldWise++", "Image-Grounded Entity Decoder With Joint Detection",
                   [(0, 3), (3, 4), (5, 7), (8, 8)], mods, edges, panels,
                   {1: [("recon", ORANGE)], 3: [("SG", RED), ("det", ORANGE), ("slot", ORANGE)]},
@@ -285,6 +291,16 @@ class Layout:
         self.y0 = self.top + 58 + MH / 2 - self.lmin * LP + 4     # lane-0 centre
         self.bottom = self.y(self.lmax) + MH / 2 + 44           # unit enclosures end here
 
+    cur = 0                      # tier whose lanes y() refers to (portrait only)
+    cross: List["Edge"] = []     # edges from the top tier into the bottom one (portrait only)
+    left_cols: set = set()
+
+    def tier(self, col: int) -> int:
+        return 0
+
+    def unit_y(self, k: int) -> Tuple[float, float]:
+        return self.top, self.bottom
+
     def x(self, col: int) -> float:
         return X_UNITS + col * (MW + CG) + self.gaps.get(col, 0) * UG
 
@@ -306,7 +322,103 @@ class Layout:
 
     @property
     def width(self) -> float:
-        return self.unit_x(3)[1] + 60 + 210
+        return self.unit_x(3)[1] + 50 + OUT_W + 24
+
+
+class PortraitLayout(Layout):
+    """Two tiers: units 1-2 on top, units 3-4 (and the scene graph) below."""
+
+    def __init__(self, m: Method):
+        self.m = m
+        self.split = m.units[2][0]
+        starts = sorted({u[0] for u in m.units})
+        ends = {u[1] for u in m.units}
+        self.gaps = {g: sum(1 for s_ in starts if 0 < s_ <= g and (s_ - 1) in ends)
+                     for g in range(0, max(u[1] for u in m.units) + 1)}
+        mods = {md.id: md for md in m.mods}
+        top_tier = lambda col: col < self.split          # noqa: E731
+        la = [md.lane for md in m.mods if top_tier(md.col)]
+        lb = [md.lane for md in m.mods if not top_tier(md.col)]
+        self.cross = []
+        for e in m.edges:
+            a, b = mods[e.src], mods[e.dst]
+            if top_tier(a.col) and not top_tier(b.col):
+                self.cross.append(e)
+                if e.route in ("bus", "side") and e.bus < a.lane:      # leaves upwards: its bus stays in the top tier
+                    la.append(e.bus)
+            elif e.route in ("bus", "side"):
+                (la if top_tier(a.col) else lb).append(e.bus)
+        self.cur = 0
+        self.topA = 56
+        self.y0A = self.topA + 58 + MH / 2 - min(la) * LP + 4
+        self.botA = self.y0A + max(la) * LP + MH / 2 + 44
+        self.cor0 = self.botA + 30
+        self.topB = self.cor0 + max(len(self.cross) - 1, 0) * 22 + 30
+        self.y0B = self.topB + 58 + MH / 2 - min(lb) * LP + 4
+        self.botB = self.y0B + max(lb) * LP + MH / 2 + 44
+        self.top, self.bottom = self.topA, self.botB
+        self.plan_cross(mods)
+
+    def tier(self, col: int) -> int:
+        return 0 if col < self.split else 1
+
+    def x(self, col: int) -> float:
+        if col < self.split:
+            return X_UNITS + col * (MW + CG) + self.gaps.get(col, 0) * UG
+        return XB + (col - self.split) * (MW + CG) + (self.gaps.get(col, 0) - self.gaps.get(self.split, 0)) * UG_B
+
+    def y(self, lane: float) -> float:
+        return (self.y0A if self.cur == 0 else self.y0B) + lane * LP
+
+    def box(self, md: Mod):
+        self.cur = self.tier(md.col)
+        return super().box(md)
+
+    def unit_y(self, k: int) -> Tuple[float, float]:
+        return (self.topA, self.botA) if k < 2 else (self.topB, self.botB)
+
+    def plan_cross(self, mods: Dict[str, Mod]):
+        """Entry side, drop x, corridor lane and channel of every top-to-bottom edge."""
+        self.plans = []
+        for e in self.cross:
+            a, b = mods[e.src], mods[e.dst]
+            chain = e.route not in ("bus", "side")
+            exit_ = "right" if chain else ("up" if e.bus < a.lane else "down")
+            blocked = any(md.col == b.col and md.lane < b.lane for md in mods.values())
+            # left entry for chains, for blocked columns and where a top drop would cross a unit header
+            entry = "left" if (chain or blocked or b.col == self.split or b.col >= self.m.units[3][0]) else "top"
+            self.plans.append(dict(e=e, a=a, b=b, chain=chain, exit=exit_, entry=entry))
+        by_col: Dict[int, list] = {}
+        for p in self.plans:
+            if p["entry"] == "left":
+                by_col.setdefault(p["b"].col, []).append(p)
+        self.left_cols = set(by_col)
+        for col, ps in by_col.items():
+            ps.sort(key=lambda p: (p["b"].lane, p["chain"]))     # the inner drop enters highest
+            for k, p in enumerate(ps):
+                p["xd"] = self.x(col) - 20 - 14 * k
+            per_dst: Dict[str, list] = {}
+            for p in ps:
+                per_dst.setdefault(p["b"].id, []).append(p)
+            for group in per_dst.values():
+                offs = [0] if len(group) == 1 else [-10 + 20 * i / (len(group) - 1) for i in range(len(group))]
+                for p, o in zip(group, offs):
+                    p["dy"] = o
+        for p in self.plans:
+            if p["entry"] == "top":
+                p["xd"] = self.x(p["b"].col) + MW / 2 - 8
+        self.plans.sort(key=lambda p: p["xd"])
+        ch = 0
+        for i, p in enumerate(self.plans):
+            p["yc"] = self.cor0 + 22 * i
+            if p["exit"] in ("right", "up"):
+                p["xch"] = self.unit_x(1)[1] + 22 + 14 * ch
+                ch += 1
+        self.n_channels = ch
+
+    @property
+    def width(self) -> float:
+        return max(self.unit_x(1)[1] + 22 + 14 * self.n_channels + 24, self.unit_x(3)[1] + 50 + OUT_W + 24)
 
 
 # ---------------------------------------------------------------------------
@@ -323,11 +435,12 @@ def draw_module(c: Canvas, L: Layout, md: Mod):
                anchor="middle", weight="600")
     if md.kind == "frozen":
         c.snow(x + w - 9, y + 9, r=5)
-    if md.badge is not None and md.badge in REMAP:
+    if md.badge is not None and md.badge in REMAP and SHOW_BADGES:
         badge(c, x + 2, y + 2, REMAP[md.badge])
 
 
 REMAP: Dict[int, int] = {}      # spec badge -> displayed number (only badges that have a panel)
+SHOW_BADGES = True              # off with --no-panels (no intermediates to point at)
 
 
 def badge(c: Canvas, x, y, n: int, r=10.5):
@@ -339,6 +452,7 @@ def draw_edge(c: Canvas, L: Layout, e: Edge, mods: Dict[str, Mod]):
     a, b = mods[e.src], mods[e.dst]
     ax, ay, aw, ah = L.box(a)
     bx, by, bw, bh = L.box(b)
+    L.cur = L.tier(a.col)
     sx, sy = ax + aw, ay + ah / 2
     tx, ty = bx, by + bh / 2
     lab_x = lab_y = None
@@ -370,6 +484,8 @@ def draw_edge(c: Canvas, L: Layout, e: Edge, mods: Dict[str, Mod]):
     elif abs(sy - ty) < 1:
         path = f"M{sx} {sy} H{tx - 1}"
         lab_x, lab_y = (sx + tx) / 2, sy - 8
+        if b.col in L.left_cols and e.label:        # portrait: keep clear of the drops entering this column
+            lab_x = sx + (len(cap(e.label)) * 7.0 + 10) / 2 + 6
     else:
         xm = (sx + CG / 2) if e.route == "early" else (tx - CG / 2)
         path = f"M{sx} {sy} H{xm} V{ty} H{tx - 1}"
@@ -390,24 +506,76 @@ def draw_units(c: Canvas, L: Layout):
     shared = L.m.units[0][1] == L.m.units[1][0]
     for k in range(4):
         x0, x1 = L.unit_x(k)
+        y0, y1 = L.unit_y(k)
         col, fill = UNIT[k]
         op = ' fill-opacity="0.8"' if shared and k < 2 else ""
-        c.a(f'<rect x="{x0}" y="{L.top}" width="{x1 - x0}" height="{L.bottom - L.top}" rx="16" fill="{fill}"{op} '
+        c.a(f'<rect x="{x0}" y="{y0}" width="{x1 - x0}" height="{y1 - y0}" rx="16" fill="{fill}"{op} '
             f'stroke="{col}" stroke-width="2.2"/>')
     for k in range(4):
         x0, x1 = L.unit_x(k)
+        y0, y1 = L.unit_y(k)
         col = UNIT[k][0]
         hx = x0 + 12
-        c.a(f'<circle cx="{hx + 13}" cy="{L.top + 22}" r="12.5" fill="{col}"/>')
-        c.text(hx + 13, L.top + 27, str(k + 1), size=14, fill=BG, anchor="middle", weight="700")
-        c.text(hx + 32, L.top + 28, NAMES[k][0], size=19, fill=col, weight="700", font=SERIF)
-        c.text(hx + 32, L.top + 46, NAMES[k][1], size=13.5, fill=MUTED, font=SANS)
+        c.a(f'<circle cx="{hx + 13}" cy="{y0 + 22}" r="12.5" fill="{col}"/>')
+        c.text(hx + 13, y0 + 27, str(k + 1), size=14, fill=BG, anchor="middle", weight="700")
+        c.text(hx + 32, y0 + 28, NAMES[k][0], size=19, fill=col, weight="700", font=SERIF)
+        c.text(hx + 32, y0 + 46, NAMES[k][1], size=13.5, fill=MUTED, font=SANS)
         xl = x0 + 16 + (MW * 0.62 if (shared and k == 1) else 0)
         for i, (sub, lc) in enumerate(L.m.losses.get(k, [])):
-            c.loss(xl + i * 56, L.bottom - 14, sub, lc, size=20)
+            c.loss(xl + i * 56, y1 - 14, sub, lc, size=20)
 
 
-def output_graph(c: Canvas, x, y, w, preds: Optional[dict], key: Optional[str], t: Optional[int]):
+def edge_label(c: Canvas, x, y, text, col):
+    tw = len(cap(text)) * 7.0 + 10
+    c.a(f'<rect x="{x - tw / 2}" y="{y - 13}" width="{tw}" height="17" rx="4" fill="{BG}" fill-opacity="0.85"/>')
+    c.text(x, y, text, size=13, fill=col if col != MUTED else TXT, anchor="middle", weight="600")
+
+
+def draw_cross(c: Canvas, L: "PortraitLayout"):
+    """Top-tier -> bottom-tier edges: out of the source (right side, up to its bus and over to a
+    channel right of unit 2, or straight down), along its corridor lane, then down into the
+    destination's top or into its left side.  A white halo under each path makes crossings read
+    as one line passing over another."""
+    downs = [p["xd"] for p in L.plans if p["exit"] == "down"]
+    n_down = 0
+    for p in L.plans:
+        e, a, b = p["e"], p["a"], p["b"]
+        ax, ay, aw, ah = L.box(a)
+        bx, by, bw, bh = L.box(b)
+        L.cur = 0
+        if p["exit"] == "right":
+            path = f"M{ax + aw} {ay + ah / 2} H{p['xch']} V{p['yc']}"
+        elif p["exit"] == "up":
+            cxa = ax + aw / 2 + 8
+            path = f"M{cxa} {ay} V{L.y(e.bus)} H{p['xch']} V{p['yc']}"
+        else:
+            cxa = ax + aw / 2 + (-10 if n_down == 0 else 10)
+            n_down += 1
+            path = f"M{cxa} {ay + ah} V{p['yc']}"
+        path += f" H{p['xd']}"
+        if p["entry"] == "top":
+            path += f" V{by - 1}"
+        else:
+            path += f" V{by + bh / 2 + p.get('dy', 0)} H{bx - 1}"
+        c.a(f'<path d="{path}" fill="none" stroke="{BG}" stroke-width="7" stroke-linejoin="round"/>')
+        c.arrow(0, 0, 0, 0, col=e.col, width=2.0, curve=path)
+        if e.label:
+            tw = len(cap(e.label)) * 7.0 + 10
+            lx = (min(downs) - 8 - tw / 2) if p["exit"] == "down" else (p["xd"] + tw / 2 + 10)
+            edge_label(c, lx, p["yc"] - 6, e.label, e.col)
+
+
+def output_box(c: Canvas, x, yc) -> float:
+    """The method's output: a plain box standing for the world scene graph."""
+    f, s_ = KINDS["frozen"]
+    c.a(f'<rect x="{x}" y="{yc - OUT_H / 2}" width="{OUT_W}" height="{OUT_H}" rx="12" fill="{BG}" stroke="{TXT}" '
+        f'stroke-width="2.4"/>')
+    c.text(x + OUT_W / 2, yc - 4, "World Scene", size=MOD_FONT + 1, fill=TXT, anchor="middle", weight="700")
+    c.text(x + OUT_W / 2, yc + 18, "Graph", size=MOD_FONT + 1, fill=TXT, anchor="middle", weight="700")
+    return yc + OUT_H / 2
+
+
+def output_graph(c: Canvas, x, y, w, preds: Optional[dict], key: Optional[str], t: Optional[int]) -> float:
     rows = []
     if preds and key in preds:
         for r in preds[key]:
@@ -433,54 +601,65 @@ def output_graph(c: Canvas, x, y, w, preds: Optional[dict], key: Optional[str], 
         c.text(ox + (w - 64) / 2, oy + 39, pred, size=13.5, fill=MUTED if vis else ORANGE, anchor="middle")
     c.text(x + w / 2, y + 76 + len(rows) * 64 + 12, f"Scene Graph, t = {t}" if t else "Scene Graph", size=14,
            fill=MUTED, anchor="middle")
+    return y + 76 + len(rows) * 64 + 18
 
 
-def draw_panels(c: Canvas, L: Layout, W: float, y: float, images: Dict[str, Path], ts, obj) -> float:
+def draw_panels(c: Canvas, L: Layout, W: float, y: float, images: Dict[str, Path], ts, obj, rows: int = 1) -> float:
     items = []
     for p in sorted(L.m.panels, key=lambda q: q.badge):
         items.append((p, p.caption.format(t=ts[1], obj=obj)))
-    x0, x1, gap, h = 24, W - 24, 18, 150
+    x0, x1, gap, h0 = 24, W - 24, 18, 150
 
-    def widths(hh):
-        out = []
-        for p, _ in items:
-            size = c.img_size(p.key)
-            a = min(size[0] / size[1], 3.6) if size else p.aspect
-            out.append(a * hh)
-        return out
-    ws = widths(h)
-    if sum(ws) + gap * (len(ws) - 1) > x1 - x0:
-        h = (x1 - x0 - gap * (len(ws) - 1)) / (sum(ws) / h)
-        ws = widths(h)
-    x = x0 + (x1 - x0 - sum(ws) - gap * (len(ws) - 1)) / 2
-    for (p, caption), w in zip(items, ws):
-        c.image_slot(x, y, w, h, p.key)
-        badge(c, x + 2, y + 2, REMAP[p.badge])
-        lines = [caption]
-        if len(cap(caption)) * 7.2 > w + gap - 4 and " " in caption:      # wrap under a narrow panel
-            words = caption.split(" ")
-            k = max(1, min(range(1, len(words)), key=lambda i: abs(len(" ".join(words[:i])) - len(caption) / 2)))
-            lines = [" ".join(words[:k]), " ".join(words[k:])]
-        for i, ln in enumerate(lines):
-            c.text(x, y + h + 17 + i * 16, ln, size=13.5, fill=MUTED)
-        x += w + gap
-    return y + h + 40
+    def aspect(p):
+        size = c.img_size(p.key)
+        return min(size[0] / size[1], 3.6) if size else p.aspect
+    asp = [aspect(p) for p, _ in items]
+    groups = [list(range(len(items)))]
+    if rows == 2 and len(items) > 1:          # split where the two rows are closest in total width
+        k = min(range(1, len(items)), key=lambda k_: abs(sum(asp[:k_]) - sum(asp) / 2))
+        groups = [list(range(k)), list(range(k, len(items)))]
+    for g in groups:
+        h = h0
+        if sum(asp[i] for i in g) * h + gap * (len(g) - 1) > x1 - x0:
+            h = (x1 - x0 - gap * (len(g) - 1)) / sum(asp[i] for i in g)
+        ws = [asp[i] * h for i in g]
+        x = x0 + (x1 - x0 - sum(ws) - gap * (len(g) - 1)) / 2
+        wrapped = False
+        for i, w in zip(g, ws):
+            p, caption = items[i]
+            c.image_slot(x, y, w, h, p.key)
+            badge(c, x + 2, y + 2, REMAP[p.badge])
+            lines = [caption]
+            if len(cap(caption)) * 7.2 > w + gap - 4 and " " in caption:      # wrap under a narrow panel
+                words = caption.split(" ")
+                k = max(1, min(range(1, len(words)), key=lambda i_: abs(len(" ".join(words[:i_])) - len(caption) / 2)))
+                lines = [" ".join(words[:k]), " ".join(words[k:])]
+                wrapped = True
+            for j, ln in enumerate(lines):
+                c.text(x, y + h + 17 + j * 16, ln, size=13.5, fill=MUTED)
+            x += w + gap
+        y += h + 40 + (16 if wrapped and g is not groups[-1] else 0)
+    return y
 
 
-def build(m: Method, images: Dict[str, Path], preds: Optional[dict], meta: dict) -> Canvas:
-    L = Layout(m)
+def build(m: Method, images: Dict[str, Path], preds: Optional[dict], meta: dict, portrait: bool = False,
+          panels: bool = True) -> Canvas:
+    L = PortraitLayout(m) if portrait else Layout(m)
     W = int(L.width)
+    global SHOW_BADGES
+    SHOW_BADGES = panels
     REMAP.clear()
     REMAP.update({b: i + 1 for i, b in enumerate(sorted({p.badge for p in m.panels}))})
     ks = meta.get("keyframes") or [0, 1, 2]
     ts = [k + 1 for k in ks]
     obj = str(meta.get("tracked_label", "object")).title()
     panel_y = L.bottom + 40
-    H = int(panel_y + 150 + 40 + 50)
+    H = int(panel_y + 2 * (150 + 40) + 50)
     c = Canvas(W, H + 400, images)
     c.text(24, 36, m.title, size=28, fill=TXT, weight="700", font=SERIF)
     c.text(24 + sum(20 if (ch.isupper() or ch in '+-') else 15 for ch in m.title) + 24, 34, m.tagline, size=17, fill=MUTED)
     draw_units(c, L)
+    L.cur = 0
     # video
     fw = 70
     vy = L.y(0) - 70
@@ -494,20 +673,28 @@ def build(m: Method, images: Dict[str, Path], preds: Optional[dict], meta: dict)
         x, y, w, h = L.box(md)
         c.arrow(0, 0, 0, 0, col=MUTED, width=2.0, curve=f"M{20 + fw + 16} {L.y(0) + 10} H{x - 22} V{y + h / 2} H{x - 1}")
     for e in m.edges:
-        draw_edge(c, L, e, mods)
+        if e not in L.cross:
+            draw_edge(c, L, e, mods)
+    if L.cross:
+        draw_cross(c, L)
     for md in m.mods:
         draw_module(c, L, md)
     # output
     ox = L.unit_x(3)[1] + 50
     last = [md for md in m.mods if md.id in ("node", "pred")]
+    centres = [L.box(md)[1] + MH / 2 for md in last]
+    yc = sum(centres) / len(centres)
     for md in last:
         x, y, w, h = L.box(md)
-        c.arrow(0, 0, 0, 0, col=MUTED, width=2.0, curve=f"M{x + w} {y + h / 2} H{ox - 26} V{L.y(0) - 40} H{ox - 4}")
-    key = str(ks[1]) if meta.get("keyframes") else None
-    output_graph(c, ox, L.y(0) - 70, 205, preds, key, ts[1] if meta.get("keyframes") else None)
+        c.arrow(0, 0, 0, 0, col=MUTED, width=2.0, curve=f"M{x + w} {y + h / 2} H{ox - 26} V{yc} H{ox - 4}")
+    L.cur = L.tier(m.units[3][0])
+    panel_y = max(panel_y, output_box(c, ox, yc) + 34)
     # intermediates
-    c.text(24, panel_y - 8, "PredCls Intermediates On " + meta.get("video", ""), size=15, fill=TXT, weight="700")
-    yb = draw_panels(c, L, W, panel_y + 6, images, ts, obj)
+    if panels:
+        c.text(24, panel_y - 8, "PredCls Intermediates On " + meta.get("video", ""), size=15, fill=TXT, weight="700")
+        yb = draw_panels(c, L, W, panel_y + 6, images, ts, obj, rows=2 if portrait else 1)
+    else:
+        yb = panel_y - 24
     # legend
     ly = yb + 26
     items = [("frozen", "Frozen"), ("learn", "Learnable"), ("new", m.new_label)]
@@ -525,8 +712,9 @@ def build(m: Method, images: Dict[str, Path], preds: Optional[dict], meta: dict)
     c.text(x, ly + 1, "ℒ", size=19, fill=RED, font=SERIF, style="italic")
     c.text(x + 18, ly, "Loss Trained In The Unit", size=15, fill=MUTED)
     x += 18 + 24 * 8.2 + 28
-    badge(c, x + 10, ly - 5, 1)
-    c.text(x + 26, ly, "Module → Its Intermediate Below", size=15, fill=MUTED)
+    if panels:
+        badge(c, x + 10, ly - 5, 1)
+        c.text(x + 26, ly, "Module → Its Intermediate Below", size=15, fill=MUTED)
     c.set_height(int(ly + 18))
     return c
 
@@ -549,13 +737,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", nargs="*", default=None)
     ap.add_argument("--video", default="TM0BV")
-    ap.add_argument("--out-dir", default=str(ARCH / "paper_figures/main"))
+    ap.add_argument("--out-dir", default=None, help="default: paper_figures/main (main_portrait with --portrait)")
+    ap.add_argument("--portrait", action="store_true", help="two-tier layout for portrait pages")
+    ap.add_argument("--no-panels", action="store_true", help="architecture only: no intermediates rows (main paper)")
     ap.add_argument("--png", action="store_true")
     ap.add_argument("--pdf", action="store_true")
     ap.add_argument("--theme", default="light", choices=["light", "dark"])
     ap.add_argument("--caps", default="title", choices=["title", "upper", "none"])
     args = ap.parse_args()
-    out = Path(args.out_dir)
+    out = Path(args.out_dir or ARCH / ("paper_figures/main_portrait" if args.portrait else "paper_figures/main"))
     out.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="main_units_"))
     svgs = []
@@ -569,7 +759,7 @@ def main():
             images[k] = thumb(src_dir / f"{k}.png", tmp, 240 if k.startswith("frame") else 520)
         preds = json.loads((d / "preds.json").read_text(encoding="utf-8")) if (d / "preds.json").exists() else None
         meta = json.loads((d / "meta.json").read_text(encoding="utf-8")) if (d / "meta.json").exists() else {}
-        c = build(m, images, preds, meta)
+        c = build(m, images, preds, meta, portrait=args.portrait, panels=not args.no_panels)
         p = c.write(out / f"{name}.svg")
         svgs.append(str(p))
         print(f"wrote {p} ({c.w} x {c.h})" + (f"  (placeholders for: {sorted(set(c.missing))})" if c.missing else ""))
