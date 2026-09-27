@@ -29,7 +29,7 @@ MODEL = "Qwen2.5-VL-7B"
 
 def build(images, video: str) -> MCanvas:
     c = MCanvas(1720, 1180, images)
-    c.band_title(46, "Unlocalized Graph-RAG · Retrieval Over A VLM-Built Event Graph")
+    c.band_title(46, "UWSGG-GraphRAG (Zero-Shot U-WSGG) · Retrieval Over A VLM-Built Event Graph")
 
     # ================= Stage 1: coarse event-graph construction =================
     c.stage(88, "Stage 1 · Coarse Event-Graph Construction (Offline, Once Per Video)")
@@ -62,8 +62,8 @@ def build(images, video: str) -> MCanvas:
     c.slot_title(1038, 130, "Event Graph G")
     c.image_slot(1038, 130, 252, 214, "event_graph", placeholder=ph_event_graph())
     c.note(1038, 360, "Merge Per-Segment Nodes · Entity Index: Name → {Nodes}", size=8.8, fill=MUTED)
-    c.note(30, 374, "Stored once as graphs/qwen25vl_7b/<video>.mp4.pkl and read by Stage 2 and by the localized "
-                    "Track B. Every VLM call in this figure is the same frozen model; P-badges name its prompts.",
+    c.note(30, 374, "Stored once as graphs/qwen25vl_7b/<video>.mp4.pkl and read by Stage 2 and by the zero-shot "
+                    "WSGG Track B. Every VLM call in this figure is the same frozen model; P-badges name its prompts.",
            size=9, fill=DIM)
 
     # ================= Stage 2: object discovery and per-object graph RAG =================
@@ -183,7 +183,7 @@ def build(images, video: str) -> MCanvas:
                     ("ghost", "In Code, Unused In Reported Runs")],
              extra_swatches=[(ORANGE, "Key Or Target Frame · Context c(o)")])
     c.badge_legend(30, 1092, [0, 1, 2, 3, 4, 5, 6])
-    c.caption(30, 1126, "Unlocalized Graph-RAG.",
+    c.caption(30, 1126, "UWSGG-GraphRAG (zero-shot U-WSGG).",
               ["Stage 1 cuts each video at its annotated key frames and turns every segment into a caption and an entity / "
                "action / scene node with one frozen VLM. Stage 2 fixes the objects and retrieves,",
                "per object, the node closest to its question under a frozen text encoder. Stage 3 asks the same VLM for "

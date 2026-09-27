@@ -28,9 +28,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (BLUE, DIM, FRAME_B, GREEN, MUTED, NEW_F, NEW_S, ORANGE, PURPLE_F, PURPLE_S, RED, TXT, VIOLET,  # noqa: E402
                     Canvas, image_map)
-from baseline_common import CW, CX, X0, card, note_panel, set_height, strip_fit, vflow  # noqa: E402
+from stage_common import CW, CX, X0, card, note_panel, set_height, strip_fit, vflow  # noqa: E402  (the stage-figure helpers baseline_common.py had before its processing-unit rewrite)
 
 IMAGES = [f"{k}_{i}" for k in ("frame", "fpn", "proposals", "det2d", "det3d", "bev", "head") for i in range(3)]
+PANELS = True                     # False (--no-panels): architecture only, no intermediates and no per-video cards
+
+
+def strip(c: Canvas, x, y, h, items):
+    """The row of intermediates under a stage, or nothing in the architecture-only figure."""
+    return strip_fit(c, x, y, h, items) if PANELS else y + 14
 
 
 def rows_box(c: Canvas, x, y, w, title, rows, kind_fill, kind_stroke, row_h=26, tsize=12):
@@ -57,9 +63,12 @@ def build(images, video: str) -> Canvas:
     # ======================= Stage 1: frozen backbone and feature pyramid =======================
     y = c.stage(88, "Stage 1 · Frozen Backbone And Feature Pyramid")
     fy = y + 20
-    for i, key in enumerate(["frame_0", "frame_1", "frame_2"]):
-        w, h = c.fit(key, w=62, default=(62, 44), max_h=110)
-        c.image_slot(30 + i * 68, fy, w, h, key, border=FRAME_B)
+    if PANELS:
+        for i, key in enumerate(["frame_0", "frame_1", "frame_2"]):
+            w, h = c.fit(key, w=62, default=(62, 44), max_h=110)
+            c.image_slot(30 + i * 68, fy, w, h, key, border=FRAME_B)
+    else:
+        c.tensor(40, fy + 35, 180, 40, "RGB Frame + Intrinsics", "Aspect-Preserving, ≤ 255k Px", col=MUTED)
     c.text(130, fy + 126, "Frames, One At A Time", size=10.5, fill=MUTED, anchor="middle")
     c.flow(236, fy + 55, 262, fy + 55, "Image", lsize=8.5, loff=(0, -5))
     c.box(264, fy + 22, 140, 68, "DINOv3-L", "ViT-L/16, Frozen; Patch Tokens", kind="frozen", frozen=True,
@@ -88,7 +97,7 @@ def build(images, video: str) -> Canvas:
     c.text(1090, fy + 104, "Only The Pyramid, The RPN And The Heads", size=8.5, fill=MUTED)
     c.text(1090, fy + 116, "Train; The ViT Never Updates.", size=8.5, fill=MUTED)
     py = fy + ph + 24
-    y1 = strip_fit(c, X0, py, 135, [
+    y1 = strip(c, X0, py, 135, [
         ("frame_1", "Input, t = 19", 0.5625), ("fpn_0", "Pyramid Channel Norms p2 … p6, t = 1", 2.4),
         ("fpn_1", "t = 19", 2.4), ("fpn_2", "t = 23", 2.4),
     ])
@@ -136,7 +145,7 @@ def build(images, video: str) -> Canvas:
     c.text(lx, ry + 176, "Standard torchvision Faster R-CNN Terms; Anchor /", size=8, fill=DIM)
     c.text(lx, ry + 187, "ROI Matching Against The 2-D GT Boxes Of The Frame", size=8, fill=DIM)
     py = r2 + 72
-    y2 = strip_fit(c, X0, py, 125, [
+    y2 = strip(c, X0, py, 125, [
         ("proposals_1", "Proposals, t = 19", 0.5625), ("det2d_0", "Detections, t = 1", 0.5625),
         ("det2d_1", "t = 19", 0.5625), ("det2d_2", "t = 23", 0.5625),
     ])
@@ -195,7 +204,7 @@ def build(images, video: str) -> Canvas:
     c.text(lx, ly + 146, "The Same Shared 1024-d ROI Vector Is Written Out As The Detector ROI Feature Read By Every Scene-Graph Method",
            size=8.5, fill=DIM)
     py = ly + 166
-    y3 = strip_fit(c, X0, py, 125, [
+    y3 = strip(c, X0, py, 125, [
         ("head_1", "3-D Head Outputs, t = 19", 1.5), ("det3d_0", "3-D Boxes, t = 1", 0.5625),
         ("det3d_1", "t = 19", 0.5625), ("det3d_2", "t = 23", 0.5625), ("bev_1", "Bird's-Eye View, t = 19", 1.3),
     ])
@@ -229,8 +238,11 @@ def build(images, video: str) -> Canvas:
           "weights each box and μ is penalised (μ = −1.1 to −3.6 on",
           "12XD3). A three-phase ramp brings the 3-D term in late."]),
     ]
-    for i, (title, lines) in enumerate(cards):
-        card(c, CX, top + i * (ch + gap), CW, ch, i + 1, title, lines, tsize=16.5)
+    if PANELS:
+        for i, (title, lines) in enumerate(cards):
+            card(c, CX, top + i * (ch + gap), CW, ch, i + 1, title, lines, tsize=16.5)
+    else:
+        c.w = CX - 10                 # no card column
     set_height(c, int(legend_y + 22))
     return c
 
@@ -244,7 +256,10 @@ def main():
                     help="white background (light) or the dark hero palette; read by common.py at import")
     ap.add_argument("--caps", default="title", choices=["title", "upper", "none"],
                     help="capitalise every text: Title Case, UPPER CASE or as written; read by common.py at import")
+    ap.add_argument("--no-panels", action="store_true", help="architecture only: no intermediates, no per-video cards")
     args = ap.parse_args()
+    global PANELS
+    PANELS = not args.no_panels
     c = build(image_map(args.images, IMAGES), args.video)
     p = c.write(Path(args.out))
     print(f"wrote {p} ({c.w} x {c.h})" + (f"  (placeholders for: {sorted(set(c.missing))})" if c.missing else ""))

@@ -29,7 +29,7 @@ MODEL = "Qwen2.5-VL-7B"
 
 def build(images, video: str) -> MCanvas:
     c = MCanvas(1720, 1548, images)
-    c.band_title(46, "U-WSGG-Sub · Per-Object Prompting With A Caption Transcript")
+    c.band_title(46, "U-WSGG-Sub (Zero-Shot U-WSGG) · Per-Object Prompting With A Caption Transcript")
 
     # ================= Stage 1: caption transcript (the Stage-1 build) =================
     c.stage(88, "Stage 1 · Caption Transcript Generation (Stage-1 Build, Once Per Video)")
@@ -67,7 +67,7 @@ def build(images, video: str) -> MCanvas:
     c.note(30, 387, "A video with no pickle runs with an empty prefix, i.e. exactly as zero_shot.", size=9, fill=DIM)
 
     # ================= Stage 2: caption-prefixed per-object query =================
-    c.stage(418, "Stage 2 · Caption-Prefixed Per-Object Query")
+    c.stage(418, "Stage 2 · Caption-Prefixed Per-Object Prompt")
     ob = object_set_block(c, 466, MODEL, captions=True)
     ox, oy, ow, oh = ob["objects"]
     c.flow(ox + ow / 2, oy + oh, ox + ow / 2, oy + oh + 34, "O → One Question Per o", lsize=8.3, loff=(-8, 20),
@@ -138,7 +138,7 @@ def build(images, video: str) -> MCanvas:
                     ("ghost", "In Code, Unused In Reported Runs")],
              extra_swatches=[(ORANGE, "Key Frame / Target Frame · Visual Input Q(f)")])
     c.badge_legend(30, 1478, [0, 1, 4, 5, 6])
-    c.caption(30, 1510, "U-WSGG-Sub.",
+    c.caption(30, 1510, "U-WSGG-Sub (zero-shot U-WSGG).",
               ["Stage 1 cuts each video at its annotated key frames and captions every segment with one frozen VLM. "
                "Stage 2 fixes the objects, builds zero_shot's visual input and prepends the whole",
                "transcript, nearest caption first, to the same per-object question. Stage 3 validates the labels and "

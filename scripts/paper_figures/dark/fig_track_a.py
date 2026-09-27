@@ -28,7 +28,7 @@ MODEL = "Qwen3-VL-8B"
 
 def build(images, video: str) -> MCanvas:
     c = MCanvas(1720, 1236, images)
-    c.band_title(46, "Localized Track A · Marked Frames, A Marked Map And A Metric Table In One Id Space")
+    c.band_title(46, "Track A (Zero-Shot WSGG) · Marked Frames, A Marked Map And A Metric Table In One Id Space")
 
     # ================= Stage 1: perception layer =================
     c.stage(88, "Stage 1 · Perception Layer In The Canonical Frame (Offline, No VLM)")
@@ -136,7 +136,7 @@ def build(images, video: str) -> MCanvas:
             "boxes in SGDet."])
     c.legend(1144, [("frozen", "Frozen Model"), ("tool", "Program"), ("new", "Introduced Component")],
              extra_swatches=[(ORANGE, "Target Frame / Localized Output")])
-    c.caption(30, 1178, "Localized Track A.",
+    c.caption(30, 1178, "Track A (zero-shot WSGG).",
               ["Stage 1 expresses each video in a canonical floor frame with frozen tools. Stage 2 builds, per annotated "
                "frame, a marked target frame, two context frames, a marked top-down map and a metric",
                "table that share one id space. Stage 3 makes one frozen-VLM call per frame, salvages and parses the "

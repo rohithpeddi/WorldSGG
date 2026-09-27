@@ -99,6 +99,7 @@ class Method:
     losses: Dict[int, List[Tuple[str, str]]] = field(default_factory=dict)   # unit index -> [(sub, colour)]
     new_label: str = "New In This Method"
     tool: bool = False
+    dump: str = ""                        # intermediates directory, when it is not the method name
 
 
 # ---------------------------------------------------------------------------
@@ -150,15 +151,15 @@ def baseline(name, title, tagline, spatial=False, motion=False, temporal=False, 
                  Mod("pair", "Pair\nFormer", "learn", c + 1, 0.0),
                  Mod("rel", "Temporal Edge\nAttention", "learn", c + 2, 0.0, 7)]
         edges.append(Edge("pe3", "iot", route="up"))
-    edges += [Edge(last, "iot", "Slot Tokens"), Edge("iot", "pair"), Edge("pair", "rel"),
+    edges += [Edge(last, "iot", "Object Reps."), Edge("iot", "pair"), Edge("pair", "rel"),
               Edge("det", "pair", "Union ROI Features", route="bus", bus=-1.9, col=MUTED)]
     c += 3
     u3 = (u3s, c - 1)
     # unit 4: decoders
     mods += [Mod("node", "Node\nPredictor", "learn", c, -1.0),
              Mod("pred", "Predicate\nHeads × 3", "learn", c, 0.0, 8)]
-    edges += [Edge("iot", "node", "Enriched Tokens", route="bus", bus=-1.0, col=UNIT[2][0]),
-              Edge("rel", "pred", "Relation Tokens")]
+    edges += [Edge("iot", "node", "Enriched Object Representations", route="bus", bus=-1.0, col=UNIT[2][0]),
+              Edge("rel", "pred", "Relationship Reps.")]
     losses = {3: [("vis", RED), ("vlm", RED)]}
     if usg:
         mods.append(Mod("align", "CLIP Alignment\nHead", "new", c, 1.0))
@@ -167,7 +168,7 @@ def baseline(name, title, tagline, spatial=False, motion=False, temporal=False, 
     units = [(0, 1), u2, u3, (c, c)]
     panels = [Panel("obb_1", "OBB Corners", 2, 0.57), Panel("appearance_in", "ROI Features, Visible Cells", 1, 2.76),
               Panel("lks_buffer", "LKS Buffer: Copied Cells", 3, 3.8), Panel("staleness", "Staleness Δ", 3, 1.8),
-              Panel("tokens_in", "Slot Tokens (PCA)", 4, 2.76)]
+              Panel("tokens_in", "Object Representations (PCA)", 4, 2.76)]
     if temporal:
         panels.append(Panel("temporal_obj_attn", "Temporal Object Attn.", 5, 1.27))
     panels += [Panel("inter_object_attn_1", ("Context" if usg else "Inter-Object") + " Attn., t = {t}", 6, 1.6),
@@ -205,10 +206,10 @@ def worldwise_family(name) -> Method:
              Mod("node", "Node\nHead", "learn", 8, -1.2),
              Mod("pred", "Predicate\nHeads × 3", "learn", 8, -0.2, 9)]
     edges += [Edge("scaf", "geo"), Edge("vp", "tok"), Edge("geo", "tok"),
-              Edge("tok", "ret", "Tokens + [MASK]"), Edge("ret", "vis"), Edge("vis", "rec", route="down"),
-              Edge("vis", "iot", "Completed Tokens"), Edge("iot", "pair"), Edge("pair", "tea"),
-              Edge("iot", "node", "Enriched Tokens", route="bus", bus=-1.2, col=UNIT[2][0]),
-              Edge("tea", "pred", "Relation Tokens"),
+              Edge("tok", "ret", "Obj. Reps. + [MASK]"), Edge("ret", "vis"), Edge("vis", "rec", route="down"),
+              Edge("vis", "iot", "Completed Obj. Reps."), Edge("iot", "pair"), Edge("pair", "tea"),
+              Edge("iot", "node", "Enriched Object Representations", route="bus", bus=-1.2, col=UNIT[2][0]),
+              Edge("tea", "pred", "Relationship Reps."),
               Edge("app", "pair", "Union Appearance", route="bus", bus=-2.1, col=MUTED)]
     panels = []
     if name == "worldwise_plus":
@@ -216,11 +217,11 @@ def worldwise_family(name) -> Method:
         panels.append(Panel("appearance_in", "Tier-1 Tokens (PCA)", 2, 2.76))
     else:
         panels.append(Panel("frame_1", "2-D Boxes, t = {t}", 1, 0.57))
-    panels += [Panel("obb_1", "OBB Corners", 3, 0.57), Panel("visibility", "Tokens: Visible / [MASK]", 4, 2.76),
+    panels += [Panel("obb_1", "OBB Corners", 3, 0.57), Panel("visibility", "Object Reps.: Visible / [MASK]", 4, 2.76),
                Panel("retriever_attn", "Retriever Attn., {obj}", 5, 1.06),
-               Panel("tokens_out", "Completed Tokens (PCA)", 6, 2.76),
+               Panel("tokens_out", "Completed Object Reps. (PCA)", 6, 2.76),
                Panel("recon_sim", "Reconstruction vs Target", 7, 2.67),
-               Panel("tokens_enriched", "Enriched Tokens (PCA)", 8, 2.76)]
+               Panel("tokens_enriched", "Enriched Object Reps. (PCA)", 8, 2.76)]
     return Method(name, title, tagline, [(0, 2), (3, 4), (5, 7), (8, 8)], mods, edges, panels,
                   {1: [("recon", ORANGE)], 3: [("SG", RED), ("sim", RED)]}, new_label=new_label)
 
@@ -230,6 +231,7 @@ def worldwise_pp() -> Method:
             Mod("fus", "Token-Grid\nFusion", "new", 1, -1.0, 2),
             Mod("scaf", "Pose + OBB\nScaffold", "frozen", 0, 0.6, 3),
             Mod("geo", "Geometry\nEncoders", "learn", 1, 0.6),
+            Mod("roi", "DINOv3-L RoI\nTokens (Frozen)", "frozen", 2, -0.4),
             Mod("tok", "Scaffold\nTokenizer", "learn", 2, 0.6, 4),
             Mod("dec", "Entity\nDecoder × 4", "new", 3, -0.2, 5),
             Mod("vis", "+ Visibility\nEmbedding", "learn", 4, -0.2, 6),
@@ -241,35 +243,99 @@ def worldwise_pp() -> Method:
             Mod("pred", "Predicate\nHeads × 3", "learn", 8, -0.2, 9),
             Mod("box", "Box\nRefinement", "new", 8, 0.8, 10),
             Mod("det", "Detection\nHeads", "new", 8, 1.8)]
-    edges = [Edge("app", "fus"), Edge("scaf", "geo"), Edge("geo", "tok"),
-             Edge("fus", "dec", "Memory Mₜ"), Edge("tok", "dec"),
-             Edge("dec", "vis", "Slots"), Edge("vis", "rec", route="down"),
+    edges = [Edge("app", "fus"), Edge("scaf", "geo"), Edge("geo", "tok"), Edge("roi", "tok", route="down"),
+             Edge("fus", "dec", "Memory Mᵗ"), Edge("tok", "dec"),
+             Edge("dec", "vis"), Edge("vis", "rec", route="down"),
              Edge("dec", "read", "Spatial Attn.", route="bus", bus=-1.2, col=UNIT[2][0]),
-             Edge("vis", "read", "Completed Slots"), Edge("read", "pair"), Edge("pair", "tea"),
+             Edge("vis", "read", "Completed Obj. Reps."), Edge("read", "pair"), Edge("pair", "tea"),
              Edge("vis", "node", route="bus", bus=-2.0, col=UNIT[2][0]),
-             Edge("tea", "pred", "Relation Tokens"),
+             Edge("tea", "pred", "Relationship Reps."),
              Edge("dec", "det", "Free Queries", route="bus", bus=2.95, col=ORANGE),
-             Edge("dec", "box", "Decoded Slots", route="side", bus=2.6, col=UNIT[0][0])]
-    panels = [Panel("memory_1", "Memory Mₜ", 2, 0.57), Panel("visibility", "Slots: Visible / [MASK]", 4, 2.76),
+             Edge("dec", "box", "Decoded Object Representations", route="side", bus=2.6, col=UNIT[0][0])]
+    panels = [Panel("memory_1", "Memory Mᵗ", 2, 0.57), Panel("visibility", "Object-Queries: Visible / [MASK]", 4, 2.76),
               Panel("temporal_attn", "(a) Temporal Attn.", 5, 1.15), Panel("spatial_attn", "(b) Spatial Attn.", 5, 1.24),
-              Panel("cross_attn_1", "(c) Cross-Attn.", 5, 0.57), Panel("tokens_out", "Decoded Slots (PCA)", 6, 2.76),
-              Panel("recon_sim", "Reconstruction vs Target", 7, 2.67), Panel("det_1", "Refined Slot Boxes", 10, 0.57)]
+              Panel("cross_attn_1", "(c) Cross-Attn.", 5, 0.57),
+              Panel("tokens_out", "Decoded Object Representations (PCA)", 6, 2.76),
+              Panel("recon_sim", "Reconstruction vs EMA Target", 7, 2.67), Panel("det_1", "Refined Object Boxes", 10, 0.57)]
     return Method("worldwise_pp", "WorldWise++", "Image-Grounded Entity Decoder With Joint Detection",
                   [(0, 3), (3, 4), (5, 7), (8, 8)], mods, edges, panels,
-                  {1: [("recon", ORANGE)], 3: [("SG", RED), ("det", ORANGE), ("slot", ORANGE)]},
+                  {1: [("recon", ORANGE)], 3: [("SG", RED), ("det", ORANGE), ("refine", ORANGE)]},
                   new_label="New Over WorldWise+")
+
+
+def worldwise_pp_sgdet() -> Method:
+    """WorldWise++ in SGDet: the frozen monocular 3-D detector supplies the 2-D boxes (on which the DINOv3-L
+    RoI tokens are pooled) and the 3-D boxes that, with the camera poses, form the world OBB scaffold."""
+    mods = [Mod("app", "DINOv3-L + π³\nGrids (Frozen)", "frozen", 0, -1.0, 1),
+            Mod("m3d", "Monocular\n3-D Detector", "frozen", 0, 0.6),
+            Mod("fus", "Token-Grid\nFusion", "new", 1, -1.0, 2),
+            Mod("roi", "DINOv3-L RoI\nPooling (Frozen)", "frozen", 1, -0.2),
+            Mod("scaf", "World OBBs\n(Box + Pose)", "tool", 1, 0.6, 3),
+            Mod("geo", "Geometry\nEncoders", "learn", 2, 0.6),
+            Mod("tok", "Scaffold\nTokenizer", "learn", 3, 0.6, 4),
+            Mod("dec", "Entity\nDecoder × 4", "new", 4, -0.2, 5),
+            Mod("vis", "+ Visibility\nEmbedding", "learn", 5, -0.2, 6),
+            Mod("rec", "EMA\nReconstruction", "learn", 5, 1.0, 7),
+            Mod("read", "Pair\nReadout", "new", 6, -0.2, 8),
+            Mod("pair", "Pair\nEncoder", "learn", 7, -0.2),
+            Mod("tea", "Temporal Edge\nAttention", "learn", 8, -0.2),
+            Mod("node", "Node\nHead", "learn", 9, -1.2),
+            Mod("pred", "Predicate\nHeads × 3", "learn", 9, -0.2, 9),
+            Mod("box", "Box\nRefinement", "new", 9, 0.8, 10),
+            Mod("det", "Detection\nHeads", "new", 9, 1.8)]
+    edges = [Edge("app", "fus"), Edge("app", "roi"), Edge("m3d", "roi"), Edge("m3d", "scaf"),
+             Edge("scaf", "geo"), Edge("geo", "tok"), Edge("roi", "tok"),
+             Edge("fus", "dec", "Memory Mᵗ"), Edge("tok", "dec"),
+             Edge("dec", "vis"), Edge("vis", "rec", route="down"),
+             Edge("dec", "read", "Spatial Attn.", route="bus", bus=-1.2, col=UNIT[2][0]),
+             Edge("vis", "read", "Completed Obj. Reps."), Edge("read", "pair"), Edge("pair", "tea"),
+             Edge("vis", "node", route="bus", bus=-2.0, col=UNIT[2][0]),
+             Edge("tea", "pred", "Relationship Reps."),
+             Edge("dec", "det", "Free Queries", route="bus", bus=2.95, col=ORANGE),
+             Edge("dec", "box", "Decoded Object Representations", route="side", bus=2.6, col=UNIT[0][0])]
+    m = worldwise_pp()
+    return Method("worldwise_pp_sgdet", "WorldWise++ (SGDet)",
+                  "Monocular 3-D Detector, Image-Grounded Entity Decoder And Joint Detection",
+                  [(0, 4), (4, 5), (6, 8), (9, 9)], mods, edges, m.panels, m.losses,
+                  new_label="New Over WorldWise+", tool=True, dump="worldwise_pp")
+
+
+def sgdet_variant(m: Method) -> Method:
+    """The SGDet form of a method: its detector supplies the boxes, so the OBB scaffold becomes the detector's 3-D
+    boxes lifted to the world with the camera poses (a non-differentiable step)."""
+    import copy
+    if m.name == "worldwise_pp":
+        return worldwise_pp_sgdet()
+    m = copy.deepcopy(m)
+    mods = {md.id: md for md in m.mods}
+    scaf = mods["scaf"]
+    scaf.label, scaf.kind = "World OBBs\n(Box + Pose)", "tool"
+    if "det" in mods:                                   # adapted baselines: the ResNet-50 monocular 3-D detector
+        mods["det"].label = "3-D Detector\n(ResNet-50)"
+        m.edges.append(Edge("det", "scaf", route="down"))
+    elif m.name == "worldwise":                         # the detector is already the appearance source
+        mods["app"].label = "Mono-3D\nDetector"
+        m.edges.append(Edge("app", "scaf", route="down"))
+    else:                                               # WorldWise+: tokens pooled on the detector's boxes
+        mods["app"].lane = mods["vp"].lane = -1.3
+        scaf.lane = mods["geo"].lane = 0.9
+        m.mods.append(Mod("m3d", "Mono-3D\nDetector", "frozen", 0, -0.2))
+        m.edges += [Edge("m3d", "vp"), Edge("m3d", "scaf", route="down")]
+    m.title += " (SGDet)"
+    m.tool = True
+    return m
 
 
 METHODS: Dict[str, Method] = {m.name: m for m in [
     baseline("w_sttran", "W-STTran", "Last-Known-State Memory And 3-D Spatial Attention",
              new={"gse", "tokenizer", "spatial_pe"}),
     baseline("w_sttran_pp", "W-STTran++", "Adds Camera-Relative Object Features", spatial=True, new={"spatial"}),
-    baseline("w_dsgdetr", "W-DSGDetr", "Adds Per-Slot Temporal Object Encoding", spatial=True, temporal=True,
+    baseline("w_dsgdetr", "W-DSGDetr", "Adds Per-Object Temporal Encoding", spatial=True, temporal=True,
              new={"temporal_obj"}),
     baseline("w_dsgdetr_pp", "W-DSGDetr++", "Adds World-Frame Object Motion", spatial=True, temporal=True, motion=True,
              new={"motion"}),
     baseline("w_usg", "W-USG", "The USG-Par Relation Stack On The LKS Substrate", usg=True),
-    worldwise_family("worldwise"), worldwise_family("worldwise_plus"), worldwise_pp(),
+    worldwise_family("worldwise"), worldwise_family("worldwise_plus"), worldwise_pp(), worldwise_pp_sgdet(),
 ]}
 
 
@@ -498,8 +564,9 @@ def draw_edge(c: Canvas, L: Layout, e: Edge, mods: Dict[str, Mod]):
         c.text(lab_x, lab_y, e.label, size=13, fill=e.col if e.col != MUTED else TXT, anchor="middle", weight="600")
 
 
-NAMES = [("Observed Objects", "Processing Unit"), ("Unobserved Objects", "Processing Unit"),
-         ("Relationship", "Processing Unit"), ("Decoders", "Prediction Heads")]
+NAMES = [("Observed Objects", "Representation Processing Unit (O-ORPU)"),
+         ("Unobserved Objects", "Representation Processing Unit (U-ORPU)"),
+         ("Relationship", "Representation Processing Unit (RRPU)"), ("Prediction Heads", "Scene Graph Outputs")]
 
 
 def draw_units(c: Canvas, L: Layout):
@@ -518,8 +585,11 @@ def draw_units(c: Canvas, L: Layout):
         hx = x0 + 12
         c.a(f'<circle cx="{hx + 13}" cy="{y0 + 22}" r="12.5" fill="{col}"/>')
         c.text(hx + 13, y0 + 27, str(k + 1), size=14, fill=BG, anchor="middle", weight="700")
-        c.text(hx + 32, y0 + 28, NAMES[k][0], size=19, fill=col, weight="700", font=SERIF)
-        c.text(hx + 32, y0 + 46, NAMES[k][1], size=13.5, fill=MUTED, font=SANS)
+        room = x1 - (hx + 32) - 10          # shrink a name that would overrun a narrow unit
+        c.text(hx + 32, y0 + 28, NAMES[k][0], size=min(19, room / (len(NAMES[k][0]) * 0.56)), fill=col,
+               weight="700", font=SERIF)
+        c.text(hx + 32, y0 + 46, NAMES[k][1], size=min(13.5, room / (len(NAMES[k][1]) * 0.52)), fill=MUTED,
+               font=SANS)
         xl = x0 + 16 + (MW * 0.62 if (shared and k == 1) else 0)
         for i, (sub, lc) in enumerate(L.m.losses.get(k, [])):
             c.loss(xl + i * 56, y1 - 14, sub, lc, size=20)
@@ -740,6 +810,7 @@ def main():
     ap.add_argument("--out-dir", default=None, help="default: paper_figures/main (main_portrait with --portrait)")
     ap.add_argument("--portrait", action="store_true", help="two-tier layout for portrait pages")
     ap.add_argument("--no-panels", action="store_true", help="architecture only: no intermediates rows (main paper)")
+    ap.add_argument("--sgdet", action="store_true", help="draw every method in the SGDet setting (with its detector)")
     ap.add_argument("--png", action="store_true")
     ap.add_argument("--pdf", action="store_true")
     ap.add_argument("--theme", default="light", choices=["light", "dark"])
@@ -750,8 +821,8 @@ def main():
     tmp = Path(tempfile.mkdtemp(prefix="main_units_"))
     svgs = []
     for name in args.only or list(METHODS):
-        m = METHODS[name]
-        d = ARCH / "intermediates" / args.video / name
+        m = sgdet_variant(METHODS[name]) if args.sgdet else METHODS[name]
+        d = ARCH / "intermediates" / args.video / (m.dump or name)
         keys = {"frame_0", "frame_1", "frame_2"} | {p.key for p in m.panels}
         images = {}
         for k in keys:

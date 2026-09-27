@@ -30,7 +30,7 @@ MODEL = "Qwen3-VL-8B"
 
 def build(images, video: str) -> MCanvas:
     c = MCanvas(1720, 1420, images)
-    c.band_title(46, "Localized Track B · A Fixed Tool Loop With A Geometric Critic And One Repair")
+    c.band_title(46, "Track B (Zero-Shot WSGG) · A Fixed Tool Loop With A Geometric Critic And One Repair")
 
     # ================= Stage 1: perception layer =================
     c.stage(88, "Stage 1 · Perception Layer In The Canonical Frame (Offline, No VLM)")
@@ -166,7 +166,7 @@ def build(images, video: str) -> MCanvas:
             "proposal, the −critic arm."])
     c.legend(1300, [("frozen", "Frozen Model"), ("tool", "Program"), ("new", "Introduced Component")],
              extra_swatches=[(ORANGE, "Final Output / Re-Check"), (RED, "Violation / Repair Route")])
-    c.caption(30, 1334, "Localized Track B.",
+    c.caption(30, 1334, "Track B (zero-shot WSGG).",
               ["Stage 1 expresses each video in a canonical floor frame with frozen tools. Stage 2 builds Track A's "
                "four-image payload and inserts the Stage-1 captions of the segments around the",
                "target frame. Stage 3 runs a fixed loop: one proposal call, a geometric critic that is a program, "
