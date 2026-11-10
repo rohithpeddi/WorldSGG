@@ -59,6 +59,8 @@ from lib.supervised.components import (
     TemporalEdgeAttention,
 )
 
+COMPLETIONS = ("mwae", "hold_last_visible", "mask_token")
+
 
 class WorldWise(nn.Module):
     """
@@ -107,6 +109,16 @@ class WorldWise(nn.Module):
         self.use_cross_object_retrieval = getattr(config, 'use_cross_object_retrieval', False)
         self.use_energy_refinement = getattr(config, 'use_energy_refinement', False)
 
+        # Rebuttal B3: completion mechanism for invisible / masked slots
+        #   mwae              (default) camera-pose-conditioned associative retrieval
+        #   hold_last_visible the slot's visual projection from its last effectively
+        #                     visible frame (next visible frame if none earlier;
+        #                     [MASK] if never visible); no retriever
+        #   mask_token        the learned [MASK] embedding only; no retriever
+        self.completion = getattr(config, 'completion', 'mwae') or 'mwae'
+        if self.completion not in COMPLETIONS:
+            raise ValueError(f"completion must be one of {COMPLETIONS}, got {self.completion!r}")
+
         # ====================== MWAE Core (always on) ======================
 
         # Module 1: Global Structural Encoder — 3D OBB geometry in world frame
@@ -149,16 +161,18 @@ class WorldWise(nn.Module):
 
         # Module 6: Associative Retriever — bidirectional cross-attention
         # (I-7: optionally cross-object with slot-identity encoding)
-        self.retriever = AssociativeRetriever(
-            d_model=config.d_model,
-            n_layers=config.n_cross_attn_layers,
-            n_heads=config.n_heads,
-            d_feedforward=config.d_feedforward,
-            dropout=config.dropout,
-            d_camera=config.d_camera if self.use_object_spatial_encoder else 0,
-            cross_object=self.use_cross_object_retrieval,
-            max_slots=getattr(config, 'max_objects', 64),
-        )
+        # (B3: absent for the hold_last_visible / mask_token completions)
+        if self.completion == "mwae":
+            self.retriever = AssociativeRetriever(
+                d_model=config.d_model,
+                n_layers=config.n_cross_attn_layers,
+                n_heads=config.n_heads,
+                d_feedforward=config.d_feedforward,
+                dropout=config.dropout,
+                d_camera=config.d_camera if self.use_object_spatial_encoder else 0,
+                cross_object=self.use_cross_object_retrieval,
+                max_slots=getattr(config, 'max_objects', 64),
+            )
 
         # Module 7: Visibility Embedding
         self.visibility_emb = nn.Embedding(2, config.d_model)
@@ -338,15 +352,21 @@ class WorldWise(nn.Module):
             cam_feats=cam_all,
             motion_feats=motion_all,
             ego_tokens=ego_tokens_all,
+            hold_masked=(self.completion == "hold_last_visible"),
         )
 
         # ==================== Step 5: Associative retrieval ====================
-        completed_tokens = self.retriever(
-            tokens=hybrid_tokens,
-            visibility_mask=visibility_mask_seq,
-            valid_mask=valid_mask_seq,
-            cam_feats=cam_all,
-        )
+        if self.completion == "mwae":
+            completed_tokens = self.retriever(
+                tokens=hybrid_tokens,
+                visibility_mask=visibility_mask_seq,
+                valid_mask=valid_mask_seq,
+                cam_feats=cam_all,
+            )
+        else:
+            # B3 controls: no retrieval; masked slots keep the held feature
+            # (hold_last_visible) or the [MASK] embedding (mask_token)
+            completed_tokens = hybrid_tokens
 
         # ==================== Step 6: Visibility embedding ====================
         effective_visible = visibility_mask_seq & (~is_masked_all)

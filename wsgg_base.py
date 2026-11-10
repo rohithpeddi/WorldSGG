@@ -134,6 +134,39 @@ def annot_dir_for(conf, phase: str) -> str:
     return getattr(conf, f"{phase}_annot_dir", None) or DEFAULT_ANNOT_DIR
 
 
+def dataset_option_kwargs(conf, video_ids=None) -> dict:
+    """WorldAG options read from the config (rebuttal round). Unset keys pass None,
+    which WorldAG resolves from its environment variables / historical defaults:
+      slot_alignment              "none" | "per_video_class"   (env WSGG_SLOT_ALIGNMENT)
+      visibility_from_annotation  bool                         (env WSGG_VISIBILITY_FROM_ANNOTATION)
+      inventory                   "feature" | "full"            (env WSGG_INVENTORY)
+    ``video_ids`` restricts the split (validation / train-minus-val lists)."""
+    kw = {
+        "slot_alignment": getattr(conf, "slot_alignment", None),
+        "visibility_from_annotation": getattr(conf, "visibility_from_annotation", None),
+        "inventory": getattr(conf, "inventory", None),
+        "held_min_score": getattr(conf, "held_min_score", None),
+    }
+    if video_ids is not None:
+        kw["video_ids"] = list(video_ids)
+    return kw
+
+
+def read_video_list(path):
+    """Video ids (one per line, '#' comments allowed) or None when ``path`` is unset.
+    Relative paths resolve against the repository root."""
+    if path is None or path == "" or path == "null":
+        return None
+    if not os.path.isabs(path):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
+    with open(path) as f:
+        ids = [ln.split("#")[0].strip() for ln in f]
+    ids = [v.replace(".mp4", "") for v in ids if v]
+    if not ids:
+        raise ValueError(f"empty video list: {path}")
+    return ids
+
+
 
 class WSGGBase:
     """
@@ -330,6 +363,9 @@ class WSGGBase:
             "optimizer_state_dict": self._optimizer.state_dict(),
             "scheduler_state_dict": self._scheduler.state_dict(),
             "scaler_state_dict": self._scaler.state_dict() if self._scaler else None,
+            # best-model tracking, so a resumed run keeps selecting over all epochs
+            "best_score": getattr(self, "_best_score", None),
+            "best_epoch": getattr(self, "_best_epoch", None),
         }
         torch.save(checkpoint_dict, ckpt_file)
         logger.info(f"✓ Checkpoint saved: epoch {epoch + 1} → {ckpt_file}")
@@ -381,6 +417,13 @@ class WSGGBase:
         # 3. Restore optimizer (largest: 2× param memory for Adam momentum buffers)
         optimizer_state = checkpoint_state.pop("optimizer_state_dict")
         self._starting_epoch = checkpoint_state.get("epoch", 0) + 1
+        if checkpoint_state.get("best_score") is not None:
+            self._best_score = float(checkpoint_state["best_score"])
+            self._best_epoch = int(checkpoint_state.get("best_epoch", -1))
+            logger.info(f"  ✓ Best score restored: {self._best_score:.4f} (epoch {self._best_epoch + 1})")
+        else:
+            logger.warning("  checkpoint has no best_score (pre-fix checkpoint): best-model "
+                           "selection restarts from the resumed epoch")
 
         # 4. Restore scaler if present
         if checkpoint_state.get("scaler_state_dict") is not None and self._scaler is not None:

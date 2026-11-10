@@ -220,6 +220,8 @@ class WorldWisePP(WorldWisePlus):
         dropout = config.dropout
 
         # The retriever and the inter-object transformer are replaced by the decoder.
+        if self.completion != "mwae":
+            raise ValueError("WorldWise++ has no retriever; the B3 completion variants apply to WorldWise only")
         del self.retriever
         del self.inter_object_encoder
 

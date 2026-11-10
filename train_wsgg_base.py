@@ -53,15 +53,16 @@ class TrainWSGGBase(WSGGBase):
         self._scaler = None
         self._best_score = 0.0
         self._best_epoch = -1
+        self._eval_split = "test"
 
     # ------------------------------------------------------------------
     # Dataset
     # ------------------------------------------------------------------
-    def _make_dataset(self, phase: str):
+    def _make_dataset(self, phase: str, video_ids=None):
         """Dataset for one split. Methods needing extra per-video inputs (e.g.
         WorldWise++ token grids) override this and return a WorldAG subclass."""
         from dataloader.world_ag_dataset import WorldAG
-        from wsgg_base import annot_dir_for
+        from wsgg_base import annot_dir_for, dataset_option_kwargs
         return WorldAG(
             phase=phase,
             data_path=self._conf.data_path,
@@ -70,16 +71,32 @@ class TrainWSGGBase(WSGGBase):
             include_invisible=getattr(self._conf, 'include_invisible', True),
             max_objects=getattr(self._conf, 'max_objects', 64),
             annot_dir_name=annot_dir_for(self._conf, phase),
+            **dataset_option_kwargs(self._conf, video_ids),
         )
 
     def init_dataset(self):
-        """Initialize WorldAG train (and optionally test) datasets."""
+        """Initialize WorldAG train (and optionally test) datasets.
+
+        Validation selection (rebuttal round): with ``val_video_list`` set, the
+        end-of-epoch evaluation (and so ``best_model.pth``) runs on those
+        training-split videos instead of the test split, and the test split is
+        never loaded. ``train_video_list`` restricts the training videos (e.g.
+        ``train_minus_val.txt``). Both are text files with one video id per line.
+        """
         from dataloader.world_ag_dataset import world_collate_fn
+        from wsgg_base import read_video_list
 
         skip_test = getattr(self._conf, 'skip_test', False)
         logger.info("Initializing WorldAG datasets...")
 
-        self._train_dataset = self._make_dataset("train")
+        train_ids = read_video_list(getattr(self._conf, 'train_video_list', None))
+        val_ids = read_video_list(getattr(self._conf, 'val_video_list', None))
+        if train_ids is not None and val_ids is not None and set(train_ids) & set(val_ids):
+            raise ValueError("train_video_list and val_video_list overlap")
+        self._eval_split = "val" if val_ids is not None else "test"
+
+        self._train_dataset = (self._make_dataset("train") if train_ids is None
+                               else self._make_dataset("train", video_ids=train_ids))
 
         self._object_classes = self._train_dataset.object_classes
 
@@ -100,12 +117,17 @@ class TrainWSGGBase(WSGGBase):
         )
 
         if not skip_test:
-            self._test_dataset = self._make_dataset("test")
+            if val_ids is None:
+                self._test_dataset = self._make_dataset("test")
+            else:
+                # validation videos live in the training split (features + annotations)
+                self._test_dataset = self._make_dataset("train", video_ids=val_ids)
             self._dataloader_test = DataLoader(
                 self._test_dataset, batch_size=1, shuffle=False,
                 collate_fn=world_collate_fn, **loader_kw,
             )
-            logger.info(f"  Train: {len(self._train_dataset)} items | Test: {len(self._test_dataset)} items")
+            logger.info(f"  Train: {len(self._train_dataset)} items | "
+                        f"{'Val' if val_ids is not None else 'Test'}: {len(self._test_dataset)} items")
         else:
             logger.info(f"  Train: {len(self._train_dataset)} items | Test: SKIPPED")
 
@@ -246,9 +268,6 @@ class TrainWSGGBase(WSGGBase):
                     mn = pd.concat(tr[-log_every:], axis=1).mean(1)
                     logger.info(f"\n{mn}")
 
-            # Save full-state checkpoint
-            self._save_checkpoint(epoch)
-
             # Epoch cost + loss aggregates (logged into the metrics row)
             epoch_time = time.time() - start_time
             peak_vram_gb = (
@@ -265,6 +284,11 @@ class TrainWSGGBase(WSGGBase):
                 )
             else:
                 score = 0.0
+
+            # Save full-state checkpoint (after the evaluation, so it carries
+            # the best score / epoch including this epoch; resume restores them)
+            self._save_checkpoint(epoch)
+
             if self._enable_wandb:
                 wandb_epoch = {"epoch": epoch + 1}
                 for k, v in epoch_losses.items():
@@ -407,6 +431,8 @@ class TrainWSGGBase(WSGGBase):
             # Save metrics to results log file
             log_path = self._results_log_path()
             row = {"epoch": epoch + 1}
+            if self._eval_split != "test":
+                row["eval_split"] = self._eval_split
             for k in [10, 20, 50, 100]:
                 row[f"wc/R@{k}"] = round(r_wc.get(k, 0.0), 6)
                 row[f"wc/mR@{k}"] = round(mr_wc.get(k, 0.0), 6)
@@ -472,6 +498,7 @@ class TrainWSGGBase(WSGGBase):
         torch.save({
             "epoch": epoch,
             "score": score,
+            "eval_split": self._eval_split,
             "model_state_dict": self._model.state_dict(),
         }, best_path)
         logger.info(f"✓ Best model saved → {best_path}")

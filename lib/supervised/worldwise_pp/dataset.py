@@ -16,6 +16,7 @@ raises — the model must never see silent zeros.
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Any, Dict
 
@@ -29,8 +30,18 @@ logger = logging.getLogger(__name__)
 
 
 class WorldAGGrid(WorldAG):
-    def __init__(self, *args, grid_cache_root: str, allow_missing_grids: bool = False, **kwargs):
+    """``rescale_boxes_to_grid`` (rebuttal C4, default False): the feature PKL's 2-D
+    boxes (``bboxes_2d``, ``gt_bboxes_2d``) are mapped per frame into the grid's image
+    space (``image_hw``). Needed when the slots come from a feature set extracted on
+    another resize than the grids, e.g. the ResNet-50 detector PKLs (multiples of 16,
+    672x352) under the DINOv3/Pi3 grids (multiples of 14, 672x378). Both are linear
+    resizes of the same frame, so the map is exact (checked < 0.1 px on GT boxes)."""
+
+    def __init__(self, *args, grid_cache_root: str, allow_missing_grids: bool = False,
+                 rescale_boxes_to_grid: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
+        self._rescale_boxes_to_grid = bool(rescale_boxes_to_grid)
+        self._record_target_size = self._rescale_boxes_to_grid
         self._grid_dir = Path(grid_cache_root) / self._phase
         if not self._grid_dir.is_dir():
             raise FileNotFoundError(
@@ -85,4 +96,22 @@ class WorldAGGrid(WorldAG):
     def __getitem__(self, index: int) -> Dict[str, Any]:
         item = super().__getitem__(index)
         item.update(self.load_grids(item["video_id"], item["frame_names"]))
+        if self._rescale_boxes_to_grid:
+            self._rescale_boxes(item)
         return item
+
+    @staticmethod
+    def _rescale_boxes(item: Dict[str, Any]) -> None:
+        """Map xyxy boxes from each frame's feature box space to the grid image (H, W)."""
+        gh, gw = float(item["image_hw"][0]), float(item["image_hw"][1])
+        ts = item.pop("feat_target_size")                      # (T, 2), stored (W, H)
+        a, b = ts[:, 0], ts[:, 1]
+        # orientation by aspect ratio (robust to PKLs that store (H, W))
+        as_wh = (torch.log(a / b) - math.log(gw / gh)).abs() <= (torch.log(b / a) - math.log(gw / gh)).abs()
+        fw = torch.where(as_wh, a, b)
+        fh = torch.where(as_wh, b, a)
+        s = torch.stack([gw / fw, gh / fh, gw / fw, gh / fh], dim=-1)[:, None, :]   # (T, 1, 4)
+        for key in ("bboxes_2d", "gt_bboxes_2d"):
+            item[key] = (item[key] * s.to(item[key].dtype)).contiguous()
+        item["box_rescale"] = {"frames_hw_stored": int((~as_wh).sum()),
+                               "sx_mean": float((gw / fw).mean()), "sy_mean": float((gh / fh).mean())}

@@ -90,6 +90,23 @@ class ScaffoldTokenizer(nn.Module):
             nn.LayerNorm(d_model),
         )
 
+    @staticmethod
+    def _hold_fill(visual_proj: torch.Tensor, source: torch.Tensor,
+                   mask_emb: torch.Tensor) -> torch.Tensor:
+        """(T, N, d) per-slot hold: at frame t, the projection at the last source
+        frame <= t, else the first source frame >= t, else ``mask_emb``.
+        ``source`` (T, N) bool marks the frames a slot may be copied from."""
+        T, N = source.shape
+        fid = torch.arange(T, device=source.device).unsqueeze(1).expand(T, N)
+        past = torch.where(source, fid, torch.full_like(fid, -1)).cummax(dim=0).values
+        fut = -torch.where(source, -fid, torch.full_like(fid, -(T + 1))).flip(0).cummax(dim=0).values.flip(0)
+        has_past = past >= 0
+        has_any = has_past | (fut <= T - 1)
+        t_src = torch.where(has_past, past, fut).clamp(0, T - 1)
+        n_idx = torch.arange(N, device=source.device).unsqueeze(0).expand(T, N)
+        held = visual_proj[t_src, n_idx]                                 # (T, N, d)
+        return torch.where(has_any.unsqueeze(-1), held, mask_emb)
+
     @torch.no_grad()
     def _update_ema_target(self):
         m = self.ema_momentum
@@ -108,6 +125,7 @@ class ScaffoldTokenizer(nn.Module):
         cam_feats: Optional[torch.Tensor] = None,
         motion_feats: Optional[torch.Tensor] = None,
         ego_tokens: Optional[torch.Tensor] = None,
+        hold_masked: bool = False,
     ) -> tuple:
         """
         Args:
@@ -119,6 +137,11 @@ class ScaffoldTokenizer(nn.Module):
             cam_feats: (B, N, d_camera) or None.
             motion_feats: (B, N, d_motion) or None — velocity/acceleration.
             ego_tokens: (B, d_camera) or None — global ego-motion per frame.
+            hold_masked: rebuttal B3 ``hold_last_visible`` control. B is the frame
+                axis (the tokenizer runs on one video, B = T). A masked token
+                (unseen or artificially masked) takes the visual projection of the
+                same slot at its last earlier frame that is visible and not masked,
+                else the next such frame, else the [MASK] embedding.
 
         Returns:
             tokens: (B, N, d_model) — hybrid tokens.
@@ -156,8 +179,12 @@ class ScaffoldTokenizer(nn.Module):
 
         # Build visual component: DINO for unmasked, [MASK] for masked
         mask_emb = self.mask_embedding.view(1, 1, -1).expand(B, N, -1)
+        if hold_masked:
+            fill = self._hold_fill(visual_proj, (~is_masked) & valid_mask, mask_emb)
+        else:
+            fill = mask_emb
         visual_component = torch.where(
-            is_masked.unsqueeze(-1), mask_emb, visual_proj,
+            is_masked.unsqueeze(-1), fill, visual_proj,
         )  # (B, N, d_visual)
 
         # Defaults for missing features

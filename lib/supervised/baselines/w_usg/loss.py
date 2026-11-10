@@ -33,12 +33,14 @@ class WUSGLoss(LKSLoss):
         bce_loss: bool = True,
         mode: str = "predcls",
         lambda_align: float = 0.1,
+        **logit_adjustment_kwargs,
     ):
         super().__init__(
             lambda_vlm=lambda_vlm,
             label_smoothing=label_smoothing,
             bce_loss=bce_loss,
             mode=mode,
+            **logit_adjustment_kwargs,
         )
         self.lambda_align = lambda_align
         self._align_ce = nn.CrossEntropyLoss()

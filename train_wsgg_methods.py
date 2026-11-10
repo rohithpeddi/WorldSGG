@@ -49,6 +49,19 @@ def _predcls_labels(conf, b):
     return b.get("object_classes") if conf.mode == "predcls" else None
 
 
+def _baseline_logit_adjustment_kwargs(conf):
+    """Rebuttal B2: optional tail-aware logit adjustment for the baseline loss
+    (same offsets as WorldWiseLoss). Default off = the historical baseline loss."""
+    if not getattr(conf, 'use_logit_adjustment', False):
+        return {}
+    return dict(
+        use_logit_adjustment=True,
+        logit_adjustment_tau=getattr(conf, 'logit_adjustment_tau', 1.0),
+        predicate_priors_path=getattr(conf, 'predicate_priors_path', None),
+        data_path=conf.data_path,
+    )
+
+
 # ============================================================================
 # W-STTran (World-adapted STTran — simplest baseline)
 # ============================================================================
@@ -75,6 +88,7 @@ class TrainWSTTran(TrainWSGGBase):
             lambda_vlm=self._conf.lambda_vlm,
             label_smoothing=self._conf.label_smoothing_vlm,
             mode=self._conf.mode,
+            **_baseline_logit_adjustment_kwargs(self._conf),
         )
 
     def is_temporal(self) -> bool:
@@ -180,6 +194,7 @@ class TrainWDSGDetr(TrainWSTTran):
             lambda_vlm=self._conf.lambda_vlm,
             label_smoothing=self._conf.label_smoothing_vlm,
             mode=self._conf.mode,
+            **_baseline_logit_adjustment_kwargs(self._conf),
         )
 
 
@@ -231,6 +246,7 @@ class TrainWUSG(TrainWSTTran):
             label_smoothing=self._conf.label_smoothing_vlm,
             mode=self._conf.mode,
             lambda_align=getattr(self._conf, 'lambda_align', 0.1),
+            **_baseline_logit_adjustment_kwargs(self._conf),
         )
 
 
@@ -388,9 +404,9 @@ class TrainWorldWisePP(TrainWorldWisePlus):
     Pi3 token grids with joint free-query detection and an EGTR-style relation
     readout. Needs the grid cache (config ``grid_cache_root``)."""
 
-    def _make_dataset(self, phase: str):
+    def _make_dataset(self, phase: str, video_ids=None):
         from lib.supervised.worldwise_pp.dataset import WorldAGGrid
-        from wsgg_base import annot_dir_for
+        from wsgg_base import annot_dir_for, dataset_option_kwargs
         return WorldAGGrid(
             phase=phase,
             data_path=self._conf.data_path,
@@ -401,6 +417,8 @@ class TrainWorldWisePP(TrainWorldWisePlus):
             annot_dir_name=annot_dir_for(self._conf, phase),
             grid_cache_root=self._conf.grid_cache_root,
             allow_missing_grids=getattr(self._conf, 'grid_cache_allow_missing', False),
+            **dataset_option_kwargs(self._conf, video_ids),
+            **({"rescale_boxes_to_grid": True} if getattr(self._conf, 'rescale_boxes_to_grid', False) else {}),
         )
 
     def init_model(self):

@@ -44,6 +44,7 @@ import logging
 import math
 import os
 import pickle
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -102,6 +103,38 @@ NAME_TO_IDX = {name: idx for idx, name in enumerate(OBJECT_CLASSES) if idx > 0}
 # Also register short forms
 for _short, _full in LABEL_DENORMALIZE_MAP.items():
     NAME_TO_IDX[_short] = NAME_TO_IDX[_full]
+
+
+SLOT_ALIGNMENTS = ("none", "per_video_class")
+PERSON_CLASS_ID = 1
+
+# Object inventory (rebuttal round 2, Nov 2026):
+#   "feature" (historical) — a frame's objects are the entries of its feature PKL. Most unobserved
+#              objects have no entry, so they get no slot, no relationship label and no prediction.
+#   "full"     — every object gets a slot in every frame where it exists, and missing objects are
+#              natural masks (unobserved slots: zero appearance feature, zero 2-D box, completed by
+#              each method's own mechanism):
+#                PredCls: every annotated object of the frame without a feature entry is appended
+#                         (source "inventory", class + 3-D box from the annotation; PredCls supplies
+#                         annotated objects and boxes).
+#                SGDet:   no ground truth is used for the inventory. Every object class established in the
+#                         video (one detection scoring >= held_min_score, default 0.2; its rank-0 identity)
+#                         is appended in each frame where it is not detected (source "held"), with the 3-D
+#                         box of its nearest detected frame.
+#              Each appended entry gets one person-object pair; its labels come from the annotation
+#              like every other pair. In the training split, appended entries without an annotated
+#              object of their class in that frame get no pair (no supervision without a label).
+INVENTORIES = ("feature", "full")
+INVENTORY_SOURCE = "inventory"
+HELD_SOURCE = "held"
+UNOBSERVED_SOURCES = ("rag", "gdino", "correction", INVENTORY_SOURCE, HELD_SOURCE)
+
+# Per-node tensors built by WorldAG._build_frame_tensors (permuted by slot alignment)
+_NODE_KEYS = ("visual_features", "corners", "gt_corners", "bboxes_2d", "gt_bboxes_2d",
+              "valid_mask", "visibility_mask", "object_classes")
+# Per-edge lists built by WorldAG._build_frame_tensors (filtered together)
+_EDGE_KEYS = ("person_indices", "object_indices", "att_labels", "spa_multi_hot",
+              "con_multi_hot", "pair_sources", "valid_raw_pair_indices")
 
 
 def _to_short(label: str) -> str:
@@ -194,6 +227,11 @@ class WorldAG(Dataset):
         include_invisible: bool = True,
         max_objects: int = 64,
         annot_dir_name: str = "world4d_rel_annotations",
+        visibility_from_annotation: Optional[bool] = None,
+        slot_alignment: Optional[str] = None,
+        video_ids: Optional[List[str]] = None,
+        inventory: Optional[str] = None,
+        held_min_score: Optional[float] = None,
     ):
         """
         Args:
@@ -207,9 +245,69 @@ class WorldAG(Dataset):
                 "world4d_rel_annotations" or the WorldBBox release set
                 "world4d_rel_annotations_worldbbox"; the loader reads
                 ``<data_path>/<annot_dir_name>/<phase>/<video>.pkl``)
+            visibility_from_annotation: If True (the historical behaviour),
+                a slot's visibility flag is overwritten with the matched
+                annotation object's ``visible`` flag. In SGDet that copies
+                ground-truth visibility onto detections at test time. False
+                keeps the feature-source rule only (``gt``/``detector`` =
+                visible; ``rag``/``gdino``/``correction`` = unobserved).
+                None reads the environment variable
+                ``WSGG_VISIBILITY_FROM_ANNOTATION`` ("0" = False; default True).
+            slot_alignment: ``"none"`` (the historical layout: slot n is the
+                n-th entry of each frame's feature list, so a slot can hold a
+                different object in every frame) or ``"per_video_class"``:
+                every video gets one fixed slot per object identity, constant
+                across frames, identity = (AG class id, rank among the
+                frame's same-class entries). Rank 0 is the class's first
+                entry in the frame (the one the class's pairs attach to);
+                further same-class entries (SGDet duplicates) are ranked by
+                detector score. The person (class 1, rank 0) is slot 0.
+                Absent identities are ``valid_mask`` False in that frame.
+                Pairs, labels, union features and every per-node tensor move
+                with their entry, so each frame's content is unchanged; only
+                the slot order differs. If a video has more identities than
+                ``max_objects``, the lowest-priority duplicates (rank >= 1,
+                lowest max score) are dropped (they carry no pairs).
+                None reads the environment variable ``WSGG_SLOT_ALIGNMENT``
+                (default "none").
+            video_ids: optional list of video ids (with or without ".mp4");
+                the split is restricted to these videos before the per-video
+                frame check. None = every video of the split.
+            inventory: ``"feature"`` (historical: the feature PKL entries) or
+                ``"full"`` (every object gets a slot; see ``INVENTORIES``).
+                ``"full"`` requires ``slot_alignment="per_video_class"`` so a
+                missing object keeps its slot. None reads the environment
+                variable ``WSGG_INVENTORY`` (default "feature").
+            held_min_score: SGDet with inventory="full": an object class is
+                held only once one of its detections in the video scores at
+                least this much (default 0.2; env ``WSGG_HELD_MIN_SCORE``).
         """
         super().__init__()
 
+        if inventory is None:
+            inventory = os.environ.get("WSGG_INVENTORY", "feature") or "feature"
+        if inventory not in INVENTORIES:
+            raise ValueError(f"inventory must be one of {INVENTORIES}, got {inventory!r}")
+        self._inventory = inventory
+        if held_min_score is None:
+            held_min_score = float(os.environ.get("WSGG_HELD_MIN_SCORE", "0.2"))
+        self._held_min_score = float(held_min_score)
+
+        if visibility_from_annotation is None:
+            visibility_from_annotation = os.environ.get(
+                "WSGG_VISIBILITY_FROM_ANNOTATION", "1") != "0"
+        self._visibility_from_annotation = bool(visibility_from_annotation)
+        if slot_alignment is None:
+            slot_alignment = os.environ.get("WSGG_SLOT_ALIGNMENT", "none") or "none"
+        if slot_alignment not in SLOT_ALIGNMENTS:
+            raise ValueError(f"slot_alignment must be one of {SLOT_ALIGNMENTS}, got {slot_alignment!r}")
+        self._slot_alignment = slot_alignment
+        if self._inventory == "full" and slot_alignment != "per_video_class":
+            raise ValueError('inventory="full" requires slot_alignment="per_video_class"')
+        self._inventory_stats = Counter()
+        self._video_ids = None
+        if video_ids is not None:
+            self._video_ids = {str(v).strip().replace(".mp4", "") for v in video_ids if str(v).strip()}
         self._phase = phase
         self._data_path = Path(data_path)
         self._mode = mode
@@ -243,7 +341,11 @@ class WorldAG(Dataset):
 
         logger.info(
             f"[WorldAG][{phase}] mode={mode}, features={feature_model}, "
-            f"annotations={annot_dir_name}, {len(self.video_list)} videos"
+            f"annotations={annot_dir_name}, {len(self.video_list)} videos, "
+            f"visibility_from_annotation={self._visibility_from_annotation}"
+            + (f", slot_alignment={self._slot_alignment}" if self._slot_alignment != "none" else "")
+            + (f", inventory={self._inventory}" if self._inventory != "feature" else "")
+            + (f", video_ids={len(self._video_ids)}" if self._video_ids is not None else "")
         )
 
     # ------------------------------------------------------------------
@@ -277,6 +379,15 @@ class WorldAG(Dataset):
                 candidates.add(vid)
             elif vid + ".mp4" in annot_videos:
                 candidates.add(vid)
+
+        if self._video_ids is not None:
+            n_before = len(candidates)
+            candidates = {v for v in candidates if v.replace(".mp4", "") in self._video_ids}
+            n_absent = len(self._video_ids - {v.replace(".mp4", "") for v in candidates})
+            logger.info(
+                f"[WorldAG][{self._phase}] video_ids filter: {len(candidates)}/{n_before} "
+                f"candidates kept; {n_absent} listed ids have no feature+annotation pair"
+            )
 
         if not candidates:
             logger.warning(
@@ -412,6 +523,19 @@ class WorldAG(Dataset):
             tw, th = int(ts[0]), int(ts[1])
         return (tw / ow, th / oh)
 
+    def _feat_target_size(self, video_id: str, frame_file: str, feat_frame: Dict[str, Any]):
+        """(W, H) of the feature PKL's box space for one frame (stored
+        ``target_size``, else recomputed like ``_bbox_scale``)."""
+        ts = feat_frame.get("target_size", None)
+        if ts is not None:
+            return float(ts[0]), float(ts[1])
+        self._bbox_scale(video_id, frame_file, feat_frame)   # fills the size cache
+        size = self._orig_size_cache.get(video_id)
+        if size is None:
+            raise ValueError(f"no target_size and no frame image for {video_id}/{frame_file}")
+        tw, th = _compute_target_size(*size)
+        return float(tw), float(th)
+
     def _build_frame_tensors(
         self,
         feat_frame: Dict[str, Any],
@@ -538,7 +662,7 @@ class WorldAG(Dataset):
 
             # Source determines visibility
             src = feat_sources[i] if i < len(feat_sources) else "gt"
-            is_visible = src not in ("rag", "gdino", "correction")
+            is_visible = src not in UNOBSERVED_SOURCES
             visibility_mask[i] = is_visible
 
             # Skip invisible if requested
@@ -601,8 +725,11 @@ class WorldAG(Dataset):
                         if c.shape == (8, 3):
                             corners[i] = torch.from_numpy(c)
 
-            # Update visibility from annotation if available (applies to both modes)
-            if annot_obj is not None and not annot_obj.get("visible", True):
+            # Update visibility from annotation if available (applies to both modes).
+            # In SGDet this copies ground-truth visibility onto detections; the
+            # flag ``visibility_from_annotation=False`` disables it.
+            if (self._visibility_from_annotation and annot_obj is not None
+                    and not annot_obj.get("visible", True)):
                 visibility_mask[i] = False
 
         # --- Person GT bbox and GT 3D corners (slot 0) ---
@@ -670,10 +797,6 @@ class WorldAG(Dataset):
             if not valid_mask[p_pos] or not valid_mask[o_pos]:
                 continue
 
-            person_indices.append(p_pos)
-            object_indices.append(o_pos)
-            valid_raw_pair_indices.append(raw_k)
-
             # Relationship GT labels always from annotation PKL.
             # For SGDet: use detector_found_idx mapping (IoU-based GT match)
             # instead of label string matching (detector may mislabel).
@@ -688,6 +811,17 @@ class WorldAG(Dataset):
                 obj_label = feat_labels[o_pos] if o_pos < len(feat_labels) else ""
                 short_label = _to_short(obj_label)
                 annot_obj = annot_by_short_label.get(short_label)
+
+            # inventory="full", training split: an appended (inventory / held) entry with no
+            # annotated object of its class in this frame has no label, so it gets no pair.
+            o_src = feat_sources[o_pos] if o_pos < len(feat_sources) else "gt"
+            if (annot_obj is None and self._phase == "train"
+                    and o_src in (INVENTORY_SOURCE, HELD_SOURCE)):
+                continue
+
+            person_indices.append(p_pos)
+            object_indices.append(o_pos)
+            valid_raw_pair_indices.append(raw_k)
 
             if annot_obj is not None:
                 att_rel = annot_obj.get("attention_relationship", [])
@@ -733,6 +867,207 @@ class WorldAG(Dataset):
         }
 
     # ------------------------------------------------------------------
+    # Full object inventory (inventory="full")
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _append_entries(ff: Dict[str, Any], new: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Copy of feature-frame ``ff`` with entries ``new`` appended (each: label, label_id,
+        source, box3d or None). Every per-entry array grows by len(new) rows (zero appearance
+        feature, zero 2-D box, score 0, unassigned); each new entry gets one person-object pair
+        (class ids, as in ``pair_indices``) with a zero union feature."""
+        if not new:
+            return ff
+        out = dict(ff)
+        k = len(new)
+        n_old = len(ff.get("labels", []))
+        roi = np.asarray(ff.get("roi_features", np.zeros((0, 1024), np.float32)))
+        d = roi.shape[1] if roi.ndim == 2 else 1024
+        out["roi_features"] = np.concatenate([roi.reshape(-1, d), np.zeros((k, d), roi.dtype if roi.size else np.float32)])
+        bx = np.asarray(ff.get("bboxes_xyxy", np.zeros((0, 4), np.float32))).reshape(-1, 4)
+        out["bboxes_xyxy"] = np.concatenate([bx, np.zeros((k, 4), bx.dtype if bx.size else np.float32)])
+        out["labels"] = list(ff.get("labels", [])) + [e["label"] for e in new]
+        out["label_ids"] = [int(x) for x in ff.get("label_ids", [])] + [int(e["label_id"]) for e in new]
+        default_src = "detector" if "assigned_labels" in ff else "gt"
+        out["sources"] = list(ff.get("sources", [default_src] * n_old)) + [e["source"] for e in new]
+        for key in ("scores", "gdino_scores", "assigned_labels"):
+            if ff.get(key) is not None:
+                out[key] = list(np.asarray(ff[key]).reshape(-1)) + [0.0] * k
+        if ff.get("boxes_3d") is not None:
+            b3 = np.asarray(ff["boxes_3d"], dtype=np.float32).reshape(-1, 8, 3)
+            add = np.stack([np.asarray(e["box3d"], np.float32) if e.get("box3d") is not None
+                            else np.zeros((8, 3), np.float32) for e in new])
+            out["boxes_3d"] = np.concatenate([b3, add])
+        out["pair_indices"] = [tuple(int(v) for v in p) for p in ff.get("pair_indices", [])] + \
+                              [(PERSON_CLASS_ID, int(e["label_id"])) for e in new]
+        if ff.get("union_features") is not None:
+            uf = np.asarray(ff["union_features"])
+            du = uf.shape[1] if uf.ndim == 2 else d
+            out["union_features"] = np.concatenate([uf.reshape(-1, du), np.zeros((k, du), uf.dtype if uf.size else np.float32)])
+        return out
+
+    def _expand_inventory(self, feat_frames, common_frames, annot_frames, annot_frame_to_key):
+        """inventory="full": per common frame, the feature entry dict with the missing objects
+        appended (see ``INVENTORIES``). Returns {frame_file: frame dict}; frames are copies."""
+        out = {}
+        st = self._inventory_stats
+        if self._mode == "predcls":
+            for f in common_frames:
+                ff = feat_frames[f]
+                af = annot_frames.get(annot_frame_to_key.get(f, f), {})
+                present = {_to_short(str(l)) for l in ff.get("labels", [])}
+                new = []
+                for obj in af.get("object_info_list", []):
+                    short = obj.get("label", _to_short(obj.get("class", "")))
+                    if short in present or short == "person" or short not in NAME_TO_IDX:
+                        continue
+                    present.add(short)
+                    new.append({"label": short, "label_id": NAME_TO_IDX[short],
+                                "source": INVENTORY_SOURCE, "box3d": None})
+                    st["appended_visible" if obj.get("visible", True) else "appended_unobserved"] += 1
+                st["frames"] += 1
+                out[f] = self._append_entries(ff, new)
+            return out
+
+        # SGDet: held identities, derived from the detections only (no annotation). An object
+        # class is established in the video once one of its detections scores >= held_min_score;
+        # an established class is held in every frame where it is not detected.
+        det = []                                   # per frame: {class id: rank-0 entry box3d}
+        established = set()
+        for f in common_frames:
+            ff = feat_frames[f]
+            b3 = ff.get("boxes_3d")
+            b3 = None if b3 is None else np.asarray(b3, dtype=np.float32).reshape(-1, 8, 3)
+            sc = ff.get("scores")
+            sc = None if sc is None else np.asarray(sc, dtype=np.float32).reshape(-1)
+            m = {}
+            for i, lid in enumerate(ff.get("label_ids", [])):
+                lid = int(lid)
+                if lid <= PERSON_CLASS_ID:
+                    continue
+                if sc is None or (i < sc.shape[0] and sc[i] >= self._held_min_score):
+                    established.add(lid)
+                if lid in m:
+                    continue
+                m[lid] = b3[i] if b3 is not None and i < b3.shape[0] else None
+            det.append(m)
+        frames_of = {}
+        for fi, m in enumerate(det):
+            for lid in m:
+                if lid in established:
+                    frames_of.setdefault(lid, []).append(fi)
+        for fi, f in enumerate(common_frames):
+            new = []
+            for lid in sorted(frames_of):
+                if lid in det[fi]:
+                    continue
+                fs = frames_of[lid]
+                # nearest detected frame, ties -> the earlier one
+                src_f = min(fs, key=lambda x: (abs(x - fi), x))
+                new.append({"label": OBJECT_CLASSES[lid], "label_id": lid, "source": HELD_SOURCE,
+                            "box3d": det[src_f][lid]})
+            st["appended_held"] += len(new)
+            st["frames"] += 1
+            out[f] = self._append_entries(feat_frames[f], new)
+        return out
+
+    # ------------------------------------------------------------------
+    # Per-video slot alignment (slot_alignment="per_video_class")
+    # ------------------------------------------------------------------
+
+    def _per_video_slot_maps(self, feat_frame_list: List[Dict[str, Any]]):
+        """One fixed slot per object identity for a whole video.
+
+        Identity of entry i of a frame = (class id, rank), rank 0 = the first
+        entry of that class in the frame (``_build_frame_tensors`` attaches the
+        class's pairs to it), ranks 1.. = the other same-class entries by
+        descending detector score (SGDet duplicates; PredCls has one entry per
+        class). Slot order: person (1, 0) first, then rank-0 identities by first
+        appearance (frame, entry), then duplicates by (rank, -max score, first
+        appearance). Identities beyond ``max_objects`` are dropped.
+
+        Returns (per-frame lists entry -> slot or -1, number of slots, stats).
+        """
+        info = {}            # key -> [first_frame, first_entry, max_score]
+        frame_keys = []
+        for fi, ff in enumerate(feat_frame_list):
+            n = len(ff.get("labels", []))
+            lids_raw = ff.get("label_ids", [])
+            lids = [int(lids_raw[i]) if i < len(lids_raw) else 0 for i in range(n)]
+            sc_raw = ff.get("scores", None)
+            sc = [float(sc_raw[i]) if sc_raw is not None and i < len(sc_raw) else 0.0
+                  for i in range(n)]
+            first = {}
+            for i, l in enumerate(lids):
+                first.setdefault(l, i)
+            rank = [0] * n
+            for l, i0 in first.items():
+                rest = sorted((i for i in range(n) if lids[i] == l and i != i0),
+                              key=lambda i: (-sc[i], i))
+                for r, i in enumerate(rest, start=1):
+                    rank[i] = r
+            keys = [(lids[i], rank[i]) for i in range(n)]
+            for i, k in enumerate(keys):
+                cur = info.get(k)
+                if cur is None:
+                    info[k] = [fi, i, sc[i]]
+                elif sc[i] > cur[2]:
+                    cur[2] = sc[i]
+            frame_keys.append(keys)
+
+        def _order(k):
+            fi, i, ms = info[k]
+            return (0 if k == (PERSON_CLASS_ID, 0) else 1, k[1],
+                    0.0 if k[1] == 0 else -ms, fi, i, k[0])
+
+        ordered = sorted(info, key=_order)
+        kept = ordered[:self._max_objects]
+        slot_of = {k: s for s, k in enumerate(kept)}
+        maps = [[slot_of.get(k, -1) for k in keys] for keys in frame_keys]
+        n_dropped_entries = sum(1 for m in maps for s in m if s < 0)
+        stats = {
+            "n_identities": len(ordered),
+            "n_slots": len(kept),
+            "dropped_identities": len(ordered) - len(kept),
+            "dropped_entries": n_dropped_entries,
+            "person_slot0": bool(kept and kept[0] == (PERSON_CLASS_ID, 0)),
+        }
+        return maps, max(len(kept), 1), stats
+
+    @staticmethod
+    def _remap_frame_tensors(ft: Dict[str, Any], entry_to_slot: List[int], n_slots: int):
+        """Move one frame's entries (built in entry order) to their video slots.
+
+        Node tensors are scattered to the slot rows (unused slots stay zero /
+        invalid); pairs keep their order and point to the new slot indices; a
+        pair whose endpoint has no slot is dropped together with its union-
+        feature index."""
+        out = {}
+        src = [i for i, s in enumerate(entry_to_slot) if s >= 0]
+        dst = [entry_to_slot[i] for i in src]
+        src_t = torch.tensor(src, dtype=torch.long)
+        dst_t = torch.tensor(dst, dtype=torch.long)
+        for key in _NODE_KEYS:
+            v = ft[key]
+            o = torch.zeros((n_slots,) + tuple(v.shape[1:]), dtype=v.dtype)
+            if src:
+                o[dst_t] = v[src_t]
+            out[key] = o
+        edges = {key: [] for key in _EDGE_KEYS}
+        for k in range(ft["K_valid"]):
+            p_slot = entry_to_slot[ft["person_indices"][k]]
+            o_slot = entry_to_slot[ft["object_indices"][k]]
+            if p_slot < 0 or o_slot < 0:
+                continue
+            for key in _EDGE_KEYS:
+                edges[key].append(ft[key][k])
+            edges["person_indices"][-1] = p_slot
+            edges["object_indices"][-1] = o_slot
+        out.update(edges)
+        out["K_valid"] = len(edges["person_indices"])
+        return out
+
+    # ------------------------------------------------------------------
     # PyTorch Dataset interface
     # ------------------------------------------------------------------
 
@@ -761,6 +1096,9 @@ class WorldAG(Dataset):
         # First pass: determine N_max and K_max across all frames
         feat_frames = feat_data["frames"]
         annot_frames = annot_data["frames"]
+        if self._inventory == "full":
+            feat_frames = self._expand_inventory(feat_frames, common_frames, annot_frames,
+                                                 annot_frame_to_key)
 
         n_objects_per_frame = []
         k_pairs_per_frame = []
@@ -779,6 +1117,12 @@ class WorldAG(Dataset):
         N_max = min(max(n_objects_per_frame) if n_objects_per_frame else 1,
                     self._max_objects)
         K_max = max(k_pairs_per_frame) if k_pairs_per_frame else 1
+
+        # Per-video slot alignment: one fixed slot per object identity
+        slot_maps, slot_stats = None, None
+        if self._slot_alignment == "per_video_class":
+            slot_maps, N_max, slot_stats = self._per_video_slot_maps(
+                [feat_frames[f] for f in common_frames])
 
         # Second pass: build per-frame tensors
         all_visual = []
@@ -802,15 +1146,27 @@ class WorldAG(Dataset):
         # For evaluator compatibility
         gt_annotations = []
 
-        for frame_file in common_frames:
+        for fi, frame_file in enumerate(common_frames):
             ff = feat_frames[frame_file]
             af_key = annot_frame_to_key.get(frame_file, frame_file)
             af = annot_frames.get(af_key, {})
 
-            frame_tensors = self._build_frame_tensors(
-                ff, af, N_max,
-                bbox_scale=self._bbox_scale(video_id, frame_file, ff),
-            )
+            if slot_maps is None:
+                frame_tensors = self._build_frame_tensors(
+                    ff, af, N_max,
+                    bbox_scale=self._bbox_scale(video_id, frame_file, ff),
+                )
+            else:
+                # Build in the frame's own entry order (no truncation), then
+                # move every entry to its video slot.
+                n_feat = len(ff.get("labels", []))
+                frame_tensors = self._remap_frame_tensors(
+                    self._build_frame_tensors(
+                        ff, af, max(n_feat, 1),
+                        bbox_scale=self._bbox_scale(video_id, frame_file, ff),
+                    ),
+                    slot_maps[fi], N_max,
+                )
 
             # Node tensors (already N_max padded)
             all_visual.append(frame_tensors["visual_features"])
@@ -895,6 +1251,14 @@ class WorldAG(Dataset):
             # Raw annotations for evaluator
             "gt_annotations": gt_annotations,
         }
+        if slot_stats is not None:
+            result["slot_stats"] = slot_stats
+        if getattr(self, "_record_target_size", False):
+            # (T, 2) feature-PKL box space per frame, as stored (W, H); used by
+            # WorldAGGrid(rescale_boxes_to_grid=True)
+            result["feat_target_size"] = torch.tensor(
+                [self._feat_target_size(video_id, f, feat_frames[f]) for f in common_frames],
+                dtype=torch.float32)
 
         # Camera poses (from annotation PKL)
         camera_poses = annot_data.get("camera_poses", None)

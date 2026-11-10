@@ -27,6 +27,31 @@ from constants import Constants as const
 from lib.supervised.components import LabelSmoother
 
 
+def load_logit_adjustment_offsets(priors_path, data_path=None):
+    """Additive logit offsets of the tail-aware logit adjustment (Menon et al.
+    2021), identical to ``WorldWiseLoss._load_priors``: attention (softmax head)
+    log pi_c, spatial / contacting (sigmoid heads) log(pi_c / (1 - pi_c)).
+    Returns (att, spa, con) float tensors; raises if the priors file is missing
+    (a requested adjustment must never be silently skipped)."""
+    import json
+    from pathlib import Path
+    if not priors_path:
+        raise ValueError("use_logit_adjustment=True needs predicate_priors_path")
+    path = Path(priors_path)
+    if data_path and not path.is_absolute():
+        path = Path(data_path) / priors_path
+    if not path.exists():
+        raise FileNotFoundError(f"predicate priors not found: {path}")
+    with open(path, "r") as f:
+        priors = json.load(f)
+    eps = 1e-6
+    att = torch.tensor(priors["attention"], dtype=torch.float32).clamp(eps, 1 - eps)
+    spa = torch.tensor(priors["spatial"], dtype=torch.float32).clamp(eps, 1 - eps)
+    con = torch.tensor(priors["contacting"], dtype=torch.float32).clamp(eps, 1 - eps)
+    logger.info(f"[LKSLoss] tail-aware logit adjustment ON (priors={path})")
+    return torch.log(att), torch.log(spa) - torch.log1p(-spa), torch.log(con) - torch.log1p(-con)
+
+
 class LKSLoss(nn.Module):
 
     def __init__(
@@ -35,11 +60,25 @@ class LKSLoss(nn.Module):
         label_smoothing: float = 0.2,
         bce_loss: bool = True,
         mode: str = "predcls",
+        use_logit_adjustment: bool = False,
+        logit_adjustment_tau: float = 1.0,
+        predicate_priors_path: Optional[str] = None,
+        data_path: Optional[str] = None,
     ):
         super().__init__()
         self.lambda_vlm = lambda_vlm
         self.bce_loss = bce_loss
         self.mode = mode
+
+        # Rebuttal B2: training-time logit adjustment on the relation logits
+        # (the model's distributions, and so evaluation, are left untouched).
+        self.use_logit_adjustment = bool(use_logit_adjustment)
+        self.logit_adjustment_tau = float(logit_adjustment_tau)
+        if self.use_logit_adjustment:
+            off_att, off_spa, off_con = load_logit_adjustment_offsets(predicate_priors_path, data_path)
+            self.register_buffer("_off_att", off_att)
+            self.register_buffer("_off_spa", off_spa)
+            self.register_buffer("_off_con", off_con)
 
         # reduction='sum' — we normalize by N_total manually for uniform per-pair gradients
         self._ce_loss = nn.CrossEntropyLoss(reduction='sum')
@@ -77,6 +116,14 @@ class LKSLoss(nn.Module):
             person_idx: (T, K_max) long
             object_idx: (T, K_max) long
         """
+        if self.use_logit_adjustment:
+            tau = self.logit_adjustment_tau
+            predictions = dict(predictions)   # never mutate the model's output dict
+            for key, off in (("attention_logits", self._off_att), ("spatial_logits", self._off_spa),
+                             ("contacting_logits", self._off_con)):
+                x = predictions[key]
+                predictions[key] = x + tau * off.to(x.device, x.dtype)
+
         device = predictions["attention_logits"].device
         # DDP-safe zero: stays connected to the computation graph
         zero = predictions["attention_logits"].sum() * 0.0
