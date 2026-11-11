@@ -1,4 +1,5 @@
-"""V2 (round 3): configs, smoke, queue submission and scoring daemon for WorldWise-3D and WorldWise++-3D.
+"""V2 (round 3): configs, smoke, queue submission and scoring daemon for all 31 V2 runs (every V1 row: baselines,
+WorldWise, WorldWise+, WorldWise++, seeds, logit adjustment, completion variants, ResNet-50 detector).
 
 V2 runs from its own code folder, /data3/rohith/ag/runs/rebuttal/code_v2 (symlinked as ~/CODE/Scene4Cast_rebuttal_v2;
 inside the rw output mount so cs94085 can run it), and writes to /data3/rohith/ag/runs/rebuttal/train_v2. V1 runs
@@ -32,16 +33,26 @@ INFRA = tr.INFRA
 PY = tr.PY
 MANIFEST = f"{OUT}/manifest_r3.json"
 V2_KEYS = {"lambda_geo": 1.0, "p_span_mask": 0.3, "max_span": 10}
-METHOD = {"worldwise": "worldwise_3d", "worldwise_pp": "worldwise_pp_3d"}
-HOST = {"worldwise": "cs94085", "worldwise_pp": "cs93371"}
+# Every V1 row gets a V2 counterpart (user, Nov 11: "we should be running all the experiments completely"): the same
+# 31 runs as round 2 (R1 Table 2 x 2 modes, R2 seeds, R3 logit adjustment + completion variants, R4 ResNet-50
+# detector), each under the V2 rules (no box input for hidden / masked slots, inferred geometry token + decoded box,
+# 3-D loss on masked items only). Host placement follows round 2 (WorldWise+ / ++ on CS93371, the rest on cs94085).
+METHOD = {"worldwise": "worldwise_3d", "worldwise_pp": "worldwise_pp_3d", "worldwise_plus": "worldwise_plus_3d",
+          "w_sttran": "w_sttran_3d", "w_sttran_pp": "w_sttran_pp_3d", "w_dsgdetr": "w_dsgdetr_3d",
+          "w_dsgdetr_pp": "w_dsgdetr_pp_3d", "w_usg": "w_usg_3d"}
+V2_TRAIN_PRIO_OFFSET = 2   # V2 trainings sort after the V1 evals (31_) in every queue, longest first
+
+
+def v2_name(exp1, row):
+    """Round-2 experiment name -> V2 name: r2_<row><rest> -> r3_<METHOD[row]><rest>."""
+    assert exp1.startswith(f"r2_{row}"), (exp1, row)
+    return f"r3_{METHOD[row]}" + exp1[len(f"r2_{row}"):]
 
 
 def runs():
-    out = []
-    for rnd, exp, row, mode, seed, ov, space, host in iv.runs():
-        if rnd == "R1" and row in METHOD and seed == 0 and not ov:
-            out.append((f"r3_{METHOD[row]}_{mode}_s0", row, mode, seed, ov, space, HOST[row]))
-    return out
+    """[(exp, row, mode, seed, overrides, gt space, host)] — one V2 run per round-2 run."""
+    return [(v2_name(exp, row), row, mode, seed, ov, space, host)
+            for rnd, exp, row, mode, seed, ov, space, host in iv.runs() if row in METHOD]
 
 
 def config_path(exp, mode):
@@ -161,7 +172,7 @@ def cmd_submit(a):
             continue
         host = a.force_host or host
         mem = tr.GPU_MEM.get(row, 4)
-        prio = tr.priority(row, mode, "train") - 1          # ahead of the round-2 jobs of the same length
+        prio = tr.priority(row, mode, "train") + V2_TRAIN_PRIO_OFFSET   # after the V1 evals (31_), longest first
         if host == "cs93371":
             tr.submit_file(f"trn3_{exp}", prio, local_train_job(exp, mode, mem), a.dry)
             tr.submit_file(f"trn3_eval_{exp}", 31, local_eval_job(exp, mode, mem), a.dry)
@@ -183,6 +194,8 @@ def cmd_smoke(a):
     open(f"{sdir}/test3.txt", "w").write("\n".join(te) + "\n")
     cmds = []
     for exp, row, mode, seed, ov, space, host in runs():
+        if a.only and exp not in a.only:
+            continue
         sexp = "smoke3_" + exp
         src, c = build(sexp, row, mode, seed, ov, save_path=f"{sdir}/runs")
         c.update({"nepoch": 1, "train_video_list": f"{sdir}/train.txt", "val_video_list": f"{sdir}/val.txt",
@@ -209,6 +222,12 @@ FAILED=0
 {chr(10).join(cmds)}
 exit $FAILED
 """
+    if a.out_script:            # run outside the queue (e.g. a GPU with spare memory while every slot is taken)
+        with open(a.out_script, "w", newline="\n") as f:
+            f.write(job)
+        os.chmod(a.out_script, 0o755)
+        print("wrote", a.out_script)
+        return
     tr.submit_file("trn3_smoke", 29, job, a.dry)
 
 
@@ -269,6 +288,8 @@ if __name__ == "__main__":
     sub.add_parser("configs")
     sub.add_parser("list")
     p = sub.add_parser("smoke")
+    p.add_argument("--only", nargs="*", default=[])
+    p.add_argument("--out_script", default=None)
     p.add_argument("--dry", action="store_true")
     p = sub.add_parser("submit")
     p.add_argument("--only", nargs="*", default=[])

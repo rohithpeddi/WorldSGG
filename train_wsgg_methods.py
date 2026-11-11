@@ -546,6 +546,12 @@ try:
                                        _pp_grid_kwargs))
 except ImportError:
     pass
+# V2, Nov 11: WorldWise+-3D and the five baselines under the V2 rules (every V1 row gets a V2 counterpart).
+try:
+    from lib.supervised.v2.trainers import build_v2_more
+    METHOD_MAP.update(build_v2_more(METHOD_MAP, dict(METHOD_MAP), _to_device, _predcls_labels))
+except ImportError:
+    pass
 
 
 def main():
