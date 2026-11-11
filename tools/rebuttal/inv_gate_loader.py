@@ -30,12 +30,14 @@ from dataloader.world_ag_dataset import (WorldAG, ATTENTION_RELATIONSHIPS, SPATI
                                          INVENTORY_SOURCE, HELD_SOURCE)
 
 
-def frame_triplets_from_item(it, t):
+def frame_triplets_from_item(it, t, visible_only=False):
     """(object short label, predicate) multiset of frame t from the item's pairs."""
     out = Counter()
     pv = it["pair_valid"][t]
     for k in torch.where(pv)[0].tolist():
         o = int(it["object_idx"][t, k])
+        if visible_only and not bool(it["visibility_mask"][t, o]):
+            continue
         lab = _to_short(OBJECT_CLASSES[int(it["object_classes"][t, o])])
         out[(lab, ATTENTION_RELATIONSHIPS[int(it["gt_attention"][t, k])])] += 1
         for i in torch.where(it["gt_spatial"][t, k] > 0)[0].tolist():
@@ -45,7 +47,7 @@ def frame_triplets_from_item(it, t):
     return out
 
 
-def frame_triplets_from_annotation(af):
+def frame_triplets_from_annotation(af, keep=None):
     out = Counter()
     seen = set()
     for obj in af.get("object_info_list", []):
@@ -53,6 +55,8 @@ def frame_triplets_from_annotation(af):
         if lab in seen:          # one instance per class is representable (first one, as the loader)
             continue
         seen.add(lab)
+        if keep is not None and lab not in keep:
+            continue
         att = [r for r in (obj.get("attention_relationship") or []) if r in ATTENTION_RELATIONSHIPS][:1]
         out[(lab, att[0] if att else "looking_at")] += 1
         for r in obj.get("spatial_relationship") or []:
@@ -67,6 +71,58 @@ def frame_triplets_from_annotation(af):
 def slot_sig(it, t, s):
     return (int(it["object_classes"][t, s]), bool(it["visibility_mask"][t, s]),
             hash(it["visual_features"][t, s].numpy().tobytes()), hash(it["corners"][t, s].numpy().tobytes()))
+
+
+def predcls_rules_check(it, phase, bad, c):
+    """PredCls unobserved rules: zero appearance / 2-D box / union feature in every split; training 3-D box =
+    the annotated box of the nearest visible frame of the same object (never-visible objects have no slot);
+    test 3-D box = the annotation's."""
+    T = it["T"]
+    firsts = []
+    for t in range(T):
+        f = {}
+        for o in it["gt_annotations"][t].get("object_info_list", []):
+            f.setdefault(o.get("label", _to_short(o.get("class", ""))), o)
+        firsts.append(f)
+    vis_frames = {}
+    for t, f in enumerate(firsts):
+        for lab, o in f.items():
+            cf = o.get("corners_final")
+            if o.get("visible", True) and cf is not None and np.asarray(cf).shape == (8, 3):
+                vis_frames.setdefault(lab, []).append(t)
+    for t in range(T):
+        for s in torch.where(it["valid_mask"][t])[0].tolist():
+            if bool(it["visibility_mask"][t, s]):
+                continue
+            lab = _to_short(OBJECT_CLASSES[int(it["object_classes"][t, s])])
+            c["unobserved_slots"] += 1
+            if it["visual_features"][t, s].abs().sum() > 0 or it["bboxes_2d"][t, s].abs().sum() > 0:
+                bad["unobserved_nonzero_feature_or_2d_box"] += 1
+            obj = firsts[t].get(lab)
+            if obj is None:
+                continue
+            got = it["corners"][t, s].numpy()
+            if phase == "train":
+                occ = vis_frames.get(lab)
+                if not occ:
+                    bad["train_never_visible_has_slot"] += 1
+                    continue
+                src = min(occ, key=lambda x: (abs(x - t), x))
+                want = np.asarray(firsts[src][lab]["corners_final"], np.float32)
+                if not np.allclose(got, want, atol=1e-5):
+                    bad["train_unobserved_box_not_nearest_visible"] += 1
+                if src != t and not obj.get("visible", True):
+                    c["train_unobserved_box_from_other_frame"] += 1
+            else:
+                cf = obj.get("corners_final")
+                if cf is not None and not np.allclose(got, np.asarray(cf, np.float32), atol=1e-5):
+                    bad["test_unobserved_box_not_annotation"] += 1
+        uf = it.get("union_features")
+        if uf is not None:
+            for k in torch.where(it["pair_valid"][t])[0].tolist():
+                o = int(it["object_idx"][t, k])
+                if not bool(it["visibility_mask"][t, o]) and uf[t, k].abs().sum() > 0:
+                    bad["unobserved_pair_union_nonzero"] += 1
 
 
 def main():
@@ -90,10 +146,21 @@ def main():
     for vi, vid in enumerate(new.video_list):
         io, inew = old[old.video_list.index(vid)], new[vi]
         assert io["frame_names"] == inew["frame_names"]
+        seen_visible = set()      # labels visible (with a 3-D box) somewhere in the video
+        for af in inew["gt_annotations"]:
+            for o in af.get("object_info_list", []):
+                cf = o.get("corners_final")
+                if o.get("visible", True) and cf is not None and np.asarray(cf).shape == (8, 3):
+                    seen_visible.add(o.get("label", _to_short(o.get("class", ""))))
+        if a.mode == "predcls":
+            predcls_rules_check(inew, a.phase, bad, c)
         for t in range(io["T"]):
             c["frames"] += 1
-            so = Counter(slot_sig(io, t, s) for s in torch.where(io["valid_mask"][t])[0].tolist())
-            sn_all = torch.where(inew["valid_mask"][t])[0].tolist()
+            # PredCls: unobserved slots are rewritten by the unobserved rules (checked separately), so only
+            # visible slots must be unchanged
+            keep = (lambda it, s: bool(it["visibility_mask"][t, s])) if a.mode == "predcls" else (lambda it, s: True)
+            so = Counter(slot_sig(io, t, s) for s in torch.where(io["valid_mask"][t])[0].tolist() if keep(io, s))
+            sn_all = [s for s in torch.where(inew["valid_mask"][t])[0].tolist() if keep(inew, s)]
             sn = Counter(slot_sig(inew, t, s) for s in sn_all)
             if so - sn:
                 bad["old_slot_changed"] += 1
@@ -110,13 +177,17 @@ def main():
                     bad["appended_visible"] += 1
                 if inew["visual_features"][t, s].abs().sum() > 0 or inew["bboxes_2d"][t, s].abs().sum() > 0:
                     bad["appended_nonzero_feature_or_box"] += 1
-            to, tn = frame_triplets_from_item(io, t), frame_triplets_from_item(inew, t)
+            vis_only = a.mode == "predcls" and a.phase == "train"
+            to, tn = frame_triplets_from_item(io, t, vis_only), frame_triplets_from_item(inew, t, vis_only)
             if to - tn:
                 bad["old_pair_label_lost"] += 1
+            if vis_only:
+                tn = frame_triplets_from_item(inew, t)
             c["triplets_old"] += sum(to.values())
             c["triplets_new"] += sum(tn.values())
             if a.mode == "predcls":
-                ta = frame_triplets_from_annotation(inew["gt_annotations"][t])
+                ta = frame_triplets_from_annotation(inew["gt_annotations"][t],
+                                                    keep=seen_visible if a.phase == "train" else None)
                 c["triplets_annotation"] += sum(ta.values())
                 if ta - tn:
                     bad["annotation_triplet_missing"] += 1

@@ -538,6 +538,15 @@ METHOD_MAP = {
     "worldwise_pp": TrainWorldWisePP,
 }
 
+# V2 (round 3) methods: WorldWise-3D / WorldWise++-3D (lib/supervised/v2). Present in the V2 code folder; absent
+# packages leave METHOD_MAP as in V1.
+try:
+    from lib.supervised.v2.trainers import build_v2_methods
+    METHOD_MAP.update(build_v2_methods(TrainWorldWise, TrainWorldWisePP, _to_device, _predcls_labels,
+                                       _pp_grid_kwargs))
+except ImportError:
+    pass
+
 
 def main():
     conf = load_wsgg_config()

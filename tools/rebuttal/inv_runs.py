@@ -94,6 +94,9 @@ def cmd_list(a):
 
 
 # ----------------------------------------------------------------------------------------------------------------
+SUFFIX = ""          # job-name suffix for resubmissions (e.g. "_hf" for the held-frame fix reruns)
+
+
 def local_train_job(exp, mode, mem, requires):
     req = f"# REQUIRES={requires}\n" if requires else ""
     return f"""#!/bin/bash
@@ -114,7 +117,7 @@ echo "[trn2] done $(date -Is)"
 def local_eval_job(exp, mode, mem):
     return f"""#!/bin/bash
 # GPU_MEM_GB={mem}
-# REQUIRES=trn2_{exp}
+# REQUIRES=trn2_{exp}{SUFFIX}
 # ROUND 2 (full inventory): test dumps with 3-D boxes (val-selected + final checkpoint) of {exp}; scored on CS93371
 set -e -o pipefail
 cd {SERVER_REPO}
@@ -142,7 +145,7 @@ def remote_train_job(exp, mode, mem):
 # ROUND 2 (full inventory, remote): {exp}
 {remote_preamble(mode)}
 echo "[trn2] start $(date -Is) host=$REB_HOST gpu=$REB_GPU"
-CFG=$(bash "$WSGG_INFRA/infra_hostcfg.sh" {cfg_rel(exp, mode)} trn2_{exp})
+CFG=$(bash "$WSGG_INFRA/infra_hostcfg.sh" {cfg_rel(exp, mode)} trn2_{exp}{SUFFIX})
 test -s "$CFG"
 "$PY" train_wsgg_methods.py --config "$CFG"
 test -f "$(hp {OUT}/runs/{exp}/best_model.pth)"
@@ -155,10 +158,10 @@ def remote_eval_job(exp, mode, mem):
     # checkpoints are read through the read-only runs mount (big reads off the rw output mount, INFRA.md 9)
     return f"""#!/bin/bash
 # GPU_MEM_GB={mem}
-# REQUIRES=trn_{exp}
+# REQUIRES=trn_{exp}{SUFFIX}
 # ROUND 2 (full inventory, remote): test dumps with 3-D boxes of {exp}; scored on CS93371
 {remote_preamble(mode)}
-CFG=$(bash "$WSGG_INFRA/infra_hostcfg.sh" {cfg_rel(exp, mode)} trn2_eval_{exp})
+CFG=$(bash "$WSGG_INFRA/infra_hostcfg.sh" {cfg_rel(exp, mode)} trn2_eval_{exp}{SUFFIX})
 test -s "$CFG"
 sed -i "s#^save_path: $WSGG_OUT/train/runs\\$#save_path: $WSGG_RUNS_RO/rebuttal/train/runs#" "$CFG"
 grep -q "^save_path: $WSGG_RUNS_RO/rebuttal/train/runs\\$" "$CFG"
@@ -200,9 +203,13 @@ def write_manifest():
 
 
 def cmd_submit(a):
+    global SUFFIX
+    SUFFIX = a.suffix
     write_manifest()
     for rnd, exp, row, mode, seed, ov, space, host in runs():
         if a.only and exp not in a.only:
+            continue
+        if a.mode and mode != a.mode:
             continue
         host = a.force_host or host
         if host not in a.hosts:
@@ -213,12 +220,12 @@ def cmd_submit(a):
         prio = tr.priority(row, mode, "train", rnd)
         if host == "cs93371":
             req = None if a.no_smoke_dep else f"trn2_smoke_{mode}"
-            submit_local(f"trn2_{exp}", prio, local_train_job(exp, mode, mem, req), a.dry)
-            submit_local(f"trn2_eval_{exp}", 31, local_eval_job(exp, mode, mem), a.dry)
+            submit_local(f"trn2_{exp}{SUFFIX}", prio, local_train_job(exp, mode, mem, req), a.dry)
+            submit_local(f"trn2_eval_{exp}{SUFFIX}", 31, local_eval_job(exp, mode, mem), a.dry)
         else:
             # remote queues accept trn_/inf_/infra_ names only: trn_r2_<..> / trn_eval_r2_<..>
-            submit_remote(host, f"trn_{exp}", prio, remote_train_job(exp, mode, mem), a.dry)
-            submit_remote(host, f"trn_eval_{exp}", 31, remote_eval_job(exp, mode, mem), a.dry)
+            submit_remote(host, f"trn_{exp}{SUFFIX}", prio, remote_train_job(exp, mode, mem), a.dry)
+            submit_remote(host, f"trn_eval_{exp}{SUFFIX}", 31, remote_eval_job(exp, mode, mem), a.dry)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -347,6 +354,8 @@ if __name__ == "__main__":
     p.add_argument("--force_host", default=None)
     p.add_argument("--only", nargs="*", default=[])
     p.add_argument("--no_smoke_dep", action="store_true")
+    p.add_argument("--mode", default=None, choices=["predcls", "sgdet"])
+    p.add_argument("--suffix", default="")
     p.add_argument("--dry", action="store_true")
     p = sub.add_parser("score_daemon")
     p.add_argument("--once", action="store_true")

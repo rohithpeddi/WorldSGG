@@ -131,7 +131,7 @@ UNOBSERVED_SOURCES = ("rag", "gdino", "correction", INVENTORY_SOURCE, HELD_SOURC
 
 # Per-node tensors built by WorldAG._build_frame_tensors (permuted by slot alignment)
 _NODE_KEYS = ("visual_features", "corners", "gt_corners", "bboxes_2d", "gt_bboxes_2d",
-              "valid_mask", "visibility_mask", "object_classes")
+              "valid_mask", "visibility_mask", "object_classes", "gt_box_valid")
 # Per-edge lists built by WorldAG._build_frame_tensors (filtered together)
 _EDGE_KEYS = ("person_indices", "object_indices", "att_labels", "spa_multi_hot",
               "con_multi_hot", "pair_sources", "valid_raw_pair_indices")
@@ -641,6 +641,10 @@ class WorldAG(Dataset):
         valid_mask = torch.zeros(max_N, dtype=torch.bool)
         visibility_mask = torch.zeros(max_N, dtype=torch.bool)
         object_classes = torch.zeros(max_N, dtype=torch.long)
+        # True where gt_corners is the annotated box of a *visible* object that this slot really is
+        # (PredCls: the slot's own visible object; SGDet: an IoU-matched detection). Used by V2's 3-D loss
+        # on masked items; never true for unobserved objects or label-fallback matches.
+        gt_box_valid = torch.zeros(max_N, dtype=torch.bool)
 
         sx, sy = float(bbox_scale[0]), float(bbox_scale[1])
         box_scale = np.array([sx, sy, sx, sy], dtype=np.float32)
@@ -667,6 +671,10 @@ class WorldAG(Dataset):
 
             # Skip invisible if requested
             if not is_visible and not self._include_invisible:
+                valid_mask[i] = False
+                continue
+            # inventory="full", PredCls training: unobserved object never visible in the video (no box)
+            if i in feat_frame.get("_drop_entries", ()):
                 valid_mask[i] = False
                 continue
 
@@ -700,6 +708,9 @@ class WorldAG(Dataset):
                     gt_c = np.asarray(gt_c, dtype=np.float32)
                     if gt_c.shape == (8, 3):
                         gt_corners[i] = torch.from_numpy(gt_c)
+                        matched = self._mode != "sgdet" or i in det_pos_to_annot
+                        if matched and is_visible and annot_obj.get("visible", True):
+                            gt_box_valid[i] = True
 
             if self._mode == "sgdet":
                 # SGDet: use detector-predicted 3D corners from features PKL
@@ -718,7 +729,14 @@ class WorldAG(Dataset):
                                 corners[i] = torch.from_numpy(c)
             else:
                 # PredCls: use GT 3D corners from annotation PKL
-                if annot_obj is not None:
+                over = feat_frame.get("_corners_override", {})
+                if i in over:
+                    # inventory="full", training: unobserved object -> box of its nearest visible frame;
+                    # the annotation's unobserved box and 2-D box are not used anywhere
+                    corners[i] = torch.from_numpy(np.asarray(over[i], dtype=np.float32))
+                    gt_corners[i] = corners[i]
+                    gt_bboxes_2d[i] = 0.0
+                elif annot_obj is not None:
                     c = annot_obj.get("corners_final", None)
                     if c is not None:
                         c = np.asarray(c, dtype=np.float32)
@@ -814,9 +832,10 @@ class WorldAG(Dataset):
 
             # inventory="full", training split: an appended (inventory / held) entry with no
             # annotated object of its class in this frame has no label, so it gets no pair.
+            # (inventory="full": also GroundingDINO entries of a class the annotation does not list)
             o_src = feat_sources[o_pos] if o_pos < len(feat_sources) else "gt"
-            if (annot_obj is None and self._phase == "train"
-                    and o_src in (INVENTORY_SOURCE, HELD_SOURCE)):
+            if (annot_obj is None and self._phase == "train" and self._inventory == "full"
+                    and o_src in UNOBSERVED_SOURCES):
                 continue
 
             person_indices.append(p_pos)
@@ -855,6 +874,7 @@ class WorldAG(Dataset):
             "valid_mask": valid_mask,
             "visibility_mask": visibility_mask,
             "object_classes": object_classes,
+            "gt_box_valid": gt_box_valid,
             # Edge data (lists, will be padded to K_max later)
             "person_indices": person_indices,
             "object_indices": object_indices,
@@ -906,7 +926,85 @@ class WorldAG(Dataset):
             out["union_features"] = np.concatenate([uf.reshape(-1, du), np.zeros((k, du), uf.dtype if uf.size else np.float32)])
         return out
 
-    def _expand_inventory(self, feat_frames, common_frames, annot_frames, annot_frame_to_key):
+    def _predcls_unobserved_rules(self, feat_frames, common_frames, annot_frames, annot_frame_to_key):
+        """inventory="full", PredCls (user rules, Nov 10): an unobserved object carries no box-derived evidence.
+          * every split: appearance feature, 2-D box and the union features of its pairs are zero (natural mask);
+          * training split only: its 3-D box is not the annotation's (training videos have no 3-D box for
+            unobserved objects). It is the annotated box of the same object in the nearest frame where it is
+            visible (ties: the earlier frame); an object never visible in the video has no box and no slot.
+        Test-split 3-D boxes stay the annotated ones (PredCls supplies every object's box).
+        Returns {frame_file: frame dict copy} with ``_corners_override`` {entry: corners} and ``_drop_entries``."""
+        train = self._phase == "train"
+        st = self._inventory_stats
+        # visible annotated boxes per class over the video (training split)
+        vis_box = {}                                 # short label -> [(frame index, corners)]
+        frames_annot = []
+        for fi, f in enumerate(common_frames):
+            af = annot_frames.get(annot_frame_to_key.get(f, f), {})
+            first = {}
+            for obj in af.get("object_info_list", []):
+                first.setdefault(obj.get("label", _to_short(obj.get("class", ""))), obj)
+            frames_annot.append(first)
+            if train:
+                for lab, obj in first.items():
+                    c = obj.get("corners_final")
+                    if obj.get("visible", True) and c is not None and np.asarray(c).shape == (8, 3):
+                        vis_box.setdefault(lab, []).append((fi, np.asarray(c, dtype=np.float32)))
+        out = {}
+        for fi, f in enumerate(common_frames):
+            ff = dict(feat_frames[f])
+            labels = [_to_short(str(l)) for l in ff.get("labels", [])]
+            lids = [int(x) for x in ff.get("label_ids", [])]
+            srcs = list(ff.get("sources", ["gt"] * len(labels)))
+            first_pos = {}
+            for i, lid in enumerate(lids):
+                first_pos.setdefault(lid, i)
+            unobs = []
+            for i, lab in enumerate(labels):
+                obj = frames_annot[fi].get(lab)
+                hidden = (srcs[i] if i < len(srcs) else "gt") in UNOBSERVED_SOURCES or (
+                    self._visibility_from_annotation and obj is not None and not obj.get("visible", True))
+                if hidden and lab != "person":
+                    unobs.append(i)
+            if unobs:
+                roi = np.array(ff.get("roi_features"), dtype=np.float32, copy=True)
+                bx = np.array(ff.get("bboxes_xyxy"), dtype=np.float32, copy=True).reshape(-1, 4)
+                roi[unobs] = 0.0
+                bx[unobs] = 0.0
+                ff["roi_features"], ff["bboxes_xyxy"] = roi, bx
+                if ff.get("union_features") is not None:
+                    uf = np.array(ff["union_features"], dtype=np.float32, copy=True)
+                    hid_lids = {lids[i] for i in unobs if first_pos.get(lids[i]) == i}
+                    for k, p in enumerate(ff.get("pair_indices", [])):
+                        if k < uf.shape[0] and int(p[1]) in hid_lids:
+                            uf[k] = 0.0
+                    ff["union_features"] = uf
+                st["unobserved_entries_zeroed"] += len(unobs)
+            if train:
+                over, drop = {}, set()
+                for i in unobs:
+                    occ = vis_box.get(labels[i])
+                    if not occ:
+                        drop.add(i)
+                        continue
+                    over[i] = min(occ, key=lambda x: (abs(x[0] - fi), x[0]))[1]
+                ff["_corners_override"], ff["_drop_entries"] = over, drop
+                st["train_unobserved_held_box"] += len(over)
+                st["train_unobserved_never_visible_dropped"] += len(drop)
+            out[f] = ff
+        return out
+
+    @staticmethod
+    def _pose_map(annot_data):
+        """{frame file basename: (4, 4) camera->world pose} from the annotation PKL (empty if absent)."""
+        poses = annot_data.get("camera_poses", None)
+        keys = annot_data.get("camera_frame_keys", [])
+        if poses is None or len(keys) == 0:
+            return {}
+        poses = np.asarray(poses, dtype=np.float32)
+        return {(k.split("/")[-1] if "/" in k else k): poses[i] for i, k in enumerate(keys) if i < len(poses)}
+
+    def _expand_inventory(self, feat_frames, common_frames, annot_frames, annot_frame_to_key, poses=None):
         """inventory="full": per common frame, the feature entry dict with the missing objects
         appended (see ``INVENTORIES``). Returns {frame_file: frame dict}; frames are copies."""
         out = {}
@@ -956,6 +1054,7 @@ class WorldAG(Dataset):
             for lid in m:
                 if lid in established:
                     frames_of.setdefault(lid, []).append(fi)
+        poses = poses or {}
         for fi, f in enumerate(common_frames):
             new = []
             for lid in sorted(frames_of):
@@ -964,8 +1063,20 @@ class WorldAG(Dataset):
                 fs = frames_of[lid]
                 # nearest detected frame, ties -> the earlier one
                 src_f = min(fs, key=lambda x: (abs(x - fi), x))
+                box = det[src_f][lid]
+                # SGDet boxes_3d live in each frame's camera frame: move the held box from the source frame's
+                # camera to this frame's camera through the world frame (fix, Nov 10; round-2 runs before it
+                # copied the source-frame camera coordinates unchanged)
+                ps = poses.get(common_frames[src_f].split("/")[-1])
+                pt = poses.get(f.split("/")[-1])
+                if box is not None and ps is not None and pt is not None:
+                    w = np.asarray(box, np.float32) @ ps[:3, :3].T + ps[:3, 3]
+                    box = (w - pt[:3, 3]) @ pt[:3, :3]
+                    st["held_box_reframed"] += 1
+                elif box is not None:
+                    st["held_box_no_pose"] += 1
                 new.append({"label": OBJECT_CLASSES[lid], "label_id": lid, "source": HELD_SOURCE,
-                            "box3d": det[src_f][lid]})
+                            "box3d": box})
             st["appended_held"] += len(new)
             st["frames"] += 1
             out[f] = self._append_entries(feat_frames[f], new)
@@ -1098,7 +1209,10 @@ class WorldAG(Dataset):
         annot_frames = annot_data["frames"]
         if self._inventory == "full":
             feat_frames = self._expand_inventory(feat_frames, common_frames, annot_frames,
-                                                 annot_frame_to_key)
+                                                 annot_frame_to_key, poses=self._pose_map(annot_data))
+            if self._mode == "predcls":
+                feat_frames = self._predcls_unobserved_rules(feat_frames, common_frames, annot_frames,
+                                                             annot_frame_to_key)
 
         n_objects_per_frame = []
         k_pairs_per_frame = []
@@ -1133,6 +1247,7 @@ class WorldAG(Dataset):
         all_valid = []
         all_vis = []
         all_classes = []
+        all_gtvalid = []
 
         all_pidx = []
         all_oidx = []
@@ -1177,6 +1292,7 @@ class WorldAG(Dataset):
             all_valid.append(frame_tensors["valid_mask"])
             all_vis.append(frame_tensors["visibility_mask"])
             all_classes.append(frame_tensors["object_classes"])
+            all_gtvalid.append(frame_tensors["gt_box_valid"])
 
             # Edge tensors: pad to K_max
             K_v = frame_tensors["K_valid"]
@@ -1234,6 +1350,7 @@ class WorldAG(Dataset):
             "valid_mask": torch.stack(all_valid),                 # (T, N_max)
             "visibility_mask": torch.stack(all_vis),             # (T, N_max)
             "object_classes": torch.stack(all_classes),           # (T, N_max)
+            "gt_box_valid": torch.stack(all_gtvalid),             # (T, N_max) bool
 
             # Per-edge: (T, K_max, ...)
             "person_idx": torch.stack(all_pidx),                 # (T, K_max)
