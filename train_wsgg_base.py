@@ -246,6 +246,9 @@ class TrainWSGGBase(WSGGBase):
                     self._scaler.update()
                 else:
                     loss.backward()
+                    if getattr(self._conf, "skip_nonfinite_grad", False) and self._grads_nonfinite(batch_idx):
+                        self._optimizer.zero_grad(set_to_none=True)
+                        continue
                     torch.nn.utils.clip_grad_norm_(
                         self._model.parameters(),
                         max_norm=self._conf.grad_clip,
@@ -304,6 +307,24 @@ class TrainWSGGBase(WSGGBase):
             if len(epoch_losses) > 0:
                 logger.info(f"  Avg losses: {dict(epoch_losses.round(4))}")
             logger.info(f"{'═' * 60}")
+
+    def _grads_nonfinite(self, batch_idx: int) -> bool:
+        """Opt-in guard (config ``skip_nonfinite_grad``, default off): True when any gradient is NaN/Inf, so the caller
+        skips the optimizer step. Under bf16 autocast there is no GradScaler, so a finite loss can still give non-finite
+        gradients, and clip_grad_norm_ then writes NaN into every parameter (W-USG-3D SGDet, Nov 11). Logs the first
+        20 cases (and every 1000th) with the tensors involved."""
+        named = [(n, p.grad) for n, p in self._model.named_parameters() if p.grad is not None]
+        if not named:
+            return False
+        norms = torch.stack(torch._foreach_norm([g for _, g in named]))
+        if bool(torch.isfinite(norms).all()):
+            return False
+        self._n_nonfinite_grad = getattr(self, "_n_nonfinite_grad", 0) + 1
+        if self._n_nonfinite_grad <= 20 or self._n_nonfinite_grad % 1000 == 0:
+            bad = [named[i][0] for i in torch.nonzero(~torch.isfinite(norms)).flatten().tolist()]
+            logger.warning(f"  non-finite gradients at batch {batch_idx} (#{self._n_nonfinite_grad}) in {len(bad)} "
+                           f"tensors, e.g. {bad[:6]}; optimizer step skipped")
+        return True
 
     def _evaluate_after_epoch(
         self, epoch: int, epoch_losses=None, epoch_time=0.0, peak_vram_gb=0.0,
