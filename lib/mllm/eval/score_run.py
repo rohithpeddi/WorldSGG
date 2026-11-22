@@ -48,6 +48,8 @@ from lib.mllm.data.worldbbox import (                                       # no
 )
 from lib.mllm.eval.dump_adapter import build_records, load_run_pkl, prediction_lookup  # noqa: E402
 from lib.mllm.eval.recall3d import evaluate_record_3d                       # noqa: E402
+from lib.mllm.eval.sgdet2d import evaluate_record_2d                        # noqa: E402
+from lib.mllm.eval.hallucination import HallucAccumulator                   # noqa: E402
 from lib.supervised.evaluation_recall import BasicSceneGraphEvaluator, evaluate_wsgg_video  # noqa: E402
 from lib.supervised.evaluation_recall_bucketed import (                     # noqa: E402
     BucketAccumulator, evaluate_wsgg_video_bucketed,
@@ -108,7 +110,7 @@ def _buckets(acc: BucketAccumulator) -> Dict[str, Any]:
 
 
 def collect_records(model: str, mode: str, pred_dir: str, limit: int = 0, cfg=None,
-                    video_list: str = None, objects_key: str = "objects") -> Dict[str, Any]:
+                    video_list: str = None, objects_key: str = "objects", halluc: bool = False) -> Dict[str, Any]:
     ts = WorldBBoxTestSet(cfg)
     ids = ts.video_ids
     if video_list:
@@ -118,6 +120,7 @@ def collect_records(model: str, mode: str, pred_dir: str, limit: int = 0, cfg=No
     pkl_dir = Path(pred_dir) / mode / model
     records: List[Dict[str, Any]] = []
     missing, errors = [], []
+    hacc = HallucAccumulator() if halluc else None
     t0 = time.time()
     for i, vid in enumerate(ids):
         p = pkl_dir / f"{vid}.mp4.pkl"
@@ -128,17 +131,24 @@ def collect_records(model: str, mode: str, pred_dir: str, limit: int = 0, cfg=No
             continue
         try:
             preds = prediction_lookup(load_run_pkl(str(p)), objects_key=objects_key)
-            records.extend(build_records(ts.load(vid), preds, mode=mode))
+            video = ts.load(vid)
+            records.extend(build_records(video, preds, mode=mode))
+            if hacc is not None:
+                hacc.add_video(video, preds)
         except Exception as e:  # noqa
             errors.append((vid, repr(e)))
             logger.exception(f"[{vid}] failed")
         if (i + 1) % 200 == 0:
             logger.info(f"{i + 1}/{len(ids)} videos, {len(records)} frames, {time.time() - t0:.0f}s")
-    return {"records": records, "missing": missing, "errors": errors,
-            "n_videos": len(ids) - len(missing) - len(errors), "n_split": len(ids), "pred_dir": str(pkl_dir)}
+    out = {"records": records, "missing": missing, "errors": errors,
+           "n_videos": len(ids) - len(missing) - len(errors), "n_split": len(ids), "pred_dir": str(pkl_dir)}
+    if hacc is not None:
+        out["halluc"] = hacc.summary()
+    return out
 
 
-def score_records(records: List[Dict[str, Any]], mode: str, iou_thrs=(0.0, 0.15, 0.25)) -> Dict[str, Any]:
+def score_records(records: List[Dict[str, Any]], mode: str, iou_thrs=(0.0, 0.15, 0.25),
+                  sgdet2d: bool = False) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     if mode == "predcls":
         w: Dict[str, Any] = {}
@@ -162,6 +172,15 @@ def score_records(records: List[Dict[str, Any]], mode: str, iou_thrs=(0.0, 0.15,
             blk[cname] = {**_stats(ev), "buckets": _buckets(acc)}
         loc[key] = blk
     out["loc3d"] = loc
+    if sgdet2d:  # optional: observed-only (OO) class + 2D IoU>=0.5 matching, eval/sgdet2d.py
+        blk = {}
+        for cname, cval in (("wc", "with"), ("nc", "no")):
+            ev = make_evaluator(mode, cval)
+            acc = BucketAccumulator(ks=KS)
+            for r in records:
+                evaluate_record_2d(r, ev, iou_thr=0.5, acc=acc)
+            blk[cname] = {**_stats(ev), "buckets": _buckets(acc)}
+        out["sgdet2d"] = blk
     out["coverage"] = {
         "frames": len(records),
         "gt_pairs": int(sum(r["pair_valid"].sum() for r in records)),
@@ -169,13 +188,14 @@ def score_records(records: List[Dict[str, Any]], mode: str, iou_thrs=(0.0, 0.15,
         "gt_pairs_with_pred": int(sum((r["pair_valid"] & r["pred_pair_valid"]).sum() for r in records)),
         "object_slots": int(sum(r["valid_mask"].sum() - 1 for r in records)),
         "object_slots_with_pred_3d": int(sum(r["has_pred_3d"][1:].sum() for r in records)),
+        "object_slots_with_pred_2d": int(sum(r["has_pred_2d"][1:].sum() for r in records if "has_pred_2d" in r)),
     }
     return out
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--method", required=True, help="zero_shot | caption_all | rag_all | wsg_agent | track_a | track_b")
+    ap.add_argument("--method", required=True, help="zero_shot | caption_all | rag_all | wsg_agent | track_a | track_b | scenegraphvlm")
     ap.add_argument("--model", default="qwen25vl_7b")
     ap.add_argument("--mode", default="predcls", choices=["predcls", "sgdet"])
     ap.add_argument("--pred_dir", default=None, help="run root (default: outputs.<method> from the config)")
@@ -186,6 +206,10 @@ def main():
     ap.add_argument("--video_list", default=None,
                     help="restrict to these videos (e.g. the 442-video subset with pre-existing Stage-1 graphs)")
     ap.add_argument("--subset_tag", default="", help="suffix for output names when --video_list is used")
+    ap.add_argument("--sgdet2d", action="store_true",
+                    help="also score the observed-only 2D SGDet regime (class + 2D IoU>=0.5; eval/sgdet2d.py)")
+    ap.add_argument("--halluc", action="store_true",
+                    help="also compute the UOR/URR hallucination metrics (eval/hallucination.py)")
     ap.add_argument("--objects_key", default="objects",
                     help="Track outputs: 'objects' (final) or 'objects_pre' (Track B first proposal = -critic arm)")
     args = ap.parse_args()
@@ -198,7 +222,7 @@ def main():
         suffix += f"__{args.objects_key}"
     t0 = time.time()
     col = collect_records(args.model, args.mode, pred_dir, args.limit, cfg, video_list=args.video_list,
-                          objects_key=args.objects_key)
+                          objects_key=args.objects_key, halluc=args.halluc)
     logger.info(f"{tag}: {col['n_videos']}/{col['n_split']} videos, {len(col['records'])} frames, "
                 f"{len(col['missing'])} missing, {len(col['errors'])} errors")
     res: Dict[str, Any] = {
@@ -207,7 +231,9 @@ def main():
         "missing": col["missing"][:50], "errors": col["errors"][:20],
     }
     if col["records"]:
-        res.update(score_records(col["records"], args.mode))
+        res.update(score_records(col["records"], args.mode, sgdet2d=args.sgdet2d))
+    if "halluc" in col:
+        res["halluc"] = col["halluc"]
     if not args.no_legacy and not args.limit:
         try:
             from lib.mllm.eval.legacy_f1 import legacy_f1, summarize_legacy
@@ -242,6 +268,14 @@ def main():
     for k, v in res.get("loc3d", {}).items():
         print(f"[{tag}] loc3d {k}: wc R@20={v['wc']['R']['20']} mR@20={v['wc']['mR']['20']} | "
               f"nc R@50={v['nc']['R']['50']} mR@50={v['nc']['mR']['50']}")
+    if "sgdet2d" in res:
+        v = res["sgdet2d"]
+        print(f"[{tag}] sgdet2d(OO): wc R@20={v['wc']['R']['20']} mR@20={v['wc']['mR']['20']} | "
+              f"nc R@50={v['nc']['R']['50']} mR@50={v['nc']['mR']['50']}")
+    if "halluc" in res:
+        h = res["halluc"]
+        print(f"[{tag}] halluc: UOR={h['uor']} URR={h['urr']} URR_obs={h['urr_observed']} "
+              f"URR_unobs={h['urr_unobserved']}")
     if "legacy" in res:
         g = res["legacy"].get("gt_plus_corrections", {})
         print(f"[{tag}] legacy F1 micro={g.get('micro_F1')} macro={g.get('macro_F1')} "

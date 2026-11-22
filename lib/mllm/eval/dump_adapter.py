@@ -31,7 +31,15 @@ Input formats accepted by :func:`prediction_lookup`:
     dicts ``{"label", "yes_prob"}`` or plain strings), predcls and sgdet;
   * Track A/B JSON-like dict ``{"frames": {frame_file: {"objects": {label:
     {"attention": [...], "spatial": [...], "contacting": [...],
-    "obb": {"center", "size", "yaw"} | "corners": [...]}}}}}``.
+    "obb": {"center", "size", "yaw"} | "corners": [...]}}}}}``;
+  * the same dict with 2D boxes (SceneGraphVLM, ``methods/scenegraphvlm``):
+    per-object ``"bbox_2d"`` and per-frame ``"person_bbox_2d"`` (xyxy, ORIGINAL frame
+    pixels), ``"objects_norel"`` (named without a relation row) and
+    ``"objects_unmapped"`` (names outside the vocabulary).  norel/unmapped entries never
+    emit a pair; they only feed the hallucination metrics.
+
+Extra keys for the optional sgdet2d regime: gt_has_box_2d (N,), pred_boxes_2d (N,4)
+Pi-3 space, has_pred_2d (N,).
 """
 from __future__ import annotations
 
@@ -125,6 +133,9 @@ def prediction_lookup(record: Dict[str, Any], objects_key: str = "objects") -> D
                 pc = np.asarray(pc, dtype=np.float64)
                 if pc.size == 24:
                     entry["__person__"] = {"corners": pc.reshape(8, 3)}
+            pb = _box2d_of(fdata.get("person_bbox_2d"))
+            if pb is not None:                            # 2D-box methods (SceneGraphVLM): person box
+                entry.setdefault("__person__", {"corners": None})["bbox_2d"] = pb
             for lab, p in objs.items():
                 lab = to_short(str(lab).strip().lower())
                 entry[lab] = {
@@ -132,8 +143,17 @@ def prediction_lookup(record: Dict[str, Any], objects_key: str = "objects") -> D
                     "spatial": _scored(p.get("spatial"), multi=True),
                     "contacting": _scored(p.get("contacting"), multi=True),
                     "corners": _corners_of(p),
+                    "bbox_2d": _box2d_of(p.get("bbox_2d")),
                     "score": float(p.get("score", 1.0)),
                 }
+            # objects the model named but gave no relation row (SceneGraphVLM): they count as
+            # predicted objects for the hallucination metrics but never emit a pair/triplet
+            # (+ names outside the 36-class vocabulary, which UOR counts as unsupported)
+            for lab in list(fdata.get("objects_norel", []) or []) + list(fdata.get("objects_unmapped", []) or []):
+                lab = to_short(str(lab).strip().lower())
+                if lab not in entry:
+                    entry[lab] = {"attention": [], "spatial": [], "contacting": [], "corners": None,
+                                  "bbox_2d": None, "score": 1.0, "norel": True}
         out[ffile] = entry
     return out
 
@@ -150,6 +170,14 @@ def _corners_of(p: Dict[str, Any]) -> Optional[np.ndarray]:
         except Exception:
             return None
     return None
+
+
+def _box2d_of(b) -> Optional[np.ndarray]:
+    """xyxy in ORIGINAL frame pixels (the annotation's space), or None."""
+    if b is None:
+        return None
+    b = np.asarray(b, dtype=np.float64).reshape(-1)
+    return b[:4] if b.size >= 4 and np.all(np.isfinite(b[:4])) and b[2] > b[0] and b[3] > b[1] else None
 
 
 def _dist(pairs: List[Tuple[str, float]], index: Dict[str, int], n: int) -> np.ndarray:
@@ -170,7 +198,8 @@ def build_records(video: WorldBBoxVideo, preds: Optional[Dict[str, Dict[str, Dic
     placeholder = np.array([0.0, 0.0, float(W), float(H)], dtype=np.float32)
     preds = preds or {}
     if person_pred_corners is None:                       # Track outputs carry the person OBB per frame
-        person_pred_corners = {f: e["__person__"]["corners"] for f, e in preds.items() if "__person__" in e}
+        person_pred_corners = {f: e["__person__"]["corners"] for f, e in preds.items()
+                               if e.get("__person__", {}).get("corners") is not None}
     frames = video.frames
     T = len(frames)
     records: List[Dict[str, Any]] = []
@@ -190,7 +219,8 @@ def build_records(video: WorldBBoxVideo, preds: Optional[Dict[str, Dict[str, Dic
         extra = []
         if mode == "sgdet":
             for lab in sorted(fp.keys()):
-                if lab not in seen and lab != "person" and lab in NAME_TO_IDX and not lab.startswith("__"):
+                if lab not in seen and lab != "person" and lab in NAME_TO_IDX and not lab.startswith("__") \
+                        and not fp[lab].get("norel"):
                     extra.append(lab)
                     labels.append(lab)
         N = len(labels)
@@ -202,7 +232,17 @@ def build_records(video: WorldBBoxVideo, preds: Optional[Dict[str, Dict[str, Dic
         pred_corners = np.zeros((N, 8, 3), dtype=np.float32)
         has_pred_3d = np.zeros(N, dtype=bool)
         pred_scores = np.ones(N, dtype=np.float32)
+        # 2D boxes for the optional observed-only sgdet2d regime (eval/sgdet2d.py), Pi-3 space
+        gt_has_box = np.zeros(N, dtype=bool)
+        pred_boxes = np.zeros((N, 4), dtype=np.float32)
+        has_pred_2d = np.zeros(N, dtype=bool)
+        to_pi3 = np.array([sx, sy, sx, sy], dtype=np.float64)
+        pp = fp.get("__person__", {}).get("bbox_2d")
+        if pp is not None:
+            pred_boxes[0] = pp * to_pi3
+            has_pred_2d[0] = True
         if fr.person_bbox_2d is not None:
+            gt_has_box[0] = True
             gt_boxes[0] = np.array([fr.person_bbox_2d[0] * sx, fr.person_bbox_2d[1] * sy,
                                     fr.person_bbox_2d[2] * sx, fr.person_bbox_2d[3] * sy])
         if fr.person_corners_final is not None:
@@ -217,6 +257,7 @@ def build_records(video: WorldBBoxVideo, preds: Optional[Dict[str, Dict[str, Dic
         for i, o in enumerate(gt_objs, start=1):
             visibility[i] = o.observed
             if o.bbox_2d is not None:
+                gt_has_box[i] = True
                 gt_boxes[i] = np.array([o.bbox_2d[0] * sx, o.bbox_2d[1] * sy,
                                         o.bbox_2d[2] * sx, o.bbox_2d[3] * sy])
             if o.corners_final is not None:
@@ -234,6 +275,9 @@ def build_records(video: WorldBBoxVideo, preds: Optional[Dict[str, Dict[str, Dic
                 has_pred_3d[i] = True
             if p is not None:
                 pred_scores[i] = float(p.get("score", 1.0))
+                if p.get("bbox_2d") is not None:
+                    pred_boxes[i] = p["bbox_2d"] * to_pi3
+                    has_pred_2d[i] = True
         # ---- pairs ----
         K = N - 1
         person_idx = np.zeros(K, dtype=np.int64)
@@ -259,7 +303,7 @@ def build_records(video: WorldBBoxVideo, preds: Optional[Dict[str, Dict[str, Dic
                     if r in _CON:
                         gt_con[k, _CON[r]] = 1.0
             p = fp.get(lab)
-            if p is not None:
+            if p is not None and not p.get("norel"):
                 pred_pair_valid[k] = True
                 att_d[k] = _dist(p["attention"], _ATT, N_ATT)
                 spa_d[k] = _dist(p["spatial"], _SPA, N_SPA)
@@ -276,5 +320,6 @@ def build_records(video: WorldBBoxVideo, preds: Optional[Dict[str, Dict[str, Dic
             "pred_labels": object_classes.copy(), "pred_scores": pred_scores,
             "gt_corners": gt_corners, "pred_corners": pred_corners, "has_pred_3d": has_pred_3d,
             "slot_labels": labels, "n_gt_objects": n_gt,
+            "gt_has_box_2d": gt_has_box, "pred_boxes_2d": pred_boxes, "has_pred_2d": has_pred_2d,
         })
     return records

@@ -67,6 +67,13 @@ tensors, calls per video, notes for the paper figure:
 Architecture of the localized family — perception layer, Track A payload, Track B
 loop and critic, notes for the paper figure: [LOCALIZED_MLLM.md](LOCALIZED_MLLM.md).
 
+## External MLLM baselines
+
+| Method key | Document | What it is |
+|---|---|---|
+| `scenegraphvlm` | [EXT_SCENEGRAPHVLM.md](EXT_SCENEGRAPHVLM.md) | released SceneGraphVLM AG checkpoint (Qwen3.5-0.8B, SFT+GRPO), own previous graph in the prompt, 2D boxes; sgdet-style only, scored unloc + `sgdet2d` (OO) + UOR/URR |
+| `prev_graph` | [EXT_SCENEGRAPHVLM.md](EXT_SCENEGRAPHVLM.md) §6 | backbone-controlled ablation: previous-frame predicted graph added to the Qwen3-VL-8B zero_shot prompt |
+
 ---
 
 ## The four caveats that must survive into the paper

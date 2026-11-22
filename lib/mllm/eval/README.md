@@ -35,6 +35,14 @@ reported as *missing* (`n_missing`), never dropped silently.
    * **`legacy`** (`legacy_f1.py`): the box-free P/R/F1 of the MLLM baseline paper section
      (vendored `legacy/evaluate_relationships.py`) on `wsg_2d_augmentations` restricted to the
      split (symlinked GT dir `/data3/rohith/ag/cache/mllm/legacy_gt_test_worldbbox_1511/`).
+   * **`sgdet2d`** (optional, `--sgdet2d`; `sgdet2d.py`): observed-only 2D SGDet for methods
+     that emit 2D boxes (SceneGraphVLM). GT = pairs whose object is observed and whose person
+     and object both carry an annotated 2D box; match = class + predicate + 2D IoU ≥ 0.5 on
+     both endpoints; same ranking as `loc3d`. Methods without 2D boxes score 0. Defaults unchanged.
+   * **`halluc`** (optional, `--halluc`; `hallucination.py`): UOR = predicted (frame, class)
+     objects absent from the video's world GT inventory / predicted objects; URR = predicted
+     triplets on a GT pair whose predicate is not a GT predicate of that pair / all predicted
+     triplets, also split by observed / unobserved GT object. Upper bounds (AG is incomplete).
 3. The records are written as `<outputs.dumps>/<method>__<model>__<mode>.pkl` (same container as
    `results/bucket_dumps/*.pkl`) so `tools/bucketed_breakdown.py` re-slices them offline.
 
