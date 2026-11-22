@@ -52,7 +52,24 @@ def runs():
         exp2 = "r2_" + exp[len("reb_"):]
         host = "cs93371" if row in LOCAL_ROWS else "cs94085"
         out.append((rnd, exp2, row, mode, seed, ov, tr.gt_space(row, ov), host))
+    out += c4_predcls(out)
     return out
+
+
+# C4 PredCls counterpart (user, Nov 20; docs/rebuttal_runs/TRAIN.md "ResNet-50 PredCls controls"): WorldWise++ PredCls
+# reading the baselines' ResNet-50 PredCls RoI and union features (1024-d; the annotated boxes of those PKLs mapped
+# into the grid image space) instead of the DINOv3 tokens, DINOv3/Pi3 grids unchanged = the R4 SGDet control's
+# overrides in PredCls. GT space dinov3_tok as for that control: the full-inventory PredCls references of the ResNet-50
+# and DINOv3-token families have the same slot layout, GT fields and full-GT cache (only bboxes_2d differ), so 2-D
+# PredCls scores do not depend on the choice, and the rescaled boxes live in the dinov3_tok box space (rescore_3d's 2-D
+# rule and frame gate). Appended after the 31 round-2 runs (their order and fields are unchanged); round 1
+# (train_runs.run_list) is unchanged. V2 (v2/v2_runs.runs) derives r3_worldwise_pp_3d_r50det_predcls_s0 from it.
+C4_PREDCLS_FROM = "r2_worldwise_pp_r50det_sgdet_s0"
+
+
+def c4_predcls(base):
+    return [(rnd, exp.replace("_sgdet_", "_predcls_"), row, "predcls", seed, dict(ov), space, host)
+            for rnd, exp, row, mode, seed, ov, space, host in base if exp == C4_PREDCLS_FROM]
 
 
 def config_path(exp, mode):
